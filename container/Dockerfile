@@ -1,0 +1,42 @@
+# RoleMesh Agent Container (Python)
+# Runs Claude Agent SDK in an isolated Linux container
+
+FROM python:3.12-slim
+
+# Install essential tools only
+# Chromium is NOT included — agent-browser is a Node.js package with no Python equivalent.
+# WebSearch/WebFetch work without a browser (built into Claude Code CLI).
+# If browser automation is needed in the future, add playwright + chromium.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python agent SDK (bundles Claude Code CLI)
+RUN pip install --no-cache-dir claude-agent-sdk croniter nats-py
+
+# Create app directory
+WORKDIR /app
+
+# Copy agent runner code and shared IPC protocol
+COPY src/agent_runner/ ./agent_runner/
+COPY src/rolemesh/ipc/protocol.py ./rolemesh_ipc_protocol.py
+
+# Create workspace directories (no IPC dirs needed — all IPC goes through NATS)
+RUN mkdir -p /workspace/group /workspace/global /workspace/extra
+
+# Create non-root user for sandbox
+RUN useradd -m -s /bin/bash agent || true
+RUN chown -R agent:agent /workspace && chmod 777 /home/agent
+
+# Switch to non-root user
+USER agent
+
+# Ensure agent_runner is importable from any working directory
+ENV PYTHONPATH=/app
+
+# Set working directory to group workspace
+WORKDIR /workspace/group
+
+# Entry point reads config from NATS KV, outputs results via NATS JetStream
+ENTRYPOINT ["python", "-m", "agent_runner"]

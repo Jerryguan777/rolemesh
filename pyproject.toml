@@ -1,0 +1,78 @@
+[project]
+name = "rolemesh"
+version = "0.1.0"
+description = "Personal Claude assistant. Lightweight, secure, customizable."
+license = "AGPL-3.0-or-later"
+requires-python = ">=3.12"
+dependencies = [
+    "structlog>=24.0",
+    "croniter>=2.0",
+    "aiohttp>=3.9",
+    "python-telegram-bot>=22.7",
+    "slack-bolt>=1.27.0",
+    "nats-py>=2.9",
+    "aiodocker>=0.23",
+    "asyncpg>=0.29",
+]
+
+[project.scripts]
+rolemesh = "rolemesh.main:main_sync"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "testcontainers[postgres]>=4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/rolemesh", "src/agent_runner"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+show_error_codes = true
+mypy_path = "src"
+
+[tool.coverage.run]
+source = ["src/rolemesh"]
+omit = [
+    "*/rolemesh/container/runner.py",
+    "*/rolemesh/security/credential_proxy.py",
+    "*/rolemesh/main.py",
+    "*/rolemesh/ipc/*",
+    "*/rolemesh/orchestration/task_scheduler.py",
+    "*/rolemesh/orchestration/remote_control.py",
+    "*/rolemesh/channels/slack.py",
+    "*/rolemesh/channels/telegram.py",
+    "*/rolemesh/agent/container_executor.py",
+    "*/rolemesh/container/docker_runtime.py",
+]
+
+[tool.coverage.report]
+fail_under = 80
+
+[dependency-groups]
+dev = [
+    "types-croniter>=6.2.2.20260316",
+    "asyncpg-stubs>=0.31",
+]

@@ -1,0 +1,24 @@
+services:
+  nats:
+    image: nats:latest
+    ports:
+      - "4222:4222"   # Client
+      - "8222:8222"   # Monitoring
+    command: ["--jetstream", "--store_dir=/data"]
+    volumes:
+      - nats-data:/data
+
+  postgres:
+    image: postgres:16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: rolemesh
+      POSTGRES_USER: rolemesh
+      POSTGRES_PASSWORD: rolemesh
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  nats-data:
+  pgdata:
