@@ -24,9 +24,9 @@ from rolemesh.container.runner import (
 from rolemesh.core.config import (
     CONTAINER_MAX_OUTPUT_SIZE,
     CONTAINER_TIMEOUT,
+    DATA_DIR,
     IDLE_TIMEOUT,
 )
-from rolemesh.core.group_folder import resolve_group_folder_path
 from rolemesh.core.logger import get_logger
 from rolemesh.ipc.protocol import AgentInitData
 
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from rolemesh.container.runtime import ContainerHandle, ContainerRuntime
-    from rolemesh.core.types import RegisteredGroup
+    from rolemesh.core.types import Coworker
     from rolemesh.ipc.nats_transport import NatsTransport
 
 logger = get_logger()
@@ -54,23 +54,19 @@ def _parse_container_output(raw: dict[str, object]) -> AgentOutput:
 
 
 class ContainerAgentExecutor:
-    """Runs agents in containers via ContainerRuntime.
-
-    Logic moved from run_container_agent(), using ContainerRuntime.run(spec)
-    instead of subprocess.  Backend config selects image, entrypoint, mounts.
-    """
+    """Runs agents in containers via ContainerRuntime."""
 
     def __init__(
         self,
         config: AgentBackendConfig,
         runtime: ContainerRuntime,
         transport: NatsTransport,
-        registered_groups: Callable[[], dict[str, RegisteredGroup]],
+        get_coworker: Callable[[str], Coworker | None],
     ) -> None:
         self._config = config
         self._runtime = runtime
         self._transport = transport
-        self._registered_groups = registered_groups
+        self._get_coworker = get_coworker
 
     @property
     def name(self) -> str:
@@ -82,26 +78,28 @@ class ContainerAgentExecutor:
         on_process: Callable[[ContainerHandle, str, str], None],
         on_output: Callable[[AgentOutput], Awaitable[None]] | None = None,
     ) -> AgentOutput:
-        """Run an agent in a container. Replaces run_container_agent()."""
+        """Run an agent in a container."""
         start_time = time.monotonic()
         start_epoch_ms = int(time.time() * 1000)
 
-        group_dir = resolve_group_folder_path(inp.group_folder)
-        group_dir.mkdir(parents=True, exist_ok=True)
-
         job_id = f"{inp.group_folder}-{uuid.uuid4().hex[:12]}"
 
-        # Look up group for mount computation
-        groups = self._registered_groups()
-        group = next((g for g in groups.values() if g.folder == inp.group_folder), None)
-        if group is None:
+        coworker = self._get_coworker(inp.coworker_id) if inp.coworker_id else None
+        if coworker is None:
             return AgentOutput(
                 status="error",
                 result=None,
-                error=f"Group not found: {inp.group_folder}",
+                error=f"Coworker not found: {inp.coworker_id}",
             )
 
-        mounts = build_volume_mounts(group, inp.is_main, self._config)
+        tenant_id = inp.tenant_id or coworker.tenant_id
+        conversation_id = inp.conversation_id or ""
+
+        # Ensure coworker directory exists
+        coworker_dir = DATA_DIR / "tenants" / tenant_id / "coworkers" / coworker.folder
+        coworker_dir.mkdir(parents=True, exist_ok=True)
+
+        mounts = build_volume_mounts(coworker, tenant_id, conversation_id, inp.is_main, self._config)
         safe_name = re.sub(r"[^a-zA-Z0-9-]", "-", inp.group_folder)
         container_name = f"rolemesh-{safe_name}-{start_epoch_ms}"
 
@@ -109,15 +107,16 @@ class ContainerAgentExecutor:
 
         logger.info(
             "Spawning container agent",
-            group=group.name,
+            coworker=coworker.name,
             container_name=container_name,
             job_id=job_id,
             mount_count=len(mounts),
             is_main=inp.is_main,
             backend=self._config.name,
+            tenant_id=tenant_id,
         )
 
-        logs_dir = group_dir / "logs"
+        logs_dir = coworker_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
 
         # Channel 1: Write initial input to KV before starting container
@@ -127,6 +126,9 @@ class ContainerAgentExecutor:
             group_folder=inp.group_folder,
             chat_jid=inp.chat_jid,
             is_main=inp.is_main,
+            tenant_id=tenant_id,
+            coworker_id=inp.coworker_id,
+            conversation_id=conversation_id,
             session_id=inp.session_id,
             is_scheduled_task=inp.is_scheduled_task,
             assistant_name=inp.assistant_name,
@@ -135,7 +137,7 @@ class ContainerAgentExecutor:
         )
         await kv_init.put(job_id, agent_init.serialize())
 
-        # Start container via ContainerRuntime (NOT subprocess)
+        # Start container via ContainerRuntime
         handle = await self._runtime.run(spec)
         on_process(handle, container_name, job_id)
 
@@ -146,7 +148,7 @@ class ContainerAgentExecutor:
         timed_out = False
 
         config_timeout = (
-            group.container_config.timeout if group.container_config else CONTAINER_TIMEOUT
+            coworker.container_config.timeout if coworker.container_config else CONTAINER_TIMEOUT
         ) or CONTAINER_TIMEOUT
         timeout_ms = max(config_timeout, IDLE_TIMEOUT + 30_000)
         timeout_s = timeout_ms / 1000.0
@@ -164,7 +166,7 @@ class ContainerAgentExecutor:
                     timed_out = True
                     logger.error(
                         "Container timeout, stopping gracefully",
-                        group=group.name,
+                        coworker=coworker.name,
                         container_name=container_name,
                     )
                     with contextlib.suppress(OSError):
@@ -196,7 +198,7 @@ class ContainerAgentExecutor:
                 except (json.JSONDecodeError, KeyError, TypeError) as err:
                     logger.warning(
                         "Failed to parse streamed output",
-                        group=group.name,
+                        coworker=coworker.name,
                         error=str(err),
                     )
                     await msg.ack()
@@ -222,7 +224,7 @@ class ContainerAgentExecutor:
                         stderr_truncated = True
                         logger.warning(
                             "Container stderr truncated due to size limit",
-                            group=group.name,
+                            coworker=coworker.name,
                             size=len(stderr_buf),
                         )
                     else:
@@ -260,7 +262,7 @@ class ContainerAgentExecutor:
                     [
                         "=== Container Run Log (TIMEOUT) ===",
                         f"Timestamp: {datetime.now(UTC).isoformat()}",
-                        f"Group: {group.name}",
+                        f"Coworker: {coworker.name}",
                         f"Container: {container_name}",
                         f"Job ID: {job_id}",
                         f"Duration: {duration_ms}ms",
@@ -274,7 +276,7 @@ class ContainerAgentExecutor:
             if had_streaming_output:
                 logger.info(
                     "Container timed out after output (idle cleanup)",
-                    group=group.name,
+                    coworker=coworker.name,
                     container_name=container_name,
                     duration=duration_ms,
                     code=code,
@@ -287,7 +289,7 @@ class ContainerAgentExecutor:
 
             logger.error(
                 "Container timed out with no output",
-                group=group.name,
+                coworker=coworker.name,
                 container_name=container_name,
                 duration=duration_ms,
                 code=code,
@@ -305,7 +307,7 @@ class ContainerAgentExecutor:
         log_lines: list[str] = [
             "=== Container Run Log ===",
             f"Timestamp: {datetime.now(UTC).isoformat()}",
-            f"Group: {group.name}",
+            f"Coworker: {coworker.name}",
             f"IsMain: {inp.is_main}",
             f"Job ID: {job_id}",
             f"Duration: {duration_ms}ms",
@@ -350,7 +352,7 @@ class ContainerAgentExecutor:
         if code != 0:
             logger.error(
                 "Container exited with error",
-                group=group.name,
+                coworker=coworker.name,
                 code=code,
                 duration=duration_ms,
                 stderr=stderr_buf,
@@ -364,7 +366,7 @@ class ContainerAgentExecutor:
 
         logger.info(
             "Container completed",
-            group=group.name,
+            coworker=coworker.name,
             duration=duration_ms,
             new_session_id=new_session_id,
         )

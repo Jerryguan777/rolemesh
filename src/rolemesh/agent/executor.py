@@ -24,6 +24,9 @@ class AgentInput:
     group_folder: str
     chat_jid: str
     is_main: bool
+    tenant_id: str = ""
+    coworker_id: str = ""
+    conversation_id: str = ""
     session_id: str | None = None
     is_scheduled_task: bool = False
     assistant_name: str | None = None

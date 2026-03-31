@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from rolemesh.container.scheduler import GroupQueue
+from rolemesh.core.orchestrator_state import OrchestratorState
 
 
 async def test_basic_message_enqueue() -> None:
@@ -114,10 +115,10 @@ async def test_enqueue_task_while_active() -> None:
     assert executed
 
 
-async def test_concurrency_limit() -> None:
-    from unittest.mock import patch
-
-    queue = GroupQueue()
+async def test_concurrency_limit_via_orchestrator_state() -> None:
+    """Three-level concurrency: OrchestratorState with global_limit=1."""
+    state = OrchestratorState(global_limit=1)
+    queue = GroupQueue(orchestrator_state=state)
 
     async def slow_process(group_jid: str) -> bool:
         await asyncio.sleep(0.3)
@@ -125,10 +126,9 @@ async def test_concurrency_limit() -> None:
 
     queue.set_process_messages_fn(slow_process)
 
-    with patch("rolemesh.container.scheduler.MAX_CONCURRENT_CONTAINERS", 1):
-        queue.enqueue_message_check("group1")
-        await asyncio.sleep(0.05)
-        queue.enqueue_message_check("group2")  # Should be queued
-        state2 = queue._get_group("group2")
-        assert state2.pending_messages is True
+    queue.enqueue_message_check("group1", tenant_id="t1", coworker_id="cw1")
+    await asyncio.sleep(0.05)
+    queue.enqueue_message_check("group2", tenant_id="t1", coworker_id="cw2")  # Should be queued
+    state2 = queue._get_group("group2")
+    assert state2.pending_messages is True
     await asyncio.sleep(0.5)

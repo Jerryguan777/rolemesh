@@ -22,19 +22,18 @@ from rolemesh.container.runtime import (
 from rolemesh.core.config import (
     CONTAINER_IMAGE,
     CREDENTIAL_PROXY_PORT,
-    GROUPS_DIR,
+    DATA_DIR,
     NATS_URL,
     PROJECT_ROOT,
     TIMEZONE,
 )
-from rolemesh.core.group_folder import resolve_group_folder_path
 from rolemesh.core.logger import get_logger
 from rolemesh.security.credential_proxy import detect_auth_mode
 from rolemesh.security.mount_security import validate_additional_mounts
 
 if TYPE_CHECKING:
     from rolemesh.agent.executor import AgentBackendConfig
-    from rolemesh.core.types import RegisteredGroup
+    from rolemesh.core.types import Coworker
     from rolemesh.ipc.nats_transport import NatsTransport
 
 # Backward-compat aliases
@@ -68,17 +67,26 @@ class AvailableGroup:
 
 
 def build_volume_mounts(
-    group: RegisteredGroup,
+    coworker: Coworker,
+    tenant_id: str,
+    conversation_id: str,
     is_main: bool,
     backend_config: AgentBackendConfig | None = None,
 ) -> list[VolumeMount]:
     """Build volume mounts for a container invocation.
 
-    Note: creates group session directory and default settings if missing.
+    Paths: data/tenants/{tid}/coworkers/{folder}/
     """
     mounts: list[VolumeMount] = []
     project_root = PROJECT_ROOT
-    group_dir = resolve_group_folder_path(group.folder)
+    tenant_dir = DATA_DIR / "tenants" / tenant_id
+    coworker_dir = tenant_dir / "coworkers" / coworker.folder
+    shared_dir = tenant_dir / "shared"
+    session_dir = coworker_dir / "sessions" / conversation_id
+
+    # Workspace: per-coworker, shared across conversations
+    workspace_dir = coworker_dir / "workspace"
+    workspace_dir.mkdir(parents=True, exist_ok=True)
 
     if is_main:
         mounts.append(
@@ -88,7 +96,6 @@ def build_volume_mounts(
                 readonly=True,
             )
         )
-
         # Shadow .env so the agent cannot read secrets
         env_file = project_root / ".env"
         if env_file.exists():
@@ -100,38 +107,49 @@ def build_volume_mounts(
                 )
             )
 
+    mounts.append(
+        VolumeMount(
+            host_path=str(workspace_dir),
+            container_path="/workspace/group",
+            readonly=False,
+        )
+    )
+
+    # Shared knowledge (read-only)
+    if shared_dir.exists():
         mounts.append(
             VolumeMount(
-                host_path=str(group_dir),
-                container_path="/workspace/group",
-                readonly=False,
-            )
-        )
-    else:
-        mounts.append(
-            VolumeMount(
-                host_path=str(group_dir),
-                container_path="/workspace/group",
-                readonly=False,
+                host_path=str(shared_dir),
+                container_path="/workspace/shared",
+                readonly=True,
             )
         )
 
-        global_dir = GROUPS_DIR / "global"
-        if global_dir.exists():
-            mounts.append(
-                VolumeMount(
-                    host_path=str(global_dir),
-                    container_path="/workspace/global",
-                    readonly=True,
-                )
-            )
+    # Per-conversation session directory
+    session_dir.mkdir(parents=True, exist_ok=True)
+    mounts.append(
+        VolumeMount(
+            host_path=str(session_dir),
+            container_path="/workspace/sessions",
+            readonly=False,
+        )
+    )
 
-    # Per-group Claude sessions directory
-    from rolemesh.core.config import DATA_DIR
+    # Logs directory
+    logs_dir = coworker_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    mounts.append(
+        VolumeMount(
+            host_path=str(logs_dir),
+            container_path="/workspace/logs",
+            readonly=False,
+        )
+    )
 
-    group_sessions_dir = DATA_DIR / "sessions" / group.folder / ".claude"
-    group_sessions_dir.mkdir(parents=True, exist_ok=True)
-    settings_file = group_sessions_dir / "settings.json"
+    # Per-coworker Claude sessions directory
+    claude_sessions_dir = coworker_dir / ".claude"
+    claude_sessions_dir.mkdir(parents=True, exist_ok=True)
+    settings_file = claude_sessions_dir / "settings.json"
     if not settings_file.exists():
         settings_file.write_text(
             json.dumps(
@@ -148,9 +166,9 @@ def build_volume_mounts(
             encoding="utf-8",
         )
 
-    # Sync skills from container/skills/ into each group's .claude/skills/
+    # Sync skills
     skills_src = project_root / "container" / "skills"
-    skills_dst = group_sessions_dir / "skills"
+    skills_dst = claude_sessions_dir / "skills"
     if skills_src.exists():
         for skill_dir in skills_src.iterdir():
             if not skill_dir.is_dir():
@@ -160,17 +178,17 @@ def build_volume_mounts(
 
     mounts.append(
         VolumeMount(
-            host_path=str(group_sessions_dir),
+            host_path=str(claude_sessions_dir),
             container_path="/home/agent/.claude",
             readonly=False,
         )
     )
 
     # Additional mounts validated against external allowlist
-    if group.container_config and group.container_config.additional_mounts:
+    if coworker.container_config and coworker.container_config.additional_mounts:
         validated_mounts = validate_additional_mounts(
-            group.container_config.additional_mounts,
-            group.name,
+            coworker.container_config.additional_mounts,
+            coworker.name,
             is_main,
         )
         for m in validated_mounts:
@@ -241,31 +259,35 @@ def build_container_spec(
 
 async def write_tasks_snapshot(
     transport: NatsTransport,
-    group_folder: str,
+    tenant_id: str,
+    coworker_folder: str,
     is_main: bool,
     tasks: list[dict[str, object]],
 ) -> None:
     """Write filtered tasks to NATS KV for the agent to read.
 
     Main sees all tasks, others only see their own.
+    Key: snapshots.{tenant_id}.{coworker_folder}.tasks
     """
     filtered_tasks: list[dict[str, object]]
-    filtered_tasks = tasks if is_main else [t for t in tasks if t.get("groupFolder") == group_folder]
+    filtered_tasks = tasks if is_main else [t for t in tasks if t.get("coworkerFolder") == coworker_folder]
 
     kv = await transport.js.key_value("snapshots")
-    await kv.put(f"{group_folder}.tasks", json.dumps(filtered_tasks).encode())
+    key = f"{tenant_id}.{coworker_folder}.tasks"
+    await kv.put(key, json.dumps(filtered_tasks).encode())
 
 
 async def write_groups_snapshot(
     transport: NatsTransport,
-    group_folder: str,
+    tenant_id: str,
+    coworker_folder: str,
     is_main: bool,
     groups: list[AvailableGroup],
     _registered_jids: set[str],
 ) -> None:
     """Write available groups snapshot to NATS KV for the agent to read.
 
-    Only main group can see all available groups (for activation).
+    Key: snapshots.{tenant_id}.{coworker_folder}.groups
     """
     visible_groups: list[dict[str, object]]
     if is_main:
@@ -282,8 +304,9 @@ async def write_groups_snapshot(
         visible_groups = []
 
     kv = await transport.js.key_value("snapshots")
+    key = f"{tenant_id}.{coworker_folder}.groups"
     await kv.put(
-        f"{group_folder}.groups",
+        key,
         json.dumps(
             {
                 "groups": visible_groups,

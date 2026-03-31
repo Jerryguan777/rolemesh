@@ -373,6 +373,7 @@ async def run_query(
     js: JetStreamContext,
     job_id: str,
     resume_at: str | None = None,
+    coworker_system_prompt: str | None = None,
 ) -> QueryResult:
     stream = MessageStream()
     stream.push(prompt)
@@ -428,13 +429,18 @@ async def run_query(
     if extra_dirs:
         log(f"Additional directories: {', '.join(extra_dirs)}")
 
-    # Build system prompt
+    # Build system prompt from coworker config + global CLAUDE.md
     system_prompt: dict[str, Any] | None = None
+    append_parts: list[str] = []
+    if coworker_system_prompt:
+        append_parts.append(coworker_system_prompt)
     if global_claude_md:
+        append_parts.append(global_claude_md)
+    if append_parts:
         system_prompt = {
             "type": "preset",
             "preset": "claude_code",
-            "append": global_claude_md,
+            "append": "\n\n".join(append_parts),
         }
 
     # Build extra_args for resume-session-at
@@ -606,6 +612,9 @@ async def main() -> None:
         is_main=container_input.is_main,
         js=js,
         job_id=JOB_ID,
+        tenant_id=init.tenant_id,
+        coworker_id=init.coworker_id,
+        conversation_id=init.conversation_id,
     )
 
     session_id = container_input.session_id
@@ -638,6 +647,7 @@ async def main() -> None:
                 js,
                 JOB_ID,
                 resume_at,
+                coworker_system_prompt=init.system_prompt,
             )
             if query_result.new_session_id:
                 session_id = query_result.new_session_id

@@ -6,12 +6,12 @@ from rolemesh.core.config import (
     CONTAINER_TIMEOUT,
     CREDENTIAL_PROXY_PORT,
     DATA_DIR,
+    GLOBAL_MAX_CONTAINERS,
     GROUPS_DIR,
     IDLE_TIMEOUT,
     MAX_CONCURRENT_CONTAINERS,
     NATS_URL,
     POLL_INTERVAL,
-    TRIGGER_PATTERN,
 )
 
 
@@ -29,12 +29,9 @@ def test_paths_exist_as_path_objects() -> None:
     assert hasattr(DATA_DIR, "exists")
 
 
-def test_trigger_pattern() -> None:
-    name = ASSISTANT_NAME
-    assert TRIGGER_PATTERN.match(f"@{name} hello")
-    assert TRIGGER_PATTERN.match(f"@{name.upper()} hello")
-    assert not TRIGGER_PATTERN.match("hello")
-    assert not TRIGGER_PATTERN.match(f"not @{name}")
+def test_global_max_containers() -> None:
+    assert GLOBAL_MAX_CONTAINERS >= 1
+    assert isinstance(GLOBAL_MAX_CONTAINERS, int)
 
 
 def test_container_image() -> None:
