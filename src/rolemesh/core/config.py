@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
 
 from rolemesh.core.env import read_env_file
 
 _env_config = read_env_file(["ASSISTANT_NAME", "ASSISTANT_HAS_OWN_NUMBER"])
 
+# Legacy: ASSISTANT_NAME is no longer the global trigger source.
+# Kept for backward compatibility; new code should use coworker.name.
 ASSISTANT_NAME: str = os.environ.get("ASSISTANT_NAME") or _env_config.get("ASSISTANT_NAME", "Andy")
 ASSISTANT_HAS_OWN_NUMBER: bool = (
     os.environ.get("ASSISTANT_HAS_OWN_NUMBER") or _env_config.get("ASSISTANT_HAS_OWN_NUMBER", "")
@@ -36,12 +37,8 @@ CONTAINER_MAX_OUTPUT_SIZE: int = int(os.environ.get("CONTAINER_MAX_OUTPUT_SIZE",
 CREDENTIAL_PROXY_PORT: int = int(os.environ.get("CREDENTIAL_PROXY_PORT", "3001"))
 IDLE_TIMEOUT: int = int(os.environ.get("IDLE_TIMEOUT", "1800000"))  # 30 min
 MAX_CONCURRENT_CONTAINERS: int = max(1, int(os.environ.get("MAX_CONCURRENT_CONTAINERS", "5")))
+GLOBAL_MAX_CONTAINERS: int = max(1, int(os.environ.get("GLOBAL_MAX_CONTAINERS", "20")))
 CONTAINER_RUNTIME: str = os.environ.get("CONTAINER_RUNTIME", "docker")
-
-TRIGGER_PATTERN: re.Pattern[str] = re.compile(
-    rf"^@{re.escape(ASSISTANT_NAME)}\b",
-    re.IGNORECASE,
-)
 
 # Timezone for scheduled tasks — needs IANA name (e.g. "America/New_York"), not abbreviation ("EST").
 TIMEZONE: str = os.environ.get("TZ", "")

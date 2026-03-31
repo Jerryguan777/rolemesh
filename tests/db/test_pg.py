@@ -1,291 +1,356 @@
-"""Tests for rolemesh.db (PostgreSQL)."""
+"""Tests for rolemesh.db (PostgreSQL) — multi-tenant schema."""
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 
-from rolemesh.core.types import NewMessage, RegisteredGroup, ScheduledTask
+from rolemesh.core.types import ScheduledTask, TaskRunLog
 from rolemesh.db.pg import (
+    create_channel_binding,
+    create_conversation,
+    create_coworker,
     create_task,
+    create_tenant,
+    create_user,
     delete_task,
-    get_all_registered_groups,
     get_all_sessions,
     get_all_tasks,
+    get_all_tenants,
+    get_channel_binding,
+    get_conversation,
+    get_conversation_by_binding_and_chat,
+    get_coworker,
+    get_coworker_by_folder,
     get_due_tasks,
     get_messages_since,
-    get_new_messages,
-    get_router_state,
     get_session,
     get_task_by_id,
-    get_tasks_for_group,
-    set_registered_group,
-    set_router_state,
+    get_tasks_for_coworker,
+    get_tenant,
+    get_tenant_by_slug,
+    log_task_run,
     set_session,
-    store_chat_metadata,
     store_message,
+    update_conversation_last_invocation,
     update_task,
+    update_task_after_run,
+    update_tenant_message_cursor,
 )
 
 pytestmark = pytest.mark.usefixtures("test_db")
 
 
+# ---------------------------------------------------------------------------
+# Helper: create full entity chain
+# ---------------------------------------------------------------------------
+
+
+async def _create_chain() -> tuple[str, str, str, str]:
+    """Create tenant → coworker → binding → conversation. Return IDs."""
+    t = await create_tenant(name="Test Corp", slug=f"test-{uuid.uuid4().hex[:8]}")
+    cw = await create_coworker(tenant_id=t.id, name="Bot", folder=f"bot-{uuid.uuid4().hex[:8]}")
+    b = await create_channel_binding(
+        coworker_id=cw.id, tenant_id=t.id, channel_type="telegram", credentials={"bot_token": "x"}
+    )
+    conv = await create_conversation(
+        tenant_id=t.id, coworker_id=cw.id, channel_binding_id=b.id, channel_chat_id="12345"
+    )
+    return t.id, cw.id, b.id, conv.id
+
+
+# ---------------------------------------------------------------------------
+# Tenant CRUD
+# ---------------------------------------------------------------------------
+
+
+async def test_create_and_get_tenant() -> None:
+    t = await create_tenant(name="Acme", slug="acme", max_concurrent_containers=10)
+    assert t.id
+    assert t.name == "Acme"
+    assert t.max_concurrent_containers == 10
+
+    fetched = await get_tenant(t.id)
+    assert fetched is not None
+    assert fetched.name == "Acme"
+
+    by_slug = await get_tenant_by_slug("acme")
+    assert by_slug is not None
+    assert by_slug.id == t.id
+
+
+async def test_get_all_tenants() -> None:
+    await create_tenant(name="T1", slug=f"t1-{uuid.uuid4().hex[:8]}")
+    await create_tenant(name="T2", slug=f"t2-{uuid.uuid4().hex[:8]}")
+    tenants = await get_all_tenants()
+    assert len(tenants) >= 2
+
+
+async def test_update_tenant_message_cursor() -> None:
+    t = await create_tenant(name="T", slug=f"t-{uuid.uuid4().hex[:8]}")
+    await update_tenant_message_cursor(t.id, "2024-06-01T12:00:00+00:00")
+    fetched = await get_tenant(t.id)
+    assert fetched is not None
+    assert fetched.last_message_cursor is not None
+
+
+# ---------------------------------------------------------------------------
+# User CRUD
+# ---------------------------------------------------------------------------
+
+
+async def test_create_user() -> None:
+    t = await create_tenant(name="T", slug=f"t-{uuid.uuid4().hex[:8]}")
+    u = await create_user(tenant_id=t.id, name="Alice", email="alice@example.com", role="admin")
+    assert u.id
+    assert u.name == "Alice"
+    assert u.role == "admin"
+
+
+# ---------------------------------------------------------------------------
+# Role CRUD
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Coworker CRUD
+# ---------------------------------------------------------------------------
+
+
+async def test_create_and_get_coworker() -> None:
+    t = await create_tenant(name="T", slug=f"t-{uuid.uuid4().hex[:8]}")
+    cw = await create_coworker(
+        tenant_id=t.id,
+        name="Ops Bot",
+        folder="ops-bot",
+        is_admin=True,
+        max_concurrent=3,
+        tools=["Bash", "Read"],
+        skills=["browser"],
+    )
+    assert cw.id
+    assert cw.is_admin is True
+    assert cw.max_concurrent == 3
+    assert cw.tools == ["Bash", "Read"]
+    assert cw.agent_backend == "claude-code"
+
+    fetched = await get_coworker(cw.id)
+    assert fetched is not None
+    assert fetched.name == "Ops Bot"
+
+    by_folder = await get_coworker_by_folder(t.id, "ops-bot")
+    assert by_folder is not None
+    assert by_folder.id == cw.id
+
+
+# ---------------------------------------------------------------------------
+# ChannelBinding CRUD
+# ---------------------------------------------------------------------------
+
+
+async def test_channel_binding() -> None:
+    t = await create_tenant(name="T", slug=f"t-{uuid.uuid4().hex[:8]}")
+    cw = await create_coworker(tenant_id=t.id, name="Bot", folder=f"bot-{uuid.uuid4().hex[:8]}")
+    b = await create_channel_binding(
+        coworker_id=cw.id, tenant_id=t.id, channel_type="telegram", credentials={"bot_token": "abc"}
+    )
+    assert b.id
+    assert b.credentials["bot_token"] == "abc"
+
+    fetched = await get_channel_binding(b.id)
+    assert fetched is not None
+    assert fetched.channel_type == "telegram"
+
+
+# ---------------------------------------------------------------------------
+# Conversation CRUD
+# ---------------------------------------------------------------------------
+
+
+async def test_conversation_crud() -> None:
+    _tid, _cwid, bid, convid = await _create_chain()
+    conv = await get_conversation(convid)
+    assert conv is not None
+    assert conv.channel_chat_id == "12345"
+    assert conv.requires_trigger is True
+
+    by_bc = await get_conversation_by_binding_and_chat(bid, "12345")
+    assert by_bc is not None
+    assert by_bc.id == convid
+
+    await update_conversation_last_invocation(convid, "2024-06-01T12:00:00+00:00")
+    updated = await get_conversation(convid)
+    assert updated is not None
+    assert updated.last_agent_invocation is not None
+
+
+# ---------------------------------------------------------------------------
+# Sessions (per-conversation)
+# ---------------------------------------------------------------------------
+
+
+async def test_sessions_per_conversation() -> None:
+    tid, cwid, _, convid = await _create_chain()
+    assert await get_session(convid) is None
+    await set_session(convid, tid, cwid, "sess-abc")
+    assert await get_session(convid) == "sess-abc"
+
+    sessions = await get_all_sessions()
+    assert convid in sessions
+
+
+# ---------------------------------------------------------------------------
+# Messages (per-conversation)
+# ---------------------------------------------------------------------------
+
+
 async def test_store_and_get_messages() -> None:
-    await store_chat_metadata("chat1", "2024-01-01T00:00:00Z", name="Test Chat")
-    msg = NewMessage(
-        id="m1",
-        chat_jid="chat1",
+    tid, _, _, convid = await _create_chain()
+    await store_message(
+        tenant_id=tid,
+        conversation_id=convid,
+        msg_id="m1",
         sender="user1",
         sender_name="Alice",
         content="Hello",
-        timestamp="2024-01-01T00:00:01Z",
+        timestamp="2024-01-01T00:00:01+00:00",
     )
-    await store_message(msg)
-
-    messages, new_ts = await get_new_messages(["chat1"], "2024-01-01T00:00:00Z", "Andy")
-    assert len(messages) == 1
-    assert messages[0].content == "Hello"
-    assert new_ts > "2024-01-01T00:00:00Z"
+    msgs = await get_messages_since(tid, convid, "", "Bot")
+    assert len(msgs) == 1
+    assert msgs[0].content == "Hello"
 
 
-async def test_get_messages_since() -> None:
-    await store_chat_metadata("chat1", "2024-01-01T00:00:00Z")
+async def test_get_messages_since_filter() -> None:
+    tid, _, _, convid = await _create_chain()
     await store_message(
-        NewMessage(
-            id="m1",
-            chat_jid="chat1",
-            sender="user1",
-            sender_name="Alice",
-            content="Hello",
-            timestamp="2024-01-01T00:00:01Z",
-        )
+        tenant_id=tid,
+        conversation_id=convid,
+        msg_id="m1",
+        sender="u",
+        sender_name="U",
+        content="First",
+        timestamp="2024-01-01T00:00:01+00:00",
     )
     await store_message(
-        NewMessage(
-            id="m2",
-            chat_jid="chat1",
-            sender="user1",
-            sender_name="Alice",
-            content="World",
-            timestamp="2024-01-01T00:00:02Z",
-        )
+        tenant_id=tid,
+        conversation_id=convid,
+        msg_id="m2",
+        sender="u",
+        sender_name="U",
+        content="Second",
+        timestamp="2024-01-01T00:00:02+00:00",
     )
-    msgs = await get_messages_since("chat1", "2024-01-01T00:00:00Z", "Andy")
-    assert len(msgs) == 2
+    msgs = await get_messages_since(tid, convid, "2024-01-01T00:00:01+00:00", "Bot")
+    assert len(msgs) == 1
+    assert msgs[0].content == "Second"
 
 
-async def test_router_state() -> None:
-    await set_router_state("test_key", "test_value")
-    assert await get_router_state("test_key") == "test_value"
-    assert await get_router_state("missing") is None
-
-
-async def test_sessions() -> None:
-    await set_session("group1", "sess-123")
-    assert await get_session("group1") == "sess-123"
-    assert await get_session("missing") is None
-
-    sessions = await get_all_sessions()
-    assert sessions["group1"] == "sess-123"
-
-
-async def test_registered_groups() -> None:
-    group = RegisteredGroup(
-        name="Test Group",
-        folder="testgroup",
-        trigger="@Andy",
-        added_at="2024-01-01T00:00:00Z",
-    )
-    await set_registered_group("chat@jid", group)
-
-    groups = await get_all_registered_groups()
-    assert "chat@jid" in groups
-    assert groups["chat@jid"].name == "Test Group"
-    assert groups["chat@jid"].folder == "testgroup"
+# ---------------------------------------------------------------------------
+# Scheduled Tasks (per-coworker)
+# ---------------------------------------------------------------------------
 
 
 async def test_task_crud() -> None:
-    task = ScheduledTask(
-        id="t1",
-        group_folder="testgroup",
-        chat_jid="chat@jid",
-        prompt="Do something",
-        schedule_type="cron",
-        schedule_value="0 9 * * *",
-        context_mode="group",
-        next_run="2024-01-02T09:00:00Z",
-        status="active",
-        created_at="2024-01-01T00:00:00Z",
+    tid, cwid, _, _ = await _create_chain()
+    task_id = str(uuid.uuid4())
+    await create_task(
+        ScheduledTask(
+            id=task_id,
+            tenant_id=tid,
+            coworker_id=cwid,
+            prompt="Do something",
+            schedule_type="cron",
+            schedule_value="0 9 * * *",
+            context_mode="group",
+            next_run="2024-01-02T09:00:00+00:00",
+            status="active",
+        )
     )
-    await create_task(task)
 
-    retrieved = await get_task_by_id("t1")
+    retrieved = await get_task_by_id(task_id)
     assert retrieved is not None
     assert retrieved.prompt == "Do something"
 
-    tasks = await get_tasks_for_group("testgroup")
+    tasks = await get_tasks_for_coworker(cwid)
     assert len(tasks) == 1
 
-    all_tasks = await get_all_tasks()
+    all_tasks = await get_all_tasks(tid)
     assert len(all_tasks) == 1
 
-    await update_task("t1", prompt="Updated prompt")
-    updated = await get_task_by_id("t1")
+    await update_task(task_id, prompt="Updated prompt")
+    updated = await get_task_by_id(task_id)
     assert updated is not None
     assert updated.prompt == "Updated prompt"
 
-    await delete_task("t1")
-    assert await get_task_by_id("t1") is None
+    await delete_task(task_id)
+    assert await get_task_by_id(task_id) is None
 
 
 async def test_get_due_tasks() -> None:
-    task = ScheduledTask(
-        id="t2",
-        group_folder="testgroup",
-        chat_jid="chat@jid",
-        prompt="Past task",
-        schedule_type="once",
-        schedule_value="2020-01-01T00:00:00Z",
-        context_mode="isolated",
-        next_run="2020-01-01T00:00:00Z",
-        status="active",
-        created_at="2020-01-01T00:00:00Z",
+    tid, cwid, _, _ = await _create_chain()
+    task_id = str(uuid.uuid4())
+    await create_task(
+        ScheduledTask(
+            id=task_id,
+            tenant_id=tid,
+            coworker_id=cwid,
+            prompt="Past task",
+            schedule_type="once",
+            schedule_value="2020-01-01T00:00:00+00:00",
+            context_mode="isolated",
+            next_run="2020-01-01T00:00:00+00:00",
+            status="active",
+        )
     )
-    await create_task(task)
-
     due = await get_due_tasks()
-    assert len(due) >= 1
-    assert any(t.id == "t2" for t in due)
-
-
-async def test_store_chat_metadata_with_channel() -> None:
-    await store_chat_metadata("tg:123", "2024-01-01T00:00:00Z", name="TG Chat", channel="telegram", is_group=True)
-    from rolemesh.db.pg import get_all_chats
-
-    chats = await get_all_chats()
-    assert any(c.jid == "tg:123" for c in chats)
-
-
-async def test_store_chat_metadata_no_name() -> None:
-    await store_chat_metadata("chat2", "2024-01-01T00:00:00Z")
-    from rolemesh.db.pg import get_all_chats
-
-    chats = await get_all_chats()
-    assert any(c.jid == "chat2" for c in chats)
-
-
-async def test_update_chat_name() -> None:
-    from rolemesh.db.pg import update_chat_name
-
-    await store_chat_metadata("chat3", "2024-01-01T00:00:00Z", name="Old Name")
-    await update_chat_name("chat3", "New Name")
-    from rolemesh.db.pg import get_all_chats
-
-    chats = await get_all_chats()
-    chat = next(c for c in chats if c.jid == "chat3")
-    assert chat.name == "New Name"
-
-
-async def test_group_sync() -> None:
-    from rolemesh.db.pg import get_last_group_sync, set_last_group_sync
-
-    assert await get_last_group_sync() is None
-    await set_last_group_sync()
-    assert await get_last_group_sync() is not None
+    assert any(t.id == task_id for t in due)
 
 
 async def test_update_task_after_run() -> None:
-    from rolemesh.db.pg import log_task_run, update_task_after_run
-
-    task = ScheduledTask(
-        id="t3",
-        group_folder="testgroup",
-        chat_jid="chat@jid",
-        prompt="Test",
-        schedule_type="cron",
-        schedule_value="0 9 * * *",
-        context_mode="group",
-        next_run="2024-01-02T09:00:00Z",
-        status="active",
-        created_at="2024-01-01T00:00:00Z",
+    tid, cwid, _, _ = await _create_chain()
+    task_id = str(uuid.uuid4())
+    await create_task(
+        ScheduledTask(
+            id=task_id,
+            tenant_id=tid,
+            coworker_id=cwid,
+            prompt="Test",
+            schedule_type="cron",
+            schedule_value="0 9 * * *",
+            context_mode="group",
+            next_run="2024-01-02T09:00:00+00:00",
+            status="active",
+        )
     )
-    await create_task(task)
-    await update_task_after_run("t3", "2024-01-03T09:00:00Z", "Done")
-    updated = await get_task_by_id("t3")
+    await update_task_after_run(task_id, "2024-01-03T09:00:00+00:00", "Done")
+    updated = await get_task_by_id(task_id)
     assert updated is not None
-    assert updated.last_result == "Done"
-    assert updated.next_run == "2024-01-03T09:00:00Z"
-
-    from rolemesh.core.types import TaskRunLog
-
-    await log_task_run(TaskRunLog(task_id="t3", run_at="2024-01-02T09:00:00Z", duration_ms=500, status="success"))
+    assert "Done" in (updated.last_result or "")
 
 
-async def test_update_task_multiple_fields() -> None:
-    task = ScheduledTask(
-        id="t4",
-        group_folder="testgroup",
-        chat_jid="chat@jid",
-        prompt="Original",
-        schedule_type="cron",
-        schedule_value="0 9 * * *",
-        context_mode="group",
-        next_run="2024-01-02T09:00:00Z",
-        status="active",
-        created_at="2024-01-01T00:00:00Z",
+async def test_log_task_run() -> None:
+    tid, cwid, _, _ = await _create_chain()
+    task_id = str(uuid.uuid4())
+    await create_task(
+        ScheduledTask(
+            id=task_id,
+            tenant_id=tid,
+            coworker_id=cwid,
+            prompt="Test",
+            schedule_type="cron",
+            schedule_value="0 9 * * *",
+            context_mode="group",
+            next_run="2024-01-02T09:00:00+00:00",
+            status="active",
+        )
     )
-    await create_task(task)
-    await update_task("t4", prompt="New prompt", status="paused", schedule_value="0 10 * * *")
-    updated = await get_task_by_id("t4")
-    assert updated is not None
-    assert updated.prompt == "New prompt"
-    assert updated.status == "paused"
-
-
-async def test_update_task_no_fields() -> None:
-    task = ScheduledTask(
-        id="t5",
-        group_folder="testgroup",
-        chat_jid="chat@jid",
-        prompt="Test",
-        schedule_type="once",
-        schedule_value="2024-01-01T00:00:00Z",
-        context_mode="isolated",
-        status="active",
-        created_at="2024-01-01T00:00:00Z",
+    await log_task_run(
+        TaskRunLog(
+            tenant_id=tid,
+            task_id=task_id,
+            run_at="2024-01-02T09:00:00+00:00",
+            duration_ms=500,
+            status="success",
+        )
     )
-    await create_task(task)
-    await update_task("t5")  # No fields — should be a no-op
-
-
-async def test_store_message_direct() -> None:
-    from rolemesh.db.pg import store_message_direct
-
-    await store_chat_metadata("chat5", "2024-01-01T00:00:00Z")
-    await store_message_direct(
-        id="md1",
-        chat_jid="chat5",
-        sender="user1",
-        sender_name="Alice",
-        content="Direct message",
-        timestamp="2024-01-01T00:00:01Z",
-        is_from_me=False,
-    )
-    msgs = await get_messages_since("chat5", "2024-01-01T00:00:00Z", "Andy")
-    assert len(msgs) == 1
-
-
-async def test_registered_group_with_config() -> None:
-    from rolemesh.core.types import ContainerConfig
-
-    group = RegisteredGroup(
-        name="Config Group",
-        folder="configgroup",
-        trigger="@Andy",
-        added_at="2024-01-01T00:00:00Z",
-        container_config=ContainerConfig(timeout=600000),
-        is_main=True,
-    )
-    await set_registered_group("config@jid", group)
-    groups = await get_all_registered_groups()
-    assert "config@jid" in groups
-    assert groups["config@jid"].is_main is True

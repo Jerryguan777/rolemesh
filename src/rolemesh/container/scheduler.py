@@ -1,7 +1,9 @@
-"""Per-group concurrent queue with global concurrency limit.
+"""Per-coworker concurrent queue with three-level concurrency control.
 
-Manages container processes across groups, handling message queueing,
+Manages container processes across coworkers, handling message queueing,
 task prioritization, retry with exponential backoff, and graceful shutdown.
+
+Three levels: global + per-tenant + per-coworker.
 """
 
 from __future__ import annotations
@@ -18,9 +20,8 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from rolemesh.container.runtime import ContainerHandle, ContainerRuntime
+    from rolemesh.core.orchestrator_state import OrchestratorState
     from rolemesh.ipc.nats_transport import NatsTransport
-
-from rolemesh.core.config import MAX_CONCURRENT_CONTAINERS
 
 logger = get_logger()
 
@@ -33,6 +34,8 @@ class _QueuedTask:
     id: str
     group_jid: str
     fn: Callable[[], Awaitable[None]]
+    tenant_id: str = ""
+    coworker_id: str = ""
 
 
 @dataclass
@@ -48,15 +51,18 @@ class _GroupState:
     group_folder: str | None = None
     job_id: str | None = None
     retry_count: int = 0
+    tenant_id: str = ""
+    coworker_id: str = ""
 
 
 class GroupQueue:
-    """Manages per-group container concurrency and task/message queuing."""
+    """Manages per-group container concurrency with three-level limits."""
 
     def __init__(
         self,
         transport: NatsTransport | None = None,
         runtime: ContainerRuntime | None = None,
+        orchestrator_state: OrchestratorState | None = None,
     ) -> None:
         self._groups: dict[str, _GroupState] = {}
         self._active_count: int = 0
@@ -66,6 +72,7 @@ class GroupQueue:
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._transport = transport
         self._runtime = runtime
+        self._orch_state = orchestrator_state
 
     def _spawn(self, coro: Awaitable[None]) -> None:
         """Launch a background task and track it to prevent GC."""
@@ -80,23 +87,49 @@ class GroupQueue:
             self._groups[group_jid] = state
         return state
 
+    def _can_start(self, tenant_id: str, coworker_id: str) -> bool:
+        """Check three-level concurrency."""
+        if self._orch_state:
+            return self._orch_state.can_start_container(tenant_id, coworker_id)
+        # Fallback to simple global limit
+        from rolemesh.core.config import MAX_CONCURRENT_CONTAINERS
+
+        return self._active_count < MAX_CONCURRENT_CONTAINERS
+
+    def _increment(self, tenant_id: str, coworker_id: str) -> None:
+        self._active_count += 1
+        if self._orch_state:
+            self._orch_state.increment_active(tenant_id, coworker_id)
+
+    def _decrement(self, tenant_id: str, coworker_id: str) -> None:
+        self._active_count -= 1
+        if self._orch_state:
+            self._orch_state.decrement_active(tenant_id, coworker_id)
+
     def set_process_messages_fn(self, fn: Callable[[str], Awaitable[bool]]) -> None:
         """Set the callback for processing messages for a group."""
         self._process_messages_fn = fn
 
-    def enqueue_message_check(self, group_jid: str) -> None:
+    def enqueue_message_check(
+        self,
+        group_jid: str,
+        tenant_id: str = "",
+        coworker_id: str = "",
+    ) -> None:
         """Queue a message check for a group."""
         if self._shutting_down:
             return
 
         state = self._get_group(group_jid)
+        state.tenant_id = tenant_id or state.tenant_id
+        state.coworker_id = coworker_id or state.coworker_id
 
         if state.active:
             state.pending_messages = True
             logger.debug("Container active, message queued", group_jid=group_jid)
             return
 
-        if self._active_count >= MAX_CONCURRENT_CONTAINERS:
+        if not self._can_start(state.tenant_id, state.coworker_id):
             state.pending_messages = True
             if group_jid not in self._waiting_groups:
                 self._waiting_groups.append(group_jid)
@@ -109,12 +142,21 @@ class GroupQueue:
 
         self._spawn(self._run_for_group(group_jid, "messages"))
 
-    def enqueue_task(self, group_jid: str, task_id: str, fn: Callable[[], Awaitable[None]]) -> None:
+    def enqueue_task(
+        self,
+        group_jid: str,
+        task_id: str,
+        fn: Callable[[], Awaitable[None]],
+        tenant_id: str = "",
+        coworker_id: str = "",
+    ) -> None:
         """Queue a task for execution."""
         if self._shutting_down:
             return
 
         state = self._get_group(group_jid)
+        state.tenant_id = tenant_id or state.tenant_id
+        state.coworker_id = coworker_id or state.coworker_id
 
         # Prevent double-queuing
         if state.running_task_id == task_id:
@@ -125,14 +167,22 @@ class GroupQueue:
             return
 
         if state.active:
-            state.pending_tasks.append(_QueuedTask(id=task_id, group_jid=group_jid, fn=fn))
+            state.pending_tasks.append(
+                _QueuedTask(
+                    id=task_id, group_jid=group_jid, fn=fn, tenant_id=state.tenant_id, coworker_id=state.coworker_id
+                )
+            )
             if state.idle_waiting:
                 self.close_stdin(group_jid)
             logger.debug("Container active, task queued", group_jid=group_jid, task_id=task_id)
             return
 
-        if self._active_count >= MAX_CONCURRENT_CONTAINERS:
-            state.pending_tasks.append(_QueuedTask(id=task_id, group_jid=group_jid, fn=fn))
+        if not self._can_start(state.tenant_id, state.coworker_id):
+            state.pending_tasks.append(
+                _QueuedTask(
+                    id=task_id, group_jid=group_jid, fn=fn, tenant_id=state.tenant_id, coworker_id=state.coworker_id
+                )
+            )
             if group_jid not in self._waiting_groups:
                 self._waiting_groups.append(group_jid)
             logger.debug(
@@ -144,7 +194,9 @@ class GroupQueue:
             return
 
         # Run immediately
-        task = _QueuedTask(id=task_id, group_jid=group_jid, fn=fn)
+        task = _QueuedTask(
+            id=task_id, group_jid=group_jid, fn=fn, tenant_id=state.tenant_id, coworker_id=state.coworker_id
+        )
         self._spawn(self._run_task(group_jid, task))
 
     def register_process(
@@ -230,7 +282,7 @@ class GroupQueue:
         state.idle_waiting = False
         state.is_task_container = False
         state.pending_messages = False
-        self._active_count += 1
+        self._increment(state.tenant_id, state.coworker_id)
 
         logger.debug(
             "Starting container for group",
@@ -255,7 +307,7 @@ class GroupQueue:
             state.container_name = None
             state.group_folder = None
             state.job_id = None
-            self._active_count -= 1
+            self._decrement(state.tenant_id, state.coworker_id)
             self._drain_group(group_jid)
 
     async def _run_task(self, group_jid: str, task: _QueuedTask) -> None:
@@ -264,7 +316,7 @@ class GroupQueue:
         state.idle_waiting = False
         state.is_task_container = True
         state.running_task_id = task.id
-        self._active_count += 1
+        self._increment(state.tenant_id, state.coworker_id)
 
         logger.debug(
             "Running queued task",
@@ -285,7 +337,7 @@ class GroupQueue:
             state.container_name = None
             state.group_folder = None
             state.job_id = None
-            self._active_count -= 1
+            self._decrement(state.tenant_id, state.coworker_id)
             self._drain_group(group_jid)
 
     def _schedule_retry(self, group_jid: str, state: _GroupState) -> None:
@@ -310,7 +362,7 @@ class GroupQueue:
         async def _retry() -> None:
             await asyncio.sleep(delay_s)
             if not self._shutting_down:
-                self.enqueue_message_check(group_jid)
+                self.enqueue_message_check(group_jid, state.tenant_id, state.coworker_id)
 
         self._spawn(_retry())
 
@@ -320,30 +372,34 @@ class GroupQueue:
 
         state = self._get_group(group_jid)
 
-        # Tasks first (they won't be re-discovered from SQLite like messages)
+        # Tasks first
         if state.pending_tasks:
             task = state.pending_tasks.pop(0)
             self._spawn(self._run_task(group_jid, task))
             return
 
-        # Then pending messages
         if state.pending_messages:
             self._spawn(self._run_for_group(group_jid, "drain"))
             return
 
-        # Nothing pending; check if other groups are waiting for a slot
         self._drain_waiting()
 
     def _drain_waiting(self) -> None:
-        while self._waiting_groups and self._active_count < MAX_CONCURRENT_CONTAINERS:
-            next_jid = self._waiting_groups.pop(0)
+        remaining: list[str] = []
+        for next_jid in self._waiting_groups:
             state = self._get_group(next_jid)
+            if not self._can_start(state.tenant_id, state.coworker_id):
+                remaining.append(next_jid)
+                continue
 
             if state.pending_tasks:
                 task = state.pending_tasks.pop(0)
                 self._spawn(self._run_task(next_jid, task))
             elif state.pending_messages:
                 self._spawn(self._run_for_group(next_jid, "drain"))
+            else:
+                continue  # nothing to do, don't re-add
+        self._waiting_groups = remaining
 
     async def shutdown(self, _grace_period_ms: int = 0) -> None:
         """Graceful shutdown -- detach containers, don't kill them."""
@@ -360,7 +416,6 @@ class GroupQueue:
             detached_containers=active_containers,
         )
 
-        # Stop active containers via runtime if available
         if self._runtime:
             for name in active_containers:
                 try:

@@ -13,8 +13,8 @@ def _make_task(
 ) -> ScheduledTask:
     return ScheduledTask(
         id="t1",
-        group_folder="test",
-        chat_jid="chat@jid",
+        tenant_id="tenant-1",
+        coworker_id="cw-1",
         prompt="test",
         schedule_type=schedule_type,  # type: ignore[arg-type]
         schedule_value=schedule_value,
