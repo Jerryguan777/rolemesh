@@ -13,3 +13,4 @@ htmlcov/
 groups/
 data/
 store/
+.env
