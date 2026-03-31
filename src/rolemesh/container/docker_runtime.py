@@ -134,15 +134,21 @@ class DockerRuntime:
         with contextlib.suppress(aiodocker.exceptions.DockerError):
             await container.delete(force=True)
 
-    async def cleanup_orphans(self, prefix: str) -> list[str]:
+    async def cleanup_orphans(
+        self, prefix: str, *, exclude_infra: bool = True,
+    ) -> list[str]:
         client = self._ensure_client()
         containers = await client.containers.list(
             all=True,
             filters={"name": [prefix]},
         )
+        # Skip infrastructure containers managed by docker compose
+        _infra_suffixes = ("-postgres-", "-nats-", "-redis-")
         removed: list[str] = []
         for c in containers:
             cname: str = c._container.get("Names", [""])[0].lstrip("/")
+            if exclude_infra and any(s in cname for s in _infra_suffixes):
+                continue
             await self.stop(cname)
             removed.append(cname)
         if removed:

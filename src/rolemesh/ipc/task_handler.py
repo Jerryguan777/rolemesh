@@ -10,6 +10,7 @@ from __future__ import annotations
 import random
 import string
 import time
+import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
 
@@ -114,9 +115,13 @@ async def process_task_ipc(
                 logger.warning("Invalid timestamp", schedule_value=schedule_value)
                 return
 
-        task_id = str(data.get("taskId", "")) or (
-            f"task-{int(time.time() * 1000)}-{''.join(random.choices(string.ascii_lowercase + string.digits, k=6))}"
-        )
+        raw_task_id = str(data.get("taskId", ""))
+        # DB column is UUID — generate one if the agent sent a non-UUID id
+        try:
+            uuid.UUID(raw_task_id)
+            task_id = raw_task_id
+        except (ValueError, AttributeError):
+            task_id = str(uuid.uuid4())
         raw_context = data.get("context_mode")
         context_mode: str = raw_context if raw_context in ("group", "isolated") else "isolated"  # type: ignore[assignment]
 
