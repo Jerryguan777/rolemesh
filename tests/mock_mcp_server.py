@@ -1,6 +1,6 @@
 """Mock MCP server for end-to-end testing.
 
-Runs on port 9100 with SSE transport at /mcp/.
+Runs on port 9100 with streamable-http transport at /mcp.
 Validates JWT tokens (accepts tokens starting with 'test-token-').
 Exposes two tools: echo and get_server_info.
 
@@ -14,13 +14,11 @@ import logging
 from typing import TYPE_CHECKING
 
 from mcp.server.fastmcp import FastMCP
-from starlette.applications import Starlette
-from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import Response
-from starlette.routing import Mount
 
 if TYPE_CHECKING:
+    from starlette.applications import Starlette
     from starlette.types import ASGIApp, Receive, Scope, Send
 
 logger = logging.getLogger("mock-mcp-server")
@@ -29,7 +27,6 @@ mcp = FastMCP(
     "mock-mcp-server",
     host="0.0.0.0",
     port=9100,
-    mount_path="/mcp",
 )
 
 
@@ -72,21 +69,17 @@ class JWTAuthMiddleware:
 
 
 def create_app() -> Starlette:
-    """Create the Starlette app with JWT auth middleware wrapping the MCP SSE app."""
-    sse_app = mcp.sse_app()
-
-    app = Starlette(
-        routes=[Mount("/", app=sse_app)],
-        middleware=[Middleware(JWTAuthMiddleware)],
-    )
-    return app
+    """Create the Starlette app with JWT auth middleware wrapping the MCP streamable-http app."""
+    http_app = mcp.streamable_http_app()
+    http_app.add_middleware(JWTAuthMiddleware)
+    return http_app
 
 
 if __name__ == "__main__":
     import uvicorn
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    logger.info("Starting mock MCP server on http://0.0.0.0:9100/mcp/")
+    logger.info("Starting mock MCP server on http://0.0.0.0:9100/mcp")
 
     app = create_app()
     uvicorn.run(app, host="0.0.0.0", port=9100, log_level="info")
