@@ -212,7 +212,7 @@ async def _load_state() -> None:
         for tool_cfg in cw.tools:
             parsed = urlparse(tool_cfg.url)
             origin = f"{parsed.scheme}://{parsed.netloc}"
-            register_mcp_server(tool_cfg.name, origin)
+            register_mcp_server(tool_cfg.name, origin, tool_cfg.headers)
 
     logger.info(
         "State loaded",

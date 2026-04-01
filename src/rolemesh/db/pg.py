@@ -455,7 +455,11 @@ async def create_coworker(
             folder,
             agent_backend,
             system_prompt,
-            json.dumps([{"name": t.name, "type": t.type, "url": t.url} for t in tools] if tools else []),
+            json.dumps(
+                [{"name": t.name, "type": t.type, "url": t.url, "headers": t.headers} for t in tools]
+                if tools
+                else []
+            ),
             json.dumps(skills or []),
             is_admin,
             cc_json,
@@ -474,11 +478,13 @@ def _record_to_coworker(row: asyncpg.Record) -> Coworker:
     tools: list[McpServerConfig] = []
     for item in tools_raw:
         if isinstance(item, dict) and "name" in item:
+            raw_headers = item.get("headers")
             tools.append(
                 McpServerConfig(
                     name=item["name"],
                     type=item.get("type", "sse"),
                     url=item.get("url", ""),
+                    headers=raw_headers if isinstance(raw_headers, dict) else {},
                 )
             )
         # Skip legacy string entries silently

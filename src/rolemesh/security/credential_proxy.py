@@ -39,17 +39,17 @@ _SKIP_RESPONSE_HEADERS = frozenset(
     }
 )
 
-# Module-level MCP server registry: server_name → origin URL
-_mcp_registry: dict[str, str] = {}
+# Module-level MCP server registry: server_name → (origin URL, headers to inject)
+_mcp_registry: dict[str, tuple[str, dict[str, str]]] = {}
 
 
-def register_mcp_server(name: str, url: str) -> None:
+def register_mcp_server(name: str, url: str, headers: dict[str, str] | None = None) -> None:
     """Register an MCP server for proxy forwarding."""
-    _mcp_registry[name] = url
+    _mcp_registry[name] = (url, headers or {})
     logger.info("MCP server registered", name=name, url=url)
 
 
-def get_mcp_registry() -> dict[str, str]:
+def get_mcp_registry() -> dict[str, tuple[str, dict[str, str]]]:
     """Get the current MCP server registry."""
     return dict(_mcp_registry)
 
@@ -65,7 +65,6 @@ async def start_credential_proxy(port: int, host: str = "127.0.0.1") -> web.AppR
             "CLAUDE_CODE_OAUTH_TOKEN",
             "ANTHROPIC_AUTH_TOKEN",
             "ANTHROPIC_BASE_URL",
-            "MCP_JWT_TOKEN",
         ]
     )
 
@@ -78,8 +77,6 @@ async def start_credential_proxy(port: int, host: str = "127.0.0.1") -> web.AppR
     upstream_host = parsed.hostname or "api.anthropic.com"
     upstream_port = parsed.port or (443 if is_https else 80)
     upstream_scheme = parsed.scheme or "https"
-
-    mcp_jwt = secrets.get("MCP_JWT_TOKEN", "")
 
     session = ClientSession()
 
@@ -110,28 +107,27 @@ async def start_credential_proxy(port: int, host: str = "127.0.0.1") -> web.AppR
             return response
 
     async def handle_mcp_proxy(request: web.Request) -> web.StreamResponse:
-        """Forward MCP requests to the actual MCP server with JWT injection."""
+        """Forward MCP requests to the actual MCP server with per-server header injection."""
         server_name = request.match_info["server_name"]
         remaining_path = "/" + request.match_info.get("path_info", "")
         if request.query_string:
             remaining_path += "?" + request.query_string
 
-        origin = _mcp_registry.get(server_name)
-        if not origin:
+        entry = _mcp_registry.get(server_name)
+        if not entry:
             return web.Response(status=404, text=f"MCP server not found: {server_name}")
 
-        if not mcp_jwt:
-            return web.Response(status=500, text="MCP_JWT_TOKEN not configured in .env")
-
+        origin, server_headers = entry
         target_url = f"{origin}{remaining_path}"
 
         fwd_headers: dict[str, str] = {}
         for key, value in request.headers.items():
             if key.lower() not in _HOP_BY_HOP:
                 fwd_headers[key] = value
-        fwd_headers["Authorization"] = f"Bearer {mcp_jwt}"
         fwd_headers.pop("host", None)
         fwd_headers.pop("Host", None)
+        # Inject per-server headers (overrides any forwarded headers with same key)
+        fwd_headers.update(server_headers)
 
         body = await request.read()
 

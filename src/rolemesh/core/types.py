@@ -61,11 +61,13 @@ class McpServerConfig:
 
     Stored in the coworker's `tools` JSONB field in the database.
     The `url` is the actual MCP server URL on the host machine.
+    The `headers` are injected by the credential proxy when forwarding requests.
     """
 
     name: str  # registered name in claude_agent_sdk, e.g. "my-mcp-server"
     type: str  # transport type: "sse" or "http"
     url: str  # actual MCP server URL, e.g. "http://localhost:9100/mcp/"
+    headers: dict[str, str] = field(default_factory=dict)  # auth headers injected by proxy
 
 
 # ---------------------------------------------------------------------------
