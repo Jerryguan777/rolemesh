@@ -7,13 +7,27 @@ export type ServerMessage =
 
 export type MessageHandler = (msg: ServerMessage) => void;
 
+export interface ConversationSummary {
+  chatId: string;
+  title: string;
+  updatedAt: string;
+}
+
+export interface HistoryMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  timestamp: string;
+}
+
 export class AgentClient {
   private ws: WebSocket | null = null;
   private handlers: Set<MessageHandler> = new Set();
   private _connected = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private bindingId: string;
-  private token: string;
+  private autoReconnect = true;
+  private pendingMessages: string[] = [];
+  readonly bindingId: string;
+  readonly token: string;
 
   chatId: string | null = null;
 
@@ -26,17 +40,26 @@ export class AgentClient {
     return this._connected;
   }
 
-  connect(): void {
+  connect(chatId?: string): void {
     if (!this.bindingId || !this.token) return;
+    this.autoReconnect = true;
+    if (chatId !== undefined) this.chatId = chatId;
 
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${protocol}//${location.host}/ws/chat?binding_id=${encodeURIComponent(this.bindingId)}&token=${encodeURIComponent(this.token)}`;
+    let url = `${protocol}//${location.host}/ws/chat?binding_id=${encodeURIComponent(this.bindingId)}&token=${encodeURIComponent(this.token)}`;
+    if (this.chatId) {
+      url += `&chat_id=${encodeURIComponent(this.chatId)}`;
+    }
 
     this.ws = new WebSocket(url);
 
     this.ws.onopen = () => {
       this._connected = true;
-      this.notify({ type: 'session', chatId: '', bindingId: this.bindingId });
+      // Flush any messages queued while connecting
+      for (const msg of this.pendingMessages) {
+        this.ws!.send(msg);
+      }
+      this.pendingMessages = [];
     };
 
     this.ws.onmessage = (evt) => {
@@ -57,7 +80,9 @@ export class AgentClient {
       if (wasConnected) {
         this.notify({ type: 'error', message: 'Connection lost. Reconnecting...' });
       }
-      this.scheduleReconnect();
+      if (this.autoReconnect) {
+        this.scheduleReconnect();
+      }
     };
 
     this.ws.onerror = () => {
@@ -66,8 +91,13 @@ export class AgentClient {
   }
 
   send(content: string): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-    this.ws.send(JSON.stringify({ type: 'message', content }));
+    const payload = JSON.stringify({ type: 'message', content, chatId: this.chatId });
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(payload);
+    } else if (this.ws && this.ws.readyState === WebSocket.CONNECTING) {
+      // Queue message to be sent once connection opens
+      this.pendingMessages.push(payload);
+    }
   }
 
   subscribe(handler: MessageHandler): () => void {
@@ -90,6 +120,7 @@ export class AgentClient {
   }
 
   disconnect(): void {
+    this.autoReconnect = false;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -97,5 +128,28 @@ export class AgentClient {
     this.ws?.close();
     this.ws = null;
     this._connected = false;
+  }
+
+  reconnect(chatId?: string): void {
+    this.disconnect();
+    this.connect(chatId);
+  }
+
+  // --- REST API helpers ---
+
+  async fetchConversations(): Promise<ConversationSummary[]> {
+    const res = await fetch(
+      `/api/conversations?binding_id=${encodeURIComponent(this.bindingId)}&token=${encodeURIComponent(this.token)}`
+    );
+    if (!res.ok) return [];
+    return res.json();
+  }
+
+  async fetchMessages(chatId: string): Promise<HistoryMessage[]> {
+    const res = await fetch(
+      `/api/conversations/${encodeURIComponent(chatId)}/messages?binding_id=${encodeURIComponent(this.bindingId)}&token=${encodeURIComponent(this.token)}`
+    );
+    if (!res.ok) return [];
+    return res.json();
   }
 }

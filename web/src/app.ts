@@ -4,6 +4,7 @@ import './components/chat-panel.js';
 import './components/message-list.js';
 import './components/message-item.js';
 import './components/message-editor.js';
+import './components/sidebar.js';
 
 @customElement('rm-app')
 export class RmApp extends LitElement {

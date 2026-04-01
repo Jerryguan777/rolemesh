@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import nats
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, Query, WebSocket
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from nats.js.api import StreamConfig
@@ -64,16 +65,98 @@ async def health() -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 
+@app.get("/api/conversations")
+async def list_conversations(
+    binding_id: str = Query(""),
+    token: str = Query(""),
+) -> JSONResponse:
+    """Return conversation list for a web binding."""
+    if not binding_id or not token or not auth.validate_token(binding_id, token):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    pool = auth.get_pool()
+    if pool is None:
+        return JSONResponse({"error": "Database unavailable"}, status_code=503)
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT c.channel_chat_id as chat_id,
+                   (SELECT content FROM messages m
+                    WHERE m.conversation_id = c.id AND m.is_from_me = FALSE
+                    ORDER BY m.timestamp LIMIT 1) as first_msg,
+                   (SELECT MAX(m.timestamp) FROM messages m
+                    WHERE m.conversation_id = c.id) as updated_at
+            FROM conversations c
+            WHERE c.channel_binding_id = $1::uuid
+              AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)
+            ORDER BY updated_at DESC NULLS LAST
+            """,
+            binding_id,
+        )
+
+    result = []
+    for row in rows:
+        first_msg = row["first_msg"] or ""
+        title = first_msg[:30] + ("..." if len(first_msg) > 30 else "") if first_msg else "New conversation"
+        updated_at = row["updated_at"].isoformat() if row["updated_at"] else ""
+        result.append({"chatId": row["chat_id"], "title": title, "updatedAt": updated_at})
+
+    return JSONResponse(result)
+
+
+@app.get("/api/conversations/{chat_id}/messages")
+async def get_messages(
+    chat_id: str,
+    binding_id: str = Query(""),
+    token: str = Query(""),
+) -> JSONResponse:
+    """Return message history for a conversation."""
+    if not binding_id or not token or not auth.validate_token(binding_id, token):
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    pool = auth.get_pool()
+    if pool is None:
+        return JSONResponse({"error": "Database unavailable"}, status_code=503)
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT m.content, m.timestamp, m.is_from_me, m.is_bot_message
+            FROM messages m
+            JOIN conversations c ON c.id = m.conversation_id
+            WHERE c.channel_binding_id = $1::uuid
+              AND c.channel_chat_id = $2
+            ORDER BY m.timestamp
+            """,
+            binding_id,
+            chat_id,
+        )
+
+    result = []
+    for row in rows:
+        role = "assistant" if row["is_from_me"] or row["is_bot_message"] else "user"
+        content = row["content"] or ""
+        # Strip internal tags from assistant messages
+        if role == "assistant":
+            content = re.sub(r"<internal>[\s\S]*?</internal>", "", content).strip()
+        ts = row["timestamp"].isoformat() if row["timestamp"] else ""
+        result.append({"role": role, "content": content, "timestamp": ts})
+
+    return JSONResponse(result)
+
+
 @app.websocket("/ws/chat")
 async def websocket_chat(
     websocket: WebSocket,
     binding_id: str = "",
     token: str = "",
+    chat_id: str = "",
 ) -> None:
     if not binding_id or not token:
         await websocket.close(code=1008, reason="Missing binding_id or token")
         return
-    await ws.handle_ws(websocket, binding_id, token)
+    await ws.handle_ws(websocket, binding_id, token, chat_id)
 
 
 # Mount static files if the dist directory exists

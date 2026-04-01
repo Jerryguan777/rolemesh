@@ -46,6 +46,11 @@ def validate_token(binding_id: str, token: str) -> bool:
     return expected == token
 
 
+def get_pool() -> asyncpg.Pool | None:  # type: ignore[type-arg]
+    """Return the database pool (for read-only queries)."""
+    return _pool
+
+
 async def close_auth() -> None:
     """Close the database pool."""
     global _pool

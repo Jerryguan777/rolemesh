@@ -12,6 +12,8 @@ import json
 import re
 import signal
 import sys
+import uuid
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -380,6 +382,18 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
                     logger.debug("Skipping duplicate result (already sent via IPC)", coworker=config.name)
                 elif isinstance(gw, WebNatsGateway):
                     await gw.send_stream_chunk(binding.id, conv.channel_chat_id, text)
+                    # Store assistant response for web history
+                    await db_store_message(
+                        tenant_id=conv.tenant_id,
+                        conversation_id=conv.id,
+                        msg_id=str(uuid.uuid4()),
+                        sender=config.name,
+                        sender_name=config.name,
+                        content=text,
+                        timestamp=datetime.now(UTC).isoformat(),
+                        is_from_me=True,
+                        is_bot_message=True,
+                    )
                 elif gw:
                     await gw.send_message(binding.id, conv.channel_chat_id, text)
                 output_sent_to_user = True
