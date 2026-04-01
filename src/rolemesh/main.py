@@ -15,6 +15,7 @@ import sys
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -83,7 +84,7 @@ from rolemesh.orchestration.remote_control import (
 )
 from rolemesh.orchestration.router import format_messages, format_outbound
 from rolemesh.orchestration.task_scheduler import start_scheduler_loop
-from rolemesh.security.credential_proxy import start_credential_proxy
+from rolemesh.security.credential_proxy import register_mcp_server, start_credential_proxy
 from rolemesh.security.sender_allowlist import (
     is_sender_allowed,
     is_trigger_allowed,
@@ -205,6 +206,13 @@ async def _load_state() -> None:
             )
 
         _state.coworkers[cw.id] = cw_state
+
+    # Register MCP servers with the credential proxy
+    for cw in all_coworkers:
+        for tool_cfg in cw.tools:
+            parsed = urlparse(tool_cfg.url)
+            origin = f"{parsed.scheme}://{parsed.netloc}"
+            register_mcp_server(tool_cfg.name, origin)
 
     logger.info(
         "State loaded",

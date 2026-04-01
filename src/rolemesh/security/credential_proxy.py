@@ -28,6 +28,31 @@ AuthMode = Literal["api-key", "oauth"]
 # Hop-by-hop headers that must not be forwarded by proxies
 _HOP_BY_HOP = frozenset({"connection", "keep-alive", "transfer-encoding"})
 
+# Response headers to strip (encoding is handled by aiohttp auto-decompression)
+_SKIP_RESPONSE_HEADERS = frozenset(
+    {
+        "content-encoding",
+        "transfer-encoding",
+        "content-length",
+        "connection",
+        "keep-alive",
+    }
+)
+
+# Module-level MCP server registry: server_name → origin URL
+_mcp_registry: dict[str, str] = {}
+
+
+def register_mcp_server(name: str, url: str) -> None:
+    """Register an MCP server for proxy forwarding."""
+    _mcp_registry[name] = url
+    logger.info("MCP server registered", name=name, url=url)
+
+
+def get_mcp_registry() -> dict[str, str]:
+    """Get the current MCP server registry."""
+    return dict(_mcp_registry)
+
 
 async def start_credential_proxy(port: int, host: str = "127.0.0.1") -> web.AppRunner:
     """Start the credential proxy HTTP server.
@@ -40,6 +65,7 @@ async def start_credential_proxy(port: int, host: str = "127.0.0.1") -> web.AppR
             "CLAUDE_CODE_OAUTH_TOKEN",
             "ANTHROPIC_AUTH_TOKEN",
             "ANTHROPIC_BASE_URL",
+            "MCP_JWT_TOKEN",
         ]
     )
 
@@ -53,7 +79,69 @@ async def start_credential_proxy(port: int, host: str = "127.0.0.1") -> web.AppR
     upstream_port = parsed.port or (443 if is_https else 80)
     upstream_scheme = parsed.scheme or "https"
 
+    mcp_jwt = secrets.get("MCP_JWT_TOKEN", "")
+
     session = ClientSession()
+
+    async def _stream_upstream(
+        request: web.Request,
+        method: str,
+        target_url: str,
+        headers: dict[str, str],
+        body: bytes,
+    ) -> web.StreamResponse:
+        """Forward a request to an upstream server and stream the response back."""
+        async with session.request(
+            method,
+            target_url,
+            headers=headers,
+            data=body or None,
+            allow_redirects=False,
+        ) as upstream_resp:
+            resp_headers = {k: v for k, v in upstream_resp.headers.items() if k.lower() not in _SKIP_RESPONSE_HEADERS}
+            response = web.StreamResponse(
+                status=upstream_resp.status,
+                headers=resp_headers,
+            )
+            await response.prepare(request)
+            async for chunk in upstream_resp.content.iter_any():
+                await response.write(chunk)
+            await response.write_eof()
+            return response
+
+    async def handle_mcp_proxy(request: web.Request) -> web.StreamResponse:
+        """Forward MCP requests to the actual MCP server with JWT injection."""
+        server_name = request.match_info["server_name"]
+        remaining_path = "/" + request.match_info.get("path_info", "")
+        if request.query_string:
+            remaining_path += "?" + request.query_string
+
+        origin = _mcp_registry.get(server_name)
+        if not origin:
+            return web.Response(status=404, text=f"MCP server not found: {server_name}")
+
+        if not mcp_jwt:
+            return web.Response(status=500, text="MCP_JWT_TOKEN not configured in .env")
+
+        target_url = f"{origin}{remaining_path}"
+
+        fwd_headers: dict[str, str] = {}
+        for key, value in request.headers.items():
+            if key.lower() not in _HOP_BY_HOP:
+                fwd_headers[key] = value
+        fwd_headers["Authorization"] = f"Bearer {mcp_jwt}"
+        fwd_headers.pop("host", None)
+        fwd_headers.pop("Host", None)
+
+        body = await request.read()
+
+        logger.debug("MCP proxy forwarding", server=server_name, target=target_url, method=request.method)
+
+        try:
+            return await _stream_upstream(request, request.method, target_url, fwd_headers, body)
+        except (ConnectionResetError, OSError, RuntimeError, ValueError) as exc:
+            logger.error("MCP proxy upstream error", server=server_name, error=str(exc))
+            return web.Response(status=502, text="MCP proxy: Bad Gateway")
 
     async def handle_request(request: web.Request) -> web.StreamResponse:
         body = await request.read()
@@ -81,36 +169,7 @@ async def start_credential_proxy(port: int, host: str = "127.0.0.1") -> web.AppR
         target_url = f"{upstream_scheme}://{upstream_host}:{upstream_port}{request.path_qs}"
 
         try:
-            async with session.request(
-                request.method,
-                target_url,
-                headers=headers,
-                data=body,
-                allow_redirects=False,
-            ) as upstream_resp:
-                # Filter out hop-by-hop and encoding headers.
-                # aiohttp auto-decompresses gzip, so we must strip content-encoding
-                # to avoid the client trying to decompress already-decoded data (ZlibError).
-                _skip_headers = frozenset(
-                    {
-                        "content-encoding",
-                        "transfer-encoding",
-                        "content-length",
-                        "connection",
-                        "keep-alive",
-                    }
-                )
-                resp_headers = {k: v for k, v in upstream_resp.headers.items() if k.lower() not in _skip_headers}
-
-                response = web.StreamResponse(
-                    status=upstream_resp.status,
-                    headers=resp_headers,
-                )
-                await response.prepare(request)
-                async for chunk in upstream_resp.content.iter_any():
-                    await response.write(chunk)
-                await response.write_eof()
-                return response
+            return await _stream_upstream(request, request.method, target_url, headers, body)
         except ConnectionResetError:
             # Container disconnected mid-stream (normal during shutdown/timeout)
             logger.debug("Credential proxy: client disconnected", url=str(request.url))
@@ -120,6 +179,7 @@ async def start_credential_proxy(port: int, host: str = "127.0.0.1") -> web.AppR
             return web.Response(status=502, text="Bad Gateway")
 
     app = web.Application()
+    app.router.add_route("*", "/mcp-proxy/{server_name}/{path_info:.*}", handle_mcp_proxy)
     app.router.add_route("*", "/{path_info:.*}", handle_request)
 
     # Store session for cleanup

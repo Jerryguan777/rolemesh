@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 
-from rolemesh.core.types import ScheduledTask, TaskRunLog
+from rolemesh.core.types import McpServerConfig, ScheduledTask, TaskRunLog
 from rolemesh.db.pg import (
     create_channel_binding,
     create_conversation,
@@ -126,13 +126,15 @@ async def test_create_and_get_coworker() -> None:
         folder="ops-bot",
         is_admin=True,
         max_concurrent=3,
-        tools=["Bash", "Read"],
+        tools=[
+            McpServerConfig(name="my-mcp-server", type="sse", url="http://localhost:9100/mcp/"),
+        ],
         skills=["browser"],
     )
     assert cw.id
     assert cw.is_admin is True
     assert cw.max_concurrent == 3
-    assert cw.tools == ["Bash", "Read"]
+    assert cw.tools == [McpServerConfig(name="my-mcp-server", type="sse", url="http://localhost:9100/mcp/")]
     assert cw.agent_backend == "claude-code"
 
     fetched = await get_coworker(cw.id)

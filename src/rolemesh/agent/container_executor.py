@@ -21,23 +21,50 @@ from rolemesh.container.runner import (
     build_container_spec,
     build_volume_mounts,
 )
+from rolemesh.container.runtime import CONTAINER_HOST_GATEWAY
 from rolemesh.core.config import (
     CONTAINER_MAX_OUTPUT_SIZE,
     CONTAINER_TIMEOUT,
+    CREDENTIAL_PROXY_PORT,
     DATA_DIR,
     IDLE_TIMEOUT,
+    MCP_PROXY_PREFIX,
 )
 from rolemesh.core.logger import get_logger
-from rolemesh.ipc.protocol import AgentInitData
+from rolemesh.ipc.protocol import AgentInitData, McpServerSpec
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from rolemesh.container.runtime import ContainerHandle, ContainerRuntime
-    from rolemesh.core.types import Coworker
+    from rolemesh.core.types import Coworker, McpServerConfig
     from rolemesh.ipc.nats_transport import NatsTransport
 
 logger = get_logger()
+
+
+def rewrite_mcp_url_for_container(
+    mcp_config: McpServerConfig,
+    proxy_host: str = "host.docker.internal",
+    proxy_port: int = 3001,
+    proxy_prefix: str = "mcp-proxy",
+) -> McpServerSpec:
+    """Rewrite a host-side MCP URL to point at the credential proxy.
+
+    Example:
+      input:  McpServerConfig(name="my-mcp-server", type="sse", url="http://localhost:9100/mcp/")
+      output: McpServerSpec(name="my-mcp-server", type="sse",
+                            url="http://host.docker.internal:3001/mcp-proxy/my-mcp-server/mcp/")
+
+    The proxy strips the /mcp-proxy/{name} prefix and forwards to the actual URL.
+    The trailing path after the host:port is preserved.
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(mcp_config.url)
+    original_path = parsed.path
+    proxy_url = f"http://{proxy_host}:{proxy_port}/{proxy_prefix}/{mcp_config.name}{original_path}"
+    return McpServerSpec(name=mcp_config.name, type=mcp_config.type, url=proxy_url)
 
 
 def _parse_container_output(raw: dict[str, object]) -> AgentOutput:
@@ -119,6 +146,19 @@ class ContainerAgentExecutor:
         logs_dir = coworker_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
 
+        # Build MCP server specs from coworker tools config
+        mcp_specs: list[McpServerSpec] | None = None
+        if coworker.tools:
+            mcp_specs = [
+                rewrite_mcp_url_for_container(
+                    tool_cfg,
+                    proxy_host=CONTAINER_HOST_GATEWAY,
+                    proxy_port=CREDENTIAL_PROXY_PORT,
+                    proxy_prefix=MCP_PROXY_PREFIX,
+                )
+                for tool_cfg in coworker.tools
+            ]
+
         # Channel 1: Write initial input to KV before starting container
         kv_init = await self._transport.js.key_value("agent-init")
         agent_init = AgentInitData(
@@ -134,6 +174,7 @@ class ContainerAgentExecutor:
             assistant_name=inp.assistant_name,
             system_prompt=inp.system_prompt,
             role_config=inp.role_config,
+            mcp_servers=mcp_specs,
         )
         await kv_init.put(job_id, agent_init.serialize())
 
