@@ -1,0 +1,271 @@
+import { LitElement, html } from 'lit';
+import { customElement, state } from 'lit/decorators.js';
+import { AgentClient, type ConversationSummary, type ServerMessage } from '../services/agent-client.js';
+
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+  streaming?: boolean;
+}
+
+@customElement('rm-chat-panel')
+export class ChatPanel extends LitElement {
+  private client: AgentClient;
+  private unsubscribe?: () => void;
+
+  @state() messages: ChatMessage[] = [];
+  @state() isStreaming = false;
+  @state() connected = false;
+  @state() conversations: ConversationSummary[] = [];
+  @state() activeChatId: string | null = null;
+  @state() sidebarCollapsed: boolean;
+  @state() pendingNewChat = false;
+
+  constructor() {
+    super();
+    const params = new URLSearchParams(location.search);
+    const bindingId = params.get('binding_id') || '';
+    const token = params.get('token') || '';
+    this.activeChatId = params.get('chat_id');
+    this.client = new AgentClient(bindingId, token);
+    this.sidebarCollapsed = localStorage.getItem('rm-sidebar-collapsed') === 'true';
+  }
+
+  protected override createRenderRoot() { return this; }
+
+  override connectedCallback() {
+    super.connectedCallback();
+    this.style.display = 'flex';
+    this.style.flexDirection = 'column';
+    this.style.minHeight = '0';
+    this.unsubscribe = this.client.subscribe((msg) => this.handleMessage(msg));
+
+    if (this.activeChatId) {
+      // Restore conversation from URL
+      this.client.connect(this.activeChatId);
+      this.loadHistory(this.activeChatId);
+    } else {
+      // No active chat — connect for auth only, show placeholder
+      this.client.connect();
+    }
+
+    this.refreshConversations();
+  }
+
+  override disconnectedCallback() {
+    super.disconnectedCallback();
+    this.unsubscribe?.();
+    this.client.disconnect();
+  }
+
+  private async refreshConversations() {
+    this.conversations = await this.client.fetchConversations();
+  }
+
+  private async loadHistory(chatId: string) {
+    const history = await this.client.fetchMessages(chatId);
+    this.messages = history
+      .filter((m) => m.content.trim())
+      .map((m) => ({ role: m.role, content: m.content }));
+  }
+
+  private handleMessage(msg: ServerMessage) {
+    switch (msg.type) {
+      case 'session':
+        this.connected = true;
+        if (msg.chatId) {
+          this.activeChatId = msg.chatId;
+          this.updateUrl();
+        }
+        break;
+      case 'thinking':
+        // Ignore duplicate thinking messages if already streaming
+        if (!this.isStreaming) {
+          this.messages = [...this.messages, { role: 'assistant', content: '', streaming: true }];
+          this.isStreaming = true;
+        }
+        break;
+      case 'text': {
+        const last = this.messages[this.messages.length - 1];
+        if (last?.role === 'assistant' && last.streaming) {
+          this.messages = [
+            ...this.messages.slice(0, -1),
+            { ...last, content: last.content + msg.content },
+          ];
+        } else {
+          this.messages = [...this.messages, { role: 'assistant', content: msg.content, streaming: true }];
+        }
+        break;
+      }
+      case 'done': {
+        const last = this.messages[this.messages.length - 1];
+        if (last?.role === 'assistant') {
+          this.messages = [...this.messages.slice(0, -1), { ...last, streaming: false }];
+        }
+        this.isStreaming = false;
+        this.refreshConversations();
+        break;
+      }
+      case 'error': {
+        const last = this.messages[this.messages.length - 1];
+        if (last?.role === 'assistant' && last.streaming && !last.content) {
+          this.messages = [
+            ...this.messages.slice(0, -1),
+            { ...last, content: `**Error:** ${msg.message}`, streaming: false },
+          ];
+        } else {
+          this.messages = [...this.messages, { role: 'assistant', content: `**Error:** ${msg.message}` }];
+        }
+        this.isStreaming = false;
+        break;
+      }
+    }
+  }
+
+  private handleSend(e: CustomEvent<{ content: string }>) {
+    const { content } = e.detail;
+    if (!content.trim()) return;
+
+    // If pending new chat, generate chat_id and connect
+    if (this.pendingNewChat || !this.activeChatId) {
+      const newChatId = crypto.randomUUID();
+      this.activeChatId = newChatId;
+      this.pendingNewChat = false;
+      this.client.reconnect(newChatId);
+      this.updateUrl();
+    }
+
+    this.messages = [...this.messages, { role: 'user', content }];
+    this.client.send(content);
+  }
+
+  private handleSelectConversation(e: CustomEvent<{ chatId: string }>) {
+    const { chatId } = e.detail;
+    if (chatId === this.activeChatId) return;
+    this.activeChatId = chatId;
+    this.pendingNewChat = false;
+    this.messages = [];
+    this.isStreaming = false;
+    this.updateUrl();
+    this.client.reconnect(chatId);
+    this.loadHistory(chatId);
+  }
+
+  private handleNewChat() {
+    this.activeChatId = null;
+    this.pendingNewChat = true;
+    this.messages = [];
+    this.isStreaming = false;
+    this.updateUrl();
+  }
+
+  private handleToggleSidebar() {
+    this.sidebarCollapsed = !this.sidebarCollapsed;
+    localStorage.setItem('rm-sidebar-collapsed', String(this.sidebarCollapsed));
+  }
+
+  private updateUrl() {
+    const params = new URLSearchParams(location.search);
+    if (this.activeChatId) {
+      params.set('chat_id', this.activeChatId);
+    } else {
+      params.delete('chat_id');
+    }
+    const url = `${location.pathname}?${params.toString()}`;
+    history.replaceState(null, '', url);
+  }
+
+  override render() {
+    return html`
+      <div class="flex h-full">
+        <!-- Sidebar -->
+        <rm-sidebar
+          .conversations=${this.conversations}
+          .activeChatId=${this.activeChatId}
+          .collapsed=${this.sidebarCollapsed}
+          @select-conversation=${(e: CustomEvent) => this.handleSelectConversation(e)}
+          @new-chat=${this.handleNewChat}
+          @toggle-sidebar=${this.handleToggleSidebar}
+        ></rm-sidebar>
+
+        <!-- Main area -->
+        <div class="flex-1 flex flex-col min-w-0">
+          <!-- Header -->
+          <div class="shrink-0 flex items-center justify-between px-4 py-3 border-b border-surface-3 dark:border-d-surface-3">
+            <div class="flex items-center gap-2">
+              <!-- Toggle sidebar -->
+              <button
+                class="w-7 h-7 flex items-center justify-center rounded-lg text-ink-2 dark:text-d-ink-2 hover:bg-surface-2 dark:hover:bg-d-surface-2 transition-colors cursor-pointer"
+                @click=${this.handleToggleSidebar}
+                title=${this.sidebarCollapsed ? 'Open sidebar' : 'Close sidebar'}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24"><path d="M3 12h18"/><path d="M3 6h18"/><path d="M3 18h18"/></svg>
+              </button>
+              <!-- New chat (visible when sidebar collapsed) -->
+              ${this.sidebarCollapsed ? html`
+                <button
+                  class="w-7 h-7 flex items-center justify-center rounded-lg text-ink-2 dark:text-d-ink-2 hover:bg-surface-2 dark:hover:bg-d-surface-2 transition-colors cursor-pointer"
+                  @click=${this.handleNewChat}
+                  title="New chat"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+                </button>
+              ` : ''}
+              <div class="w-6 h-6 rounded-md bg-gradient-to-br from-brand-light to-brand flex items-center justify-center shadow-sm">
+                <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+                  <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+                </svg>
+              </div>
+              <span class="text-[14px] font-semibold text-ink-0 dark:text-d-ink-0">RoleMesh</span>
+            </div>
+            <div class="flex items-center gap-1.5">
+              <span class="w-2 h-2 rounded-full ${this.connected ? 'bg-emerald-500' : 'bg-red-500'}"></span>
+              <span class="text-[11.5px] text-ink-3 dark:text-d-ink-3">${this.connected ? 'Connected' : 'Disconnected'}</span>
+            </div>
+          </div>
+
+          <!-- Messages -->
+          <div class="flex-1 overflow-y-auto" id="scroll-area">
+            <div class="max-w-[720px] mx-auto w-full">
+              ${this.messages.length === 0 ? this.renderEmpty() : ''}
+              <rm-message-list .messages=${this.messages}></rm-message-list>
+              ${this.messages.length > 0 ? html`<div class="h-8"></div>` : ''}
+            </div>
+          </div>
+
+          <!-- Input -->
+          <div class="shrink-0 pb-5 pt-2 px-4">
+            <div class="max-w-[720px] mx-auto w-full">
+              <rm-message-editor
+                .isStreaming=${this.isStreaming}
+                .connected=${this.connected}
+                @send=${(e: CustomEvent) => this.handleSend(e)}
+              ></rm-message-editor>
+              <div class="text-center mt-2.5 text-[11px] text-ink-3 dark:text-d-ink-3 select-none">
+                AI responses may be inaccurate. Verify important information.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private renderEmpty() {
+    return html`
+      <div class="px-4 pt-[20vh] pb-10 anim-fade">
+        <div class="text-center">
+          <div class="inline-flex items-center justify-center w-14 h-14 rounded-[16px] bg-gradient-to-br from-brand-light to-brand mb-5 shadow-[0_8px_24px_-6px_rgba(99,102,241,0.35)]">
+            <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+              <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+            </svg>
+          </div>
+          <h1 class="text-[22px] font-bold text-ink-0 dark:text-d-ink-0 tracking-[-0.03em] mb-1.5">RoleMesh</h1>
+          <p class="text-[13.5px] text-ink-2 dark:text-d-ink-2 max-w-sm mx-auto leading-relaxed">
+            Start a conversation with your AI coworker.
+          </p>
+        </div>
+      </div>
+    `;
+  }
+}

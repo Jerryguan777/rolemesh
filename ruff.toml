@@ -20,7 +20,7 @@ ignore = [
 ]
 
 [lint.isort]
-known-first-party = ["rolemesh", "agent_runner"]
+known-first-party = ["rolemesh", "agent_runner", "webui"]
 
 [format]
 quote-style = "double"

@@ -16,6 +16,7 @@ from rolemesh.core.types import (
     ContainerConfig,
     Conversation,
     Coworker,
+    McpServerConfig,
     NewMessage,
     RegisteredGroup,
     ScheduledTask,
@@ -423,7 +424,7 @@ async def create_coworker(
     folder: str,
     agent_backend: str = "claude-code",
     system_prompt: str | None = None,
-    tools: list[str] | None = None,
+    tools: list[McpServerConfig] | None = None,
     skills: list[str] | None = None,
     is_admin: bool = False,
     container_config: ContainerConfig | None = None,
@@ -454,7 +455,11 @@ async def create_coworker(
             folder,
             agent_backend,
             system_prompt,
-            json.dumps(tools or []),
+            json.dumps(
+                [{"name": t.name, "type": t.type, "url": t.url, "headers": t.headers} for t in tools]
+                if tools
+                else []
+            ),
             json.dumps(skills or []),
             is_admin,
             cc_json,
@@ -466,6 +471,23 @@ async def create_coworker(
 
 def _record_to_coworker(row: asyncpg.Record) -> Coworker:
     tools_raw = row.get("tools")
+    if isinstance(tools_raw, str):
+        tools_raw = json.loads(tools_raw) if tools_raw else []
+    elif not isinstance(tools_raw, list):
+        tools_raw = []
+    tools: list[McpServerConfig] = []
+    for item in tools_raw:
+        if isinstance(item, dict) and "name" in item:
+            raw_headers = item.get("headers")
+            tools.append(
+                McpServerConfig(
+                    name=item["name"],
+                    type=item.get("type", "sse"),
+                    url=item.get("url", ""),
+                    headers=raw_headers if isinstance(raw_headers, dict) else {},
+                )
+            )
+        # Skip legacy string entries silently
     skills_raw = row.get("skills")
     return Coworker(
         id=str(row["id"]),
@@ -474,7 +496,7 @@ def _record_to_coworker(row: asyncpg.Record) -> Coworker:
         folder=row["folder"],
         agent_backend=row.get("agent_backend") or "claude-code",
         system_prompt=row.get("system_prompt"),
-        tools=tools_raw if isinstance(tools_raw, list) else json.loads(tools_raw) if tools_raw else [],
+        tools=tools,
         skills=skills_raw if isinstance(skills_raw, list) else json.loads(skills_raw) if skills_raw else [],
         is_admin=bool(row["is_admin"]),
         container_config=_parse_container_config(row["container_config"]),

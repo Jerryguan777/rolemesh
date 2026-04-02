@@ -12,7 +12,10 @@ import json
 import re
 import signal
 import sys
+import uuid
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -22,6 +25,7 @@ if TYPE_CHECKING:
 from rolemesh.agent import CLAUDE_CODE_BACKEND, AgentInput, AgentOutput, ContainerAgentExecutor
 from rolemesh.channels.slack_gateway import SlackGateway
 from rolemesh.channels.telegram_gateway import TelegramGateway
+from rolemesh.channels.web_nats_gateway import WebNatsGateway
 from rolemesh.container.runner import (
     AvailableGroup,
     write_groups_snapshot,
@@ -80,7 +84,7 @@ from rolemesh.orchestration.remote_control import (
 )
 from rolemesh.orchestration.router import format_messages, format_outbound
 from rolemesh.orchestration.task_scheduler import start_scheduler_loop
-from rolemesh.security.credential_proxy import start_credential_proxy
+from rolemesh.security.credential_proxy import register_mcp_server, start_credential_proxy
 from rolemesh.security.sender_allowlist import (
     is_sender_allowed,
     is_trigger_allowed,
@@ -203,6 +207,13 @@ async def _load_state() -> None:
 
         _state.coworkers[cw.id] = cw_state
 
+    # Register MCP servers with the credential proxy
+    for cw in all_coworkers:
+        for tool_cfg in cw.tools:
+            parsed = urlparse(tool_cfg.url)
+            origin = f"{parsed.scheme}://{parsed.netloc}"
+            register_mcp_server(tool_cfg.name, origin, tool_cfg.headers)
+
     logger.info(
         "State loaded",
         tenant_count=len(_state.tenants),
@@ -213,6 +224,34 @@ async def _load_state() -> None:
 # ---------------------------------------------------------------------------
 # Message handling callback (from gateways)
 # ---------------------------------------------------------------------------
+
+
+async def _auto_create_web_conversation(
+    binding_id: str, chat_id: str
+) -> tuple[CoworkerState, ConversationState] | None:
+    """Auto-create a conversation for web channel (each browser tab gets a new chat_id)."""
+    # Find the coworker that owns this binding
+    for cw in _state.coworkers.values():
+        for b in cw.channel_bindings.values():
+            if b.id == binding_id and b.channel_type == "web":
+                conv = await create_conversation(
+                    tenant_id=cw.config.tenant_id,
+                    coworker_id=cw.config.id,
+                    channel_binding_id=binding_id,
+                    channel_chat_id=chat_id,
+                    name=f"Web Chat {chat_id[:8]}",
+                    requires_trigger=False,
+                )
+                conv_state = ConversationState(conversation=conv)
+                cw.conversations[conv.id] = conv_state
+                logger.info(
+                    "Auto-created web conversation",
+                    coworker=cw.config.name,
+                    chat_id=chat_id,
+                    conversation_id=conv.id,
+                )
+                return cw, conv_state
+    return None
 
 
 async def _handle_incoming(
@@ -229,7 +268,10 @@ async def _handle_incoming(
     # Find conversation
     result = _state.find_conversation_by_binding_and_chat(binding_id, chat_id)
     if not result:
-        return
+        # Auto-create conversation for web channel (each browser tab = new chat_id)
+        result = await _auto_create_web_conversation(binding_id, chat_id)
+        if not result:
+            return
 
     cw_state, conv_state = result
     conv = conv_state.conversation
@@ -325,12 +367,12 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
         )
 
     # Set typing
-    binding = cw_state.channel_bindings.get(_get_channel_type_for_chat(conv.channel_chat_id))
-    if binding:
-        gw = _gateways.get(_get_channel_type_for_chat(conv.channel_chat_id))
-        if gw:
-            with contextlib.suppress(OSError, RuntimeError, TypeError, ValueError):
-                await gw.set_typing(binding.id, conv.channel_chat_id, True)
+    channel_type = _get_channel_type_for_conv(cw_state, conv)
+    binding = cw_state.channel_bindings.get(channel_type)
+    gw = _gateways.get(channel_type) if binding else None
+    if binding and gw:
+        with contextlib.suppress(OSError, RuntimeError, TypeError, ValueError):
+            await gw.set_typing(binding.id, conv.channel_chat_id, True)
 
     had_error = False
     output_sent_to_user = False
@@ -346,13 +388,30 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
                 if text in _ipc_sent_texts:
                     _ipc_sent_texts.discard(text)
                     logger.debug("Skipping duplicate result (already sent via IPC)", coworker=config.name)
-                else:
-                    gw = _gateways.get(_get_channel_type_for_chat(conv.channel_chat_id))
-                    if gw:
-                        await gw.send_message(binding.id, conv.channel_chat_id, text)
+                elif isinstance(gw, WebNatsGateway):
+                    await gw.send_stream_chunk(binding.id, conv.channel_chat_id, text)
+                    # Store assistant response for web history
+                    await db_store_message(
+                        tenant_id=conv.tenant_id,
+                        conversation_id=conv.id,
+                        msg_id=str(uuid.uuid4()),
+                        sender=config.name,
+                        sender_name=config.name,
+                        content=text,
+                        timestamp=datetime.now(UTC).isoformat(),
+                        is_from_me=True,
+                        is_bot_message=True,
+                    )
+                elif gw:
+                    await gw.send_message(binding.id, conv.channel_chat_id, text)
                 output_sent_to_user = True
             _reset_idle_timer()
         if result.status == "success":
+            # Send stream done immediately for web channel (don't wait for
+            # _run_agent to return — the container stays alive until idle timeout)
+            if binding and isinstance(gw, WebNatsGateway):
+                with contextlib.suppress(OSError, RuntimeError, TypeError, ValueError):
+                    await gw.send_stream_done(binding.id, conv.channel_chat_id)
             _queue.notify_idle(conversation_id)
         if result.status == "error":
             had_error = True
@@ -360,11 +419,9 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
     output = await _run_agent(cw_state, conv_state, prompt, _on_output)
 
     # Stop typing
-    if binding:
-        gw = _gateways.get(_get_channel_type_for_chat(conv.channel_chat_id))
-        if gw:
-            with contextlib.suppress(OSError, RuntimeError, TypeError, ValueError):
-                await gw.set_typing(binding.id, conv.channel_chat_id, False)
+    if binding and gw:
+        with contextlib.suppress(OSError, RuntimeError, TypeError, ValueError):
+            await gw.set_typing(binding.id, conv.channel_chat_id, False)
     if idle_handle is not None:
         idle_handle.cancel()
 
@@ -384,10 +441,18 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
 
 
 def _get_channel_type_for_chat(chat_id: str) -> str:
-    """Infer channel type from chat ID format."""
+    """Infer channel type from chat ID format (fallback heuristic)."""
     if chat_id.startswith("C") or chat_id.startswith("D"):
         return "slack"
     return "telegram"
+
+
+def _get_channel_type_for_conv(cw_state: CoworkerState, conv: Conversation) -> str:
+    """Determine channel type for a conversation by looking up its binding."""
+    for channel_type, binding in cw_state.channel_bindings.items():
+        if binding.id == conv.channel_binding_id:
+            return channel_type
+    return _get_channel_type_for_chat(conv.channel_chat_id)
 
 
 async def _run_agent(
@@ -665,9 +730,10 @@ async def _message_loop(shutdown_event: asyncio.Event) -> None:
                             conv_state.last_agent_timestamp = all_pending[-1].timestamp
                             await update_conversation_last_invocation(conv.id, all_pending[-1].timestamp)
 
-                            binding = cw_state.channel_bindings.get(_get_channel_type_for_chat(chat_id))
+                            ch_type = _get_channel_type_for_conv(cw_state, conv)
+                            binding = cw_state.channel_bindings.get(ch_type)
                             if binding:
-                                gw = _gateways.get(_get_channel_type_for_chat(chat_id))
+                                gw = _gateways.get(ch_type)
                                 if gw:
                                     with contextlib.suppress(OSError, RuntimeError, TypeError, ValueError):
                                         await gw.set_typing(binding.id, chat_id, True)
@@ -733,11 +799,12 @@ async def _handle_remote_control(command: str, chat_id: str, sender: str) -> Non
         if not conv:
             continue
 
-        binding = cw.channel_bindings.get(_get_channel_type_for_chat(chat_id))
+        ch_type = _get_channel_type_for_conv(cw, conv.conversation)
+        binding = cw.channel_bindings.get(ch_type)
         if not binding:
             continue
 
-        gw = _gateways.get(_get_channel_type_for_chat(chat_id))
+        gw = _gateways.get(ch_type)
         if not gw:
             continue
 
@@ -812,9 +879,11 @@ async def main() -> None:
         loop.add_signal_handler(sig, _signal_handler, sig.name)
 
     # Initialize gateways and add bindings
+    _web_gw = WebNatsGateway(on_message=_handle_incoming, transport=_transport)
     _gateways = {
         "telegram": TelegramGateway(on_message=_handle_incoming),
         "slack": SlackGateway(on_message=_handle_incoming),
+        "web": _web_gw,
     }
 
     # Add channel bindings to gateways
@@ -826,6 +895,8 @@ async def main() -> None:
                     await gw.add_binding(binding)
                 except Exception:
                     logger.exception("Failed to add binding", binding_id=binding.id, channel_type=channel_type)
+
+    await _web_gw.start()
 
     start_scheduler_loop(_SchedulerDepsImpl())
 
@@ -1007,18 +1078,20 @@ class _IpcDepsImpl:
 async def _send_via_coworker(cw_state: CoworkerState | None, chat_id: str, text: str) -> None:
     """Send a message using a specific coworker's binding."""
     if cw_state:
-        channel_type = _get_channel_type_for_chat(chat_id)
-        binding = cw_state.channel_bindings.get(channel_type)
-        if binding:
-            gw = _gateways.get(channel_type)
-            if gw:
-                await gw.send_message(binding.id, chat_id, text)
+        for conv in cw_state.conversations.values():
+            if conv.conversation.channel_chat_id == chat_id:
+                channel_type = _get_channel_type_for_conv(cw_state, conv.conversation)
+                binding = cw_state.channel_bindings.get(channel_type)
+                if binding:
+                    gw = _gateways.get(channel_type)
+                    if gw:
+                        await gw.send_message(binding.id, chat_id, text)
                 return
     # Fallback: scan all coworkers (for backward compat)
     for cw in _state.coworkers.values():
         for conv in cw.conversations.values():
             if conv.conversation.channel_chat_id == chat_id:
-                channel_type = _get_channel_type_for_chat(chat_id)
+                channel_type = _get_channel_type_for_conv(cw, conv.conversation)
                 binding = cw.channel_bindings.get(channel_type)
                 if binding:
                     gw = _gateways.get(channel_type)

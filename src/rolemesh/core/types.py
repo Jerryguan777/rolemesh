@@ -51,6 +51,26 @@ class ContainerConfig:
 
 
 # ---------------------------------------------------------------------------
+# MCP server configuration
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class McpServerConfig:
+    """Per-coworker external MCP server configuration.
+
+    Stored in the coworker's `tools` JSONB field in the database.
+    The `url` is the actual MCP server URL on the host machine.
+    The `headers` are injected by the credential proxy when forwarding requests.
+    """
+
+    name: str  # registered name in claude_agent_sdk, e.g. "my-mcp-server"
+    type: str  # transport type: "sse" or "http"
+    url: str  # actual MCP server URL, e.g. "http://localhost:9100/mcp/"
+    headers: dict[str, str] = field(default_factory=dict)  # auth headers injected by proxy
+
+
+# ---------------------------------------------------------------------------
 # Multi-tenant data model
 # ---------------------------------------------------------------------------
 
@@ -91,7 +111,7 @@ class Coworker:
     folder: str
     agent_backend: str = "claude-code"
     system_prompt: str | None = None
-    tools: list[str] = field(default_factory=list)
+    tools: list[McpServerConfig] = field(default_factory=list)
     skills: list[str] = field(default_factory=list)
     is_admin: bool = False
     container_config: ContainerConfig | None = None

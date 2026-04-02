@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any
 
 import nats
 from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, query
-from rolemesh_ipc_protocol import AgentInitData
+from rolemesh_ipc_protocol import AgentInitData, McpServerSpec
 
 from .ipc_mcp import create_rolemesh_mcp_server
 
@@ -374,6 +374,7 @@ async def run_query(
     job_id: str,
     resume_at: str | None = None,
     coworker_system_prompt: str | None = None,
+    mcp_servers: list[McpServerSpec] | None = None,
 ) -> QueryResult:
     stream = MessageStream()
     stream.push(prompt)
@@ -448,35 +449,51 @@ async def run_query(
     if resume_at:
         extra_args = {"resume-session-at": resume_at}
 
+    # Build MCP servers dict — start with the built-in rolemesh server
+    mcp_servers_dict: dict[str, Any] = {"rolemesh": mcp_server}
+
+    # Build allowed tools list
+    allowed_tools = [
+        "Bash",
+        "Read",
+        "Write",
+        "Edit",
+        "Glob",
+        "Grep",
+        "WebSearch",
+        "WebFetch",
+        "Task",
+        "TaskOutput",
+        "TaskStop",
+        "TeamCreate",
+        "TeamDelete",
+        "SendMessage",
+        "TodoWrite",
+        "ToolSearch",
+        "Skill",
+        "NotebookEdit",
+        "mcp__rolemesh__*",
+    ]
+
+    # Register external MCP servers from init data
+    if mcp_servers:
+        for spec in mcp_servers:
+            mcp_servers_dict[spec.name] = {
+                "type": spec.type,
+                "url": spec.url,
+            }
+            allowed_tools.append(f"mcp__{spec.name}__*")
+            log(f"External MCP server registered: {spec.name} ({spec.type}) → {spec.url}")
+
     options = ClaudeAgentOptions(
         cwd="/workspace/group",
         add_dirs=extra_dirs if extra_dirs else None,
         resume=session_id,
         system_prompt=system_prompt,
-        allowed_tools=[
-            "Bash",
-            "Read",
-            "Write",
-            "Edit",
-            "Glob",
-            "Grep",
-            "WebSearch",
-            "WebFetch",
-            "Task",
-            "TaskOutput",
-            "TaskStop",
-            "TeamCreate",
-            "TeamDelete",
-            "SendMessage",
-            "TodoWrite",
-            "ToolSearch",
-            "Skill",
-            "NotebookEdit",
-            "mcp__rolemesh__*",
-        ],
+        allowed_tools=allowed_tools,
         env=sdk_env,
         permission_mode="bypassPermissions",
-        mcp_servers={"rolemesh": mcp_server},
+        mcp_servers=mcp_servers_dict,
         hooks={
             "PreCompact": [HookMatcher(hooks=[create_pre_compact_hook(container_input.assistant_name)])],
         },
@@ -648,6 +665,7 @@ async def main() -> None:
                 JOB_ID,
                 resume_at,
                 coworker_system_prompt=init.system_prompt,
+                mcp_servers=init.mcp_servers,
             )
             if query_result.new_session_id:
                 session_id = query_result.new_session_id

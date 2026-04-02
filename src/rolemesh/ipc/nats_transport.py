@@ -76,6 +76,15 @@ class NatsTransport:
         await self._js.create_key_value(config=KeyValueConfig(bucket="agent-init", ttl=_KV_TTL_SECONDS))
         await self._js.create_key_value(config=KeyValueConfig(bucket="snapshots", ttl=_KV_TTL_SECONDS))
 
+        # Create JetStream stream for web channel communication.
+        await self._js.add_stream(
+            StreamConfig(
+                name="web-ipc",
+                subjects=["web.>"],
+                max_age=_STREAM_MAX_AGE_S,
+            )
+        )
+
         logger.info("NATS connected", url=self._url)
 
     @property

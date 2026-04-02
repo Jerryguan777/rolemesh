@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from rolemesh.core.types import ChannelBinding, Conversation, Tenant
+    from rolemesh.core.types import ChannelBinding, Conversation, McpServerConfig, Tenant
 
 
 @dataclass
@@ -28,7 +28,7 @@ class CoworkerConfig:
     container_image: str | None
     max_concurrent: int
     role_config: dict[str, object] = field(default_factory=dict)
-    tools: list[str] = field(default_factory=list)
+    tools: list[McpServerConfig] = field(default_factory=list)
     skills: list[str] = field(default_factory=list)
     is_admin: bool = False
 
