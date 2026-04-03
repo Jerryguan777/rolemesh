@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from rolemesh.auth.permissions import AgentPermissions
     from rolemesh.core.types import ChannelBinding, Conversation, McpServerConfig, Tenant
 
 
@@ -31,6 +32,16 @@ class CoworkerConfig:
     tools: list[McpServerConfig] = field(default_factory=list)
     skills: list[str] = field(default_factory=list)
     is_admin: bool = False
+    agent_role: str = "agent"
+    permissions: AgentPermissions | None = None  # filled by __post_init__; always non-None after init
+
+    def __post_init__(self) -> None:
+        # is_admin is derived — always overwritten from agent_role
+        self.is_admin = self.agent_role == "super_agent"
+        if self.permissions is None:
+            from rolemesh.auth.permissions import AgentPermissions as _AgentPermissions
+
+            self.permissions = _AgentPermissions.for_role(self.agent_role)
 
     @staticmethod
     def build_trigger_pattern(name: str) -> re.Pattern[str]:

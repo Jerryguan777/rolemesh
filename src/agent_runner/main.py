@@ -47,7 +47,8 @@ class ContainerInput:
     prompt: str
     group_folder: str
     chat_jid: str
-    is_main: bool
+    permissions: dict[str, object]
+    user_id: str = ""
     session_id: str | None = None
     is_scheduled_task: bool = False
     assistant_name: str | None = None
@@ -417,7 +418,7 @@ async def run_query(
     # Load global CLAUDE.md as additional system context (shared across all groups)
     global_claude_md_path = Path("/workspace/global/CLAUDE.md")
     global_claude_md: str | None = None
-    if not container_input.is_main and global_claude_md_path.exists():
+    if container_input.permissions.get("data_scope") != "tenant" and global_claude_md_path.exists():
         global_claude_md = global_claude_md_path.read_text()
 
     # Discover additional directories mounted at /workspace/extra/*
@@ -599,7 +600,8 @@ async def main() -> None:
             prompt=init.prompt,
             group_folder=init.group_folder,
             chat_jid=init.chat_jid,
-            is_main=init.is_main,
+            permissions=init.permissions,
+            user_id=init.user_id,
             session_id=init.session_id,
             is_scheduled_task=init.is_scheduled_task,
             assistant_name=init.assistant_name,
@@ -626,7 +628,7 @@ async def main() -> None:
     mcp_server = create_rolemesh_mcp_server(
         chat_jid=container_input.chat_jid,
         group_folder=container_input.group_folder,
-        is_main=container_input.is_main,
+        permissions=container_input.permissions,
         js=js,
         job_id=JOB_ID,
         tenant_id=init.tenant_id,

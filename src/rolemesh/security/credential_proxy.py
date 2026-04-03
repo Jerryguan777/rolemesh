@@ -13,7 +13,7 @@ Two auth modes:
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlparse
 
 from aiohttp import ClientSession, web
@@ -21,7 +21,28 @@ from aiohttp import ClientSession, web
 from rolemesh.core.env import read_env_file
 from rolemesh.core.logger import get_logger
 
+if TYPE_CHECKING:
+    from rolemesh.auth.token_service import TokenService
+
 logger = get_logger()
+
+# Module-level TokenService for MCP user identity forwarding
+_token_service: TokenService | None = None
+
+# Headers sent by containers to identify the user
+_ROLEMESH_IDENTITY_HEADERS = (
+    "X-RoleMesh-User-Id",
+    "X-RoleMesh-Tenant-Id",
+    "X-RoleMesh-Coworker-Id",
+    "X-RoleMesh-Conversation-Id",
+)
+
+
+def set_token_service(ts: TokenService) -> None:
+    """Set the TokenService instance for MCP user identity forwarding."""
+    global _token_service
+    _token_service = ts
+    logger.info("TokenService configured for MCP identity forwarding")
 
 AuthMode = Literal["api-key", "oauth"]
 
@@ -128,6 +149,20 @@ async def start_credential_proxy(port: int, host: str = "127.0.0.1") -> web.AppR
         fwd_headers.pop("Host", None)
         # Inject per-server headers (overrides any forwarded headers with same key)
         fwd_headers.update(server_headers)
+
+        # MCP user identity forwarding: if the container sent identity headers,
+        # issue a short-lived RoleMesh JWT and inject it as Authorization header
+        user_id = request.headers.get("X-RoleMesh-User-Id")
+        if user_id and _token_service:
+            tenant_id = request.headers.get("X-RoleMesh-Tenant-Id", "")
+            coworker_id = request.headers.get("X-RoleMesh-Coworker-Id", "")
+            conversation_id = request.headers.get("X-RoleMesh-Conversation-Id", "")
+            short_token = _token_service.issue(user_id, tenant_id, coworker_id, conversation_id)
+            fwd_headers["Authorization"] = f"Bearer {short_token}"
+
+        # Strip raw identity headers — don't leak to MCP server
+        for h in _ROLEMESH_IDENTITY_HEADERS:
+            fwd_headers.pop(h, None)
 
         body = await request.read()
 

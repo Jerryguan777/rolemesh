@@ -9,10 +9,12 @@ from rolemesh.agent.executor import (
     AgentInput,
     AgentOutput,
 )
+from rolemesh.auth.permissions import AgentPermissions
 
 
 def test_agent_input_frozen() -> None:
-    inp = AgentInput(prompt="hello", group_folder="g", chat_jid="j", is_main=True)
+    perms = AgentPermissions.for_role("super_agent").to_dict()
+    inp = AgentInput(prompt="hello", group_folder="g", chat_jid="j", permissions=perms)
     try:
         inp.prompt = "other"  # type: ignore[misc]
         raise AssertionError("Should have raised")
@@ -21,20 +23,24 @@ def test_agent_input_frozen() -> None:
 
 
 def test_agent_input_optional_fields() -> None:
-    inp = AgentInput(prompt="p", group_folder="g", chat_jid="j", is_main=False)
+    perms = AgentPermissions.for_role("agent").to_dict()
+    inp = AgentInput(prompt="p", group_folder="g", chat_jid="j", permissions=perms)
     assert inp.session_id is None
     assert inp.is_scheduled_task is False
     assert inp.assistant_name is None
     assert inp.system_prompt is None
     assert inp.role_config is None
+    assert inp.user_id == ""
 
 
 def test_agent_input_all_fields() -> None:
+    perms = AgentPermissions.for_role("super_agent").to_dict()
     inp = AgentInput(
         prompt="hello",
         group_folder="grp",
         chat_jid="jid",
-        is_main=True,
+        permissions=perms,
+        user_id="user-1",
         session_id="s1",
         is_scheduled_task=True,
         assistant_name="Andy",
@@ -42,6 +48,8 @@ def test_agent_input_all_fields() -> None:
         role_config={"role": "coder"},
     )
     assert inp.prompt == "hello"
+    assert inp.permissions["data_scope"] == "tenant"
+    assert inp.user_id == "user-1"
     assert inp.system_prompt == "You are helpful"
     assert inp.role_config == {"role": "coder"}
 

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from rolemesh.auth.permissions import AgentPermissions
 
 # ---------------------------------------------------------------------------
 # Security / container mount types
@@ -118,6 +121,16 @@ class Coworker:
     max_concurrent: int = 2
     status: str = "active"
     created_at: str = ""
+    agent_role: str = "agent"  # "super_agent" | "agent"
+    permissions: AgentPermissions | None = None  # filled by __post_init__; always non-None after init
+
+    def __post_init__(self) -> None:
+        # is_admin is derived — always overwritten from agent_role
+        self.is_admin = self.agent_role == "super_agent"
+        if self.permissions is None:
+            from rolemesh.auth.permissions import AgentPermissions as _AgentPermissions
+
+            self.permissions = _AgentPermissions.for_role(self.agent_role)
 
 
 @dataclass
@@ -184,6 +197,7 @@ def registered_group_to_coworker(
         folder=group.folder,
         is_admin=group.is_main,
         container_config=group.container_config,
+        agent_role="super_agent" if group.is_main else "agent",
     )
 
 

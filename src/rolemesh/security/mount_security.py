@@ -182,7 +182,7 @@ class MountValidationResult:
     effective_readonly: bool | None = None
 
 
-def validate_mount(mount: AdditionalMount, is_main: bool) -> MountValidationResult:
+def validate_mount(mount: AdditionalMount, is_super_agent: bool = False) -> MountValidationResult:
     """Validate a single additional mount against the allowlist."""
     allowlist = load_mount_allowlist()
 
@@ -228,7 +228,7 @@ def validate_mount(mount: AdditionalMount, is_main: bool) -> MountValidationResu
     effective_readonly = True
 
     if requested_read_write:
-        if not is_main and allowlist.non_main_read_only:
+        if not is_super_agent and allowlist.non_main_read_only:
             logger.info("Mount forced to read-only for non-main group", mount=mount.host_path)
         elif not allowed_root.allow_read_write:
             logger.info(
@@ -252,7 +252,7 @@ def validate_mount(mount: AdditionalMount, is_main: bool) -> MountValidationResu
 def validate_additional_mounts(
     mounts: list[AdditionalMount],
     group_name: str,
-    is_main: bool,
+    is_super_agent: bool = False,
 ) -> list[dict[str, object]]:
     """Validate all additional mounts for a group.
 
@@ -261,7 +261,7 @@ def validate_additional_mounts(
     validated: list[dict[str, object]] = []
 
     for mount in mounts:
-        result = validate_mount(mount, is_main)
+        result = validate_mount(mount, is_super_agent=is_super_agent)
 
         if result.allowed:
             validated.append(

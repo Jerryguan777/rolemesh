@@ -41,6 +41,10 @@ MAX_CONCURRENT_CONTAINERS: int = max(1, int(os.environ.get("MAX_CONCURRENT_CONTA
 GLOBAL_MAX_CONTAINERS: int = max(1, int(os.environ.get("GLOBAL_MAX_CONTAINERS", "20")))
 CONTAINER_RUNTIME: str = os.environ.get("CONTAINER_RUNTIME", "docker")
 
+# Auth configuration
+AUTH_MODE: str = os.environ.get("AUTH_MODE", "embedded")
+ROLEMESH_TOKEN_SECRET: str = os.environ.get("ROLEMESH_TOKEN_SECRET", "")
+
 # Timezone for scheduled tasks — needs IANA name (e.g. "America/New_York"), not abbreviation ("EST").
 TIMEZONE: str = os.environ.get("TZ", "")
 

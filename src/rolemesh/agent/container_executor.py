@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from rolemesh.agent.executor import AgentBackendConfig, AgentInput, AgentOutput
+from rolemesh.auth.permissions import AgentPermissions
 from rolemesh.container.runner import (
     build_container_spec,
     build_volume_mounts,
@@ -126,7 +127,11 @@ class ContainerAgentExecutor:
         coworker_dir = DATA_DIR / "tenants" / tenant_id / "coworkers" / coworker.folder
         coworker_dir.mkdir(parents=True, exist_ok=True)
 
-        mounts = build_volume_mounts(coworker, tenant_id, conversation_id, inp.is_main, self._config)
+        permissions = AgentPermissions.from_dict(inp.permissions)
+        mounts = build_volume_mounts(
+            coworker, tenant_id, conversation_id,
+            permissions=permissions, backend_config=self._config,
+        )
         safe_name = re.sub(r"[^a-zA-Z0-9-]", "-", inp.group_folder)
         container_name = f"rolemesh-{safe_name}-{start_epoch_ms}"
 
@@ -138,7 +143,7 @@ class ContainerAgentExecutor:
             container_name=container_name,
             job_id=job_id,
             mount_count=len(mounts),
-            is_main=inp.is_main,
+            agent_permissions=inp.permissions,
             backend=self._config.name,
             tenant_id=tenant_id,
         )
@@ -165,10 +170,11 @@ class ContainerAgentExecutor:
             prompt=inp.prompt,
             group_folder=inp.group_folder,
             chat_jid=inp.chat_jid,
-            is_main=inp.is_main,
+            permissions=inp.permissions,
             tenant_id=tenant_id,
             coworker_id=inp.coworker_id,
             conversation_id=conversation_id,
+            user_id=inp.user_id,
             session_id=inp.session_id,
             is_scheduled_task=inp.is_scheduled_task,
             assistant_name=inp.assistant_name,
@@ -349,7 +355,7 @@ class ContainerAgentExecutor:
             "=== Container Run Log ===",
             f"Timestamp: {datetime.now(UTC).isoformat()}",
             f"Coworker: {coworker.name}",
-            f"IsMain: {inp.is_main}",
+            f"Permissions: {inp.permissions}",
             f"Job ID: {job_id}",
             f"Duration: {duration_ms}ms",
             f"Exit Code: {code}",

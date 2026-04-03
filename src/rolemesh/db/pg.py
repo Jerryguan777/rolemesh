@@ -8,6 +8,7 @@ from typing import Any
 
 import asyncpg
 
+from rolemesh.auth.permissions import AgentPermissions
 from rolemesh.core.config import DATABASE_URL
 from rolemesh.core.group_folder import is_valid_group_folder
 from rolemesh.core.logger import get_logger
@@ -128,6 +129,38 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             """)
             await conn.execute("ALTER TABLE coworkers DROP COLUMN role_id")
         await conn.execute("DROP TABLE IF EXISTS roles CASCADE")
+    # --- Auth: add agent_role + permissions to coworkers, migrate is_admin ---
+    await conn.execute(
+        "ALTER TABLE coworkers ADD COLUMN IF NOT EXISTS agent_role TEXT DEFAULT 'agent'"
+    )
+    await conn.execute(
+        "ALTER TABLE coworkers ADD COLUMN IF NOT EXISTS permissions JSONB "
+        "DEFAULT '{\"data_scope\":\"self\",\"task_schedule\":false,"
+        "\"task_manage_others\":false,\"agent_delegate\":false}'"
+    )
+    # Idempotent migration: is_admin=TRUE -> super_agent + full permissions
+    await conn.execute("""
+        UPDATE coworkers SET
+            agent_role = 'super_agent',
+            permissions = '{"data_scope":"tenant","task_schedule":true,"task_manage_others":true,"agent_delegate":true}'
+        WHERE is_admin = TRUE AND agent_role = 'agent'
+    """)
+    # User-agent assignment table
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_agent_assignments (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            coworker_id UUID NOT NULL REFERENCES coworkers(id) ON DELETE CASCADE,
+            tenant_id UUID NOT NULL REFERENCES tenants(id),
+            assigned_at TIMESTAMPTZ DEFAULT now(),
+            UNIQUE (user_id, coworker_id)
+        )
+    """)
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_uaa_user ON user_agent_assignments(user_id)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_uaa_coworker ON user_agent_assignments(coworker_id)")
+    # Password hash for future standalone auth
+    await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT")
+
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS channel_bindings (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -239,6 +272,7 @@ async def _init_test_database(database_url: str) -> None:
     _pool = await asyncpg.create_pool(database_url, min_size=2, max_size=10)
     async with _pool.acquire() as conn:
         # Drop all tables for a clean slate
+        await conn.execute("DROP TABLE IF EXISTS user_agent_assignments CASCADE")
         await conn.execute("DROP TABLE IF EXISTS task_run_logs CASCADE")
         await conn.execute("DROP TABLE IF EXISTS messages CASCADE")
         await conn.execute("DROP TABLE IF EXISTS scheduled_tasks CASCADE")
@@ -426,11 +460,18 @@ async def create_coworker(
     system_prompt: str | None = None,
     tools: list[McpServerConfig] | None = None,
     skills: list[str] | None = None,
-    is_admin: bool = False,
+    is_admin: bool = False,  # Deprecated: use agent_role instead. Ignored when agent_role is set.
     container_config: ContainerConfig | None = None,
     max_concurrent: int = 2,
+    agent_role: str = "",
+    permissions: AgentPermissions | None = None,
 ) -> Coworker:
-    """Create a new coworker."""
+    """Create a new coworker.
+
+    Use ``agent_role`` ("super_agent" / "agent") instead of ``is_admin``.
+    ``agent_role`` takes priority when set; ``is_admin`` is only used as
+    fallback for backward compatibility.
+    """
     cc_json: str | None = None
     if container_config:
         cc_json = json.dumps(
@@ -442,12 +483,16 @@ async def create_coworker(
                 "timeout": container_config.timeout,
             }
         )
+    # Derive agent_role from is_admin if not explicitly set
+    effective_role = agent_role or ("super_agent" if is_admin else "agent")
+    effective_perms = permissions or AgentPermissions.for_role(effective_role)
     pool = _get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO coworkers (tenant_id, name, folder, agent_backend, system_prompt, tools, skills, is_admin, container_config, max_concurrent)
-            VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9::jsonb, $10)
+            INSERT INTO coworkers (tenant_id, name, folder, agent_backend, system_prompt,
+                tools, skills, is_admin, container_config, max_concurrent, agent_role, permissions)
+            VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9::jsonb, $10, $11, $12::jsonb)
             RETURNING *
             """,
             tenant_id,
@@ -464,6 +509,8 @@ async def create_coworker(
             is_admin,
             cc_json,
             max_concurrent,
+            effective_role,
+            json.dumps(effective_perms.to_dict()),
         )
     assert row is not None
     return _record_to_coworker(row)
@@ -489,6 +536,16 @@ def _record_to_coworker(row: asyncpg.Record) -> Coworker:
             )
         # Skip legacy string entries silently
     skills_raw = row.get("skills")
+
+    # Parse agent_role and permissions (new auth fields)
+    agent_role = row.get("agent_role") or "agent"
+    perms_raw = row.get("permissions")
+    if isinstance(perms_raw, dict):
+        permissions = AgentPermissions.from_dict(perms_raw)
+    elif isinstance(perms_raw, str) and perms_raw:
+        permissions = AgentPermissions.from_dict(json.loads(perms_raw))
+    else:
+        permissions = AgentPermissions.for_role(agent_role)
     return Coworker(
         id=str(row["id"]),
         tenant_id=str(row["tenant_id"]),
@@ -503,6 +560,8 @@ def _record_to_coworker(row: asyncpg.Record) -> Coworker:
         max_concurrent=row["max_concurrent"],
         status=row["status"] or "active",
         created_at=row["created_at"].isoformat() if row["created_at"] else "",
+        agent_role=agent_role,
+        permissions=permissions,
     )
 
 
@@ -1314,3 +1373,67 @@ async def drop_legacy_tables() -> None:
         # Recreate in new format (now legacy_exists check will be False)
         await _create_schema(conn)
     logger.info("Legacy tables dropped and new-format tables created")
+
+
+# ---------------------------------------------------------------------------
+# User-Agent assignment CRUD
+# ---------------------------------------------------------------------------
+
+
+async def assign_agent_to_user(user_id: str, coworker_id: str, tenant_id: str) -> None:
+    """Assign a coworker (agent) to a user."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO user_agent_assignments (user_id, coworker_id, tenant_id)
+            VALUES ($1::uuid, $2::uuid, $3::uuid)
+            ON CONFLICT (user_id, coworker_id) DO NOTHING
+            """,
+            user_id,
+            coworker_id,
+            tenant_id,
+        )
+
+
+async def unassign_agent_from_user(user_id: str, coworker_id: str) -> None:
+    """Remove a coworker assignment from a user."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM user_agent_assignments WHERE user_id = $1::uuid AND coworker_id = $2::uuid",
+            user_id,
+            coworker_id,
+        )
+
+
+async def get_agents_for_user(user_id: str) -> list[Coworker]:
+    """Get all coworkers assigned to a user."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT c.* FROM coworkers c
+            JOIN user_agent_assignments uaa ON c.id = uaa.coworker_id
+            WHERE uaa.user_id = $1::uuid
+            ORDER BY c.name
+            """,
+            user_id,
+        )
+    return [_record_to_coworker(row) for row in rows]
+
+
+async def get_users_for_agent(coworker_id: str) -> list[User]:
+    """Get all users assigned to a coworker."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT u.* FROM users u
+            JOIN user_agent_assignments uaa ON u.id = uaa.user_id
+            WHERE uaa.coworker_id = $1::uuid
+            ORDER BY u.name
+            """,
+            coworker_id,
+        )
+    return [_record_to_user(row) for row in rows]

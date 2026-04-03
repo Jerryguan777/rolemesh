@@ -1,16 +1,21 @@
-"""Token validation for web channel bindings."""
+"""Token validation for web channel bindings and AuthProvider integration."""
 
 from __future__ import annotations
 
 import json
+from typing import TYPE_CHECKING
 
 import asyncpg
 
 from webui.config import DATABASE_URL
 
+if TYPE_CHECKING:
+    from rolemesh.auth.provider import AuthenticatedUser, AuthProvider
+
 # binding_id -> api_token (loaded on startup)
 _token_map: dict[str, str] = {}
 _pool: asyncpg.Pool | None = None  # type: ignore[type-arg]
+_provider: AuthProvider | None = None
 
 
 async def init_auth() -> None:
@@ -18,6 +23,24 @@ async def init_auth() -> None:
     global _pool
     _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3)
     await reload_tokens()
+
+
+async def init_auth_provider(mode: str = "") -> None:
+    """Initialize the AuthProvider for user-level authentication."""
+    global _provider
+    try:
+        from rolemesh.auth.factory import create_auth_provider
+
+        _provider = create_auth_provider(mode)
+    except (ImportError, ValueError):
+        _provider = None
+
+
+async def authenticate_request(token: str) -> AuthenticatedUser | None:
+    """Authenticate a request token via the configured AuthProvider."""
+    if _provider is not None:
+        return await _provider.authenticate(token)
+    return None
 
 
 async def reload_tokens() -> None:

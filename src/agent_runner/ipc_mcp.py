@@ -32,7 +32,7 @@ def _text_result(text: str, *, is_error: bool = False) -> dict[str, Any]:
 def create_rolemesh_mcp_server(
     chat_jid: str,
     group_folder: str,
-    is_main: bool,
+    permissions: dict[str, object],
     js: JetStreamContext,
     job_id: str,
     tenant_id: str = "",
@@ -50,6 +50,9 @@ def create_rolemesh_mcp_server(
         )
         _bg_tasks.add(task)
         task.add_done_callback(_bg_tasks.discard)
+
+    has_tenant_scope = permissions.get("data_scope") == "tenant"
+    can_schedule = bool(permissions.get("task_schedule"))
 
     # --- send_message ---
     @tool(
@@ -93,6 +96,9 @@ def create_rolemesh_mcp_server(
         },
     )
     async def schedule_task(args: dict[str, Any]) -> dict[str, Any]:
+        if not can_schedule:
+            return _text_result("Permission denied: task:schedule is not enabled for this agent.", is_error=True)
+
         prompt = args["prompt"]
         schedule_type = args["schedule_type"]
         schedule_value = args["schedule_value"]
@@ -155,7 +161,11 @@ def create_rolemesh_mcp_server(
             key = f"{tenant_id}.{group_folder}.tasks" if tenant_id else f"{group_folder}.tasks"
             entry = await kv.get(key)
             all_tasks: list[dict[str, Any]] = json.loads(entry.value)
-            tasks = all_tasks if is_main else [t for t in all_tasks if t.get("coworkerFolder") == group_folder]
+            tasks = (
+                all_tasks
+                if has_tenant_scope
+                else [t for t in all_tasks if t.get("coworkerFolder") == group_folder]
+            )
             if not tasks:
                 return _text_result("No scheduled tasks found.")
             lines = [
@@ -180,7 +190,6 @@ def create_rolemesh_mcp_server(
                 "groupFolder": group_folder,
                 "tenantId": tenant_id,
                 "coworkerId": coworker_id,
-                "isMain": is_main,
                 "timestamp": datetime.now().isoformat(),
             },
         )
@@ -198,7 +207,6 @@ def create_rolemesh_mcp_server(
                 "groupFolder": group_folder,
                 "tenantId": tenant_id,
                 "coworkerId": coworker_id,
-                "isMain": is_main,
                 "timestamp": datetime.now().isoformat(),
             },
         )
@@ -216,7 +224,6 @@ def create_rolemesh_mcp_server(
                 "groupFolder": group_folder,
                 "tenantId": tenant_id,
                 "coworkerId": coworker_id,
-                "isMain": is_main,
                 "timestamp": datetime.now().isoformat(),
             },
         )
@@ -252,7 +259,6 @@ def create_rolemesh_mcp_server(
             "groupFolder": group_folder,
             "tenantId": tenant_id,
             "coworkerId": coworker_id,
-            "isMain": str(is_main),
             "timestamp": datetime.now().isoformat(),
         }
         if args.get("prompt") is not None:
@@ -265,47 +271,6 @@ def create_rolemesh_mcp_server(
         _publish(f"agent.{job_id}.tasks", data)
         return _text_result(f"Task {task_id} update requested.")
 
-    # --- register_conversation ---
-    @tool(
-        "register_conversation",
-        "Register a new chat group for this coworker. Admin coworker only. "
-        "Only channel_chat_id is required; coworker/tenant/binding derived from context.",
-        {"channel_chat_id": str, "name": str},
-    )
-    async def register_conversation(args: dict[str, Any]) -> dict[str, Any]:
-        if not is_main:
-            return _text_result("Only the admin coworker can register new conversations.", is_error=True)
-        _publish(
-            f"agent.{job_id}.tasks",
-            {
-                "type": "register_conversation",
-                "channel_chat_id": args["channel_chat_id"],
-                "name": args.get("name", ""),
-                "groupFolder": group_folder,
-                "tenantId": tenant_id,
-                "coworkerId": coworker_id,
-                "timestamp": datetime.now().isoformat(),
-            },
-        )
-        return _text_result("Conversation registered.")
-
-    # --- refresh_conversations ---
-    @tool("refresh_conversations", "Refresh available chat list from channel. Admin only.", {})
-    async def refresh_conversations(args: dict[str, Any]) -> dict[str, Any]:
-        if not is_main:
-            return _text_result("Only the admin coworker can refresh conversations.", is_error=True)
-        _publish(
-            f"agent.{job_id}.tasks",
-            {
-                "type": "refresh_conversations",
-                "groupFolder": group_folder,
-                "tenantId": tenant_id,
-                "coworkerId": coworker_id,
-                "timestamp": datetime.now().isoformat(),
-            },
-        )
-        return _text_result("Conversation refresh requested.")
-
     return create_sdk_mcp_server(
         "rolemesh",
         tools=[
@@ -316,7 +281,5 @@ def create_rolemesh_mcp_server(
             resume_task,
             cancel_task,
             update_task,
-            register_conversation,
-            refresh_conversations,
         ],
     )

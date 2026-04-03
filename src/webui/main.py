@@ -19,6 +19,8 @@ from webui.config import NATS_URL, WEB_UI_DIST, WEB_UI_HOST, WEB_UI_PORT
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from starlette.responses import Response
+
 _nc: nats.aio.client.Client | None = None
 
 # Stream max age: 1 hour in seconds
@@ -157,6 +159,33 @@ async def websocket_chat(
         await websocket.close(code=1008, reason="Missing binding_id or token")
         return
     await ws.handle_ws(websocket, binding_id, token, chat_id)
+
+
+# ---------------------------------------------------------------------------
+# Admin API stubs (features moved from agent IPC, not yet implemented)
+# ---------------------------------------------------------------------------
+
+_NOT_IMPLEMENTED = JSONResponse({"error": "Not yet implemented"}, status_code=501)
+
+
+@app.post("/api/admin/conversations/register")
+async def admin_register_conversation() -> Response:
+    return _NOT_IMPLEMENTED
+
+
+@app.post("/api/admin/conversations/refresh")
+async def admin_refresh_conversations() -> Response:
+    return _NOT_IMPLEMENTED
+
+
+@app.post("/api/admin/users/invite")
+async def admin_invite_user() -> Response:
+    return _NOT_IMPLEMENTED
+
+
+@app.post("/api/admin/agents/{agent_id}/assign")
+async def admin_assign_agent(agent_id: str) -> Response:
+    return _NOT_IMPLEMENTED
 
 
 # Mount static files if the dist directory exists
