@@ -5,23 +5,21 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-import asyncpg
-
-from webui.config import DATABASE_URL
-
 if TYPE_CHECKING:
+    import asyncpg
+
     from rolemesh.auth.provider import AuthenticatedUser, AuthProvider
 
 # binding_id -> api_token (loaded on startup)
 _token_map: dict[str, str] = {}
-_pool: asyncpg.Pool | None = None  # type: ignore[type-arg]
+_pool: asyncpg.Pool[asyncpg.Record] | None = None
 _provider: AuthProvider | None = None
 
 
-async def init_auth() -> None:
-    """Connect to the database and load all web-type channel bindings."""
+async def init_auth(pool: asyncpg.Pool[asyncpg.Record]) -> None:
+    """Set the shared database pool and load web-type channel binding tokens."""
     global _pool
-    _pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=3)
+    _pool = pool
     await reload_tokens()
 
 
@@ -75,8 +73,6 @@ def get_pool() -> asyncpg.Pool | None:  # type: ignore[type-arg]
 
 
 async def close_auth() -> None:
-    """Close the database pool."""
+    """Release reference to the shared pool. The pool itself is closed by pg.close_database()."""
     global _pool
-    if _pool is not None:
-        await _pool.close()
-        _pool = None
+    _pool = None

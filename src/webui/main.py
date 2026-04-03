@@ -13,13 +13,21 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from nats.js.api import StreamConfig
 
+from rolemesh.db.pg import _get_pool, close_database, init_database
 from webui import auth, ws
-from webui.config import NATS_URL, WEB_UI_DIST, WEB_UI_HOST, WEB_UI_PORT
+from webui.admin import router as admin_router
+from webui.config import DATABASE_URL, NATS_URL, WEB_UI_DIST, WEB_UI_HOST, WEB_UI_PORT
+
+
+async def _init_db() -> None:
+    await init_database(DATABASE_URL)
+
+
+async def _close_db() -> None:
+    await close_database()
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-
-    from starlette.responses import Response
 
 _nc: nats.aio.client.Client | None = None
 
@@ -47,13 +55,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     ws.set_jetstream(js)
 
-    # Load web bindings from DB
-    await auth.init_auth()
+    # Initialize the shared DB pool (used by both admin API and web binding auth)
+    await _init_db()
+
+    # Load web bindings using the shared pool
+    await auth.init_auth(_get_pool())
+    await auth.init_auth_provider()
 
     yield
 
     # Shutdown
     await auth.close_auth()
+    await _close_db()
     if _nc is not None:
         await _nc.close()
         _nc = None
@@ -161,31 +174,8 @@ async def websocket_chat(
     await ws.handle_ws(websocket, binding_id, token, chat_id)
 
 
-# ---------------------------------------------------------------------------
-# Admin API stubs (features moved from agent IPC, not yet implemented)
-# ---------------------------------------------------------------------------
-
-_NOT_IMPLEMENTED = JSONResponse({"error": "Not yet implemented"}, status_code=501)
-
-
-@app.post("/api/admin/conversations/register")
-async def admin_register_conversation() -> Response:
-    return _NOT_IMPLEMENTED
-
-
-@app.post("/api/admin/conversations/refresh")
-async def admin_refresh_conversations() -> Response:
-    return _NOT_IMPLEMENTED
-
-
-@app.post("/api/admin/users/invite")
-async def admin_invite_user() -> Response:
-    return _NOT_IMPLEMENTED
-
-
-@app.post("/api/admin/agents/{agent_id}/assign")
-async def admin_assign_agent(agent_id: str) -> Response:
-    return _NOT_IMPLEMENTED
+# Admin API router
+app.include_router(admin_router)
 
 
 # Mount static files if the dist directory exists

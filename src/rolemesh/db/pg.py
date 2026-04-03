@@ -350,6 +350,41 @@ async def get_tenant(tenant_id: str) -> Tenant | None:
     return _record_to_tenant(row)
 
 
+async def update_tenant(
+    tenant_id: str,
+    *,
+    name: str | None = None,
+    max_concurrent_containers: int | None = None,
+) -> Tenant | None:
+    """Update selected fields on a tenant."""
+    fields: list[str] = []
+    values: list[Any] = []
+    param_idx = 1
+
+    if name is not None:
+        fields.append(f"name = ${param_idx}")
+        values.append(name)
+        param_idx += 1
+    if max_concurrent_containers is not None:
+        fields.append(f"max_concurrent_containers = ${param_idx}")
+        values.append(max_concurrent_containers)
+        param_idx += 1
+
+    if not fields:
+        return await get_tenant(tenant_id)
+
+    values.append(tenant_id)
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE tenants SET {', '.join(fields)} WHERE id = ${param_idx}::uuid RETURNING *",
+            *values,
+        )
+    if row is None:
+        return None
+    return _record_to_tenant(row)
+
+
 async def get_tenant_by_slug(slug: str) -> Tenant | None:
     """Get a tenant by slug."""
     pool = _get_pool()
@@ -422,6 +457,75 @@ def _record_to_user(row: asyncpg.Record) -> User:
         channel_ids=cids if isinstance(cids, dict) else json.loads(cids) if cids else {},
         created_at=row["created_at"].isoformat() if row["created_at"] else "",
     )
+
+
+async def get_user(user_id: str) -> User | None:
+    """Get a user by ID."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM users WHERE id = $1::uuid", user_id)
+    if row is None:
+        return None
+    return _record_to_user(row)
+
+
+async def get_users_for_tenant(tenant_id: str) -> list[User]:
+    """Get all users for a tenant."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM users WHERE tenant_id = $1::uuid ORDER BY name",
+            tenant_id,
+        )
+    return [_record_to_user(row) for row in rows]
+
+
+async def update_user(
+    user_id: str,
+    *,
+    name: str | None = None,
+    email: str | None = None,
+    role: str | None = None,
+) -> User | None:
+    """Update selected fields on a user."""
+    fields: list[str] = []
+    values: list[Any] = []
+    param_idx = 1
+
+    if name is not None:
+        fields.append(f"name = ${param_idx}")
+        values.append(name)
+        param_idx += 1
+    if email is not None:
+        fields.append(f"email = ${param_idx}")
+        values.append(email or None)  # "" → NULL in DB
+        param_idx += 1
+    if role is not None:
+        fields.append(f"role = ${param_idx}")
+        values.append(role)
+        param_idx += 1
+
+    if not fields:
+        return await get_user(user_id)
+
+    values.append(user_id)
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE users SET {', '.join(fields)} WHERE id = ${param_idx}::uuid RETURNING *",
+            *values,
+        )
+    if row is None:
+        return None
+    return _record_to_user(row)
+
+
+async def delete_user(user_id: str) -> bool:
+    """Delete a user by ID."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM users WHERE id = $1::uuid", user_id)
+    return result == "DELETE 1"
 
 
 # ---------------------------------------------------------------------------
@@ -608,6 +712,84 @@ async def get_all_coworkers() -> list[Coworker]:
     return [_record_to_coworker(row) for row in rows]
 
 
+async def update_coworker(
+    coworker_id: str,
+    *,
+    name: str | None = None,
+    system_prompt: str | None = None,
+    tools: list[McpServerConfig] | None = None,
+    skills: list[str] | None = None,
+    max_concurrent: int | None = None,
+    status: str | None = None,
+    agent_role: str | None = None,
+    permissions: AgentPermissions | None = None,
+) -> Coworker | None:
+    """Update selected fields on a coworker."""
+    fields: list[str] = []
+    values: list[Any] = []
+    param_idx = 1
+
+    if name is not None:
+        fields.append(f"name = ${param_idx}")
+        values.append(name)
+        param_idx += 1
+    if system_prompt is not None:
+        fields.append(f"system_prompt = ${param_idx}")
+        values.append(system_prompt)
+        param_idx += 1
+    if tools is not None:
+        fields.append(f"tools = ${param_idx}::jsonb")
+        values.append(
+            json.dumps([{"name": t.name, "type": t.type, "url": t.url, "headers": t.headers} for t in tools])
+        )
+        param_idx += 1
+    if skills is not None:
+        fields.append(f"skills = ${param_idx}::jsonb")
+        values.append(json.dumps(skills))
+        param_idx += 1
+    if max_concurrent is not None:
+        fields.append(f"max_concurrent = ${param_idx}")
+        values.append(max_concurrent)
+        param_idx += 1
+    if status is not None:
+        fields.append(f"status = ${param_idx}")
+        values.append(status)
+        param_idx += 1
+    if agent_role is not None:
+        fields.append(f"agent_role = ${param_idx}")
+        values.append(agent_role)
+        param_idx += 1
+        fields.append(f"is_admin = ${param_idx}")
+        values.append(agent_role == "super_agent")
+        param_idx += 1
+    if permissions is not None:
+        fields.append(f"permissions = ${param_idx}::jsonb")
+        values.append(json.dumps(permissions.to_dict()))
+        param_idx += 1
+
+    if not fields:
+        return await get_coworker(coworker_id)
+
+    values.append(coworker_id)
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE coworkers SET {', '.join(fields)} WHERE id = ${param_idx}::uuid RETURNING *",
+            *values,
+        )
+    if row is None:
+        return None
+    return _record_to_coworker(row)
+
+
+async def delete_coworker(coworker_id: str) -> bool:
+    """Delete a coworker by ID. CASCADE handles dependent tables."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM coworkers WHERE id = $1::uuid", coworker_id)
+    return result == "DELETE 1"
+
+
 # ---------------------------------------------------------------------------
 # ChannelBinding CRUD
 # ---------------------------------------------------------------------------
@@ -694,6 +876,54 @@ async def get_channel_bindings_for_coworker(coworker_id: str) -> list[ChannelBin
             coworker_id,
         )
     return [_record_to_channel_binding(row) for row in rows]
+
+
+async def update_channel_binding(
+    binding_id: str,
+    *,
+    credentials: dict[str, str] | None = None,
+    bot_display_name: str | None = None,
+    status: str | None = None,
+) -> ChannelBinding | None:
+    """Update selected fields on a channel binding."""
+    fields: list[str] = []
+    values: list[Any] = []
+    param_idx = 1
+
+    if credentials is not None:
+        fields.append(f"credentials = ${param_idx}::jsonb")
+        values.append(json.dumps(credentials))
+        param_idx += 1
+    if bot_display_name is not None:
+        fields.append(f"bot_display_name = ${param_idx}")
+        values.append(bot_display_name)
+        param_idx += 1
+    if status is not None:
+        fields.append(f"status = ${param_idx}")
+        values.append(status)
+        param_idx += 1
+
+    if not fields:
+        return await get_channel_binding(binding_id)
+
+    values.append(binding_id)
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE channel_bindings SET {', '.join(fields)} WHERE id = ${param_idx}::uuid RETURNING *",
+            *values,
+        )
+    if row is None:
+        return None
+    return _record_to_channel_binding(row)
+
+
+async def delete_channel_binding(binding_id: str) -> bool:
+    """Delete a channel binding by ID."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM channel_bindings WHERE id = $1::uuid", binding_id)
+    return result == "DELETE 1"
 
 
 # ---------------------------------------------------------------------------
@@ -785,6 +1015,14 @@ async def get_conversation_by_binding_and_chat(channel_binding_id: str, channel_
     if row is None:
         return None
     return _record_to_conversation(row)
+
+
+async def delete_conversation(conversation_id: str) -> bool:
+    """Delete a conversation by ID."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM conversations WHERE id = $1::uuid", conversation_id)
+    return result == "DELETE 1"
 
 
 async def update_conversation_last_invocation(conversation_id: str, timestamp: str) -> None:
