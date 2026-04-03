@@ -20,7 +20,7 @@ class AuthenticatedUser:
 
 @runtime_checkable
 class AuthProvider(Protocol):
-    """Protocol for pluggable auth backends (embedded SaaS / standalone)."""
+    """Protocol for pluggable auth backends (external JWT / builtin)."""
 
     async def authenticate(self, token: str) -> AuthenticatedUser | None:
         """Validate a bearer token and return the authenticated user, or None."""

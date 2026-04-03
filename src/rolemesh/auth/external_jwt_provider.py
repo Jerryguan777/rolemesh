@@ -1,4 +1,4 @@
-"""Embedded auth provider — validates JWTs from an external SaaS system.
+"""External JWT auth provider — validates JWTs issued by an external SaaS system.
 
 Configuration via environment variables:
   EXTERNAL_JWT_SECRET       — symmetric secret (for HS256/HS384/HS512)
@@ -21,7 +21,7 @@ import jwt
 from rolemesh.auth.provider import AuthenticatedUser
 
 
-class EmbeddedProvider:
+class ExternalJwtProvider:
     """Validates JWTs issued by an external SaaS and maps claims to AuthenticatedUser."""
 
     def __init__(self) -> None:
@@ -42,7 +42,7 @@ class EmbeddedProvider:
         self._key = self._public_key or self._secret
         if not self._key:
             raise ValueError(
-                "EmbeddedProvider requires EXTERNAL_JWT_SECRET or EXTERNAL_JWT_PUBLIC_KEY"
+                "ExternalJwtProvider requires EXTERNAL_JWT_SECRET or EXTERNAL_JWT_PUBLIC_KEY"
             )
 
     async def authenticate(self, token: str) -> AuthenticatedUser | None:
@@ -79,5 +79,5 @@ class EmbeddedProvider:
             return None
 
     async def get_user_by_id(self, user_id: str) -> AuthenticatedUser | None:
-        """Not supported in embedded mode — user lookup requires the SaaS system."""
+        """Not supported in external JWT mode — user lookup requires the SaaS system."""
         return None

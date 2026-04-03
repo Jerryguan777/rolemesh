@@ -13,7 +13,8 @@ def create_auth_provider(mode: str = "") -> AuthProvider:
     """Create an AuthProvider for the given deployment mode.
 
     Args:
-        mode: "embedded" or "standalone". If empty, reads AUTH_MODE env var.
+        mode: "external" or "builtin". If empty, reads AUTH_MODE env var.
+              Legacy values "embedded" and "standalone" are accepted as aliases.
 
     Returns:
         An AuthProvider instance.
@@ -22,16 +23,22 @@ def create_auth_provider(mode: str = "") -> AuthProvider:
         ValueError: If the mode is unknown.
     """
     if not mode:
-        mode = os.environ.get("AUTH_MODE", "embedded")
+        mode = os.environ.get("AUTH_MODE", "external")
 
+    # Accept legacy aliases
     if mode == "embedded":
-        from rolemesh.auth.embedded_provider import EmbeddedProvider
+        mode = "external"
+    elif mode == "standalone":
+        mode = "builtin"
 
-        return EmbeddedProvider()  # type: ignore[return-value]
+    if mode == "external":
+        from rolemesh.auth.external_jwt_provider import ExternalJwtProvider
 
-    if mode == "standalone":
-        from rolemesh.auth.standalone_provider import StandaloneProvider
+        return ExternalJwtProvider()  # type: ignore[return-value]
 
-        return StandaloneProvider()  # type: ignore[return-value]
+    if mode == "builtin":
+        from rolemesh.auth.builtin_provider import BuiltinProvider
 
-    raise ValueError(f"Unknown auth mode: {mode!r}. Expected 'embedded' or 'standalone'.")
+        return BuiltinProvider()  # type: ignore[return-value]
+
+    raise ValueError(f"Unknown auth mode: {mode!r}. Expected 'external' or 'builtin'.")

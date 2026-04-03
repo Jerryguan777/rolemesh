@@ -158,7 +158,7 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     """)
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_uaa_user ON user_agent_assignments(user_id)")
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_uaa_coworker ON user_agent_assignments(coworker_id)")
-    # Password hash for future standalone auth
+    # Password hash for future builtin auth
     await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT")
 
     await conn.execute("""
