@@ -1,6 +1,6 @@
 # Authentication & Authorization Architecture
 
-> Status: Approved Design  
+> Status: Approved Design
 > Audience: Contributors and integrators of RoleMesh
 
 ## Overview
@@ -14,21 +14,17 @@ This document describes how auth is designed to support both scenarios cleanly, 
 
 ## Design Principles
 
-### 1. AuthN is external, AuthZ is internal
+1. **AuthN is external, AuthZ is internal.** Authentication (who are you?) is delegated to a pluggable `IdentityProvider` adapter. Authorization (what can you do?) is always handled by RoleMesh's own logic.
 
-Authentication (who are you?) is delegated to an `IdentityProvider` — a pluggable adapter. Authorization (what can you do?) is always handled by RoleMesh's own logic.
+2. **User permissions and agent permissions are fully independent.** Users are authorized to _use_ agents. Agents are authorized to _perform_ operations. These two checks happen in series, never cross-referenced. There is no intersection calculation at runtime.
 
-### 2. User permissions and agent permissions are independent
+3. **Assign = full access.** Once an agent is assigned to a user, the user can use all of that agent's capabilities. If different users need different capability levels, create multiple agents with different permission configs and assign them accordingly.
 
-Users are authorized to *use* agents. Agents are authorized to *perform* actions. These two concerns never cross. There is no intersection calculation at runtime.
+4. **Permissions stay thin.** Only pure authorization decisions live in the permissions model. Resource limits (timeout, concurrency), tool bindings (MCP servers), security policies, and rate limiting are managed by their respective modules — not duplicated in permissions.
 
-### 3. Permissions stay thin
+5. **Checks happen at boundaries, not in business logic.** All authorization checks are performed at interception points (IPC handlers, middleware). Business logic code contains zero permission checks.
 
-Only pure authorization decisions live in the permissions model. Resource limits (timeout, concurrency), tool bindings (MCP servers), security policies (network, mounts), and rate limiting are managed by their respective modules — not duplicated in permissions.
-
-### 4. Checks happen at boundaries, not in business logic
-
-All authorization checks are performed at interception points (IPC handlers, middleware). Business logic code contains zero permission checks and is unaware of the auth system.
+6. **External system auth via token passthrough.** RoleMesh does not enforce business-level permissions (e.g., "can this user access Project X in the SaaS"). Instead, RoleMesh passes user identity to MCP servers via a delegation token, and the external business system enforces its own permissions.
 
 ## Architecture
 
@@ -57,7 +53,7 @@ All authorization checks are performed at interception points (IPC handlers, mid
 
 ## Identity Contract
 
-The bridge between external auth and internal logic is `ResolvedIdentity`:
+The bridge between external auth and internal logic:
 
 ```python
 @dataclass(frozen=True)
@@ -82,169 +78,147 @@ class IdentityProvider(Protocol):
 
 ### Embedded Mode: ExternalAuthProvider
 
-Validates the host SaaS's JWT/token and maps external roles to RoleMesh roles using a declarative mapping configuration:
+Validates the host SaaS's JWT/token and maps external roles to RoleMesh roles using a declarative JSON mapping config stored per-tenant in the database:
 
 ```json
 {
   "role_map": {
-    "saas:org-owner":    "owner",
-    "saas:org-admin":    "admin",
-    "saas:project-lead": "admin",
-    "saas:member":       "member",
-    "*":                 "viewer"
+    "saas:org-owner": "owner",
+    "saas:admin": "admin",
+    "saas:member": "member",
+    "*": "viewer"
   },
   "permission_overrides": {
-    "saas:org-admin": {
-      "task:schedule": true,
-      "agent:delegate": true
-    }
+    "saas:admin": { "task:schedule": true }
   }
 }
 ```
 
-Resolution logic:
-
-1. Verify external JWT (public key / introspection endpoint)
-2. Map external role → RoleMesh role via `role_map`
-3. Load role's default permissions
-4. Apply `permission_overrides` for the external role (if any)
-5. Return `ResolvedIdentity`
-
-The mapping config is stored as JSON in the database, editable by tenant admins. No code changes needed when integrating with a new SaaS.
+Resolution: verify JWT → extract external role → map via `role_map` → load role defaults → apply `permission_overrides` → return ResolvedIdentity. Integrating with a new SaaS means writing a mapping config, not changing code.
 
 ### Standalone Mode: BuiltinAuthProvider
 
-Validates JWTs issued by RoleMesh's own auth module. Roles and permissions are read directly from the database.
+Validates JWTs issued by RoleMesh itself. Roles and permissions are read directly from JWT claims.
 
 ## User Permissions
 
-User permissions answer one question: **which agents can this user access?**
+User permissions answer two questions:
 
-```
-User ──[assignment]──→ Agent
-       "can I use this agent?"
-```
+### 1. What can this user manage on the platform? (Role)
 
-### Agent Assignment
+| Role | Capabilities |
+|------|-------------|
+| owner | Tenant settings, billing, everything admin can do |
+| admin | Create/edit/delete agents, manage users, assign agents |
+| member | Use assigned agents, view own conversations |
+| viewer | See public agent list, read-only |
 
-Agents are treated as resources. An admin assigns agents to users. Once assigned, the user can use all of the agent's capabilities.
+### 2. Which agents can this user interact with? (Assignment)
 
-```sql
-CREATE TABLE user_agent_assignments (
-    tenant_id    UUID NOT NULL,
-    user_id      UUID NOT NULL,
-    coworker_id  UUID NOT NULL,
-    assigned_at  TIMESTAMPTZ DEFAULT now(),
-    PRIMARY KEY (user_id, coworker_id)
-);
-```
+Agents are resources. Admins assign agents to users. Assigned = can use all capabilities of that agent.
+
+- admin/owner: can access all agents without assignment
+- member: can only use explicitly assigned agents
+- viewer: can see public agents but cannot send messages
 
 ### Agent Visibility
 
-Agents have a `visibility` field:
+Agents have a `visibility` field (`public` or `restricted`):
 
-| visibility | assigned | role: admin/owner | Result |
-|------------|----------|-------------------|--------|
-| `public` | yes | - | Visible + usable |
-| `public` | no | - | Visible + not usable |
-| `restricted` | yes | - | Visible + usable |
-| `restricted` | no | - | Not visible |
-| any | - | yes | Visible + usable (always) |
-
-Admins and owners bypass assignment checks and can access all agents.
-
-### Role Defaults
-
-| Role | Default agent access | Typical use |
-|------|---------------------|-------------|
-| `owner` | All agents, full control | Platform/tenant owner |
-| `admin` | All agents, manage assignments | IT admin |
-| `member` | Assigned agents only | Regular employee |
-| `viewer` | See public agents, cannot message | Read-only stakeholder |
+- `public` + assigned → visible and usable
+- `public` + not assigned → visible but not usable
+- `restricted` + not assigned → invisible to non-admin users
+- admin/owner → always visible and usable
 
 ## Agent Permissions (Capabilities)
 
-Agent permissions define what an agent is allowed to do. They are completely independent of user permissions.
+Agent permissions are completely independent of user permissions. They define what an agent is allowed to do within the RoleMesh platform.
 
-```python
-DEFAULT_AGENT_PERMISSIONS = {
-    "data:scope": "own",              # own / team / tenant
-    "message:send": "assigned",       # assigned / all
-    "message:mention-human": False,   # Can @mention humans in group chats
-    "task:schedule": False,           # Can create scheduled tasks
-    "task:manage-others": False,      # Can manage other agents' tasks
-    "agent:delegate": False,          # Can invoke other agents
-}
-```
+### Agent Roles
 
-These are stored in the `coworkers.permissions` JSONB column.
+Two predefined roles, used as permission templates:
 
-### Why no overlap with other config
+**super_agent** (replaces old `is_main=True`): global visibility, cross-agent management.
+**agent** (replaces old `is_main=False`): scoped to own data and tasks.
 
-| Concern | Where it lives | Why not in permissions |
-|---------|---------------|----------------------|
-| `max_concurrent` | `coworkers.max_concurrent` | Resource config, not authorization |
-| `timeout` | `container_config.timeout` | Resource config |
-| Allowed MCP servers | `coworkers.tools[]` | Tool binding, not authorization |
+### Permission Fields
+
+| Permission | super_agent | agent | Meaning |
+|-----------|------------|-------|---------|
+| `data:scope` | `tenant` | `own` | RoleMesh data visibility (tasks, snapshots) |
+| `task:schedule` | `true` | `false` | Can create scheduled tasks |
+| `task:manage-others` | `true` | `false` | Can manage other agents' tasks |
+| `agent:delegate` | `true` | `false` | Can invoke other agents |
+
+Roles set defaults. Individual permissions can be adjusted per agent.
+
+### What is NOT in agent permissions
+
+| Concern | Where it lives | Reason |
+|---------|---------------|--------|
+| max_concurrent | `coworkers.max_concurrent` | Resource config |
+| timeout | `container_config.timeout` | Resource config |
+| Which MCP servers | `coworkers.tools[]` | Tool binding |
 | Network/mount restrictions | Security module | Security policy |
-| Rate limiting | Credential proxy interceptor | Operational safeguard |
+| Rate limits | Credential proxy | Operational safeguard |
+| @mention humans | Not controlled | Agent decides by context |
+| Cross-conversation messaging | Not supported | All agents message within own conversations only |
 
-Permissions only contain pure yes/no authorization decisions. Everything else has its own home.
+## External System Auth: Token Passthrough
 
-## Authorization Flow
+When an agent calls an MCP tool that accesses external business systems, RoleMesh does not check business-level permissions. Instead, it passes user identity through.
 
-```
-User sends message to Agent
-│
-├─① AuthN: IdentityProvider.resolve(request) → ResolvedIdentity
-│  Failure → 401
-│
-├─② Access check: Is this agent assigned to this user?
-│  (admin/owner skip this check)
-│  Failure → 403
-│
-├─③ Message delivered to agent, agent processes and decides to call tools
-│
-├─④ Capability check: Does this agent have permission for this operation?
-│  Checked at IPC task_handler, before tool execution
-│  Failure → PermissionDenied returned to agent → agent informs user
-│
-└─⑤ Tool executes successfully
-```
+### Two-layer headers on MCP requests
 
-Steps ② and ④ are independent. User access is checked when the message arrives. Agent capability is checked when the agent acts. Business logic in between knows nothing about either check.
+- **Server auth**: proves the request comes from RoleMesh (existing `McpServerConfig.headers`)
+- **User delegation token**: identifies which user the agent is acting on behalf of
 
-## Why "assign = full access" (no intersection)
+### Delegation token
 
-We considered computing `min(user.data_scope, agent.data_scope)` at runtime. We rejected this because:
+RoleMesh mints a short-lived token (not the original SaaS JWT, which may expire):
+- Signed by RoleMesh's own key
+- Contains: user_id, tenant_id, role
+- Expiration: matches agent execution timeout
+- MCP servers verify using RoleMesh's public key
+- Follows OAuth 2.0 Token Exchange pattern (RFC 8693)
 
-1. **Complexity** — Runtime intersection of two permission sets adds complexity to every tool call path.
-2. **Unpredictability** — Admins can't easily reason about what a user+agent combination can actually do.
-3. **Redundancy** — If an admin assigns a `data:scope=tenant` agent to a regular user, that's an explicit decision. The admin already considered the implications.
-4. **Simplicity** — "Assigned = full access" is one concept. Intersection requires explaining a matrix.
+For scheduled tasks (no active user), the delegation token is minted for the task creator's identity.
 
-If an admin wants to restrict data access for certain users, they create a separate agent with `data:scope=own` and assign that one instead. This is more explicit and auditable than runtime intersection.
-
-## Separation from Other Modules
+## Complete Authorization Flow
 
 ```
-┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌──────────────┐
-│ Auth Module  │  │ Security    │  │ Approval    │  │ Rate Limiter │
-│              │  │ Module      │  │ Module      │  │              │
-│ · AuthN     │  │ · Network   │  │ · Rules     │  │ · MCP calls  │
-│ · User→Agent│  │ · Mounts    │  │ · Tokens    │  │ · Per-job    │
-│ · Agent caps│  │ · Domains   │  │ · Workflow   │  │ · Counters   │
-└──────┬──────┘  └──────┬──────┘  └──────┬──────┘  └──────┬───────┘
-       │                │                │                │
-       └────────────────┴────────┬───────┴────────────────┘
-                                 ▼
-                     Interception points
-                  (middleware, IPC handler,
-                   credential proxy)
-                                 │
-                                 ▼
-                     Business logic (pure,
-                     no auth/security code)
+User sends message
+  │
+  ① AuthN: IdentityProvider.resolve() → ResolvedIdentity
+  │  Failure → 401
+  │
+  ② User access: is this agent assigned to this user?
+  │  (admin/owner bypass)
+  │  Failure → 403
+  │
+  ③ Agent executes: LLM processes, decides to call tools
+  │
+  ④ Agent capability: does this agent have the permission?
+  │  Checked at IPC task_handler
+  │  Failure → PermissionDenied → agent tells user
+  │
+  ⑤ External auth: MCP tool receives delegation token
+  │  Business system checks user's permissions
+  │  Failure → tool returns error → agent tells user
+  │
+  ⑥ Success
 ```
 
-Each module is independent. They are composed at interception points, not inside business logic.
+Four layers. Each independent. Each checking a different concern.
+
+## Module Boundaries
+
+```
+Auth module        — AuthN + user→agent access + agent capabilities
+Security module    — Network, mount, domain policies
+Approval module    — Human-in-the-loop for sensitive operations
+Rate limiter       — MCP call frequency at credential proxy
+Config             — Resource limits (timeout, concurrency)
+```
+
+Five concerns, five modules. Composed at interception points. Business logic is clean.
