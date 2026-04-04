@@ -13,8 +13,10 @@ from fastapi import WebSocket, WebSocketDisconnect
 from nats.js.api import DeliverPolicy
 from starlette.websockets import WebSocketState
 
+from rolemesh.db import pg
 from rolemesh.ipc.web_protocol import WebInboundMessage
-from webui.auth import validate_token
+from webui import auth
+from webui.auth import BOOTSTRAP_USER_ID
 
 if TYPE_CHECKING:
     from nats.js.client import JetStreamContext
@@ -47,11 +49,37 @@ async def _broadcast(binding_id: str, chat_id: str, data: dict[str, str]) -> Non
             await ws.send_json(data)
 
 
-async def handle_ws(ws: WebSocket, binding_id: str, token: str, chat_id: str = "") -> None:
+async def handle_ws(ws: WebSocket, agent_id: str, token: str, chat_id: str = "") -> None:
     """Handle a single WebSocket connection lifecycle."""
-    if not validate_token(binding_id, token):
+    # 1. Authenticate via JWT / bootstrap token
+    user = await auth.authenticate_ws(token)
+    if user is None:
         await ws.close(code=1008, reason="Invalid token")
         return
+
+    # 2. Look up the coworker (agent)
+    try:
+        coworker = await pg.get_coworker(agent_id)
+    except Exception:  # asyncpg.DataError for invalid UUID  # noqa: BLE001
+        coworker = None
+    if coworker is None or coworker.tenant_id != user.tenant_id:
+        await ws.close(code=4004, reason="Agent not found")
+        return
+
+    # 3. Check assignment — owners/admins can access any agent
+    if user.role not in ("owner", "admin"):
+        assigned = await pg.get_agents_for_user(user.user_id)
+        assigned_ids = {c.id for c in assigned}
+        if coworker.id not in assigned_ids:
+            await ws.close(code=4003, reason="Not assigned to this agent")
+            return
+
+    # 4. Look up web binding for this coworker
+    binding = await pg.get_channel_binding_for_coworker(agent_id, "web")
+    if binding is None:
+        await ws.close(code=4004, reason="Web binding not found")
+        return
+    binding_id = binding.id
 
     await ws.accept()
 
@@ -60,9 +88,23 @@ async def handle_ws(ws: WebSocket, binding_id: str, token: str, chat_id: str = "
     # Use client-provided chat_id if valid UUID, otherwise generate one
     if not chat_id or not _is_valid_uuid(chat_id):
         chat_id = str(uuid.uuid4())
-    sender_id = f"web-user-{chat_id[:8]}"
 
-    # Send session info
+    sender_id = user.user_id if user.user_id != BOOTSTRAP_USER_ID else f"web-user-{chat_id[:8]}"
+
+    # 5. Find or create conversation
+    conv = await pg.get_conversation_by_binding_and_chat(binding_id, chat_id)
+    if conv is None:
+        conv = await pg.create_conversation(
+            tenant_id=user.tenant_id,
+            coworker_id=coworker.id,
+            channel_binding_id=binding_id,
+            channel_chat_id=chat_id,
+            user_id=user.user_id if user.user_id != BOOTSTRAP_USER_ID else None,
+        )
+    elif conv.user_id is None and user.user_id != BOOTSTRAP_USER_ID:
+        await pg.update_conversation_user_id(conv.id, user.user_id)
+
+    # Send session info (include binding_id for NATS subscription subjects)
     await ws.send_json({"type": "session", "chatId": chat_id, "bindingId": binding_id})
 
     # Register connection (multiple WS per chat_id supported)
@@ -146,7 +188,7 @@ async def handle_ws(ws: WebSocket, binding_id: str, token: str, chat_id: str = "
                 inbound = WebInboundMessage(
                     chat_id=chat_id,
                     sender_id=sender_id,
-                    sender_name="Web User",
+                    sender_name=user.name or "Web User",
                     text=data["content"],
                     timestamp=datetime.now(UTC).isoformat(),
                     msg_id=str(uuid.uuid4()),

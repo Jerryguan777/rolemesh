@@ -24,10 +24,10 @@ export class ChatPanel extends LitElement {
   constructor() {
     super();
     const params = new URLSearchParams(location.search);
-    const bindingId = params.get('binding_id') || '';
+    const agentId = params.get('agent_id') || '';
     const token = params.get('token') || '';
     this.activeChatId = params.get('chat_id');
-    this.client = new AgentClient(bindingId, token);
+    this.client = new AgentClient(agentId, token);
     this.sidebarCollapsed = localStorage.getItem('rm-sidebar-collapsed') === 'true';
   }
 

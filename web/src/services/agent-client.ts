@@ -1,5 +1,5 @@
 export type ServerMessage =
-  | { type: 'session'; chatId: string; bindingId: string }
+  | { type: 'session'; chatId: string; agentId: string }
   | { type: 'thinking' }
   | { type: 'text'; content: string }
   | { type: 'done' }
@@ -26,13 +26,13 @@ export class AgentClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private autoReconnect = true;
   private pendingMessages: string[] = [];
-  readonly bindingId: string;
+  readonly agentId: string;
   readonly token: string;
 
   chatId: string | null = null;
 
-  constructor(bindingId: string, token: string) {
-    this.bindingId = bindingId;
+  constructor(agentId: string, token: string) {
+    this.agentId = agentId;
     this.token = token;
   }
 
@@ -41,12 +41,12 @@ export class AgentClient {
   }
 
   connect(chatId?: string): void {
-    if (!this.bindingId || !this.token) return;
+    if (!this.agentId || !this.token) return;
     this.autoReconnect = true;
     if (chatId !== undefined) this.chatId = chatId;
 
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    let url = `${protocol}//${location.host}/ws/chat?binding_id=${encodeURIComponent(this.bindingId)}&token=${encodeURIComponent(this.token)}`;
+    let url = `${protocol}//${location.host}/ws/chat?agent_id=${encodeURIComponent(this.agentId)}&token=${encodeURIComponent(this.token)}`;
     if (this.chatId) {
       url += `&chat_id=${encodeURIComponent(this.chatId)}`;
     }
@@ -139,7 +139,7 @@ export class AgentClient {
 
   async fetchConversations(): Promise<ConversationSummary[]> {
     const res = await fetch(
-      `/api/conversations?binding_id=${encodeURIComponent(this.bindingId)}&token=${encodeURIComponent(this.token)}`
+      `/api/conversations?agent_id=${encodeURIComponent(this.agentId)}&token=${encodeURIComponent(this.token)}`
     );
     if (!res.ok) return [];
     return res.json();
@@ -147,7 +147,7 @@ export class AgentClient {
 
   async fetchMessages(chatId: string): Promise<HistoryMessage[]> {
     const res = await fetch(
-      `/api/conversations/${encodeURIComponent(chatId)}/messages?binding_id=${encodeURIComponent(this.bindingId)}&token=${encodeURIComponent(this.token)}`
+      `/api/conversations/${encodeURIComponent(chatId)}/messages?agent_id=${encodeURIComponent(this.agentId)}&token=${encodeURIComponent(this.token)}`
     );
     if (!res.ok) return [];
     return res.json();

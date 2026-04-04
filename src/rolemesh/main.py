@@ -241,6 +241,7 @@ async def _auto_create_web_conversation(
                     channel_chat_id=chat_id,
                     name=f"Web Chat {chat_id[:8]}",
                     requires_trigger=False,
+                    user_id=None,
                 )
                 conv_state = ConversationState(conversation=conv)
                 cw.conversations[conv.id] = conv_state
@@ -512,7 +513,7 @@ async def _run_agent(
                 group_folder=config.folder,
                 chat_jid=conv.channel_chat_id,
                 permissions=permissions.to_dict(),
-                user_id="",
+                user_id=conv.user_id or "",
                 assistant_name=config.name,
                 system_prompt=config.system_prompt,
                 tenant_id=config.tenant_id,

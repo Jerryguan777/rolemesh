@@ -160,6 +160,7 @@ class Conversation:
     requires_trigger: bool = True
     last_agent_invocation: str | None = None
     created_at: str = ""
+    user_id: str | None = None  # owner user (set for web conversations)
 
 
 # ---------------------------------------------------------------------------

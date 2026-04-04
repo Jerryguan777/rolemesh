@@ -1,8 +1,7 @@
-"""Token validation for web channel bindings and AuthProvider integration."""
+"""AuthProvider-based authentication for web channel."""
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -10,17 +9,14 @@ if TYPE_CHECKING:
 
     from rolemesh.auth.provider import AuthenticatedUser, AuthProvider
 
-# binding_id -> api_token (loaded on startup)
-_token_map: dict[str, str] = {}
 _pool: asyncpg.Pool[asyncpg.Record] | None = None
 _provider: AuthProvider | None = None
 
 
 async def init_auth(pool: asyncpg.Pool[asyncpg.Record]) -> None:
-    """Set the shared database pool and load web-type channel binding tokens."""
+    """Set the shared database pool."""
     global _pool
     _pool = pool
-    await reload_tokens()
 
 
 async def init_auth_provider(mode: str = "") -> None:
@@ -41,30 +37,29 @@ async def authenticate_request(token: str) -> AuthenticatedUser | None:
     return None
 
 
-async def reload_tokens() -> None:
-    """Reload web binding tokens from the database."""
-    assert _pool is not None
-    async with _pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT id, credentials FROM channel_bindings WHERE channel_type = 'web' AND status = 'active'"
+BOOTSTRAP_USER_ID = "bootstrap"
+
+
+async def authenticate_ws(token: str) -> AuthenticatedUser | None:
+    """Authenticate a token (JWT or bootstrap). Returns None on failure.
+
+    Used by both WebSocket and REST endpoints.
+    """
+    from rolemesh.auth.provider import AuthenticatedUser as AuthUser
+    from webui.config import ADMIN_BOOTSTRAP_TOKEN
+
+    if ADMIN_BOOTSTRAP_TOKEN and token == ADMIN_BOOTSTRAP_TOKEN:
+        from rolemesh.db.pg import get_tenant_by_slug
+
+        tenant = await get_tenant_by_slug("default")
+        tenant_id = tenant.id if tenant else "default"
+        return AuthUser(
+            user_id=BOOTSTRAP_USER_ID,
+            tenant_id=tenant_id,
+            role="owner",
+            name="Bootstrap Admin",
         )
-    _token_map.clear()
-    for row in rows:
-        binding_id = str(row["id"])
-        creds = row["credentials"]
-        if isinstance(creds, str):
-            creds = json.loads(creds)
-        api_token = creds.get("api_token", "") if creds else ""
-        if api_token:
-            _token_map[binding_id] = api_token
-
-
-def validate_token(binding_id: str, token: str) -> bool:
-    """Return True if the token matches the binding's api_token."""
-    expected = _token_map.get(binding_id)
-    if not expected:
-        return False
-    return expected == token
+    return await authenticate_request(token)
 
 
 def get_pool() -> asyncpg.Pool | None:  # type: ignore[type-arg]

@@ -189,6 +189,11 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         )
     """)
 
+    # Auth: add user_id to conversations (nullable — Telegram/Slack groups have no single owner)
+    await conn.execute(
+        "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id)"
+    )
+
     # --- Tables that exist in both legacy (Step 4) and new (Step 5) formats ---
     # Detect if legacy messages table exists (has chat_jid column).
     # If so, skip creating new-format tables — migration script will handle it.
@@ -938,15 +943,16 @@ async def create_conversation(
     channel_chat_id: str,
     name: str | None = None,
     requires_trigger: bool = True,
+    user_id: str | None = None,
 ) -> Conversation:
     """Create a conversation."""
     pool = _get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO conversations (tenant_id, coworker_id, channel_binding_id, channel_chat_id, name, requires_trigger)
-            VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6)
-            RETURNING id, tenant_id, coworker_id, channel_binding_id, channel_chat_id, name, requires_trigger, last_agent_invocation, created_at
+            INSERT INTO conversations (tenant_id, coworker_id, channel_binding_id, channel_chat_id, name, requires_trigger, user_id)
+            VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7::uuid)
+            RETURNING *
             """,
             tenant_id,
             coworker_id,
@@ -954,6 +960,7 @@ async def create_conversation(
             channel_chat_id,
             name,
             requires_trigger,
+            user_id,
         )
     assert row is not None
     return _record_to_conversation(row)
@@ -961,6 +968,7 @@ async def create_conversation(
 
 def _record_to_conversation(row: asyncpg.Record) -> Conversation:
     lai = row["last_agent_invocation"]
+    uid = row.get("user_id")
     return Conversation(
         id=str(row["id"]),
         tenant_id=str(row["tenant_id"]),
@@ -971,6 +979,7 @@ def _record_to_conversation(row: asyncpg.Record) -> Conversation:
         requires_trigger=bool(row["requires_trigger"]) if row["requires_trigger"] is not None else True,
         last_agent_invocation=lai.isoformat() if lai else None,
         created_at=row["created_at"].isoformat() if row["created_at"] else "",
+        user_id=str(uid) if uid else None,
     )
 
 
@@ -1033,6 +1042,17 @@ async def update_conversation_last_invocation(conversation_id: str, timestamp: s
         await conn.execute(
             "UPDATE conversations SET last_agent_invocation = $1 WHERE id = $2::uuid",
             ts,
+            conversation_id,
+        )
+
+
+async def update_conversation_user_id(conversation_id: str, user_id: str) -> None:
+    """Set the user_id on a conversation (binds a user to a web conversation)."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE conversations SET user_id = $1::uuid WHERE id = $2::uuid",
+            user_id,
             conversation_id,
         )
 
