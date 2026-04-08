@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -204,6 +205,12 @@ async def websocket_chat(
 
 # Admin API router
 app.include_router(admin_router)
+
+# OIDC PKCE router (only when AUTH_MODE=oidc)
+if os.environ.get("AUTH_MODE", "external") == "oidc":
+    from webui.oidc_routes import router as oidc_router
+
+    app.include_router(oidc_router)
 
 
 # Mount static files if the dist directory exists

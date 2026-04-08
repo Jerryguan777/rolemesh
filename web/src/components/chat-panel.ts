@@ -25,7 +25,8 @@ export class ChatPanel extends LitElement {
     super();
     const params = new URLSearchParams(location.search);
     const agentId = params.get('agent_id') || '';
-    const token = params.get('token') || '';
+    // Token resolution priority: URL query param > sessionStorage (OIDC) > empty
+    const token = params.get('token') || sessionStorage.getItem('rm_id_token') || '';
     this.activeChatId = params.get('chat_id');
     this.client = new AgentClient(agentId, token);
     this.sidebarCollapsed = localStorage.getItem('rm-sidebar-collapsed') === 'true';

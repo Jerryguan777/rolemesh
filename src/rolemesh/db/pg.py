@@ -161,6 +161,25 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     # Password hash for future builtin auth
     await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT")
 
+    # OIDC: external subject identifier (sub claim from IdP)
+    await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS external_sub TEXT")
+    await conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_external_sub "
+        "ON users(external_sub) WHERE external_sub IS NOT NULL"
+    )
+
+    # OIDC: external tenant mapping (one IdP tenant → one local tenant)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS external_tenant_map (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            provider TEXT NOT NULL DEFAULT 'oidc',
+            external_tenant_id TEXT NOT NULL,
+            local_tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            created_at TIMESTAMPTZ DEFAULT now(),
+            UNIQUE (provider, external_tenant_id)
+        )
+    """)
+
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS channel_bindings (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -461,7 +480,78 @@ def _record_to_user(row: asyncpg.Record) -> User:
         role=row["role"],
         channel_ids=cids if isinstance(cids, dict) else json.loads(cids) if cids else {},
         created_at=row["created_at"].isoformat() if row["created_at"] else "",
+        external_sub=row.get("external_sub"),
     )
+
+
+async def get_user_by_external_sub(external_sub: str) -> User | None:
+    """Look up a user by their external OIDC subject identifier."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM users WHERE external_sub = $1", external_sub)
+    if row is None:
+        return None
+    return _record_to_user(row)
+
+
+async def create_user_with_external_sub(
+    tenant_id: str,
+    name: str,
+    email: str | None,
+    role: str,
+    external_sub: str,
+) -> User:
+    """Create a user linked to an external OIDC subject."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO users (tenant_id, name, email, role, channel_ids, external_sub)
+            VALUES ($1::uuid, $2, $3, $4, '{}'::jsonb, $5)
+            RETURNING *
+            """,
+            tenant_id,
+            name,
+            email,
+            role,
+            external_sub,
+        )
+    assert row is not None
+    return _record_to_user(row)
+
+
+async def get_local_tenant_id(provider: str, external_tenant_id: str) -> str | None:
+    """Look up the local tenant ID for an external IdP tenant."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT local_tenant_id FROM external_tenant_map WHERE provider = $1 AND external_tenant_id = $2",
+            provider,
+            external_tenant_id,
+        )
+    if row is None:
+        return None
+    return str(row["local_tenant_id"])
+
+
+async def create_external_tenant_mapping(
+    provider: str,
+    external_tenant_id: str,
+    local_tenant_id: str,
+) -> None:
+    """Create a mapping between an external IdP tenant and a local tenant."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO external_tenant_map (provider, external_tenant_id, local_tenant_id)
+            VALUES ($1, $2, $3::uuid)
+            ON CONFLICT (provider, external_tenant_id) DO NOTHING
+            """,
+            provider,
+            external_tenant_id,
+            local_tenant_id,
+        )
 
 
 async def get_user(user_id: str) -> User | None:

@@ -102,6 +102,7 @@ class User:
     role: str = "member"  # admin / manager / member
     channel_ids: dict[str, str] = field(default_factory=dict)
     created_at: str = ""
+    external_sub: str | None = None  # OIDC sub claim — unique per IdP
 
 
 @dataclass

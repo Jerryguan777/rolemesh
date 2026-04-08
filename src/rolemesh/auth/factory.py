@@ -13,7 +13,7 @@ def create_auth_provider(mode: str = "") -> AuthProvider:
     """Create an AuthProvider for the given deployment mode.
 
     Args:
-        mode: "external" or "builtin". If empty, reads AUTH_MODE env var.
+        mode: "external", "builtin", or "oidc". If empty, reads AUTH_MODE env var.
               Legacy values "embedded" and "standalone" are accepted as aliases.
 
     Returns:
@@ -41,4 +41,29 @@ def create_auth_provider(mode: str = "") -> AuthProvider:
 
         return BuiltinProvider()  # type: ignore[return-value]
 
-    raise ValueError(f"Unknown auth mode: {mode!r}. Expected 'external' or 'builtin'.")
+    if mode == "oidc":
+        from rolemesh.auth.oidc_provider import DefaultOIDCAdapter, OIDCAuthProvider
+        from webui.config import OIDC_AUDIENCE, OIDC_CLIENT_ID, OIDC_DISCOVERY_URL
+
+        # Optional custom adapter via OIDC_ADAPTER=module.path.ClassName
+        adapter_spec = os.environ.get("OIDC_ADAPTER", "")
+        if adapter_spec:
+            import importlib
+
+            module_path, _, class_name = adapter_spec.rpartition(".")
+            if not module_path:
+                raise ValueError(f"Invalid OIDC_ADAPTER spec: {adapter_spec!r}")
+            module = importlib.import_module(module_path)
+            adapter_cls = getattr(module, class_name)
+            adapter = adapter_cls()
+        else:
+            adapter = DefaultOIDCAdapter.from_env()
+
+        return OIDCAuthProvider(  # type: ignore[return-value]
+            discovery_url=OIDC_DISCOVERY_URL,
+            client_id=OIDC_CLIENT_ID,
+            audience=OIDC_AUDIENCE,
+            adapter=adapter,
+        )
+
+    raise ValueError(f"Unknown auth mode: {mode!r}. Expected 'external', 'builtin', or 'oidc'.")

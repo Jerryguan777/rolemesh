@@ -1,22 +1,80 @@
 import { LitElement, html } from 'lit';
-import { customElement } from 'lit/decorators.js';
+import { customElement, state } from 'lit/decorators.js';
 import './components/chat-panel.js';
 import './components/message-list.js';
 import './components/message-item.js';
 import './components/message-editor.js';
 import './components/sidebar.js';
+import './components/login-page.js';
+import {
+  fetchAuthConfig,
+  getStoredToken,
+  handleCallback,
+  isTokenExpired,
+} from './services/oidc-auth.js';
+
+type AuthState = 'loading' | 'login' | 'authenticated';
 
 @customElement('rm-app')
 export class RmApp extends LitElement {
-  protected override createRenderRoot() { return this; }
+  protected override createRenderRoot() {
+    return this;
+  }
 
-  override connectedCallback() {
+  @state() private authState: AuthState = 'loading';
+
+  override async connectedCallback() {
     super.connectedCallback();
     this.style.display = 'block';
     this.style.height = '100%';
+    await this.resolveAuth();
+  }
+
+  private async resolveAuth() {
+    const params = new URLSearchParams(location.search);
+
+    // 1. Token in URL query params (backward compat / SaaS-passed)
+    const urlToken = params.get('token');
+    if (urlToken && !isTokenExpired(urlToken)) {
+      this.authState = 'authenticated';
+      return;
+    }
+
+    // 2. OIDC callback: code stored by /oauth2/callback page
+    if (sessionStorage.getItem('oidc_code')) {
+      const exchanged = await handleCallback();
+      if (exchanged) {
+        // Token now in sessionStorage; chat-panel reads it from there
+        this.authState = 'authenticated';
+        return;
+      }
+    }
+
+    // 3. Stored token from previous session
+    const stored = getStoredToken();
+    if (stored && !isTokenExpired(stored)) {
+      this.authState = 'authenticated';
+      return;
+    }
+
+    // 4. OIDC configured but no token → show login page
+    const config = await fetchAuthConfig();
+    if (config) {
+      this.authState = 'login';
+      return;
+    }
+
+    // 5. Fall back to chat panel (legacy / no auth provider configured)
+    this.authState = 'authenticated';
   }
 
   override render() {
+    if (this.authState === 'loading') {
+      return html`<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#666;">Loading...</div>`;
+    }
+    if (this.authState === 'login') {
+      return html`<rm-login-page></rm-login-page>`;
+    }
     return html`
       <div class="h-full flex flex-col bg-surface-0 dark:bg-d-surface-0">
         <rm-chat-panel class="flex-1 min-h-0"></rm-chat-panel>

@@ -30,6 +30,11 @@ async def init_auth_provider(mode: str = "") -> None:
         _provider = None
 
 
+def get_provider() -> AuthProvider | None:
+    """Return the configured AuthProvider, if any."""
+    return _provider
+
+
 async def authenticate_request(token: str) -> AuthenticatedUser | None:
     """Authenticate a request token via the configured AuthProvider."""
     if _provider is not None:
