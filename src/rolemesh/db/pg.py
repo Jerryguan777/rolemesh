@@ -180,6 +180,19 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         )
     """)
 
+    # OIDC: per-user token vault for MCP token forwarding
+    # refresh_token / access_token are encrypted with Fernet (key derived from
+    # ROLEMESH_TOKEN_SECRET).
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS oidc_user_tokens (
+            user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+            refresh_token_encrypted BYTEA NOT NULL,
+            access_token_encrypted BYTEA,
+            access_token_expires_at TIMESTAMPTZ,
+            updated_at TIMESTAMPTZ DEFAULT now()
+        )
+    """)
+
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS channel_bindings (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -296,6 +309,8 @@ async def _init_test_database(database_url: str) -> None:
     _pool = await asyncpg.create_pool(database_url, min_size=2, max_size=10)
     async with _pool.acquire() as conn:
         # Drop all tables for a clean slate
+        await conn.execute("DROP TABLE IF EXISTS oidc_user_tokens CASCADE")
+        await conn.execute("DROP TABLE IF EXISTS external_tenant_map CASCADE")
         await conn.execute("DROP TABLE IF EXISTS user_agent_assignments CASCADE")
         await conn.execute("DROP TABLE IF EXISTS task_run_logs CASCADE")
         await conn.execute("DROP TABLE IF EXISTS messages CASCADE")
@@ -554,6 +569,107 @@ async def create_external_tenant_mapping(
         )
 
 
+# ---------------------------------------------------------------------------
+# OIDC user token vault (server-side encrypted refresh/access tokens)
+# ---------------------------------------------------------------------------
+
+
+async def upsert_user_oidc_tokens(
+    user_id: str,
+    refresh_token_encrypted: bytes,
+    access_token_encrypted: bytes | None,
+    access_token_expires_at: datetime | None,
+) -> None:
+    """Insert or replace the encrypted token row for a user."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO oidc_user_tokens (
+                user_id, refresh_token_encrypted, access_token_encrypted,
+                access_token_expires_at, updated_at
+            )
+            VALUES ($1::uuid, $2, $3, $4, now())
+            ON CONFLICT (user_id) DO UPDATE SET
+                refresh_token_encrypted = EXCLUDED.refresh_token_encrypted,
+                access_token_encrypted = EXCLUDED.access_token_encrypted,
+                access_token_expires_at = EXCLUDED.access_token_expires_at,
+                updated_at = now()
+            """,
+            user_id,
+            refresh_token_encrypted,
+            access_token_encrypted,
+            access_token_expires_at,
+        )
+
+
+async def get_user_oidc_tokens(
+    user_id: str,
+) -> tuple[bytes, bytes | None, datetime | None] | None:
+    """Return (refresh_token_enc, access_token_enc, expires_at) or None."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT refresh_token_encrypted, access_token_encrypted, access_token_expires_at "
+            "FROM oidc_user_tokens WHERE user_id = $1::uuid",
+            user_id,
+        )
+    if row is None:
+        return None
+    return (
+        row["refresh_token_encrypted"],
+        row["access_token_encrypted"],
+        row["access_token_expires_at"],
+    )
+
+
+async def update_user_access_token(
+    user_id: str,
+    access_token_encrypted: bytes,
+    access_token_expires_at: datetime,
+) -> None:
+    """Update only the cached access_token (after refresh)."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE oidc_user_tokens
+            SET access_token_encrypted = $1,
+                access_token_expires_at = $2,
+                updated_at = now()
+            WHERE user_id = $3::uuid
+            """,
+            access_token_encrypted,
+            access_token_expires_at,
+            user_id,
+        )
+
+
+async def update_user_refresh_token(
+    user_id: str,
+    refresh_token_encrypted: bytes,
+) -> None:
+    """Update only the refresh_token (after IdP rotation)."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE oidc_user_tokens SET refresh_token_encrypted = $1, updated_at = now() "
+            "WHERE user_id = $2::uuid",
+            refresh_token_encrypted,
+            user_id,
+        )
+
+
+async def delete_user_oidc_tokens(user_id: str) -> None:
+    """Remove a user's stored OIDC tokens (logout / refresh failure)."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM oidc_user_tokens WHERE user_id = $1::uuid",
+            user_id,
+        )
+
+
 async def get_user(user_id: str) -> User | None:
     """Get a user by ID."""
     pool = _get_pool()
@@ -700,7 +816,10 @@ async def create_coworker(
             agent_backend,
             system_prompt,
             json.dumps(
-                [{"name": t.name, "type": t.type, "url": t.url, "headers": t.headers} for t in tools]
+                [
+                    {"name": t.name, "type": t.type, "url": t.url, "headers": t.headers, "auth_mode": t.auth_mode}
+                    for t in tools
+                ]
                 if tools
                 else []
             ),
@@ -725,12 +844,16 @@ def _record_to_coworker(row: asyncpg.Record) -> Coworker:
     for item in tools_raw:
         if isinstance(item, dict) and "name" in item:
             raw_headers = item.get("headers")
+            auth_mode = item.get("auth_mode") or "user"
+            if auth_mode not in ("user", "service", "both"):
+                auth_mode = "user"
             tools.append(
                 McpServerConfig(
                     name=item["name"],
                     type=item.get("type", "sse"),
                     url=item.get("url", ""),
                     headers=raw_headers if isinstance(raw_headers, dict) else {},
+                    auth_mode=auth_mode,
                 )
             )
         # Skip legacy string entries silently
@@ -835,7 +958,12 @@ async def update_coworker(
     if tools is not None:
         fields.append(f"tools = ${param_idx}::jsonb")
         values.append(
-            json.dumps([{"name": t.name, "type": t.type, "url": t.url, "headers": t.headers} for t in tools])
+            json.dumps(
+                [
+                    {"name": t.name, "type": t.type, "url": t.url, "headers": t.headers, "auth_mode": t.auth_mode}
+                    for t in tools
+                ]
+            )
         )
         param_idx += 1
     if skills is not None:

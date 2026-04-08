@@ -43,7 +43,6 @@ from rolemesh.core.config import (
     IDLE_TIMEOUT,
     NATS_URL,
     POLL_INTERVAL,
-    ROLEMESH_TOKEN_SECRET,
     TIMEZONE,
 )
 from rolemesh.core.logger import get_logger
@@ -82,7 +81,7 @@ from rolemesh.orchestration.remote_control import (
 )
 from rolemesh.orchestration.router import format_messages, format_outbound
 from rolemesh.orchestration.task_scheduler import start_scheduler_loop
-from rolemesh.security.credential_proxy import register_mcp_server, set_token_service, start_credential_proxy
+from rolemesh.security.credential_proxy import register_mcp_server, set_token_vault, start_credential_proxy
 from rolemesh.security.sender_allowlist import (
     is_sender_allowed,
     is_trigger_allowed,
@@ -212,7 +211,7 @@ async def _load_state() -> None:
         for tool_cfg in cw.tools:
             parsed = urlparse(tool_cfg.url)
             origin = f"{parsed.scheme}://{parsed.netloc}"
-            register_mcp_server(tool_cfg.name, origin, tool_cfg.headers)
+            register_mcp_server(tool_cfg.name, origin, tool_cfg.headers, tool_cfg.auth_mode)
 
     logger.info(
         "State loaded",
@@ -828,11 +827,16 @@ async def main() -> None:
 
     proxy_runner = await start_credential_proxy(CREDENTIAL_PROXY_PORT, PROXY_BIND_HOST)
 
-    # Initialize TokenService for MCP user identity forwarding
-    if ROLEMESH_TOKEN_SECRET:
-        from rolemesh.auth.token_service import TokenService
+    # Initialize TokenVault for per-user MCP token forwarding (OIDC mode only).
+    # Note: this only sets the vault in THIS process. The WebUI runs in a
+    # separate process and must initialize its own vault from env (see
+    # src/webui/main.py lifespan).
+    from rolemesh.auth.token_vault import create_vault_from_env
 
-        set_token_service(TokenService(secret=ROLEMESH_TOKEN_SECRET))
+    _vault = await create_vault_from_env()
+    if _vault is not None:
+        set_token_vault(_vault)
+        logger.info("TokenVault initialized for credential proxy")
 
     shutdown_event = asyncio.Event()
 

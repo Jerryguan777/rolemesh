@@ -1,3 +1,5 @@
+import { refreshTokenSilent } from './oidc-auth.js';
+
 export type ServerMessage =
   | { type: 'session'; chatId: string; agentId: string }
   | { type: 'thinking' }
@@ -27,13 +29,18 @@ export class AgentClient {
   private autoReconnect = true;
   private pendingMessages: string[] = [];
   readonly agentId: string;
-  readonly token: string;
+  token: string;
 
   chatId: string | null = null;
 
   constructor(agentId: string, token: string) {
     this.agentId = agentId;
     this.token = token;
+  }
+
+  /** Update the token (called after a silent refresh). Does NOT reconnect. */
+  setToken(newToken: string): void {
+    this.token = newToken;
   }
 
   get connected(): boolean {
@@ -74,11 +81,23 @@ export class AgentClient {
       }
     };
 
-    this.ws.onclose = () => {
+    this.ws.onclose = (event) => {
       const wasConnected = this._connected;
       this._connected = false;
       if (wasConnected) {
         this.notify({ type: 'error', message: 'Connection lost. Reconnecting...' });
+      }
+      // Auth failure codes: 1008 (policy violation, e.g. invalid token),
+      // 4001-4099 (custom: 4003 = not assigned, 4004 = agent not found).
+      // For 1008, try refresh first; for 4xxx, the user truly cannot access this agent.
+      if (this.autoReconnect && event.code === 1008) {
+        void this.tryRefreshAndReconnect();
+        return;
+      }
+      if (event.code >= 4000 && event.code < 5000) {
+        // Permanent failure — stop auto-reconnect to avoid loop
+        this.autoReconnect = false;
+        return;
       }
       if (this.autoReconnect) {
         this.scheduleReconnect();
@@ -119,6 +138,19 @@ export class AgentClient {
     }, 3000);
   }
 
+  /** WebSocket closed with auth failure → try refreshing token then reconnect. */
+  private async tryRefreshAndReconnect(): Promise<void> {
+    const newToken = await refreshTokenSilent();
+    if (newToken) {
+      this.token = newToken;
+      this.connect();
+    } else {
+      // Refresh failed — give up auto-reconnect; let app surface auth-failed
+      this.autoReconnect = false;
+      window.dispatchEvent(new CustomEvent('rm-auth-failed'));
+    }
+  }
+
   disconnect(): void {
     this.autoReconnect = false;
     if (this.reconnectTimer) {
@@ -137,17 +169,32 @@ export class AgentClient {
 
   // --- REST API helpers ---
 
+  /** Fetch with automatic 401 → refresh → retry. */
+  private async fetchWithRefresh(buildUrl: (token: string) => string): Promise<Response> {
+    let res = await fetch(buildUrl(this.token));
+    if (res.status === 401) {
+      const newToken = await refreshTokenSilent();
+      if (newToken) {
+        this.token = newToken;
+        res = await fetch(buildUrl(newToken));
+      }
+    }
+    return res;
+  }
+
   async fetchConversations(): Promise<ConversationSummary[]> {
-    const res = await fetch(
-      `/api/conversations?agent_id=${encodeURIComponent(this.agentId)}&token=${encodeURIComponent(this.token)}`
+    const res = await this.fetchWithRefresh(
+      (token) =>
+        `/api/conversations?agent_id=${encodeURIComponent(this.agentId)}&token=${encodeURIComponent(token)}`
     );
     if (!res.ok) return [];
     return res.json();
   }
 
   async fetchMessages(chatId: string): Promise<HistoryMessage[]> {
-    const res = await fetch(
-      `/api/conversations/${encodeURIComponent(chatId)}/messages?agent_id=${encodeURIComponent(this.agentId)}&token=${encodeURIComponent(this.token)}`
+    const res = await this.fetchWithRefresh(
+      (token) =>
+        `/api/conversations/${encodeURIComponent(chatId)}/messages?agent_id=${encodeURIComponent(this.agentId)}&token=${encodeURIComponent(token)}`
     );
     if (!res.ok) return [];
     return res.json();

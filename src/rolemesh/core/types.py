@@ -65,12 +65,21 @@ class McpServerConfig:
     Stored in the coworker's `tools` JSONB field in the database.
     The `url` is the actual MCP server URL on the host machine.
     The `headers` are injected by the credential proxy when forwarding requests.
+
+    auth_mode controls how the MCP server is authenticated:
+      * "user"    — forward the user's IdP access_token as Authorization
+                    (default; OIDC-aware MCP servers)
+      * "service" — only inject per-server static headers (legacy/internal MCP
+                    that uses a shared service key)
+      * "both"    — inject both: per-server headers stay intact, user token
+                    goes into X-User-Authorization (high-security scenarios)
     """
 
     name: str  # registered name in claude_agent_sdk, e.g. "my-mcp-server"
     type: str  # transport type: "sse" or "http"
     url: str  # actual MCP server URL, e.g. "http://localhost:9100/mcp/"
     headers: dict[str, str] = field(default_factory=dict)  # auth headers injected by proxy
+    auth_mode: str = "user"  # "user" | "service" | "both"
 
 
 # ---------------------------------------------------------------------------

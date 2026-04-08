@@ -26,3 +26,12 @@ OIDC_SCOPE_ROLE_MAP: str = os.environ.get("OIDC_SCOPE_ROLE_MAP", "")  # JSON
 OIDC_CLAIM_ROLE: str = os.environ.get("OIDC_CLAIM_ROLE", "")
 OIDC_CLAIM_TENANT_ID: str = os.environ.get("OIDC_CLAIM_TENANT_ID", "")
 OIDC_ADAPTER: str = os.environ.get("OIDC_ADAPTER", "")  # module path, e.g. "myapp.adapters.MyAdapter"
+
+# Refresh token cookie configuration
+OIDC_COOKIE_SAMESITE: str = os.environ.get("OIDC_COOKIE_SAMESITE", "lax")  # lax | strict | none
+OIDC_COOKIE_SECURE: bool = os.environ.get("OIDC_COOKIE_SECURE", "true").lower() == "true"
+OIDC_REFRESH_COOKIE_TTL: int = int(os.environ.get("OIDC_REFRESH_COOKIE_TTL", str(30 * 86400)))  # 30 days
+
+# CORS allowed origins (comma-separated). Required for embedded SaaS scenarios
+# where the browser sends credentials cross-origin.
+CORS_ORIGINS: list[str] = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]

@@ -22,27 +22,24 @@ from rolemesh.core.env import read_env_file
 from rolemesh.core.logger import get_logger
 
 if TYPE_CHECKING:
-    from rolemesh.auth.token_service import TokenService
+    from rolemesh.auth.token_vault import TokenVault
 
 logger = get_logger()
 
-# Module-level TokenService for MCP user identity forwarding
-_token_service: TokenService | None = None
+# Module-level TokenVault for per-user IdP token forwarding to MCP servers
+_token_vault: TokenVault | None = None
 
-# Headers sent by containers to identify the user
-_ROLEMESH_IDENTITY_HEADERS = (
-    "X-RoleMesh-User-Id",
-    "X-RoleMesh-Tenant-Id",
-    "X-RoleMesh-Coworker-Id",
-    "X-RoleMesh-Conversation-Id",
-)
+# The only identity header containers send. Other identity (tenant_id, etc.)
+# is no longer needed because the vault is keyed by user_id.
+_USER_ID_HEADER = "X-RoleMesh-User-Id"
 
 
-def set_token_service(ts: TokenService) -> None:
-    """Set the TokenService instance for MCP user identity forwarding."""
-    global _token_service
-    _token_service = ts
-    logger.info("TokenService configured for MCP identity forwarding")
+def set_token_vault(vault: TokenVault) -> None:
+    """Set the TokenVault instance for per-user MCP token forwarding."""
+    global _token_vault
+    _token_vault = vault
+    logger.info("TokenVault configured for MCP user token forwarding")
+
 
 AuthMode = Literal["api-key", "oauth"]
 
@@ -60,17 +57,24 @@ _SKIP_RESPONSE_HEADERS = frozenset(
     }
 )
 
-# Module-level MCP server registry: server_name → (origin URL, headers to inject)
-_mcp_registry: dict[str, tuple[str, dict[str, str]]] = {}
+# Module-level MCP server registry:
+#   server_name → (origin URL, per-server headers, auth_mode)
+# auth_mode controls user-token injection (see McpServerConfig).
+_mcp_registry: dict[str, tuple[str, dict[str, str], str]] = {}
 
 
-def register_mcp_server(name: str, url: str, headers: dict[str, str] | None = None) -> None:
+def register_mcp_server(
+    name: str,
+    url: str,
+    headers: dict[str, str] | None = None,
+    auth_mode: str = "user",
+) -> None:
     """Register an MCP server for proxy forwarding."""
-    _mcp_registry[name] = (url, headers or {})
-    logger.info("MCP server registered", name=name, url=url)
+    _mcp_registry[name] = (url, headers or {}, auth_mode)
+    logger.info("MCP server registered", name=name, url=url, auth_mode=auth_mode)
 
 
-def get_mcp_registry() -> dict[str, tuple[str, dict[str, str]]]:
+def get_mcp_registry() -> dict[str, tuple[str, dict[str, str], str]]:
     """Get the current MCP server registry."""
     return dict(_mcp_registry)
 
@@ -138,7 +142,7 @@ async def start_credential_proxy(port: int, host: str = "127.0.0.1") -> web.AppR
         if not entry:
             return web.Response(status=404, text=f"MCP server not found: {server_name}")
 
-        origin, server_headers = entry
+        origin, server_headers, auth_mode = entry
         target_url = f"{origin}{remaining_path}"
 
         fwd_headers: dict[str, str] = {}
@@ -147,22 +151,23 @@ async def start_credential_proxy(port: int, host: str = "127.0.0.1") -> web.AppR
                 fwd_headers[key] = value
         fwd_headers.pop("host", None)
         fwd_headers.pop("Host", None)
-        # Inject per-server headers (overrides any forwarded headers with same key)
+        # Inject per-server static headers first (service-to-service auth)
         fwd_headers.update(server_headers)
 
-        # MCP user identity forwarding: if the container sent identity headers,
-        # issue a short-lived RoleMesh JWT and inject it as Authorization header
-        user_id = request.headers.get("X-RoleMesh-User-Id")
-        if user_id and _token_service:
-            tenant_id = request.headers.get("X-RoleMesh-Tenant-Id", "")
-            coworker_id = request.headers.get("X-RoleMesh-Coworker-Id", "")
-            conversation_id = request.headers.get("X-RoleMesh-Conversation-Id", "")
-            short_token = _token_service.issue(user_id, tenant_id, coworker_id, conversation_id)
-            fwd_headers["Authorization"] = f"Bearer {short_token}"
+        # Per-user IdP token forwarding (auth_mode="user" or "both")
+        user_id = request.headers.get(_USER_ID_HEADER)
+        if auth_mode in ("user", "both") and user_id and _token_vault is not None:
+            access_token = await _token_vault.get_fresh_access_token(user_id)
+            if access_token:
+                if auth_mode == "user":
+                    # Override per-server Authorization with user's IdP token
+                    fwd_headers["Authorization"] = f"Bearer {access_token}"
+                else:  # both
+                    # Keep service Authorization, add user token in separate header
+                    fwd_headers["X-User-Authorization"] = f"Bearer {access_token}"
 
-        # Strip raw identity headers — don't leak to MCP server
-        for h in _ROLEMESH_IDENTITY_HEADERS:
-            fwd_headers.pop(h, None)
+        # Strip identity header — don't leak to MCP server
+        fwd_headers.pop(_USER_ID_HEADER, None)
 
         body = await request.read()
 

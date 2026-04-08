@@ -11,6 +11,7 @@ import {
   getStoredToken,
   handleCallback,
   isTokenExpired,
+  scheduleRefresh,
 } from './services/oidc-auth.js';
 
 type AuthState = 'loading' | 'login' | 'authenticated';
@@ -27,6 +28,10 @@ export class RmApp extends LitElement {
     super.connectedCallback();
     this.style.display = 'block';
     this.style.height = '100%';
+    // Listen for unrecoverable auth failures (refresh exhausted, etc.)
+    window.addEventListener('rm-auth-failed', () => {
+      this.authState = 'login';
+    });
     await this.resolveAuth();
   }
 
@@ -37,6 +42,7 @@ export class RmApp extends LitElement {
     const urlToken = params.get('token');
     if (urlToken && !isTokenExpired(urlToken)) {
       this.authState = 'authenticated';
+      this.startRefreshScheduler(urlToken);
       return;
     }
 
@@ -46,6 +52,7 @@ export class RmApp extends LitElement {
       if (exchanged) {
         // Token now in sessionStorage; chat-panel reads it from there
         this.authState = 'authenticated';
+        this.startRefreshScheduler(exchanged.id_token);
         return;
       }
     }
@@ -54,6 +61,7 @@ export class RmApp extends LitElement {
     const stored = getStoredToken();
     if (stored && !isTokenExpired(stored)) {
       this.authState = 'authenticated';
+      this.startRefreshScheduler(stored);
       return;
     }
 
@@ -66,6 +74,15 @@ export class RmApp extends LitElement {
 
     // 5. Fall back to chat panel (legacy / no auth provider configured)
     this.authState = 'authenticated';
+  }
+
+  private startRefreshScheduler(token: string): void {
+    scheduleRefresh(token, (newToken) => {
+      // Notify chat-panel to update its agent client and reconnect WebSocket
+      window.dispatchEvent(
+        new CustomEvent('rm-token-refreshed', { detail: newToken })
+      );
+    });
   }
 
   override render() {

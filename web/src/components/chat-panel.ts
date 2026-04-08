@@ -12,6 +12,7 @@ export interface ChatMessage {
 export class ChatPanel extends LitElement {
   private client: AgentClient;
   private unsubscribe?: () => void;
+  private tokenRefreshHandler?: (e: Event) => void;
 
   @state() messages: ChatMessage[] = [];
   @state() isStreaming = false;
@@ -41,6 +42,16 @@ export class ChatPanel extends LitElement {
     this.style.minHeight = '0';
     this.unsubscribe = this.client.subscribe((msg) => this.handleMessage(msg));
 
+    // React to background token refresh: update client token and reconnect WebSocket
+    this.tokenRefreshHandler = (e: Event) => {
+      const newToken = (e as CustomEvent<string>).detail;
+      if (newToken) {
+        this.client.setToken(newToken);
+        this.client.reconnect(this.activeChatId ?? undefined);
+      }
+    };
+    window.addEventListener('rm-token-refreshed', this.tokenRefreshHandler);
+
     if (this.activeChatId) {
       // Restore conversation from URL
       this.client.connect(this.activeChatId);
@@ -56,6 +67,9 @@ export class ChatPanel extends LitElement {
   override disconnectedCallback() {
     super.disconnectedCallback();
     this.unsubscribe?.();
+    if (this.tokenRefreshHandler) {
+      window.removeEventListener('rm-token-refreshed', this.tokenRefreshHandler);
+    }
     this.client.disconnect();
   }
 

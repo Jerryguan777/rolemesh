@@ -1,9 +1,4 @@
-"""RoleMesh authentication and authorization.
-
-TokenService is not re-exported here to avoid pulling in PyJWT on every
-import.  Use ``from rolemesh.auth.token_service import TokenService``
-when needed.
-"""
+"""RoleMesh authentication and authorization."""
 
 from rolemesh.auth.authorization import (
     can_delegate,

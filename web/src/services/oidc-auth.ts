@@ -76,17 +76,21 @@ export function clearToken(): void {
   sessionStorage.removeItem(STORAGE_STATE);
 }
 
-export function isTokenExpired(token: string): boolean {
+/** Decode JWT payload without signature verification (validation happens server-side). */
+function parseJwtPayload(token: string): { exp?: number; [k: string]: unknown } | null {
   try {
     const parts = token.split('.');
-    if (parts.length !== 3) return true;
-    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
-    const exp = payload.exp;
-    if (typeof exp !== 'number') return true;
-    return Date.now() / 1000 >= exp - 30; // 30s clock skew margin
+    if (parts.length !== 3) return null;
+    return JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
   } catch {
-    return true;
+    return null;
   }
+}
+
+export function isTokenExpired(token: string): boolean {
+  const payload = parseJwtPayload(token);
+  if (!payload || typeof payload.exp !== 'number') return true;
+  return Date.now() / 1000 >= payload.exp - 30; // 30s clock skew margin
 }
 
 // ---------- Login flow ----------
@@ -137,6 +141,7 @@ export async function handleCallback(): Promise<ExchangeResponse | null> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ code, code_verifier: verifier }),
+    credentials: 'include', // accept the httpOnly refresh cookie set by backend
   });
   if (!res.ok) return null;
   const data = (await res.json()) as ExchangeResponse;
@@ -144,7 +149,76 @@ export async function handleCallback(): Promise<ExchangeResponse | null> {
   return data;
 }
 
-export function logout(): void {
+// ---------- Refresh ----------
+
+let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+let refreshInFlight: Promise<string | null> | null = null;
+
+/** Call the backend refresh endpoint. The httpOnly cookie is sent automatically. */
+export async function refreshTokenSilent(): Promise<string | null> {
+  // De-duplicate concurrent refresh attempts
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = (async () => {
+    try {
+      const res = await fetch('/api/auth/refresh', {
+        method: 'POST',
+        credentials: 'include',
+      });
+      if (!res.ok) return null;
+      const data = (await res.json()) as ExchangeResponse;
+      storeToken(data.id_token);
+      return data.id_token;
+    } catch {
+      return null;
+    } finally {
+      refreshInFlight = null;
+    }
+  })();
+  return refreshInFlight;
+}
+
+/** Schedule a background refresh based on the token's exp claim.
+ *  Calls onRefreshed with the new token; on failure, forces re-login.
+ */
+export function scheduleRefresh(token: string, onRefreshed: (newToken: string) => void): void {
+  if (refreshTimer) clearTimeout(refreshTimer);
+  const payload = parseJwtPayload(token);
+  if (!payload || typeof payload.exp !== 'number') return;
+  const msUntilExpiry = payload.exp * 1000 - Date.now();
+  // Refresh 5 min before expiry, but at least 10s in the future
+  const refreshAt = Math.max(msUntilExpiry - 5 * 60_000, 10_000);
+  refreshTimer = setTimeout(async () => {
+    const newToken = await refreshTokenSilent();
+    if (newToken) {
+      onRefreshed(newToken);
+      scheduleRefresh(newToken, onRefreshed);
+    } else {
+      // Refresh failed → notify app, let it decide how to handle
+      clearToken();
+      window.dispatchEvent(new CustomEvent('rm-auth-failed'));
+    }
+  }, refreshAt);
+}
+
+export function cancelRefresh(): void {
+  if (refreshTimer) {
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+  }
+}
+
+export async function logout(): Promise<void> {
+  const token = getStoredToken();
+  cancelRefresh();
   clearToken();
+  try {
+    await fetch('/api/auth/logout', {
+      method: 'POST',
+      credentials: 'include',
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    });
+  } catch {
+    /* ignore */
+  }
   location.reload();
 }

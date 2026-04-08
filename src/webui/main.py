@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 import asyncpg
 import nats
 from fastapi import FastAPI, Query, WebSocket
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from nats.js.api import StreamConfig
@@ -19,7 +20,14 @@ from rolemesh.db import pg
 from rolemesh.db.pg import _get_pool, close_database, init_database
 from webui import auth, ws
 from webui.admin import router as admin_router
-from webui.config import DATABASE_URL, NATS_URL, WEB_UI_DIST, WEB_UI_HOST, WEB_UI_PORT
+from webui.config import (
+    CORS_ORIGINS,
+    DATABASE_URL,
+    NATS_URL,
+    WEB_UI_DIST,
+    WEB_UI_HOST,
+    WEB_UI_PORT,
+)
 
 
 async def _init_db() -> None:
@@ -65,6 +73,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await auth.init_auth(_get_pool())
     await auth.init_auth_provider()
 
+    # Initialize TokenVault for OIDC token mirroring (mirrors orchestrator init).
+    # This is per-process: orchestrator and webui each hold their own vault.
+    from rolemesh.auth.token_vault import create_vault_from_env
+    from webui import oidc_routes
+
+    _vault = await create_vault_from_env()
+    if _vault is not None:
+        oidc_routes.set_token_vault(_vault)
+
     yield
 
     # Shutdown
@@ -76,6 +93,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(lifespan=lifespan)
+
+# CORS for embedded SaaS scenarios where the browser sends credentials
+# (httpOnly refresh cookie) cross-origin. Only enabled when CORS_ORIGINS is set.
+if CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=CORS_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 
 @app.get("/api/health")

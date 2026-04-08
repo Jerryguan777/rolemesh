@@ -476,13 +476,24 @@ async def run_query(
         "mcp__rolemesh__*",
     ]
 
-    # Register external MCP servers from init data
+    # Register external MCP servers from init data.
+    # Inject X-RoleMesh-User-Id header so the credential proxy can resolve
+    # the user's IdP token from the server-side TokenVault.
     if mcp_servers:
         for spec in mcp_servers:
-            mcp_servers_dict[spec.name] = {
+            server_config: dict[str, Any] = {
                 "type": spec.type,
                 "url": spec.url,
             }
+            # Merge with any existing headers on the spec (future-proof) and
+            # add user identity. Always emit headers dict so credential proxy
+            # gets a consistent shape.
+            spec_headers = dict(getattr(spec, "headers", None) or {})
+            if container_input.user_id:
+                spec_headers["X-RoleMesh-User-Id"] = container_input.user_id
+            if spec_headers:
+                server_config["headers"] = spec_headers
+            mcp_servers_dict[spec.name] = server_config
             allowed_tools.append(f"mcp__{spec.name}__*")
             log(f"External MCP server registered: {spec.name} ({spec.type}) → {spec.url}")
 

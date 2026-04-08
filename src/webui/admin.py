@@ -81,7 +81,16 @@ def _coworker_to_response(cw: Coworker) -> AgentResponse:
         folder=cw.folder,
         agent_backend=cw.agent_backend,
         system_prompt=cw.system_prompt,
-        tools=[{"name": t.name, "type": t.type, "url": t.url, "headers": t.headers} for t in cw.tools],
+        tools=[
+            {
+                "name": t.name,
+                "type": t.type,
+                "url": t.url,
+                "headers": t.headers,
+                "auth_mode": t.auth_mode,
+            }
+            for t in cw.tools
+        ],
         skills=cw.skills,
         max_concurrent=cw.max_concurrent,
         status=cw.status,
@@ -159,15 +168,21 @@ async def _get_agent_or_404(agent_id: str, tenant_id: str) -> Coworker:
 
 def _parse_tools(tools_dicts: list[dict[str, object]]) -> list[McpServerConfig]:
     """Convert a list of tool dicts to McpServerConfig objects."""
-    return [
-        McpServerConfig(
-            name=str(t["name"]),
-            type=str(t.get("type", "http")),
-            url=str(t["url"]),
-            headers=dict(t.get("headers") or {}),  # type: ignore[arg-type]
+    result: list[McpServerConfig] = []
+    for t in tools_dicts:
+        auth_mode = str(t.get("auth_mode") or "user")
+        if auth_mode not in ("user", "service", "both"):
+            auth_mode = "user"
+        result.append(
+            McpServerConfig(
+                name=str(t["name"]),
+                type=str(t.get("type", "http")),
+                url=str(t["url"]),
+                headers=dict(t.get("headers") or {}),  # type: ignore[arg-type]
+                auth_mode=auth_mode,
+            )
         )
-        for t in tools_dicts
-    ]
+    return result
 
 
 def _parse_permissions(perms_dict: dict[str, object] | None) -> AgentPermissions | None:
