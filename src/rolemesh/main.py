@@ -63,6 +63,7 @@ from rolemesh.db.pg import (
     get_all_coworkers,
     get_all_sessions,
     get_all_tasks,
+    get_conversation_by_binding_and_chat,
     get_messages_since,
     get_new_messages_for_conversations,
     get_tenant_by_slug,
@@ -231,15 +232,20 @@ async def _auto_create_web_conversation(
     for cw in _state.coworkers.values():
         for b in cw.channel_bindings.values():
             if b.id == binding_id and b.channel_type == "web":
-                conv = await create_conversation(
-                    tenant_id=cw.config.tenant_id,
-                    coworker_id=cw.config.id,
-                    channel_binding_id=binding_id,
-                    channel_chat_id=chat_id,
-                    name=f"Web Chat {chat_id[:8]}",
-                    requires_trigger=False,
-                    user_id=None,
-                )
+                # ws.py may have already created the conversation before the
+                # NATS message reaches the orchestrator. Check DB first to
+                # avoid a UniqueViolationError on (binding_id, chat_id).
+                conv = await get_conversation_by_binding_and_chat(binding_id, chat_id)
+                if conv is None:
+                    conv = await create_conversation(
+                        tenant_id=cw.config.tenant_id,
+                        coworker_id=cw.config.id,
+                        channel_binding_id=binding_id,
+                        channel_chat_id=chat_id,
+                        name=f"Web Chat {chat_id[:8]}",
+                        requires_trigger=False,
+                        user_id=None,
+                    )
                 conv_state = ConversationState(conversation=conv)
                 cw.conversations[conv.id] = conv_state
                 logger.info(
