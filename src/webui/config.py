@@ -16,21 +16,39 @@ WEB_UI_DIST: Path = Path(os.environ.get("WEB_UI_DIST", "web/dist"))
 ADMIN_BOOTSTRAP_TOKEN: str = os.environ.get("ADMIN_BOOTSTRAP_TOKEN", "")
 
 # --- OIDC configuration (used when AUTH_MODE=oidc) ---
-OIDC_DISCOVERY_URL: str = os.environ.get("OIDC_DISCOVERY_URL", "")
-OIDC_CLIENT_ID: str = os.environ.get("OIDC_CLIENT_ID", "")
-OIDC_CLIENT_SECRET: str = os.environ.get("OIDC_CLIENT_SECRET", "")
-OIDC_REDIRECT_URI: str = os.environ.get("OIDC_REDIRECT_URI", "")
-OIDC_SCOPES: str = os.environ.get("OIDC_SCOPES", "openid profile email")
-OIDC_AUDIENCE: str = os.environ.get("OIDC_AUDIENCE", "")  # defaults to client_id
-OIDC_SCOPE_ROLE_MAP: str = os.environ.get("OIDC_SCOPE_ROLE_MAP", "")  # JSON
-OIDC_CLAIM_ROLE: str = os.environ.get("OIDC_CLAIM_ROLE", "")
-OIDC_CLAIM_TENANT_ID: str = os.environ.get("OIDC_CLAIM_TENANT_ID", "")
-OIDC_ADAPTER: str = os.environ.get("OIDC_ADAPTER", "")  # module path, e.g. "myapp.adapters.MyAdapter"
+# Convenience re-export so existing webui imports keep working. The source of
+# truth is rolemesh.auth.oidc.config; new code may import from either location.
+from rolemesh.auth.oidc.config import (  # noqa: E402
+    OIDC_ADAPTER,
+    OIDC_AUDIENCE,
+    OIDC_CLAIM_ROLE,
+    OIDC_CLAIM_TENANT_ID,
+    OIDC_CLIENT_ID,
+    OIDC_CLIENT_SECRET,
+    OIDC_COOKIE_SAMESITE,
+    OIDC_COOKIE_SECURE,
+    OIDC_DISCOVERY_URL,
+    OIDC_REDIRECT_URI,
+    OIDC_REFRESH_COOKIE_TTL,
+    OIDC_SCOPE_ROLE_MAP,
+    OIDC_SCOPES,
+)
 
-# Refresh token cookie configuration
-OIDC_COOKIE_SAMESITE: str = os.environ.get("OIDC_COOKIE_SAMESITE", "lax")  # lax | strict | none
-OIDC_COOKIE_SECURE: bool = os.environ.get("OIDC_COOKIE_SECURE", "true").lower() == "true"
-OIDC_REFRESH_COOKIE_TTL: int = int(os.environ.get("OIDC_REFRESH_COOKIE_TTL", str(30 * 86400)))  # 30 days
+__all__ = [
+    "OIDC_ADAPTER",
+    "OIDC_AUDIENCE",
+    "OIDC_CLAIM_ROLE",
+    "OIDC_CLAIM_TENANT_ID",
+    "OIDC_CLIENT_ID",
+    "OIDC_CLIENT_SECRET",
+    "OIDC_COOKIE_SAMESITE",
+    "OIDC_COOKIE_SECURE",
+    "OIDC_DISCOVERY_URL",
+    "OIDC_REDIRECT_URI",
+    "OIDC_REFRESH_COOKIE_TTL",
+    "OIDC_SCOPES",
+    "OIDC_SCOPE_ROLE_MAP",
+]
 
 # CORS allowed origins (comma-separated). Required for embedded SaaS scenarios
 # where the browser sends credentials cross-origin.

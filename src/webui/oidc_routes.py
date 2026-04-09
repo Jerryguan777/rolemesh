@@ -31,7 +31,7 @@ from webui.config import (
 )
 
 if TYPE_CHECKING:
-    from rolemesh.auth.oidc_provider import OIDCAuthProvider
+    from rolemesh.auth.oidc.provider import OIDCAuthProvider
 
 logger = get_logger()
 router = APIRouter(tags=["auth"])
@@ -51,7 +51,7 @@ def set_token_vault(vault) -> None:  # type: ignore[no-untyped-def]
 
 def _get_oidc_provider() -> OIDCAuthProvider:
     """Return the active OIDCAuthProvider, raising if not configured."""
-    from rolemesh.auth.oidc_provider import OIDCAuthProvider
+    from rolemesh.auth.oidc.provider import OIDCAuthProvider
 
     provider = auth.get_provider()
     if not isinstance(provider, OIDCAuthProvider):

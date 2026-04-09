@@ -42,8 +42,9 @@ def create_auth_provider(mode: str = "") -> AuthProvider:
         return BuiltinProvider()  # type: ignore[return-value]
 
     if mode == "oidc":
-        from rolemesh.auth.oidc_provider import DefaultOIDCAdapter, OIDCAuthProvider
-        from webui.config import OIDC_AUDIENCE, OIDC_CLIENT_ID, OIDC_DISCOVERY_URL
+        from rolemesh.auth.oidc.adapter import DefaultOIDCAdapter
+        from rolemesh.auth.oidc.config import OIDC_AUDIENCE, OIDC_CLIENT_ID, OIDC_DISCOVERY_URL
+        from rolemesh.auth.oidc.provider import OIDCAuthProvider
 
         # Optional custom adapter via OIDC_ADAPTER=module.path.ClassName
         adapter_spec = os.environ.get("OIDC_ADAPTER", "")

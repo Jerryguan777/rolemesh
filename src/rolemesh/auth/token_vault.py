@@ -241,7 +241,7 @@ async def create_vault_from_env() -> TokenVault | None:
     client_secret = os.environ.get("OIDC_CLIENT_SECRET", "")
 
     # Resolve token endpoint via OIDC discovery
-    from rolemesh.auth.oidc_provider import OIDCAuthProvider
+    from rolemesh.auth.oidc.provider import OIDCAuthProvider
 
     temp_provider = OIDCAuthProvider(
         discovery_url=discovery_url,

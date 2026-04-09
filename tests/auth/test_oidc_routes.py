@@ -130,7 +130,7 @@ def mock_httpx(public_jwk, make_token):
     def _factory(*_args, **_kwargs):
         return _MockClient(state["get_routes"], state["post_routes"])
 
-    with patch("rolemesh.auth.oidc_provider.httpx.AsyncClient", _factory), patch(
+    with patch("rolemesh.auth.oidc.jwks.httpx.AsyncClient", _factory), patch(
         "webui.oidc_routes.httpx.AsyncClient", _factory
     ):
         yield state
@@ -235,12 +235,15 @@ def app_with_oidc(monkeypatch, mock_httpx, mock_db):
     monkeypatch.setenv("OIDC_REDIRECT_URI", "http://localhost:8080/oauth2/callback")
     monkeypatch.setenv("OIDC_COOKIE_SECURE", "false")  # allow http in tests
 
+    import rolemesh.auth.oidc.config
     import webui.config
 
+    importlib.reload(rolemesh.auth.oidc.config)
     importlib.reload(webui.config)
 
     # Set up provider in webui.auth module
-    from rolemesh.auth.oidc_provider import DefaultOIDCAdapter, OIDCAuthProvider
+    from rolemesh.auth.oidc.adapter import DefaultOIDCAdapter
+    from rolemesh.auth.oidc.provider import OIDCAuthProvider
     from webui import auth
 
     auth._provider = OIDCAuthProvider(
