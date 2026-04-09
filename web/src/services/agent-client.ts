@@ -58,9 +58,11 @@ export class AgentClient {
       this.reconnectTimer = null;
     }
 
-    // Close existing WS without triggering scheduleReconnect from its onclose.
+    // Close existing WS. Detach handlers first so the async onclose event
+    // doesn't trigger scheduleReconnect or "Connection lost" notifications.
     if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
-      this.autoReconnect = false;
+      this.ws.onclose = null;
+      this.ws.onerror = null;
       this.ws.close();
       this.ws = null;
     }
