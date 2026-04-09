@@ -27,7 +27,8 @@ from typing import TYPE_CHECKING, Any
 
 import nats
 from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, query
-from rolemesh_ipc_protocol import AgentInitData, McpServerSpec
+
+from rolemesh.ipc.protocol import AgentInitData, McpServerSpec
 
 from .ipc_mcp import create_rolemesh_mcp_server
 

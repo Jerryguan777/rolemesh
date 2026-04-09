@@ -18,9 +18,13 @@ RUN pip install --no-cache-dir claude-agent-sdk croniter nats-py
 # Create app directory
 WORKDIR /app
 
-# Copy agent runner code and shared IPC protocol
+# Copy agent runner code and shared IPC protocol.
+# protocol.py imports rolemesh.auth.permissions, so we mirror the package
+# layout under /app rather than flattening to a single module.
 COPY src/agent_runner/ ./agent_runner/
-COPY src/rolemesh/ipc/protocol.py ./rolemesh_ipc_protocol.py
+COPY src/rolemesh/ipc/protocol.py ./rolemesh/ipc/protocol.py
+COPY src/rolemesh/auth/permissions.py ./rolemesh/auth/permissions.py
+RUN touch ./rolemesh/__init__.py ./rolemesh/ipc/__init__.py ./rolemesh/auth/__init__.py
 
 # Create workspace directories (no IPC dirs needed — all IPC goes through NATS)
 RUN mkdir -p /workspace/group /workspace/global /workspace/extra

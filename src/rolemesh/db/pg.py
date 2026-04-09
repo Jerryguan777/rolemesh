@@ -293,6 +293,18 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         """)
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_task_run_logs ON task_run_logs(task_id, run_at)")
 
+    # Idempotent default tenant. OIDCAuthProvider._provision_tenant falls back
+    # to slug='default' for single-tenant deployments where the IdP doesn't
+    # carry a tenant claim. Without this row, the first OIDC login on a fresh
+    # database returns None and authentication fails opaquely.
+    await conn.execute(
+        """
+        INSERT INTO tenants (slug, name)
+        VALUES ('default', 'Default')
+        ON CONFLICT (slug) DO NOTHING
+        """
+    )
+
 
 async def init_database(database_url: str | None = None) -> None:
     """Initialize PostgreSQL connection pool and create schema."""
