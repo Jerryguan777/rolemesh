@@ -100,6 +100,10 @@ async def handle_ws(ws: WebSocket, agent_id: str, token: str, chat_id: str = "")
             channel_binding_id=binding_id,
             channel_chat_id=chat_id,
             user_id=user.user_id if user.user_id != BOOTSTRAP_USER_ID else None,
+            # Web is 1:1 direct chat — no trigger pattern gating. The pg default
+            # of True is correct for telegram/slack group chats but would cause
+            # the orchestrator to ignore plain "hello" messages from web users.
+            requires_trigger=False,
         )
     elif conv.user_id is None and user.user_id != BOOTSTRAP_USER_ID:
         await pg.update_conversation_user_id(conv.id, user.user_id)

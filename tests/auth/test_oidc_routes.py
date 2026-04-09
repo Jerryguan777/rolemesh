@@ -243,13 +243,16 @@ def app_with_oidc(monkeypatch, mock_httpx, mock_db):
 
     # Set up provider in webui.auth module
     from rolemesh.auth.oidc.adapter import DefaultOIDCAdapter
+    from rolemesh.auth.oidc.config import OIDCConfig
     from rolemesh.auth.oidc.provider import OIDCAuthProvider
     from webui import auth
 
     auth._provider = OIDCAuthProvider(
-        discovery_url="https://test.example.com/.well-known/openid-configuration",
-        client_id="test-client",
-        audience="test-client",
+        OIDCConfig(
+            discovery_url="https://test.example.com/.well-known/openid-configuration",
+            client_id="test-client",
+            audience="test-client",
+        ),
         adapter=DefaultOIDCAdapter(),
     )
 

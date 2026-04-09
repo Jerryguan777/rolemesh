@@ -319,9 +319,10 @@ async def test_oidc_authenticate_creates_user_in_default_tenant(
     patch_jwks, oidc_env, mock_db, make_token
 ):
     from rolemesh.auth.oidc.adapter import DefaultOIDCAdapter
+    from rolemesh.auth.oidc.config import OIDCConfig
     from rolemesh.auth.oidc.provider import OIDCAuthProvider
 
-    provider = OIDCAuthProvider(discovery_url="https://test.example.com/.well-known/openid-configuration", client_id="test-client", audience="test-client", adapter=DefaultOIDCAdapter.from_env())
+    provider = OIDCAuthProvider(OIDCConfig(discovery_url="https://test.example.com/.well-known/openid-configuration", client_id="test-client", audience="test-client"), adapter=DefaultOIDCAdapter.from_env())
     token = make_token(
         {
             "sub": "user-12345",
@@ -349,9 +350,10 @@ async def test_oidc_authenticate_jit_provisions_tenant(
 ):
     monkeypatch.setenv("OIDC_CLAIM_TENANT_ID", "tid")
     from rolemesh.auth.oidc.adapter import DefaultOIDCAdapter
+    from rolemesh.auth.oidc.config import OIDCConfig
     from rolemesh.auth.oidc.provider import OIDCAuthProvider
 
-    provider = OIDCAuthProvider(discovery_url="https://test.example.com/.well-known/openid-configuration", client_id="test-client", audience="test-client", adapter=DefaultOIDCAdapter.from_env())
+    provider = OIDCAuthProvider(OIDCConfig(discovery_url="https://test.example.com/.well-known/openid-configuration", client_id="test-client", audience="test-client"), adapter=DefaultOIDCAdapter.from_env())
     token = make_token(
         {
             "sub": "user-tenant-test",
@@ -374,9 +376,10 @@ async def test_oidc_authenticate_rejects_wrong_audience(
     patch_jwks, oidc_env, mock_db, make_token
 ):
     from rolemesh.auth.oidc.adapter import DefaultOIDCAdapter
+    from rolemesh.auth.oidc.config import OIDCConfig
     from rolemesh.auth.oidc.provider import OIDCAuthProvider
 
-    provider = OIDCAuthProvider(discovery_url="https://test.example.com/.well-known/openid-configuration", client_id="test-client", audience="test-client", adapter=DefaultOIDCAdapter.from_env())
+    provider = OIDCAuthProvider(OIDCConfig(discovery_url="https://test.example.com/.well-known/openid-configuration", client_id="test-client", audience="test-client"), adapter=DefaultOIDCAdapter.from_env())
     token = make_token(
         {
             "sub": "user-bad-aud",
@@ -393,9 +396,10 @@ async def test_oidc_authenticate_rejects_wrong_issuer(
     patch_jwks, oidc_env, mock_db, make_token
 ):
     from rolemesh.auth.oidc.adapter import DefaultOIDCAdapter
+    from rolemesh.auth.oidc.config import OIDCConfig
     from rolemesh.auth.oidc.provider import OIDCAuthProvider
 
-    provider = OIDCAuthProvider(discovery_url="https://test.example.com/.well-known/openid-configuration", client_id="test-client", audience="test-client", adapter=DefaultOIDCAdapter.from_env())
+    provider = OIDCAuthProvider(OIDCConfig(discovery_url="https://test.example.com/.well-known/openid-configuration", client_id="test-client", audience="test-client"), adapter=DefaultOIDCAdapter.from_env())
     token = make_token(
         {
             "sub": "user-bad-iss",
@@ -412,9 +416,10 @@ async def test_oidc_authenticate_rejects_expired_token(
     patch_jwks, oidc_env, mock_db, make_token
 ):
     from rolemesh.auth.oidc.adapter import DefaultOIDCAdapter
+    from rolemesh.auth.oidc.config import OIDCConfig
     from rolemesh.auth.oidc.provider import OIDCAuthProvider
 
-    provider = OIDCAuthProvider(discovery_url="https://test.example.com/.well-known/openid-configuration", client_id="test-client", audience="test-client", adapter=DefaultOIDCAdapter.from_env())
+    provider = OIDCAuthProvider(OIDCConfig(discovery_url="https://test.example.com/.well-known/openid-configuration", client_id="test-client", audience="test-client"), adapter=DefaultOIDCAdapter.from_env())
     token = make_token(
         {
             "sub": "user-expired",
@@ -429,9 +434,10 @@ async def test_oidc_authenticate_rejects_expired_token(
 
 async def test_oidc_authenticate_rejects_garbage_token(patch_jwks, oidc_env, mock_db):
     from rolemesh.auth.oidc.adapter import DefaultOIDCAdapter
+    from rolemesh.auth.oidc.config import OIDCConfig
     from rolemesh.auth.oidc.provider import OIDCAuthProvider
 
-    provider = OIDCAuthProvider(discovery_url="https://test.example.com/.well-known/openid-configuration", client_id="test-client", audience="test-client", adapter=DefaultOIDCAdapter.from_env())
+    provider = OIDCAuthProvider(OIDCConfig(discovery_url="https://test.example.com/.well-known/openid-configuration", client_id="test-client", audience="test-client"), adapter=DefaultOIDCAdapter.from_env())
     assert await provider.authenticate("not-a-jwt") is None
     assert await provider.authenticate("") is None
 
@@ -441,9 +447,10 @@ async def test_oidc_authenticate_updates_existing_user_role(
 ):
     monkeypatch.setenv("OIDC_CLAIM_ROLE", "role")
     from rolemesh.auth.oidc.adapter import DefaultOIDCAdapter
+    from rolemesh.auth.oidc.config import OIDCConfig
     from rolemesh.auth.oidc.provider import OIDCAuthProvider
 
-    provider = OIDCAuthProvider(discovery_url="https://test.example.com/.well-known/openid-configuration", client_id="test-client", audience="test-client", adapter=DefaultOIDCAdapter.from_env())
+    provider = OIDCAuthProvider(OIDCConfig(discovery_url="https://test.example.com/.well-known/openid-configuration", client_id="test-client", audience="test-client"), adapter=DefaultOIDCAdapter.from_env())
     # First login as member
     token_v1 = make_token(
         {

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import json
-import os
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from rolemesh.core.logger import get_logger
+
+if TYPE_CHECKING:
+    from rolemesh.auth.oidc.config import OIDCConfig
 
 logger = get_logger()
 
@@ -49,6 +50,8 @@ class DefaultOIDCAdapter:
         claim_role: Direct role claim name (priority over scope mapping).
         scope_role_map: {scope: role} mapping for scope-based role resolution.
         claim_tenant_id: Claim name carrying the IdP tenant identifier.
+        claim_groups: Claim name carrying the user's group memberships.
+        group_role_map: {group: role} mapping for group-based role resolution.
 
     All parameters default to empty/None for single-tenant deployments
     where the IdP issues a single role claim or no role at all.
@@ -59,44 +62,59 @@ class DefaultOIDCAdapter:
         claim_role: str = "",
         scope_role_map: dict[str, str] | None = None,
         claim_tenant_id: str = "",
+        claim_groups: str = "",
+        group_role_map: dict[str, str] | None = None,
     ) -> None:
         self._claim_role = claim_role
         self._claim_tenant = claim_tenant_id
+        self._claim_groups = claim_groups
         # Validate values: silently dropping config is the default OIDC failure
         # mode that gives every user 'member' role with no log — surface it loudly.
+        self._scope_map: dict[str, str] = self._validate_role_map(
+            scope_role_map, "scope_role_map"
+        )
+        self._group_map: dict[str, str] = self._validate_role_map(
+            group_role_map, "group_role_map"
+        )
+
+    @staticmethod
+    def _validate_role_map(
+        raw: dict[str, str] | None, name: str
+    ) -> dict[str, str]:
         validated: dict[str, str] = {}
-        for scope, role in (scope_role_map or {}).items():
+        for key, role in (raw or {}).items():
             if role in _VALID_ROLES:
-                validated[scope] = role
+                validated[key] = role
             else:
                 logger.error(
-                    "OIDC scope_role_map value rejected; not in (owner|admin|member)",
-                    scope=scope,
+                    "OIDC role map value rejected; not in (owner|admin|member)",
+                    map_name=name,
+                    key=key,
                     role=role,
                 )
-        self._scope_map: dict[str, str] = validated
+        return validated
+
+    @classmethod
+    def from_config(cls, cfg: OIDCConfig) -> DefaultOIDCAdapter:
+        """Build a DefaultOIDCAdapter from a structured OIDCConfig."""
+        return cls(
+            claim_role=cfg.claim_role,
+            scope_role_map=cfg.scope_role_map,
+            claim_tenant_id=cfg.claim_tenant_id,
+            claim_groups=cfg.claim_groups,
+            group_role_map=cfg.group_role_map,
+        )
 
     @classmethod
     def from_env(cls) -> DefaultOIDCAdapter:
-        """Build a DefaultOIDCAdapter from OIDC_* environment variables."""
-        scope_map_raw = os.environ.get("OIDC_SCOPE_ROLE_MAP", "")
-        scope_map: dict[str, str] = {}
-        if scope_map_raw:
-            try:
-                parsed = json.loads(scope_map_raw)
-                if isinstance(parsed, dict):
-                    scope_map = {str(k): str(v) for k, v in parsed.items()}
-                else:
-                    logger.error(
-                        "OIDC_SCOPE_ROLE_MAP must be a JSON object", value=scope_map_raw
-                    )
-            except json.JSONDecodeError:
-                logger.error("Invalid OIDC_SCOPE_ROLE_MAP JSON", value=scope_map_raw)
-        return cls(
-            claim_role=os.environ.get("OIDC_CLAIM_ROLE", ""),
-            scope_role_map=scope_map,
-            claim_tenant_id=os.environ.get("OIDC_CLAIM_TENANT_ID", ""),
-        )
+        """Build a DefaultOIDCAdapter from OIDC_* environment variables.
+
+        Convenience wrapper: parses env into OIDCConfig, then delegates to
+        from_config so that JSON parsing happens in one place.
+        """
+        from rolemesh.auth.oidc.config import OIDCConfig
+
+        return cls.from_config(OIDCConfig.from_env())
 
     def map_role(self, claims: dict[str, Any]) -> str:
         # 1. Direct role claim takes priority
@@ -104,7 +122,31 @@ class DefaultOIDCAdapter:
             role = claims.get(self._claim_role)
             if isinstance(role, str) and role in _VALID_ROLES:
                 return role
-        # 2. Scope-based mapping — highest-privilege scope wins
+
+        # 2. Group-based mapping (enterprise IdPs put role signal in `groups`).
+        # Many id_tokens carry no `scope` claim at all — groups is the only
+        # signal. Highest-privilege group wins.
+        if self._claim_groups and self._group_map:
+            groups_value = claims.get(self._claim_groups, [])
+            if isinstance(groups_value, str):
+                # Some IdPs flatten to space- or comma-separated string
+                groups = [g.strip() for g in groups_value.replace(",", " ").split() if g.strip()]
+            elif isinstance(groups_value, list):
+                groups = [str(g) for g in groups_value]
+            else:
+                groups = []
+            mapped = {self._group_map[g] for g in groups if g in self._group_map}
+            for role in _VALID_ROLES:
+                if role in mapped:
+                    return role
+            if groups:
+                logger.warning(
+                    "OIDC group_role_map matched no groups; falling through",
+                    token_groups=groups,
+                    configured_groups=list(self._group_map.keys()),
+                )
+
+        # 3. Scope-based mapping — highest-privilege scope wins
         if self._scope_map:
             scope_value = claims.get("scope") or claims.get("scp") or ""
             scopes = scope_value if isinstance(scope_value, list) else str(scope_value).split()

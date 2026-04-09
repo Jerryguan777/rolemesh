@@ -14,6 +14,7 @@ from rolemesh.auth.provider import AuthenticatedUser
 from rolemesh.core.logger import get_logger
 
 if TYPE_CHECKING:
+    from rolemesh.auth.oidc.config import OIDCConfig
     from rolemesh.auth.oidc.discovery import DiscoveryDocument
 
 logger = get_logger()
@@ -26,23 +27,22 @@ class OIDCAuthProvider:
     and JIT-provisions tenants/users on first login.
     """
 
-    PROVIDER_KEY = "oidc"
-
     def __init__(
         self,
-        discovery_url: str,
-        client_id: str,
-        audience: str = "",
+        config: OIDCConfig,
         adapter: OIDCAdapter | None = None,
     ) -> None:
-        if not discovery_url:
-            raise ValueError("OIDCAuthProvider requires discovery_url")
-        if not client_id:
-            raise ValueError("OIDCAuthProvider requires client_id")
+        if not config.discovery_url:
+            raise ValueError("OIDCAuthProvider requires config.discovery_url")
+        if not config.client_id:
+            raise ValueError("OIDCAuthProvider requires config.client_id")
 
-        self._client_id = client_id
-        self._audience = audience or client_id
-        self._jwks = JWKSManager(discovery_url)
+        self._config = config
+        self._client_id = config.client_id
+        self._audience = config.audience or config.client_id
+        self._provider_key = config.provider_key
+        self._auto_assign_to_all = config.auto_assign_to_all
+        self._jwks = JWKSManager(config.discovery_url)
         self._adapter: OIDCAdapter = adapter or DefaultOIDCAdapter()  # type: ignore[assignment]
 
     async def get_discovery(self) -> DiscoveryDocument:
@@ -146,7 +146,7 @@ class OIDCAuthProvider:
             default = await get_tenant_by_slug("default")
             return default.id if default else None
 
-        local_id = await get_local_tenant_id(self.PROVIDER_KEY, external_tenant_id)
+        local_id = await get_local_tenant_id(self._provider_key, external_tenant_id)
         if local_id is not None:
             return local_id
 
@@ -154,7 +154,7 @@ class OIDCAuthProvider:
         slug = f"oidc-{external_tenant_id}"[:60]
         tenant_name = str(claims.get("tenant_name") or external_tenant_id)
         tenant = await create_tenant(name=tenant_name, slug=slug)
-        await create_external_tenant_mapping(self.PROVIDER_KEY, external_tenant_id, tenant.id)
+        await create_external_tenant_mapping(self._provider_key, external_tenant_id, tenant.id)
         await self._adapter.on_tenant_provisioned(tenant.id, claims)
         logger.info("OIDC tenant provisioned", tenant_id=tenant.id, external_id=external_tenant_id)
         return tenant.id
@@ -192,4 +192,23 @@ class OIDCAuthProvider:
         )
         await self._adapter.on_user_provisioned(user.id, tenant_id, claims)
         logger.info("OIDC user provisioned", user_id=user.id, sub=external_sub)
+
+        # Auto-assign new users to every coworker in the tenant. Only fires on
+        # first-time creation; subsequent logins do not re-assign because an
+        # admin may have intentionally unassigned the user.
+        if self._auto_assign_to_all:
+            from rolemesh.db.pg import (
+                assign_agent_to_user,
+                get_coworkers_for_tenant,
+            )
+
+            coworkers = await get_coworkers_for_tenant(tenant_id)
+            for cw in coworkers:
+                await assign_agent_to_user(user.id, cw.id, tenant_id)
+            logger.info(
+                "OIDC user auto-assigned to coworkers",
+                user_id=user.id,
+                count=len(coworkers),
+            )
+
         return user
