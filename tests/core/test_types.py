@@ -88,7 +88,7 @@ def test_coworker_defaults() -> None:
     assert cw.agent_backend == "claude-code"
     assert cw.tools == []
     assert cw.skills == []
-    assert cw.is_admin is False
+    assert cw.agent_role == "agent"
     assert cw.max_concurrent == 2
     assert cw.status == "active"
 
@@ -122,5 +122,5 @@ def test_registered_group_to_coworker() -> None:
     cw = registered_group_to_coworker(group, "t1", "cw1")
     assert cw.name == "test"
     assert cw.folder == "test"
-    assert cw.is_admin is True
+    assert cw.agent_role == "super_agent"
     assert cw.tenant_id == "t1"

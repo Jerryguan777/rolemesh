@@ -84,7 +84,7 @@ class TestScenarioFirstTimeUser:
             tenant_id=t.id,
             name="Ops Bot",
             folder="ops-bot",
-            is_admin=True,
+            agent_role="super_agent",
         )
         b = await create_channel_binding(
             coworker_id=cw.id,
@@ -106,7 +106,7 @@ class TestScenarioFirstTimeUser:
         assert await get_session(conv.id) == "sess-001"
 
         # Verify all fields
-        assert cw.is_admin is True
+        assert cw.agent_role == "super_agent"
         assert conv.requires_trigger is True
         assert b.channel_type == "telegram"
 
@@ -170,28 +170,12 @@ class TestScenarioIPCFromContainer:
         t = await create_tenant(name="T", slug="t-ipc")
         cw = await create_coworker(tenant_id=t.id, name="Bot", folder="bot")
 
+        from rolemesh.auth.permissions import AgentPermissions
+
         tasks_changed: list[bool] = []
 
         class FakeDeps:
             async def send_message(self, jid: str, text: str) -> None:
-                pass
-
-            async def get_coworker_by_folder(self, tenant_id: str, folder: str) -> object:
-                return None
-
-            async def get_channel_binding_for_coworker(self, coworker_id: str, channel_type: str) -> object:
-                return None
-
-            async def register_conversation(self, **kwargs: object) -> object:
-                return None
-
-            async def sync_groups(self, force: bool) -> None:
-                pass
-
-            async def get_available_groups(self) -> list[object]:
-                return []
-
-            def write_groups_snapshot(self, *args: object) -> None:
                 pass
 
             async def on_tasks_changed(self) -> None:
@@ -211,7 +195,7 @@ class TestScenarioIPCFromContainer:
                 "targetCoworkerId": cw.id,
             },
             "bot",
-            True,
+            AgentPermissions.for_role("super_agent"),
             FakeDeps(),  # type: ignore[arg-type]
             tenant_id=t.id,
             coworker_id=cw.id,
@@ -380,7 +364,7 @@ class TestScenarioMountSecurity:
             reset_cache()
             result = validate_mount(
                 AdditionalMount(host_path="/etc/shadow", container_path="/mnt/shadow"),
-                is_main=True,
+                is_super_agent=True,
             )
             assert not result.allowed
 

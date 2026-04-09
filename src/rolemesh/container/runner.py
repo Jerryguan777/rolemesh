@@ -10,9 +10,9 @@ import json
 import os
 import shutil
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from rolemesh.auth.permissions import AgentPermissions
 from rolemesh.container.runtime import (
     CONTAINER_HOST_GATEWAY,
     ContainerSpec,
@@ -51,7 +51,6 @@ __all__ = [
     "VolumeMount",
     "build_container_spec",
     "build_volume_mounts",
-    "write_groups_snapshot",
     "write_tasks_snapshot",
 ]
 
@@ -70,13 +69,24 @@ def build_volume_mounts(
     coworker: Coworker,
     tenant_id: str,
     conversation_id: str,
-    is_main: bool,
+    permissions: AgentPermissions | None = None,
     backend_config: AgentBackendConfig | None = None,
+    # Legacy parameter — ignored if permissions is set
+    is_main: bool = False,
 ) -> list[VolumeMount]:
     """Build volume mounts for a container invocation.
 
     Paths: data/tenants/{tid}/coworkers/{folder}/
     """
+    # Resolve effective permissions
+    if permissions is None:
+        permissions = AgentPermissions.for_role("super_agent" if is_main else "agent")
+
+    has_tenant_scope = permissions.data_scope == "tenant"
+    # Mount r/w policy uses agent_role (not data_scope) to avoid granting
+    # write access when only data_scope is overridden to "tenant".
+    is_super_agent = coworker.agent_role == "super_agent"
+
     mounts: list[VolumeMount] = []
     project_root = PROJECT_ROOT
     tenant_dir = DATA_DIR / "tenants" / tenant_id
@@ -88,7 +98,7 @@ def build_volume_mounts(
     workspace_dir = coworker_dir / "workspace"
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
-    if is_main:
+    if has_tenant_scope:
         mounts.append(
             VolumeMount(
                 host_path=str(project_root),
@@ -189,7 +199,7 @@ def build_volume_mounts(
         validated_mounts = validate_additional_mounts(
             coworker.container_config.additional_mounts,
             coworker.name,
-            is_main,
+            is_super_agent=is_super_agent,
         )
         for m in validated_mounts:
             mounts.append(
@@ -261,56 +271,28 @@ async def write_tasks_snapshot(
     transport: NatsTransport,
     tenant_id: str,
     coworker_folder: str,
-    is_main: bool,
-    tasks: list[dict[str, object]],
+    permissions: AgentPermissions | None = None,
+    tasks: list[dict[str, object]] | None = None,
+    # Legacy parameter — ignored if permissions is set
+    is_main: bool = False,
 ) -> None:
     """Write filtered tasks to NATS KV for the agent to read.
 
-    Main sees all tasks, others only see their own.
+    Tenant-scope sees all tasks, self-scope only sees own.
     Key: snapshots.{tenant_id}.{coworker_folder}.tasks
     """
+    if tasks is None:
+        tasks = []
+
+    # Resolve effective permissions
+    if permissions is None:
+        permissions = AgentPermissions.for_role("super_agent" if is_main else "agent")
+
+    has_tenant_scope = permissions.data_scope == "tenant"
+
     filtered_tasks: list[dict[str, object]]
-    filtered_tasks = tasks if is_main else [t for t in tasks if t.get("coworkerFolder") == coworker_folder]
+    filtered_tasks = tasks if has_tenant_scope else [t for t in tasks if t.get("coworkerFolder") == coworker_folder]
 
     kv = await transport.js.key_value("snapshots")
     key = f"{tenant_id}.{coworker_folder}.tasks"
     await kv.put(key, json.dumps(filtered_tasks).encode())
-
-
-async def write_groups_snapshot(
-    transport: NatsTransport,
-    tenant_id: str,
-    coworker_folder: str,
-    is_main: bool,
-    groups: list[AvailableGroup],
-    _registered_jids: set[str],
-) -> None:
-    """Write available groups snapshot to NATS KV for the agent to read.
-
-    Key: snapshots.{tenant_id}.{coworker_folder}.groups
-    """
-    visible_groups: list[dict[str, object]]
-    if is_main:
-        visible_groups = [
-            {
-                "jid": g.jid,
-                "name": g.name,
-                "lastActivity": g.last_activity,
-                "isRegistered": g.is_registered,
-            }
-            for g in groups
-        ]
-    else:
-        visible_groups = []
-
-    kv = await transport.js.key_value("snapshots")
-    key = f"{tenant_id}.{coworker_folder}.groups"
-    await kv.put(
-        key,
-        json.dumps(
-            {
-                "groups": visible_groups,
-                "lastSync": datetime.now(UTC).isoformat(),
-            }
-        ).encode(),
-    )

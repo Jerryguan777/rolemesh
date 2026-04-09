@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from rolemesh.auth.permissions import AgentPermissions
 
 # ---------------------------------------------------------------------------
 # Security / container mount types
@@ -62,12 +65,21 @@ class McpServerConfig:
     Stored in the coworker's `tools` JSONB field in the database.
     The `url` is the actual MCP server URL on the host machine.
     The `headers` are injected by the credential proxy when forwarding requests.
+
+    auth_mode controls how the MCP server is authenticated:
+      * "user"    — forward the user's IdP access_token as Authorization
+                    (default; OIDC-aware MCP servers)
+      * "service" — only inject per-server static headers (legacy/internal MCP
+                    that uses a shared service key)
+      * "both"    — inject both: per-server headers stay intact, user token
+                    goes into X-User-Authorization (high-security scenarios)
     """
 
     name: str  # registered name in claude_agent_sdk, e.g. "my-mcp-server"
     type: str  # transport type: "sse" or "http"
     url: str  # actual MCP server URL, e.g. "http://localhost:9100/mcp/"
     headers: dict[str, str] = field(default_factory=dict)  # auth headers injected by proxy
+    auth_mode: str = "user"  # "user" | "service" | "both"
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +111,7 @@ class User:
     role: str = "member"  # admin / manager / member
     channel_ids: dict[str, str] = field(default_factory=dict)
     created_at: str = ""
+    external_sub: str | None = None  # OIDC sub claim — unique per IdP
 
 
 @dataclass
@@ -113,11 +126,18 @@ class Coworker:
     system_prompt: str | None = None
     tools: list[McpServerConfig] = field(default_factory=list)
     skills: list[str] = field(default_factory=list)
-    is_admin: bool = False
     container_config: ContainerConfig | None = None
     max_concurrent: int = 2
     status: str = "active"
     created_at: str = ""
+    agent_role: str = "agent"  # "super_agent" | "agent"
+    permissions: AgentPermissions | None = None  # filled by __post_init__; always non-None after init
+
+    def __post_init__(self) -> None:
+        if self.permissions is None:
+            from rolemesh.auth.permissions import AgentPermissions as _AgentPermissions
+
+            self.permissions = _AgentPermissions.for_role(self.agent_role)
 
 
 @dataclass
@@ -147,6 +167,7 @@ class Conversation:
     requires_trigger: bool = True
     last_agent_invocation: str | None = None
     created_at: str = ""
+    user_id: str | None = None  # owner user (set for web conversations)
 
 
 # ---------------------------------------------------------------------------
@@ -182,8 +203,8 @@ def registered_group_to_coworker(
         tenant_id=tenant_id,
         name=group.name,
         folder=group.folder,
-        is_admin=group.is_main,
         container_config=group.container_config,
+        agent_role="super_agent" if group.is_main else "agent",
     )
 
 

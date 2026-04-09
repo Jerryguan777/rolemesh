@@ -23,12 +23,11 @@ if TYPE_CHECKING:
     from rolemesh.channels.gateway import ChannelGateway
 
 from rolemesh.agent import CLAUDE_CODE_BACKEND, AgentInput, AgentOutput, ContainerAgentExecutor
+from rolemesh.auth.permissions import AgentPermissions
 from rolemesh.channels.slack_gateway import SlackGateway
 from rolemesh.channels.telegram_gateway import TelegramGateway
 from rolemesh.channels.web_nats_gateway import WebNatsGateway
 from rolemesh.container.runner import (
-    AvailableGroup,
-    write_groups_snapshot,
     write_tasks_snapshot,
 )
 from rolemesh.container.runtime import (
@@ -64,6 +63,7 @@ from rolemesh.db.pg import (
     get_all_coworkers,
     get_all_sessions,
     get_all_tasks,
+    get_conversation_by_binding_and_chat,
     get_messages_since,
     get_new_messages_for_conversations,
     get_tenant_by_slug,
@@ -79,12 +79,10 @@ from rolemesh.ipc.nats_transport import NatsTransport
 from rolemesh.ipc.task_handler import process_task_ipc
 from rolemesh.orchestration.remote_control import (
     restore_remote_control,
-    start_remote_control,
-    stop_remote_control,
 )
 from rolemesh.orchestration.router import format_messages, format_outbound
 from rolemesh.orchestration.task_scheduler import start_scheduler_loop
-from rolemesh.security.credential_proxy import register_mcp_server, start_credential_proxy
+from rolemesh.security.credential_proxy import register_mcp_server, set_token_vault, start_credential_proxy
 from rolemesh.security.sender_allowlist import (
     is_sender_allowed,
     is_trigger_allowed,
@@ -123,7 +121,6 @@ def _coworker_from_state(cw_state: CoworkerState) -> Coworker:
         system_prompt=c.system_prompt,
         tools=c.tools,
         skills=c.skills,
-        is_admin=c.is_admin,
         max_concurrent=c.max_concurrent,
     )
 
@@ -186,7 +183,8 @@ async def _load_state() -> None:
             max_concurrent=cw.max_concurrent,
             tools=cw.tools,
             skills=cw.skills,
-            is_admin=cw.is_admin,
+            agent_role=cw.agent_role,
+            permissions=cw.permissions,
         )
 
         cw_state = CoworkerState(config=config)
@@ -212,7 +210,7 @@ async def _load_state() -> None:
         for tool_cfg in cw.tools:
             parsed = urlparse(tool_cfg.url)
             origin = f"{parsed.scheme}://{parsed.netloc}"
-            register_mcp_server(tool_cfg.name, origin, tool_cfg.headers)
+            register_mcp_server(tool_cfg.name, origin, tool_cfg.headers, tool_cfg.auth_mode)
 
     logger.info(
         "State loaded",
@@ -234,14 +232,20 @@ async def _auto_create_web_conversation(
     for cw in _state.coworkers.values():
         for b in cw.channel_bindings.values():
             if b.id == binding_id and b.channel_type == "web":
-                conv = await create_conversation(
-                    tenant_id=cw.config.tenant_id,
-                    coworker_id=cw.config.id,
-                    channel_binding_id=binding_id,
-                    channel_chat_id=chat_id,
-                    name=f"Web Chat {chat_id[:8]}",
-                    requires_trigger=False,
-                )
+                # ws.py may have already created the conversation before the
+                # NATS message reaches the orchestrator. Check DB first to
+                # avoid a UniqueViolationError on (binding_id, chat_id).
+                conv = await get_conversation_by_binding_and_chat(binding_id, chat_id)
+                if conv is None:
+                    conv = await create_conversation(
+                        tenant_id=cw.config.tenant_id,
+                        coworker_id=cw.config.id,
+                        channel_binding_id=binding_id,
+                        channel_chat_id=chat_id,
+                        name=f"Web Chat {chat_id[:8]}",
+                        requires_trigger=False,
+                        user_id=None,
+                    )
                 conv_state = ConversationState(conversation=conv)
                 cw.conversations[conv.id] = conv_state
                 logger.info(
@@ -334,9 +338,7 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
     if not missed_messages:
         return True
 
-    is_admin = config.is_admin
-
-    if not is_admin and conv.requires_trigger:
+    if config.agent_role != "super_agent" and conv.requires_trigger:
         allowlist_cfg = load_sender_allowlist()
         has_trigger = any(
             config.trigger_pattern.search(m.content.strip())
@@ -464,7 +466,7 @@ async def _run_agent(
     """Run agent in a container. Returns 'success' or 'error'."""
     config = cw_state.config
     conv = conv_state.conversation
-    is_main = config.is_admin
+    permissions = config.permissions
     session_id = conv_state.session_id
 
     if _transport is not None:
@@ -473,7 +475,7 @@ async def _run_agent(
             _transport,
             config.tenant_id,
             config.folder,
-            is_main,
+            permissions,
             [
                 {
                     "id": t.id,
@@ -511,7 +513,8 @@ async def _run_agent(
                 session_id=session_id,
                 group_folder=config.folder,
                 chat_jid=conv.channel_chat_id,
-                is_main=is_main,
+                permissions=permissions.to_dict(),
+                user_id=conv.user_id or "",
                 assistant_name=config.name,
                 system_prompt=config.system_prompt,
                 tenant_id=config.tenant_id,
@@ -572,11 +575,10 @@ async def _start_nats_ipc_subscriptions(transport: NatsTransport, deps: _IpcDeps
                             source_cw = _state.get_coworker_by_folder(tenant.id, source_group)
                             if source_cw:
                                 break
-                    is_main = source_cw.config.is_admin if source_cw else False
 
-                    # Authorization: admin can send anywhere, others only to own conversations
-                    authorized = is_main
-                    if not authorized and source_cw:
+                    # Authorization: all agents can only message their own conversations
+                    authorized = False
+                    if source_cw:
                         for conv in source_cw.conversations.values():
                             if conv.conversation.channel_chat_id == chat_jid:
                                 authorized = True
@@ -610,7 +612,7 @@ async def _start_nats_ipc_subscriptions(transport: NatsTransport, deps: _IpcDeps
                 source_tenant_id = data.get("tenantId", DEFAULT_TENANT)
                 source_coworker_id = data.get("coworkerId", "")
 
-                # Determine is_main from coworker state (fallback to folder lookup)
+                # Determine permissions from coworker state (fallback to folder lookup)
                 source_cw = _state.coworkers.get(source_coworker_id) if source_coworker_id else None
                 if source_cw is None and source_group:
                     for tenant in _state.tenants.values():
@@ -618,12 +620,12 @@ async def _start_nats_ipc_subscriptions(transport: NatsTransport, deps: _IpcDeps
                         if source_cw:
                             source_coworker_id = source_cw.config.id
                             break
-                is_main = source_cw.config.is_admin if source_cw else False
+                permissions = source_cw.config.permissions if source_cw else AgentPermissions()
 
                 await process_task_ipc(
                     data,
                     source_group,
-                    is_main,
+                    permissions,
                     deps,
                     tenant_id=source_tenant_id,
                     coworker_id=source_coworker_id,
@@ -701,8 +703,7 @@ async def _message_loop(shutdown_event: asyncio.Event) -> None:
                     conv = conv_state.conversation
                     chat_id = conv.channel_chat_id
 
-                    is_admin = config.is_admin
-                    needs_trigger = not is_admin and conv.requires_trigger
+                    needs_trigger = config.agent_role != "super_agent" and conv.requires_trigger
 
                     if needs_trigger:
                         conv_messages = [msg for cid, msg in results if cid == conv_id]
@@ -785,47 +786,6 @@ async def _ensure_container_system_running() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Remote control handler
-# ---------------------------------------------------------------------------
-
-
-async def _handle_remote_control(command: str, chat_id: str, sender: str) -> None:
-    """Handle /remote-control commands."""
-    # Find coworker with admin access
-    for cw in _state.coworkers.values():
-        if not cw.config.is_admin:
-            continue
-        conv = cw.conversations.get(chat_id)
-        if not conv:
-            continue
-
-        ch_type = _get_channel_type_for_conv(cw, conv.conversation)
-        binding = cw.channel_bindings.get(ch_type)
-        if not binding:
-            continue
-
-        gw = _gateways.get(ch_type)
-        if not gw:
-            continue
-
-        if command == "/remote-control":
-            import os
-
-            result = await start_remote_control(sender, chat_id, os.getcwd())
-            if result.get("ok"):
-                await gw.send_message(binding.id, chat_id, str(result["url"]))
-            else:
-                await gw.send_message(binding.id, chat_id, f"Remote Control failed: {result.get('error', 'unknown')}")
-        else:
-            result = stop_remote_control()
-            if result.get("ok"):
-                await gw.send_message(binding.id, chat_id, "Remote Control session ended.")
-            else:
-                await gw.send_message(binding.id, chat_id, str(result.get("error", "Unknown error")))
-        return
-
-
-# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -867,6 +827,17 @@ async def main() -> None:
     _queue = GroupQueue(transport=_transport, runtime=_runtime, orchestrator_state=_state)
 
     proxy_runner = await start_credential_proxy(CREDENTIAL_PROXY_PORT, PROXY_BIND_HOST)
+
+    # Initialize TokenVault for per-user MCP token forwarding (OIDC mode only).
+    # Note: this only sets the vault in THIS process. The WebUI runs in a
+    # separate process and must initialize its own vault from env (see
+    # src/webui/main.py lifespan).
+    from rolemesh.auth.token_vault import create_vault_from_env
+
+    _vault = await create_vault_from_env()
+    if _vault is not None:
+        set_token_vault(_vault)
+        logger.info("TokenVault initialized for credential proxy")
 
     shutdown_event = asyncio.Event()
 
@@ -979,75 +950,6 @@ class _IpcDepsImpl:
     async def send_message(self, jid: str, text: str) -> None:
         await _send_via_coworker(None, jid, text)
 
-    async def send_message_to_chat(self, chat_id: str, text: str) -> None:
-        text = format_outbound(text)
-        if text:
-            await _send_via_coworker(None, chat_id, text)
-
-    async def get_coworker_by_folder(self, tenant_id: str, folder: str) -> Coworker | None:
-        cw = _state.get_coworker_by_folder(tenant_id, folder)
-        return _coworker_from_state(cw) if cw else None
-
-    async def get_channel_binding_for_coworker(self, coworker_id: str, channel_type: str) -> ChannelBinding | None:
-        cw = _state.coworkers.get(coworker_id)
-        if cw is None:
-            return None
-        return cw.channel_bindings.get(channel_type)
-
-    async def register_conversation(
-        self,
-        tenant_id: str,
-        coworker_id: str,
-        channel_binding_id: str,
-        channel_chat_id: str,
-        name: str | None,
-    ) -> Conversation:
-        conv = await create_conversation(
-            tenant_id=tenant_id,
-            coworker_id=coworker_id,
-            channel_binding_id=channel_binding_id,
-            channel_chat_id=channel_chat_id,
-            name=name,
-            requires_trigger=True,
-        )
-        # Add to runtime state (keyed by conversation ID)
-        cw = _state.coworkers.get(coworker_id)
-        if cw:
-            cw.conversations[conv.id] = ConversationState(conversation=conv)
-        return conv
-
-    async def sync_groups(self, force: bool) -> None:
-        pass  # TODO: implement per-gateway sync
-
-    async def get_available_groups(self) -> list[AvailableGroup]:
-        convs = await get_all_conversations()
-        return [
-            AvailableGroup(
-                jid=c.channel_chat_id,
-                name=c.name or c.channel_chat_id,
-                last_activity=c.created_at,
-                is_registered=True,
-            )
-            for c in convs
-        ]
-
-    def write_groups_snapshot(
-        self,
-        tenant_id: str,
-        coworker_folder: str,
-        is_main: bool,
-        available_groups: list[AvailableGroup],
-        registered_jids: set[str],
-    ) -> None:
-        if _transport is not None:
-            t = asyncio.ensure_future(
-                write_groups_snapshot(
-                    _transport, tenant_id, coworker_folder, is_main, available_groups, registered_jids
-                )
-            )
-            _bg_tasks.add(t)
-            t.add_done_callback(_bg_tasks.discard)
-
     async def on_tasks_changed(self) -> None:
         if _transport is None:
             return
@@ -1066,11 +968,14 @@ class _IpcDepsImpl:
                 for t in tasks
             ]
 
-            async def _update(folder: str, is_admin: bool, tid: str, rows: list[dict[str, object]]) -> None:
+            async def _update(
+                folder: str, perms: AgentPermissions, tid: str, rows: list[dict[str, object]]
+            ) -> None:
                 assert _transport is not None
-                await write_tasks_snapshot(_transport, tid, folder, is_admin, rows)
+                await write_tasks_snapshot(_transport, tid, folder, perms, rows)
 
-            t = asyncio.ensure_future(_update(cw.config.folder, cw.config.is_admin, cw.config.tenant_id, task_rows))
+            cw_perms = cw.config.permissions
+            t = asyncio.ensure_future(_update(cw.config.folder, cw_perms, cw.config.tenant_id, task_rows))
             _bg_tasks.add(t)
             t.add_done_callback(_bg_tasks.discard)
 

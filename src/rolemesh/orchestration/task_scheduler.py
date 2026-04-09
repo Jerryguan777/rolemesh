@@ -138,7 +138,7 @@ async def _run_task(
         )
         return
 
-    is_main = coworker.is_admin
+    permissions = coworker.permissions
     transport = deps.transport
 
     # Find conversation for chat_jid routing
@@ -160,8 +160,8 @@ async def _run_task(
             transport,
             task.tenant_id,
             coworker.folder,
-            is_main,
-            [
+            permissions=permissions,
+            tasks=[
                 {
                     "id": t.id,
                     "coworkerFolder": coworker.folder,
@@ -213,7 +213,7 @@ async def _run_task(
                 session_id=session_id,
                 group_folder=coworker.folder,
                 chat_jid=chat_jid,
-                is_main=is_main,
+                permissions=permissions.to_dict(),
                 is_scheduled_task=True,
                 assistant_name=coworker.name,
                 tenant_id=task.tenant_id,

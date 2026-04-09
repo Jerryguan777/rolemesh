@@ -85,7 +85,7 @@ async def _create_coworker_full(
     tenant_id: str,
     name: str,
     folder: str,
-    is_admin: bool = False,
+    agent_role: str = "agent",
     max_concurrent: int = 2,
     channel_type: str = "telegram",
     credentials: dict[str, str] | None = None,
@@ -99,7 +99,7 @@ async def _create_coworker_full(
         tenant_id=tenant_id,
         name=name,
         folder=folder,
-        is_admin=is_admin,
+        agent_role=agent_role,
         max_concurrent=max_concurrent,
     )
     binding = await create_channel_binding(
@@ -139,7 +139,7 @@ def _build_coworker_state(
         agent_backend=cw.agent_backend,
         container_image=None,
         max_concurrent=cw.max_concurrent,
-        is_admin=cw.is_admin,
+        agent_role=cw.agent_role,
     )
     state = CoworkerState(config=config)
     state.channel_bindings[binding.channel_type] = binding
@@ -413,7 +413,7 @@ class TestTwoCoworkersSameGroup:
             tenant.id,
             "Admin Bot",
             "admin-bot",
-            is_admin=True,
+            agent_role="super_agent",
             chat_ids=["-1003000"],
             requires_trigger=False,
         )
@@ -454,7 +454,7 @@ class TestSessionIsolation:
             tenant.id,
             "Ops Bot",
             "ops-sess",
-            is_admin=True,
+            agent_role="super_agent",
             chat_ids=["-100A", "-100B"],
             requires_trigger=False,
         )
@@ -509,7 +509,7 @@ class TestSessionIsolation:
             tenant.id,
             "Ops Bot",
             "ops-rb",
-            is_admin=True,
+            agent_role="super_agent",
             chat_ids=["-200A", "-200B"],
             requires_trigger=False,
         )
@@ -648,116 +648,28 @@ class TestThreeLevelConcurrency:
 
 
 class TestRegisterConversation:
-    async def test_admin_registers_new_conversation(self, env: Path) -> None:
-        """Admin coworker registers a new chat via IPC → conversation created in DB."""
-        from rolemesh.db.pg import get_conversation_by_binding_and_chat
+    """register_conversation IPC was removed — these tests verify
+    that the old task type is now treated as unknown and silently ignored."""
+
+    async def test_register_conversation_now_unknown(self, env: Path) -> None:
+        """register_conversation IPC type is no longer handled (moved to admin API)."""
+        from rolemesh.auth.permissions import AgentPermissions
         from rolemesh.ipc.task_handler import process_task_ipc
-
-        tenant = await _create_tenant_in_db("Acme", "acme-reg")
-        cw, binding, _ = await _create_coworker_full(
-            tenant.id,
-            "Admin Bot",
-            "admin-reg",
-            is_admin=True,
-            chat_ids=[],
-        )
-
-        registered_conversations: list[object] = []
 
         class FakeDeps:
             async def send_message(self, jid: str, text: str) -> None:
                 pass
 
-            async def get_coworker_by_folder(self, tenant_id: str, folder: str) -> Coworker | None:
-                return cw if folder == "admin-reg" else None
-
-            async def get_channel_binding_for_coworker(
-                self, coworker_id: str, channel_type: str
-            ) -> ChannelBinding | None:
-                return binding if coworker_id == cw.id else None
-
-            async def register_conversation(self, **kwargs: object) -> Conversation:
-                from rolemesh.db.pg import create_conversation
-
-                conv = await create_conversation(
-                    tenant_id=str(kwargs["tenant_id"]),
-                    coworker_id=str(kwargs["coworker_id"]),
-                    channel_binding_id=str(kwargs["channel_binding_id"]),
-                    channel_chat_id=str(kwargs["channel_chat_id"]),
-                    name=str(kwargs.get("name") or ""),
-                )
-                registered_conversations.append(conv)
-                return conv
-
-            async def sync_groups(self, force: bool) -> None:
-                pass
-
-            async def get_available_groups(self) -> list[object]:
-                return []
-
-            def write_groups_snapshot(self, *args: object) -> None:
-                pass
-
             async def on_tasks_changed(self) -> None:
                 pass
 
-        await process_task_ipc(
-            {
-                "type": "register_conversation",
-                "channel_chat_id": "-1009999",
-                "name": "New Sales Group",
-            },
-            "admin-reg",  # source group_folder
-            True,  # is_main
-            FakeDeps(),  # type: ignore[arg-type]
-            tenant_id=tenant.id,
-            coworker_id=cw.id,
-        )
-
-        assert len(registered_conversations) == 1
-        conv = await get_conversation_by_binding_and_chat(binding.id, "-1009999")
-        assert conv is not None
-        assert conv.name == "New Sales Group"
-
-    async def test_non_admin_cannot_register_conversation(self, env: Path) -> None:
-        """Non-admin coworker trying to register → blocked."""
-        from rolemesh.ipc.task_handler import process_task_ipc
-
-        registered: list[object] = []
-
-        class FakeDeps:
-            async def send_message(self, jid: str, text: str) -> None:
-                pass
-
-            async def get_coworker_by_folder(self, tenant_id: str, folder: str) -> object:
-                return None
-
-            async def get_channel_binding_for_coworker(self, coworker_id: str, channel_type: str) -> object:
-                return None
-
-            async def register_conversation(self, **kwargs: object) -> object:
-                registered.append(kwargs)
-                return None
-
-            async def sync_groups(self, force: bool) -> None:
-                pass
-
-            async def get_available_groups(self) -> list[object]:
-                return []
-
-            def write_groups_snapshot(self, *args: object) -> None:
-                pass
-
-            async def on_tasks_changed(self) -> None:
-                pass
-
+        # Should not raise, just log unknown type
         await process_task_ipc(
             {"type": "register_conversation", "channel_chat_id": "-999"},
             "some-folder",
-            False,  # NOT admin
+            AgentPermissions.for_role("super_agent"),
             FakeDeps(),  # type: ignore[arg-type]
         )
-        assert len(registered) == 0  # Blocked
 
 
 # ===========================================================================
@@ -868,7 +780,7 @@ class TestMigration:
                 tenant_id=tenant.id,
                 name=group.name,
                 folder=group.folder,
-                is_admin=group.is_main,
+                agent_role="super_agent" if group.is_main else "agent",
             )
             binding = await create_channel_binding(
                 coworker_id=coworker.id,
@@ -906,11 +818,11 @@ class TestMigration:
 
         main_cw = next((c for c in coworkers if c.folder == "main-group"), None)
         assert main_cw is not None
-        assert main_cw.is_admin is True
+        assert main_cw.agent_role == "super_agent"
 
         team_cw = next((c for c in coworkers if c.folder == "team-chat"), None)
         assert team_cw is not None
-        assert team_cw.is_admin is False
+        assert team_cw.agent_role == "agent"
 
         conversations = await get_all_conversations()
         assert len(conversations) == 2
@@ -1081,6 +993,7 @@ class TestMessageIsolation:
 class TestTaskSchedulingPerCoworker:
     async def test_task_created_with_coworker_id(self, env: Path) -> None:
         """IPC schedule_task creates task keyed by coworker_id, not folder."""
+        from rolemesh.auth.permissions import AgentPermissions
         from rolemesh.db.pg import get_task_by_id
         from rolemesh.ipc.task_handler import process_task_ipc
 
@@ -1089,30 +1002,12 @@ class TestTaskSchedulingPerCoworker:
             tenant.id,
             "Ops Bot",
             "ops-task",
-            is_admin=True,
+            agent_role="super_agent",
             chat_ids=["-400"],
         )
 
         class FakeDeps:
             async def send_message(self, jid: str, text: str) -> None:
-                pass
-
-            async def get_coworker_by_folder(self, tenant_id: str, folder: str) -> object:
-                return None
-
-            async def get_channel_binding_for_coworker(self, coworker_id: str, channel_type: str) -> object:
-                return None
-
-            async def register_conversation(self, **kwargs: object) -> object:
-                return None
-
-            async def sync_groups(self, force: bool) -> None:
-                pass
-
-            async def get_available_groups(self) -> list[object]:
-                return []
-
-            def write_groups_snapshot(self, *args: object) -> None:
                 pass
 
             async def on_tasks_changed(self) -> None:
@@ -1129,7 +1024,7 @@ class TestTaskSchedulingPerCoworker:
                 "targetCoworkerId": cw.id,
             },
             "ops-task",
-            True,
+            AgentPermissions.for_role("super_agent"),
             FakeDeps(),  # type: ignore[arg-type]
             tenant_id=tenant.id,
             coworker_id=cw.id,
@@ -1142,6 +1037,7 @@ class TestTaskSchedulingPerCoworker:
 
     async def test_non_admin_cannot_schedule_for_other_coworker(self, env: Path) -> None:
         """Non-admin trying to schedule a task for another coworker → blocked."""
+        from rolemesh.auth.permissions import AgentPermissions
         from rolemesh.db.pg import get_all_tasks
         from rolemesh.ipc.task_handler import process_task_ipc
 
@@ -1149,24 +1045,6 @@ class TestTaskSchedulingPerCoworker:
 
         class FakeDeps:
             async def send_message(self, jid: str, text: str) -> None:
-                pass
-
-            async def get_coworker_by_folder(self, tenant_id: str, folder: str) -> object:
-                return None
-
-            async def get_channel_binding_for_coworker(self, coworker_id: str, channel_type: str) -> object:
-                return None
-
-            async def register_conversation(self, **kwargs: object) -> object:
-                return None
-
-            async def sync_groups(self, force: bool) -> None:
-                pass
-
-            async def get_available_groups(self) -> list[object]:
-                return []
-
-            def write_groups_snapshot(self, *args: object) -> None:
                 pass
 
             async def on_tasks_changed(self) -> None:
@@ -1181,7 +1059,7 @@ class TestTaskSchedulingPerCoworker:
                 "targetCoworkerId": "other-coworker-id",
             },
             "my-folder",
-            False,  # NOT admin
+            AgentPermissions.for_role("agent"),
             FakeDeps(),  # type: ignore[arg-type]
             tenant_id=tenant.id,
             coworker_id="my-coworker-id",

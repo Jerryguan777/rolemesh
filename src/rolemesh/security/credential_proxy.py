@@ -13,7 +13,7 @@ Two auth modes:
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlparse
 
 from aiohttp import ClientSession, web
@@ -21,7 +21,25 @@ from aiohttp import ClientSession, web
 from rolemesh.core.env import read_env_file
 from rolemesh.core.logger import get_logger
 
+if TYPE_CHECKING:
+    from rolemesh.auth.token_vault import TokenVault
+
 logger = get_logger()
+
+# Module-level TokenVault for per-user IdP token forwarding to MCP servers
+_token_vault: TokenVault | None = None
+
+# The only identity header containers send. Other identity (tenant_id, etc.)
+# is no longer needed because the vault is keyed by user_id.
+_USER_ID_HEADER = "X-RoleMesh-User-Id"
+
+
+def set_token_vault(vault: TokenVault) -> None:
+    """Set the TokenVault instance for per-user MCP token forwarding."""
+    global _token_vault
+    _token_vault = vault
+    logger.info("TokenVault configured for MCP user token forwarding")
+
 
 AuthMode = Literal["api-key", "oauth"]
 
@@ -39,17 +57,24 @@ _SKIP_RESPONSE_HEADERS = frozenset(
     }
 )
 
-# Module-level MCP server registry: server_name → (origin URL, headers to inject)
-_mcp_registry: dict[str, tuple[str, dict[str, str]]] = {}
+# Module-level MCP server registry:
+#   server_name → (origin URL, per-server headers, auth_mode)
+# auth_mode controls user-token injection (see McpServerConfig).
+_mcp_registry: dict[str, tuple[str, dict[str, str], str]] = {}
 
 
-def register_mcp_server(name: str, url: str, headers: dict[str, str] | None = None) -> None:
+def register_mcp_server(
+    name: str,
+    url: str,
+    headers: dict[str, str] | None = None,
+    auth_mode: str = "user",
+) -> None:
     """Register an MCP server for proxy forwarding."""
-    _mcp_registry[name] = (url, headers or {})
-    logger.info("MCP server registered", name=name, url=url)
+    _mcp_registry[name] = (url, headers or {}, auth_mode)
+    logger.info("MCP server registered", name=name, url=url, auth_mode=auth_mode)
 
 
-def get_mcp_registry() -> dict[str, tuple[str, dict[str, str]]]:
+def get_mcp_registry() -> dict[str, tuple[str, dict[str, str], str]]:
     """Get the current MCP server registry."""
     return dict(_mcp_registry)
 
@@ -117,7 +142,7 @@ async def start_credential_proxy(port: int, host: str = "127.0.0.1") -> web.AppR
         if not entry:
             return web.Response(status=404, text=f"MCP server not found: {server_name}")
 
-        origin, server_headers = entry
+        origin, server_headers, auth_mode = entry
         target_url = f"{origin}{remaining_path}"
 
         fwd_headers: dict[str, str] = {}
@@ -126,8 +151,23 @@ async def start_credential_proxy(port: int, host: str = "127.0.0.1") -> web.AppR
                 fwd_headers[key] = value
         fwd_headers.pop("host", None)
         fwd_headers.pop("Host", None)
-        # Inject per-server headers (overrides any forwarded headers with same key)
+        # Inject per-server static headers first (service-to-service auth)
         fwd_headers.update(server_headers)
+
+        # Per-user IdP token forwarding (auth_mode="user" or "both")
+        user_id = request.headers.get(_USER_ID_HEADER)
+        if auth_mode in ("user", "both") and user_id and _token_vault is not None:
+            access_token = await _token_vault.get_fresh_access_token(user_id)
+            if access_token:
+                if auth_mode == "user":
+                    # Override per-server Authorization with user's IdP token
+                    fwd_headers["Authorization"] = f"Bearer {access_token}"
+                else:  # both
+                    # Keep service Authorization, add user token in separate header
+                    fwd_headers["X-User-Authorization"] = f"Bearer {access_token}"
+
+        # Strip identity header — don't leak to MCP server
+        fwd_headers.pop(_USER_ID_HEADER, None)
 
         body = await request.read()
 

@@ -2,19 +2,40 @@
 
 from __future__ import annotations
 
+import os
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import asyncpg
 import nats
 from fastapi import FastAPI, Query, WebSocket
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from nats.js.api import StreamConfig
 
+from rolemesh.db import pg
+from rolemesh.db.pg import _get_pool, close_database, init_database
 from webui import auth, ws
-from webui.config import NATS_URL, WEB_UI_DIST, WEB_UI_HOST, WEB_UI_PORT
+from webui.admin import router as admin_router
+from webui.config import (
+    CORS_ORIGINS,
+    DATABASE_URL,
+    NATS_URL,
+    WEB_UI_DIST,
+    WEB_UI_HOST,
+    WEB_UI_PORT,
+)
+
+
+async def _init_db() -> None:
+    await init_database(DATABASE_URL)
+
+
+async def _close_db() -> None:
+    await close_database()
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -45,13 +66,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     ws.set_jetstream(js)
 
-    # Load web bindings from DB
-    await auth.init_auth()
+    # Initialize the shared DB pool (used by both admin API and web binding auth)
+    await _init_db()
+
+    # Load web bindings using the shared pool
+    await auth.init_auth(_get_pool())
+    await auth.init_auth_provider()
+
+    # Initialize TokenVault for OIDC token mirroring (mirrors orchestrator init).
+    # This is per-process: orchestrator and webui each hold their own vault.
+    from rolemesh.auth.token_vault import create_vault_from_env
+    from webui import oidc_routes
+
+    _vault = await create_vault_from_env()
+    if _vault is not None:
+        oidc_routes.set_token_vault(_vault)
 
     yield
 
     # Shutdown
     await auth.close_auth()
+    await _close_db()
     if _nc is not None:
         await _nc.close()
         _nc = None
@@ -59,20 +94,55 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(lifespan=lifespan)
 
+# CORS for embedded SaaS scenarios where the browser sends credentials
+# (httpOnly refresh cookie) cross-origin. Only enabled when CORS_ORIGINS is set.
+if CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=CORS_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
 
 @app.get("/api/health")
 async def health() -> JSONResponse:
     return JSONResponse({"status": "ok"})
 
 
+async def _resolve_web_agent(agent_id: str, token: str) -> tuple[str, str] | JSONResponse:
+    """Authenticate and resolve the web binding for an agent.
+
+    Returns (binding_id, tenant_id) on success, or a JSONResponse error.
+    """
+    if not agent_id or not token:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    user = await auth.authenticate_ws(token)
+    if user is None:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    try:
+        coworker = await pg.get_coworker(agent_id)
+    except asyncpg.DataError:
+        coworker = None
+    if coworker is None or coworker.tenant_id != user.tenant_id:
+        return JSONResponse({"error": "Agent not found"}, status_code=404)
+    binding = await pg.get_channel_binding_for_coworker(agent_id, "web")
+    if binding is None:
+        return JSONResponse({"error": "Web binding not found"}, status_code=404)
+    return binding.id, user.tenant_id
+
+
 @app.get("/api/conversations")
 async def list_conversations(
-    binding_id: str = Query(""),
+    agent_id: str = Query(""),
     token: str = Query(""),
 ) -> JSONResponse:
     """Return conversation list for a web binding."""
-    if not binding_id or not token or not auth.validate_token(binding_id, token):
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    result_or_error = await _resolve_web_agent(agent_id, token)
+    if isinstance(result_or_error, JSONResponse):
+        return result_or_error
+    binding_id, _ = result_or_error
 
     pool = auth.get_pool()
     if pool is None:
@@ -108,12 +178,14 @@ async def list_conversations(
 @app.get("/api/conversations/{chat_id}/messages")
 async def get_messages(
     chat_id: str,
-    binding_id: str = Query(""),
+    agent_id: str = Query(""),
     token: str = Query(""),
 ) -> JSONResponse:
     """Return message history for a conversation."""
-    if not binding_id or not token or not auth.validate_token(binding_id, token):
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    result_or_error = await _resolve_web_agent(agent_id, token)
+    if isinstance(result_or_error, JSONResponse):
+        return result_or_error
+    binding_id, _ = result_or_error
 
     pool = auth.get_pool()
     if pool is None:
@@ -149,14 +221,24 @@ async def get_messages(
 @app.websocket("/ws/chat")
 async def websocket_chat(
     websocket: WebSocket,
-    binding_id: str = "",
+    agent_id: str = "",
     token: str = "",
     chat_id: str = "",
 ) -> None:
-    if not binding_id or not token:
-        await websocket.close(code=1008, reason="Missing binding_id or token")
+    if not agent_id or not token:
+        await websocket.close(code=1008, reason="Missing agent_id or token")
         return
-    await ws.handle_ws(websocket, binding_id, token, chat_id)
+    await ws.handle_ws(websocket, agent_id, token, chat_id)
+
+
+# Admin API router
+app.include_router(admin_router)
+
+# OIDC PKCE router (only when AUTH_MODE=oidc)
+if os.environ.get("AUTH_MODE", "external") == "oidc":
+    from webui.oidc_routes import router as oidc_router
+
+    app.include_router(oidc_router)
 
 
 # Mount static files if the dist directory exists

@@ -53,7 +53,7 @@ def test_validate_mount_no_allowlist(tmp_path: Path) -> None:
     reset_cache()
     mount = AdditionalMount(host_path=str(tmp_path))
     with patch("rolemesh.security.mount_security.MOUNT_ALLOWLIST_PATH", tmp_path / "nonexistent.json"):
-        result = validate_mount(mount, is_main=True)
+        result = validate_mount(mount, is_super_agent=True)
     assert result.allowed is False
     assert "No mount allowlist" in result.reason
     reset_cache()
@@ -70,7 +70,7 @@ def test_validate_mount_invalid_container_path() -> None:
             blocked_patterns=[],
             non_main_read_only=True,
         )
-        result = validate_mount(mount, is_main=True)
+        result = validate_mount(mount, is_super_agent=True)
     assert result.allowed is False
     assert ".." in result.reason
     reset_cache()
@@ -92,7 +92,7 @@ def test_validate_mount_blocked_pattern(tmp_path: Path) -> None:
     )
     mount = AdditionalMount(host_path=str(ssh_dir))
     with patch("rolemesh.security.mount_security.MOUNT_ALLOWLIST_PATH", config_file):
-        result = validate_mount(mount, is_main=True)
+        result = validate_mount(mount, is_super_agent=True)
     assert result.allowed is False
     assert "blocked pattern" in result.reason
     reset_cache()
@@ -116,7 +116,7 @@ def test_validate_mount_not_under_allowed_root(tmp_path: Path) -> None:
     )
     mount = AdditionalMount(host_path=str(target_dir))
     with patch("rolemesh.security.mount_security.MOUNT_ALLOWLIST_PATH", config_file):
-        result = validate_mount(mount, is_main=True)
+        result = validate_mount(mount, is_super_agent=True)
     assert result.allowed is False
     assert "not under any allowed root" in result.reason
     reset_cache()
@@ -138,7 +138,7 @@ def test_validate_mount_success(tmp_path: Path) -> None:
     )
     mount = AdditionalMount(host_path=str(target_dir), readonly=False)
     with patch("rolemesh.security.mount_security.MOUNT_ALLOWLIST_PATH", config_file):
-        result = validate_mount(mount, is_main=True)
+        result = validate_mount(mount, is_super_agent=True)
     assert result.allowed is True
     assert result.effective_readonly is False
     reset_cache()
@@ -160,7 +160,7 @@ def test_validate_mount_forced_readonly_non_main(tmp_path: Path) -> None:
     )
     mount = AdditionalMount(host_path=str(target_dir), readonly=False)
     with patch("rolemesh.security.mount_security.MOUNT_ALLOWLIST_PATH", config_file):
-        result = validate_mount(mount, is_main=False)
+        result = validate_mount(mount, is_super_agent=False)
     assert result.allowed is True
     assert result.effective_readonly is True
     reset_cache()
@@ -184,7 +184,7 @@ def test_validate_additional_mounts(tmp_path: Path) -> None:
     )
     mounts = [AdditionalMount(host_path=str(target))]
     with patch("rolemesh.security.mount_security.MOUNT_ALLOWLIST_PATH", config_file):
-        validated = validate_additional_mounts(mounts, "test-group", is_main=True)
+        validated = validate_additional_mounts(mounts, "test-group", is_super_agent=True)
     assert len(validated) == 1
     assert "/workspace/extra/" in str(validated[0]["container_path"])
     reset_cache()
@@ -204,7 +204,7 @@ def test_validate_mount_nonexistent_path(tmp_path: Path) -> None:
     )
     mount = AdditionalMount(host_path=str(tmp_path / "nonexistent"))
     with patch("rolemesh.security.mount_security.MOUNT_ALLOWLIST_PATH", config_file):
-        result = validate_mount(mount, is_main=True)
+        result = validate_mount(mount, is_super_agent=True)
     assert result.allowed is False
     assert "does not exist" in result.reason
     reset_cache()
