@@ -49,8 +49,23 @@ export class AgentClient {
 
   connect(chatId?: string): void {
     if (!this.agentId || !this.token) return;
-    this.autoReconnect = true;
     if (chatId !== undefined) this.chatId = chatId;
+
+    // Cancel any pending reconnect timer to prevent double-connect when
+    // both scheduleReconnect and an explicit reconnect fire together.
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
+    // Close existing WS without triggering scheduleReconnect from its onclose.
+    if (this.ws && this.ws.readyState !== WebSocket.CLOSED) {
+      this.autoReconnect = false;
+      this.ws.close();
+      this.ws = null;
+    }
+
+    this.autoReconnect = true;
 
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     let url = `${protocol}//${location.host}/ws/chat?agent_id=${encodeURIComponent(this.agentId)}&token=${encodeURIComponent(this.token)}`;
