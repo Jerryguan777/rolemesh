@@ -120,7 +120,6 @@ def _coworker_from_state(cw_state: CoworkerState) -> Coworker:
         system_prompt=c.system_prompt,
         tools=c.tools,
         skills=c.skills,
-        is_admin=c.is_admin,
         max_concurrent=c.max_concurrent,
     )
 
@@ -183,7 +182,6 @@ async def _load_state() -> None:
             max_concurrent=cw.max_concurrent,
             tools=cw.tools,
             skills=cw.skills,
-            is_admin=cw.is_admin,
             agent_role=cw.agent_role,
             permissions=cw.permissions,
         )
@@ -334,9 +332,7 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
     if not missed_messages:
         return True
 
-    is_admin = config.is_admin
-
-    if not is_admin and conv.requires_trigger:
+    if config.agent_role != "super_agent" and conv.requires_trigger:
         allowlist_cfg = load_sender_allowlist()
         has_trigger = any(
             config.trigger_pattern.search(m.content.strip())
@@ -701,8 +697,7 @@ async def _message_loop(shutdown_event: asyncio.Event) -> None:
                     conv = conv_state.conversation
                     chat_id = conv.channel_chat_id
 
-                    is_admin = config.is_admin
-                    needs_trigger = not is_admin and conv.requires_trigger
+                    needs_trigger = config.agent_role != "super_agent" and conv.requires_trigger
 
                     if needs_trigger:
                         conv_messages = [msg for cid, msg in results if cid == conv_id]

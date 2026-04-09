@@ -124,7 +124,7 @@ async def test_create_and_get_coworker() -> None:
         tenant_id=t.id,
         name="Ops Bot",
         folder="ops-bot",
-        is_admin=True,
+        agent_role="super_agent",
         max_concurrent=3,
         tools=[
             McpServerConfig(name="my-mcp-server", type="sse", url="http://localhost:9100/mcp/"),
@@ -132,7 +132,7 @@ async def test_create_and_get_coworker() -> None:
         skills=["browser"],
     )
     assert cw.id
-    assert cw.is_admin is True
+    assert cw.agent_role == "super_agent"
     assert cw.max_concurrent == 3
     assert cw.tools == [McpServerConfig(name="my-mcp-server", type="sse", url="http://localhost:9100/mcp/")]
     assert cw.agent_backend == "claude-code"

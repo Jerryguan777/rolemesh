@@ -84,7 +84,7 @@ class TestScenarioFirstTimeUser:
             tenant_id=t.id,
             name="Ops Bot",
             folder="ops-bot",
-            is_admin=True,
+            agent_role="super_agent",
         )
         b = await create_channel_binding(
             coworker_id=cw.id,
@@ -106,7 +106,7 @@ class TestScenarioFirstTimeUser:
         assert await get_session(conv.id) == "sess-001"
 
         # Verify all fields
-        assert cw.is_admin is True
+        assert cw.agent_role == "super_agent"
         assert conv.requires_trigger is True
         assert b.channel_type == "telegram"
 

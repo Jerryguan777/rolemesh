@@ -77,10 +77,10 @@ async def test_multi_tenant_schema_creation(e2e_env: Path) -> None:
         tenant_id=tenant.id,
         name="Test Bot",
         folder="test-bot",
-        is_admin=True,
+        agent_role="super_agent",
     )
     assert coworker.id
-    assert coworker.is_admin is True
+    assert coworker.agent_role == "super_agent"
 
     binding = await create_channel_binding(
         coworker_id=coworker.id,

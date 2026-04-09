@@ -126,7 +126,6 @@ class Coworker:
     system_prompt: str | None = None
     tools: list[McpServerConfig] = field(default_factory=list)
     skills: list[str] = field(default_factory=list)
-    is_admin: bool = False
     container_config: ContainerConfig | None = None
     max_concurrent: int = 2
     status: str = "active"
@@ -135,8 +134,6 @@ class Coworker:
     permissions: AgentPermissions | None = None  # filled by __post_init__; always non-None after init
 
     def __post_init__(self) -> None:
-        # is_admin is derived — always overwritten from agent_role
-        self.is_admin = self.agent_role == "super_agent"
         if self.permissions is None:
             from rolemesh.auth.permissions import AgentPermissions as _AgentPermissions
 
@@ -206,7 +203,6 @@ def registered_group_to_coworker(
         tenant_id=tenant_id,
         name=group.name,
         folder=group.folder,
-        is_admin=group.is_main,
         container_config=group.container_config,
         agent_role="super_agent" if group.is_main else "agent",
     )

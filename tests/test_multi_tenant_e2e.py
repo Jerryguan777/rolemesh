@@ -85,7 +85,7 @@ async def _create_coworker_full(
     tenant_id: str,
     name: str,
     folder: str,
-    is_admin: bool = False,
+    agent_role: str = "agent",
     max_concurrent: int = 2,
     channel_type: str = "telegram",
     credentials: dict[str, str] | None = None,
@@ -99,7 +99,7 @@ async def _create_coworker_full(
         tenant_id=tenant_id,
         name=name,
         folder=folder,
-        is_admin=is_admin,
+        agent_role=agent_role,
         max_concurrent=max_concurrent,
     )
     binding = await create_channel_binding(
@@ -139,7 +139,7 @@ def _build_coworker_state(
         agent_backend=cw.agent_backend,
         container_image=None,
         max_concurrent=cw.max_concurrent,
-        is_admin=cw.is_admin,
+        agent_role=cw.agent_role,
     )
     state = CoworkerState(config=config)
     state.channel_bindings[binding.channel_type] = binding
@@ -413,7 +413,7 @@ class TestTwoCoworkersSameGroup:
             tenant.id,
             "Admin Bot",
             "admin-bot",
-            is_admin=True,
+            agent_role="super_agent",
             chat_ids=["-1003000"],
             requires_trigger=False,
         )
@@ -454,7 +454,7 @@ class TestSessionIsolation:
             tenant.id,
             "Ops Bot",
             "ops-sess",
-            is_admin=True,
+            agent_role="super_agent",
             chat_ids=["-100A", "-100B"],
             requires_trigger=False,
         )
@@ -509,7 +509,7 @@ class TestSessionIsolation:
             tenant.id,
             "Ops Bot",
             "ops-rb",
-            is_admin=True,
+            agent_role="super_agent",
             chat_ids=["-200A", "-200B"],
             requires_trigger=False,
         )
@@ -780,7 +780,7 @@ class TestMigration:
                 tenant_id=tenant.id,
                 name=group.name,
                 folder=group.folder,
-                is_admin=group.is_main,
+                agent_role="super_agent" if group.is_main else "agent",
             )
             binding = await create_channel_binding(
                 coworker_id=coworker.id,
@@ -818,11 +818,11 @@ class TestMigration:
 
         main_cw = next((c for c in coworkers if c.folder == "main-group"), None)
         assert main_cw is not None
-        assert main_cw.is_admin is True
+        assert main_cw.agent_role == "super_agent"
 
         team_cw = next((c for c in coworkers if c.folder == "team-chat"), None)
         assert team_cw is not None
-        assert team_cw.is_admin is False
+        assert team_cw.agent_role == "agent"
 
         conversations = await get_all_conversations()
         assert len(conversations) == 2
@@ -1002,7 +1002,7 @@ class TestTaskSchedulingPerCoworker:
             tenant.id,
             "Ops Bot",
             "ops-task",
-            is_admin=True,
+            agent_role="super_agent",
             chat_ids=["-400"],
         )
 

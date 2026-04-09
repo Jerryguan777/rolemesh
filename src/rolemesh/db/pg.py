@@ -92,7 +92,6 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             system_prompt TEXT,
             tools JSONB DEFAULT '[]',
             skills JSONB DEFAULT '[]',
-            is_admin BOOLEAN DEFAULT FALSE,
             container_config JSONB,
             max_concurrent INT DEFAULT 2,
             status TEXT DEFAULT 'active',
@@ -129,7 +128,7 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             """)
             await conn.execute("ALTER TABLE coworkers DROP COLUMN role_id")
         await conn.execute("DROP TABLE IF EXISTS roles CASCADE")
-    # --- Auth: add agent_role + permissions to coworkers, migrate is_admin ---
+    # --- Auth: add agent_role + permissions to coworkers ---
     await conn.execute(
         "ALTER TABLE coworkers ADD COLUMN IF NOT EXISTS agent_role TEXT DEFAULT 'agent'"
     )
@@ -138,13 +137,22 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         "DEFAULT '{\"data_scope\":\"self\",\"task_schedule\":false,"
         "\"task_manage_others\":false,\"agent_delegate\":false}'"
     )
-    # Idempotent migration: is_admin=TRUE -> super_agent + full permissions
+    # Backfill legacy is_admin→agent_role before dropping the column.
+    # Idempotent: only runs when the column still exists (fresh deploy from an
+    # older schema that had is_admin=TRUE rows but never ran the backfill).
     await conn.execute("""
-        UPDATE coworkers SET
-            agent_role = 'super_agent',
-            permissions = '{"data_scope":"tenant","task_schedule":true,"task_manage_others":true,"agent_delegate":true}'
-        WHERE is_admin = TRUE AND agent_role = 'agent'
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'coworkers' AND column_name = 'is_admin') THEN
+                UPDATE coworkers SET
+                    agent_role = 'super_agent',
+                    permissions = '{"data_scope":"tenant","task_schedule":true,"task_manage_others":true,"agent_delegate":true}'
+                WHERE is_admin = TRUE AND agent_role = 'agent';
+            END IF;
+        END $$
     """)
+    await conn.execute("ALTER TABLE coworkers DROP COLUMN IF EXISTS is_admin")
     # User-agent assignment table
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_agent_assignments (
@@ -787,18 +795,12 @@ async def create_coworker(
     system_prompt: str | None = None,
     tools: list[McpServerConfig] | None = None,
     skills: list[str] | None = None,
-    is_admin: bool = False,  # Deprecated: use agent_role instead. Ignored when agent_role is set.
     container_config: ContainerConfig | None = None,
     max_concurrent: int = 2,
-    agent_role: str = "",
+    agent_role: str = "agent",
     permissions: AgentPermissions | None = None,
 ) -> Coworker:
-    """Create a new coworker.
-
-    Use ``agent_role`` ("super_agent" / "agent") instead of ``is_admin``.
-    ``agent_role`` takes priority when set; ``is_admin`` is only used as
-    fallback for backward compatibility.
-    """
+    """Create a new coworker."""
     cc_json: str | None = None
     if container_config:
         cc_json = json.dumps(
@@ -810,16 +812,14 @@ async def create_coworker(
                 "timeout": container_config.timeout,
             }
         )
-    # Derive agent_role from is_admin if not explicitly set
-    effective_role = agent_role or ("super_agent" if is_admin else "agent")
-    effective_perms = permissions or AgentPermissions.for_role(effective_role)
+    effective_perms = permissions or AgentPermissions.for_role(agent_role)
     pool = _get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO coworkers (tenant_id, name, folder, agent_backend, system_prompt,
-                tools, skills, is_admin, container_config, max_concurrent, agent_role, permissions)
-            VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9::jsonb, $10, $11, $12::jsonb)
+                tools, skills, container_config, max_concurrent, agent_role, permissions)
+            VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9, $10, $11::jsonb)
             RETURNING *
             """,
             tenant_id,
@@ -836,10 +836,9 @@ async def create_coworker(
                 else []
             ),
             json.dumps(skills or []),
-            is_admin,
             cc_json,
             max_concurrent,
-            effective_role,
+            agent_role,
             json.dumps(effective_perms.to_dict()),
         )
     assert row is not None
@@ -889,7 +888,6 @@ def _record_to_coworker(row: asyncpg.Record) -> Coworker:
         system_prompt=row.get("system_prompt"),
         tools=tools,
         skills=skills_raw if isinstance(skills_raw, list) else json.loads(skills_raw) if skills_raw else [],
-        is_admin=bool(row["is_admin"]),
         container_config=_parse_container_config(row["container_config"]),
         max_concurrent=row["max_concurrent"],
         status=row["status"] or "active",
@@ -993,9 +991,6 @@ async def update_coworker(
     if agent_role is not None:
         fields.append(f"agent_role = ${param_idx}")
         values.append(agent_role)
-        param_idx += 1
-        fields.append(f"is_admin = ${param_idx}")
-        values.append(agent_role == "super_agent")
         param_idx += 1
     if permissions is not None:
         fields.append(f"permissions = ${param_idx}::jsonb")
