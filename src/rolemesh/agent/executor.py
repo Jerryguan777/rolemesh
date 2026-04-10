@@ -62,16 +62,24 @@ class AgentBackendConfig:
 
 
 CLAUDE_CODE_BACKEND = AgentBackendConfig(
-    name="claude-code",
+    name="claude",
     image="rolemesh-agent:latest",
+    extra_env={"AGENT_BACKEND": "claude"},
 )
 
-PIMONO_BACKEND = AgentBackendConfig(
-    name="pi-mono",
-    image="ppi-agent:latest",
-    entrypoint=["python", "-m", "ppi.coding_agent", "--mode", "rolemesh"],
+PI_BACKEND = AgentBackendConfig(
+    name="pi",
+    image="rolemesh-agent:latest",
+    extra_env={"AGENT_BACKEND": "pi"},
     skip_claude_session=True,
 )
+
+# Map backend names to configs for dispatch.
+BACKEND_CONFIGS: dict[str, AgentBackendConfig] = {
+    "claude": CLAUDE_CODE_BACKEND,
+    "claude-code": CLAUDE_CODE_BACKEND,  # legacy alias
+    "pi": PI_BACKEND,
+}
 
 
 class AgentExecutor(Protocol):

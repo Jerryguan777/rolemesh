@@ -2,8 +2,9 @@
 
 from rolemesh.agent.container_executor import ContainerAgentExecutor
 from rolemesh.agent.executor import (
+    BACKEND_CONFIGS,
     CLAUDE_CODE_BACKEND,
-    PIMONO_BACKEND,
+    PI_BACKEND,
     AgentBackendConfig,
     AgentExecutor,
     AgentInput,
@@ -11,8 +12,9 @@ from rolemesh.agent.executor import (
 )
 
 __all__ = [
+    "BACKEND_CONFIGS",
     "CLAUDE_CODE_BACKEND",
-    "PIMONO_BACKEND",
+    "PI_BACKEND",
     "AgentBackendConfig",
     "AgentExecutor",
     "AgentInput",

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from rolemesh.agent.executor import (
+    BACKEND_CONFIGS,
     CLAUDE_CODE_BACKEND,
-    PIMONO_BACKEND,
+    PI_BACKEND,
     AgentBackendConfig,
     AgentInput,
     AgentOutput,
@@ -78,17 +79,29 @@ def test_agent_backend_config_defaults() -> None:
 
 
 def test_claude_code_backend_preset() -> None:
-    assert CLAUDE_CODE_BACKEND.name == "claude-code"
+    assert CLAUDE_CODE_BACKEND.name == "claude"
     assert CLAUDE_CODE_BACKEND.image == "rolemesh-agent:latest"
     assert CLAUDE_CODE_BACKEND.entrypoint is None
     assert CLAUDE_CODE_BACKEND.skip_claude_session is False
+    assert CLAUDE_CODE_BACKEND.extra_env == {"AGENT_BACKEND": "claude"}
 
 
-def test_pimono_backend_preset() -> None:
-    assert PIMONO_BACKEND.name == "pi-mono"
-    assert PIMONO_BACKEND.image == "ppi-agent:latest"
-    assert PIMONO_BACKEND.entrypoint == ["python", "-m", "ppi.coding_agent", "--mode", "rolemesh"]
-    assert PIMONO_BACKEND.skip_claude_session is True
+def test_pi_backend_preset() -> None:
+    assert PI_BACKEND.name == "pi"
+    assert PI_BACKEND.image == "rolemesh-agent:latest"
+    assert PI_BACKEND.entrypoint is None
+    assert PI_BACKEND.skip_claude_session is True
+    assert PI_BACKEND.extra_env == {"AGENT_BACKEND": "pi"}
+
+
+def test_backend_configs_map() -> None:
+    assert "claude" in BACKEND_CONFIGS
+    assert "pi" in BACKEND_CONFIGS
+    assert "claude-code" in BACKEND_CONFIGS  # legacy alias
+    assert BACKEND_CONFIGS["claude"] is CLAUDE_CODE_BACKEND
+    assert BACKEND_CONFIGS["pi"] is PI_BACKEND
+    # Legacy alias must resolve to the same config object
+    assert BACKEND_CONFIGS["claude-code"] is BACKEND_CONFIGS["claude"]
 
 
 def test_agent_backend_config_frozen() -> None:

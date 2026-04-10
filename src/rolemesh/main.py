@@ -22,7 +22,8 @@ if TYPE_CHECKING:
 
     from rolemesh.channels.gateway import ChannelGateway
 
-from rolemesh.agent import CLAUDE_CODE_BACKEND, AgentInput, AgentOutput, ContainerAgentExecutor
+from rolemesh.agent import BACKEND_CONFIGS, AgentInput, AgentOutput, CLAUDE_CODE_BACKEND, ContainerAgentExecutor, PI_BACKEND
+from rolemesh.core.config import AGENT_BACKEND_DEFAULT
 from rolemesh.auth.permissions import AgentPermissions
 from rolemesh.channels.slack_gateway import SlackGateway
 from rolemesh.channels.telegram_gateway import TelegramGateway
@@ -128,6 +129,7 @@ def _coworker_from_state(cw_state: CoworkerState) -> Coworker:
 _transport: NatsTransport | None = None
 _runtime: ContainerRuntime | None = None
 _executor: ContainerAgentExecutor | None = None
+_executors: dict[str, ContainerAgentExecutor] = {}
 # Track texts sent via IPC send_message to deduplicate against results stream
 _ipc_sent_texts: set[str] = set()
 _bg_tasks: set[asyncio.Task[None]] = set()
@@ -490,7 +492,15 @@ async def _run_agent(
             ],
         )
 
-    if _executor is None:
+    # Select executor based on coworker's backend setting
+    executor = _executors.get(config.agent_backend) if _executors else None
+    if executor is None and _executors:
+        logger.warning(
+            "Unknown agent_backend=%r for coworker %s, using default",
+            config.agent_backend, config.name,
+        )
+        executor = _executor
+    if executor is None:
         logger.error("Agent executor not initialized")
         return "error"
 
@@ -507,7 +517,7 @@ async def _run_agent(
         wrapped_on_output = _wrapped
 
     try:
-        output = await _executor.execute(
+        output = await executor.execute(
             AgentInput(
                 prompt=prompt,
                 session_id=session_id,
@@ -792,7 +802,7 @@ async def _ensure_container_system_running() -> None:
 
 async def main() -> None:
     """Entry point for the RoleMesh orchestrator."""
-    global _transport, _queue, _runtime, _executor, _gateways
+    global _transport, _queue, _runtime, _executor, _executors, _gateways
 
     await _ensure_container_system_running()
     await init_database()
@@ -817,12 +827,18 @@ async def main() -> None:
         cw = _state.coworkers.get(coworker_id)
         return _coworker_from_state(cw) if cw else None
 
-    _executor = ContainerAgentExecutor(
-        CLAUDE_CODE_BACKEND,
-        _runtime,
-        _transport,
-        _get_coworker,
-    )
+    # Build one executor per unique config, then add aliases.
+    _unique_configs = {CLAUDE_CODE_BACKEND, PI_BACKEND}
+    for cfg in _unique_configs:
+        _executors[cfg.name] = ContainerAgentExecutor(cfg, _runtime, _transport, _get_coworker)
+    # Add aliases so legacy DB values (e.g. "claude-code") resolve correctly.
+    for alias, cfg in BACKEND_CONFIGS.items():
+        if alias not in _executors:
+            _executors[alias] = _executors[cfg.name]
+
+    if AGENT_BACKEND_DEFAULT not in _executors:
+        logger.warning("Unknown ROLEMESH_AGENT_BACKEND=%r, falling back to 'claude'", AGENT_BACKEND_DEFAULT)
+    _executor = _executors.get(AGENT_BACKEND_DEFAULT, _executors["claude"])
 
     _queue = GroupQueue(transport=_transport, runtime=_runtime, orchestrator_state=_state)
 
