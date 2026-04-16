@@ -19,7 +19,7 @@ from rolemesh.core.logger import get_logger
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from rolemesh.container.runtime import ContainerHandle, ContainerRuntime
+    from rolemesh.container.runtime import ContainerRuntime
     from rolemesh.core.orchestrator_state import OrchestratorState
     from rolemesh.ipc.nats_transport import NatsTransport
 
@@ -46,7 +46,7 @@ class _GroupState:
     running_task_id: str | None = None
     pending_messages: bool = False
     pending_tasks: list[_QueuedTask] = field(default_factory=list)
-    process: ContainerHandle | None = None
+    is_running: bool = False
     container_name: str | None = None
     group_folder: str | None = None
     job_id: str | None = None
@@ -202,14 +202,13 @@ class GroupQueue:
     def register_process(
         self,
         group_jid: str,
-        proc: ContainerHandle,
         container_name: str,
         group_folder: str | None = None,
         job_id: str | None = None,
     ) -> None:
-        """Track an active container handle for a group."""
+        """Track an active container for a group."""
         state = self._get_group(group_jid)
-        state.process = proc
+        state.is_running = True
         state.container_name = container_name
         if group_folder:
             state.group_folder = group_folder
@@ -303,7 +302,7 @@ class GroupQueue:
             self._schedule_retry(group_jid, state)
         finally:
             state.active = False
-            state.process = None
+            state.is_running = False
             state.container_name = None
             state.group_folder = None
             state.job_id = None
@@ -333,7 +332,7 @@ class GroupQueue:
             state.active = False
             state.is_task_container = False
             state.running_task_id = None
-            state.process = None
+            state.is_running = False
             state.container_name = None
             state.group_folder = None
             state.job_id = None
@@ -407,7 +406,7 @@ class GroupQueue:
 
         active_containers: list[str] = []
         for state in self._groups.values():
-            if state.process and state.container_name:
+            if state.is_running and state.container_name:
                 active_containers.append(state.container_name)
 
         logger.info(

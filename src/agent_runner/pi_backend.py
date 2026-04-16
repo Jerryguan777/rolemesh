@@ -34,9 +34,9 @@ from .backend import (
     ResultEvent,
     SessionInitEvent,
 )
-from .mcp_client import McpServerConnection
+from pi.mcp import McpServerConnection, load_mcp_tools
+
 from .tools.context import ToolContext
-from .tools.mcp_loader import load_mcp_tools
 from .tools.pi_adapter import create_rolemesh_tools
 
 

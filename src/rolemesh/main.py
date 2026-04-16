@@ -33,7 +33,6 @@ from rolemesh.container.runner import (
 )
 from rolemesh.container.runtime import (
     PROXY_BIND_HOST,
-    ContainerHandle,
     get_runtime,
 )
 from rolemesh.container.scheduler import GroupQueue
@@ -531,8 +530,8 @@ async def _run_agent(
                 coworker_id=config.id,
                 conversation_id=conv.id,
             ),
-            lambda handle, container_name, job_id: _queue.register_process(
-                conv.id, handle, container_name, config.folder, job_id
+            lambda container_name, job_id: _queue.register_process(
+                conv.id, container_name, config.folder, job_id
             ),
             wrapped_on_output,
         )
@@ -939,12 +938,11 @@ class _SchedulerDepsImpl:
     def on_process(
         self,
         group_jid: str,
-        proc: ContainerHandle,
         container_name: str,
         group_folder: str,
         job_id: str | None = None,
     ) -> None:
-        _queue.register_process(group_jid, proc, container_name, group_folder, job_id)
+        _queue.register_process(group_jid, container_name, group_folder, job_id)
 
     @property
     def transport(self) -> NatsTransport | None:

@@ -1,26 +1,22 @@
 """
-MCP tool loader — discovers tools from external MCP servers and wraps them
+MCP tool bridge — discovers tools from external MCP servers and wraps them
 as Pi AgentTool instances.
 
 Tool names follow the convention: mcp__{server_name}__{tool_name}
-This matches the Claude SDK naming so coworker system prompts work
-consistently across backends.
 """
 
 from __future__ import annotations
 
 import asyncio
-import sys
+import logging
 from typing import Any
 
 from pi.agent.types import AgentTool, AgentToolResult
 from pi.ai.types import TextContent
 
-from ..mcp_client import McpServerConnection
+from .client import McpServerConnection
 
-
-def _log(message: str) -> None:
-    print(f"[mcp-loader] {message}", file=sys.stderr, flush=True)
+logger = logging.getLogger(__name__)
 
 
 class McpProxiedTool(AgentTool):
@@ -79,7 +75,7 @@ async def load_mcp_tools(
     """Connect to MCP servers and discover their tools.
 
     Args:
-        specs: List of McpServerSpec (name, type, url).
+        specs: List of objects with name, type, url attributes.
 
     Returns:
         Tuple of (tools, connections). Connections must be closed on shutdown.
@@ -99,7 +95,7 @@ async def load_mcp_tools(
             connections.append(conn)
 
             remote_tools = await conn.list_tools()
-            _log(f"MCP server '{spec.name}': {len(remote_tools)} tools discovered")
+            logger.info("MCP server '%s': %d tools discovered", spec.name, len(remote_tools))
 
             for tool_info in remote_tools:
                 prefixed_name = f"mcp__{spec.name}__{tool_info['name']}"
@@ -113,8 +109,7 @@ async def load_mcp_tools(
                     )
                 )
         except Exception as exc:
-            _log(f"Warning: Failed to connect to MCP server '{spec.name}': {exc}")
-            # Don't block agent startup on MCP failures
+            logger.warning("Failed to connect to MCP server '%s': %s", spec.name, exc)
             continue
 
     return all_tools, connections

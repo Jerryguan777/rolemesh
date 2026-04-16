@@ -154,12 +154,6 @@ def _build_coworker_state(
 
 
 @dataclass
-class _FakeHandle:
-    name: str = "mock-container"
-    pid: int = 12345
-
-
-@dataclass
 class CapturedExecution:
     coworker_name: str
     chat_id: str
@@ -200,7 +194,7 @@ class MockExecutor:
                 conversation_id=inp.conversation_id,
             )
         )
-        on_process(_FakeHandle(), "mock-container", f"job-{uuid.uuid4().hex[:6]}")
+        on_process("mock-container", f"job-{uuid.uuid4().hex[:6]}")
         output = AgentOutput(
             status="success",
             result=self._response,
@@ -236,7 +230,7 @@ class FailingExecutor(MockExecutor):
                 conversation_id=inp.conversation_id,
             )
         )
-        on_process(_FakeHandle(), "crash-container", f"job-{uuid.uuid4().hex[:6]}")
+        on_process("crash-container", f"job-{uuid.uuid4().hex[:6]}")
         if on_output:
             await on_output(AgentOutput(status="error", result=None, error="Container crashed"))
         return AgentOutput(status="error", result=None, error="Container crashed")

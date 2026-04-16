@@ -229,12 +229,20 @@ async def create_agent_session(
             )
         return key
 
+    # Assemble tools: built-in coding tools (filtered by active names) + custom tools
+    from pi.coding_agent.core.tools import create_all_tools
+
+    all_builtin = create_all_tools(cwd)
+    active_tools: list[Any] = [all_builtin[name] for name in initial_tool_names if name in all_builtin]
+    if options.custom_tools:
+        active_tools.extend(options.custom_tools)
+
     # Create agent
     initial_state = AgentState(
         system_prompt="",
         model=model or Model(),
         thinking_level=thinking_level or "off",
-        tools=[],
+        tools=active_tools,
         messages=[],
         is_streaming=False,
         stream_message=None,

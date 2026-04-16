@@ -1,19 +1,13 @@
-"""Agent execution protocol and data types.
+"""Agent execution data types and backend configs.
 
-Defines AgentInput, AgentOutput, AgentBackendConfig, and the AgentExecutor
-protocol.  Concrete implementations (e.g. ContainerAgentExecutor) live in
-separate modules.
+Defines AgentInput, AgentOutput, and AgentBackendConfig.
+The concrete executor (ContainerAgentExecutor) lives in container_executor.py.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, Protocol
-
-if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
-    from rolemesh.container.runtime import ContainerHandle
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -80,17 +74,3 @@ BACKEND_CONFIGS: dict[str, AgentBackendConfig] = {
     "claude-code": CLAUDE_CODE_BACKEND,  # legacy alias
     "pi": PI_BACKEND,
 }
-
-
-class AgentExecutor(Protocol):
-    """Protocol for agent execution backends."""
-
-    @property
-    def name(self) -> str: ...
-
-    async def execute(
-        self,
-        inp: AgentInput,
-        on_process: Callable[[ContainerHandle, str, str], None],
-        on_output: Callable[[AgentOutput], Awaitable[None]] | None = None,
-    ) -> AgentOutput: ...

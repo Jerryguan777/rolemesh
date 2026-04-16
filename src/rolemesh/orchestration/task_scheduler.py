@@ -31,7 +31,6 @@ from rolemesh.db.pg import (
 
 if TYPE_CHECKING:
     from rolemesh.agent.container_executor import ContainerAgentExecutor
-    from rolemesh.container.runtime import ContainerHandle
     from rolemesh.container.scheduler import GroupQueue
     from rolemesh.core.orchestrator_state import OrchestratorState
     from rolemesh.core.types import Coworker
@@ -82,7 +81,6 @@ class SchedulerDependencies(Protocol):
     def on_process(
         self,
         group_jid: str,
-        proc: ContainerHandle,
         container_name: str,
         group_folder: str,
         job_id: str | None = None,
@@ -220,8 +218,8 @@ async def _run_task(
                 coworker_id=task.coworker_id,
                 conversation_id=conversation_id,
             ),
-            lambda handle, container_name, job_id: deps.on_process(
-                chat_jid, handle, container_name, coworker.folder, job_id
+            lambda container_name, job_id: deps.on_process(
+                chat_jid, container_name, coworker.folder, job_id
             ),
             _on_output,
         )
