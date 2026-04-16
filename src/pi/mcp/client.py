@@ -26,10 +26,17 @@ CALL_TOOL_TIMEOUT = 300
 class McpServerConnection:
     """Manages the lifecycle of a single MCP server connection."""
 
-    def __init__(self, name: str, server_type: str, url: str) -> None:
+    def __init__(
+        self,
+        name: str,
+        server_type: str,
+        url: str,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.name = name
         self.server_type = server_type
         self.url = url
+        self.headers = headers
         self._session: ClientSession | None = None
         self._exit_stack: AsyncExitStack | None = None
 
@@ -39,9 +46,9 @@ class McpServerConnection:
 
         try:
             if self.server_type == "sse":
-                transport = sse_client(self.url)
+                transport = sse_client(self.url, headers=self.headers)
             else:
-                transport = streamable_http_client(self.url)
+                transport = streamable_http_client(self.url, headers=self.headers)
 
             streams = await asyncio.wait_for(
                 self._exit_stack.enter_async_context(transport),

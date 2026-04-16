@@ -9,6 +9,7 @@ for the NATS bridge.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -76,6 +77,7 @@ class PiBackend:
         self._unsubscribe: Callable[[], None] | None = None
         self._mcp_connections: list[McpServerConnection] = []
         self._bg_tasks: set[asyncio.Task[None]] = set()
+        self._last_result_text: str | None = None
 
     @property
     def session_id(self) -> str | None:
@@ -95,6 +97,23 @@ class PiBackend:
         mcp_servers: list[McpServerSpec] | None = None,
     ) -> None:
         cwd = "/workspace/group"
+
+        # Register LLM providers (Anthropic, OpenAI, Google, etc.)
+        # Must be called before any LLM streaming; the registry starts empty.
+        from pi.ai.providers.register_builtins import register_built_in_api_providers
+        register_built_in_api_providers()
+
+        # Map credential proxy env vars to Pi's expected names.
+        # Container has CLAUDE_CODE_OAUTH_TOKEN (Claude Code convention);
+        # Pi reads ANTHROPIC_OAUTH_TOKEN or ANTHROPIC_API_KEY.
+        if not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("ANTHROPIC_OAUTH_TOKEN"):
+            oauth_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+            if oauth_token:
+                os.environ["ANTHROPIC_OAUTH_TOKEN"] = oauth_token
+
+        # ANTHROPIC_BASE_URL points to credential proxy (legacy path /).
+        # For the /proxy/anthropic path, Pi's Anthropic SDK reads the env var.
+        # OPENAI_BASE_URL points to /proxy/openai — OpenAI SDK reads it.
 
         # Session file path
         sessions_dir = Path("/workspace/sessions")
@@ -145,15 +164,52 @@ class PiBackend:
         custom_tools = create_rolemesh_tools(tool_ctx)
 
         if mcp_servers:
-            mcp_tools, self._mcp_connections = await load_mcp_tools(mcp_servers)
+            mcp_tools, self._mcp_connections = await load_mcp_tools(
+                mcp_servers, user_id=init.user_id,
+            )
             custom_tools.extend(mcp_tools)
             if mcp_tools:
                 _log(f"Loaded {len(mcp_tools)} external MCP tools from {len(self._mcp_connections)} servers")
+
+        # Resolve model from PI_MODEL_ID env var.
+        # Format: "model-id" (searches all providers) or "provider/model-id".
+        model = None
+        model_id = os.environ.get("PI_MODEL_ID")
+        if model_id:
+            from pi.ai.models import get_model, get_providers
+
+            if "/" in model_id:
+                provider, mid = model_id.split("/", 1)
+                model = get_model(provider, mid)
+            else:
+                for provider in get_providers():
+                    model = get_model(provider, model_id)
+                    if model:
+                        break
+
+            if model:
+                # Override model.base_url to route through credential proxy.
+                # Pi models have hardcoded base_urls (e.g. "https://api.openai.com/v1")
+                # which bypass the proxy. We replace them with the proxy URL from env vars.
+                _PROXY_ENV_MAP = {
+                    "openai": "OPENAI_BASE_URL",
+                    "anthropic": "ANTHROPIC_BASE_URL",
+                }
+                proxy_env = _PROXY_ENV_MAP.get(model.provider)
+                if proxy_env:
+                    proxy_url = os.environ.get(proxy_env)
+                    if proxy_url:
+                        model.base_url = proxy_url
+                        _log(f"Routing {model.provider} through proxy: {proxy_url}")
+                _log(f"Using model: {model.provider}/{model.id}")
+            else:
+                _log(f"Warning: model '{model_id}' not found in any provider")
 
         # Create agent session
         result = await create_agent_session(
             CreateAgentSessionOptions(
                 cwd=cwd,
+                model=model,
                 session_manager=session_manager,
                 resource_loader=resource_loader,
                 custom_tools=custom_tools,
@@ -179,21 +235,21 @@ class PiBackend:
         task.add_done_callback(_task_done_callback)
 
     def _handle_event(self, event: AgentSessionEvent) -> None:
-        """Synchronous event handler — schedules async emission."""
+        """Synchronous event handler — collects the last assistant text.
+
+        We do NOT emit ResultEvent on every TurnEndEvent because the host
+        calls notify_idle on each result, which can cause scheduling issues.
+        Instead, we track the last assistant message and emit a single
+        ResultEvent after run_prompt() returns.
+        """
         if isinstance(event, TurnEndEvent):
             text = _extract_text(event.message) if hasattr(event, "message") else ""
-            self._schedule_emit(ResultEvent(
-                text=text or None,
-                new_session_id=self._session_file,
-            ))
-        elif isinstance(event, AgentEndEvent):
-            self._schedule_emit(ResultEvent(
-                text=None,
-                new_session_id=self._session_file,
-            ))
+            if text:
+                self._last_result_text = text
 
     async def run_prompt(self, text: str) -> None:
         assert self._session is not None
+        self._last_result_text = None
         try:
             # AgentSession.prompt() awaits Agent.prompt() which awaits _run_loop(),
             # so this call is fully blocking until the agent finishes.
@@ -201,6 +257,12 @@ class PiBackend:
         except Exception as exc:
             await self._emit(ErrorEvent(error=str(exc)))
             raise
+
+        # Emit a single final result after the agent is done.
+        await self._emit(ResultEvent(
+            text=self._last_result_text,
+            new_session_id=self._session_file,
+        ))
 
     async def handle_follow_up(self, text: str) -> None:
         assert self._session is not None

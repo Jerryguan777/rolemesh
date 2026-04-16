@@ -78,64 +78,18 @@ async def publish_output(js: JetStreamContext, job_id: str, output: ContainerOut
     )
 
 
-async def wait_for_nats_message(
-    nc: Client,
-    js: JetStreamContext,
-    job_id: str,
-) -> str | None:
-    """Wait for a new NATS input message or close signal.
-
-    Returns the message text, or None if close signal received.
-    """
-    result_text: str | None = None
-    close_received = asyncio.Event()
-    message_received = asyncio.Event()
-
-    input_sub = await js.subscribe(f"agent.{job_id}.input")
-
-    async def handle_close(msg: Any) -> None:
-        await msg.respond(b"ack")
-        close_received.set()
-
-    close_sub = await nc.subscribe(f"agent.{job_id}.close", cb=handle_close)
-
-    try:
-        while True:
-            try:
-                msg = await asyncio.wait_for(input_sub.next_msg(timeout=0.5), timeout=0.5)
-                data = json.loads(msg.data)
-                await msg.ack()
-                if data.get("type") == "message" and data.get("text"):
-                    result_text = data["text"]
-                    message_received.set()
-            except TimeoutError:
-                pass
-
-            if close_received.is_set():
-                return None
-            if message_received.is_set():
-                return result_text
-    finally:
-        await input_sub.unsubscribe()
-        await close_sub.unsubscribe()
-
-
-async def drain_nats_input(js: JetStreamContext, job_id: str) -> list[str]:
-    """Drain any pending input messages from NATS."""
+async def drain_nats_input(sub: Any) -> list[str]:
+    """Drain any pending input messages from an existing subscription."""
     messages: list[str] = []
-    sub = await js.subscribe(f"agent.{job_id}.input")
-    try:
-        while True:
-            try:
-                msg = await asyncio.wait_for(sub.next_msg(timeout=0.1), timeout=0.1)
-                data = json.loads(msg.data)
-                await msg.ack()
-                if data.get("type") == "message" and data.get("text"):
-                    messages.append(data["text"])
-            except TimeoutError:
-                break
-    finally:
-        await sub.unsubscribe()
+    while True:
+        try:
+            msg = await asyncio.wait_for(sub.next_msg(timeout=0.1), timeout=0.1)
+            data = json.loads(msg.data)
+            await msg.ack()
+            if data.get("type") == "message" and data.get("text"):
+                messages.append(data["text"])
+        except TimeoutError:
+            break
     return messages
 
 
@@ -218,6 +172,18 @@ async def run_query_loop(
     backend.subscribe(on_event)
     await backend.start(init, tool_ctx, mcp_servers=init.mcp_servers)
 
+    # Subscribe once for the entire loop lifetime to avoid JetStream
+    # redelivery of already-consumed messages when ephemeral consumers
+    # are repeatedly created and destroyed.
+    close_received = asyncio.Event()
+
+    async def handle_close(msg: Any) -> None:
+        await msg.respond(b"ack")
+        close_received.set()
+
+    close_sub = await nc.subscribe(f"agent.{job_id}.close", cb=handle_close)
+    input_sub = await js.subscribe(f"agent.{job_id}.input")
+
     # Build initial prompt
     prompt = init.prompt
     if init.is_scheduled_task:
@@ -225,7 +191,7 @@ async def run_query_loop(
             "[SCHEDULED TASK - The following message was sent automatically "
             "and is not coming directly from the user or group.]\n\n" + prompt
         )
-    pending = await drain_nats_input(js, job_id)
+    pending = await drain_nats_input(input_sub)
     if pending:
         log(f"Draining {len(pending)} pending NATS messages into initial prompt")
         prompt += "\n" + "\n".join(pending)
@@ -235,17 +201,8 @@ async def run_query_loop(
         while True:
             log(f"Starting query (session: {session_id or 'new'})...")
 
-            # Set up follow-up polling during query
-            close_received = asyncio.Event()
             closed_during_query = False
             ipc_polling = True
-
-            async def handle_close(msg: Any) -> None:
-                await msg.respond(b"ack")
-                close_received.set()
-
-            close_sub = await nc.subscribe(f"agent.{job_id}.close", cb=handle_close)
-            input_sub = await js.subscribe(f"agent.{job_id}.input")
 
             async def poll_nats_during_query() -> None:
                 nonlocal ipc_polling, closed_during_query
@@ -276,8 +233,6 @@ async def run_query_loop(
                 poll_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await poll_task
-                await input_sub.unsubscribe()
-                await close_sub.unsubscribe()
 
             if closed_during_query:
                 log("Close signal consumed during query, exiting")
@@ -290,7 +245,22 @@ async def run_query_loop(
             )
 
             log("Query ended, waiting for next NATS message...")
-            next_message = await wait_for_nats_message(nc, js, job_id)
+
+            # Wait for next input or close signal using the shared subscriptions.
+            next_message: str | None = None
+            while True:
+                if close_received.is_set():
+                    break
+                try:
+                    msg = await asyncio.wait_for(input_sub.next_msg(timeout=0.5), timeout=0.5)
+                    data = json.loads(msg.data)
+                    await msg.ack()
+                    if data.get("type") == "message" and data.get("text"):
+                        next_message = data["text"]
+                        break
+                except TimeoutError:
+                    pass
+
             if next_message is None:
                 log("Close signal received, exiting")
                 break
@@ -298,6 +268,8 @@ async def run_query_loop(
             log(f"Got new message ({len(next_message)} chars), starting new query")
             prompt = next_message
     finally:
+        await input_sub.unsubscribe()
+        await close_sub.unsubscribe()
         await backend.shutdown()
 
 

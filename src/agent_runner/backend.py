@@ -9,11 +9,12 @@ backend produced them.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
-from rolemesh.ipc.protocol import AgentInitData, McpServerSpec
+if TYPE_CHECKING:
+    from rolemesh.ipc.protocol import AgentInitData, McpServerSpec
 
-from .tools.context import ToolContext
+    from .tools.context import ToolContext
 
 
 # ---------------------------------------------------------------------------

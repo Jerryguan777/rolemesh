@@ -85,11 +85,12 @@ class SchedulerDependencies(Protocol):
         group_folder: str,
         job_id: str | None = None,
     ) -> None: ...
-    def send_message(self, jid: str, text: str) -> Awaitable[None]: ...
+    def send_message(self, jid: str, text: str, coworker_id: str = "") -> Awaitable[None]: ...
     @property
     def transport(self) -> NatsTransport | None: ...
     @property
     def executor(self) -> ContainerAgentExecutor | None: ...
+    def get_executor(self, backend_name: str) -> ContainerAgentExecutor | None: ...
 
 
 _TASK_CLOSE_DELAY_S: float = 10.0
@@ -120,7 +121,7 @@ async def _run_task(
 
     logger.info("Running scheduled task", task_id=task.id, coworker=coworker.name)
 
-    executor = deps.executor
+    executor = deps.get_executor(coworker.agent_backend) or deps.executor
     if executor is None:
         logger.error("Agent executor not available for task", task_id=task.id)
         await log_task_run(
@@ -197,7 +198,7 @@ async def _run_task(
             if streamed_output.result:
                 result = streamed_output.result
                 if chat_jid:
-                    await deps.send_message(chat_jid, streamed_output.result)
+                    await deps.send_message(chat_jid, streamed_output.result, coworker_id=task.coworker_id)
                 _schedule_close()
             if streamed_output.status == "success":
                 deps.queue.notify_idle(chat_jid)

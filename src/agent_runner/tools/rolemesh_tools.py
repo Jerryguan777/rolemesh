@@ -228,7 +228,7 @@ async def list_tasks(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
             for t in tasks
         ]
         return _text_result("Scheduled tasks:\n" + "\n".join(lines))
-    except (OSError, json.JSONDecodeError, KeyError, ValueError) as exc:
+    except Exception as exc:
         return _text_result(f"Error reading tasks: {exc}")
 
 

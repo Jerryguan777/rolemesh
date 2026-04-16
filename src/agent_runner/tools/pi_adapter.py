@@ -55,7 +55,8 @@ class RoleMeshAgentTool(AgentTool):
         on_update: Any | None = None,
     ) -> AgentToolResult:
         result = await self._fn(params, self._ctx)
-        text = result.get("content", [{}])[0].get("text", "")
+        content_list = result.get("content", [])
+        text = content_list[0].get("text", "") if content_list else ""
         is_error = result.get("isError", False)
         if is_error:
             text = f"[Error] {text}"

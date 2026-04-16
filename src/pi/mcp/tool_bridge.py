@@ -71,11 +71,13 @@ class McpProxiedTool(AgentTool):
 
 async def load_mcp_tools(
     specs: list[Any],
+    user_id: str = "",
 ) -> tuple[list[AgentTool], list[McpServerConnection]]:
     """Connect to MCP servers and discover their tools.
 
     Args:
         specs: List of objects with name, type, url attributes.
+        user_id: User ID for credential proxy header injection.
 
     Returns:
         Tuple of (tools, connections). Connections must be closed on shutdown.
@@ -85,10 +87,16 @@ async def load_mcp_tools(
     connections: list[McpServerConnection] = []
 
     for spec in specs:
+        # Build headers for credential proxy (user identity for token injection).
+        headers: dict[str, str] = {}
+        if user_id:
+            headers["X-RoleMesh-User-Id"] = user_id
+
         conn = McpServerConnection(
             name=spec.name,
             server_type=spec.type,
             url=spec.url,
+            headers=headers or None,
         )
         try:
             await conn.connect()

@@ -827,7 +827,7 @@ async def main() -> None:
         return _coworker_from_state(cw) if cw else None
 
     # Build one executor per unique config, then add aliases.
-    _unique_configs = {CLAUDE_CODE_BACKEND, PI_BACKEND}
+    _unique_configs = [CLAUDE_CODE_BACKEND, PI_BACKEND]
     for cfg in _unique_configs:
         _executors[cfg.name] = ContainerAgentExecutor(cfg, _runtime, _transport, _get_coworker)
     # Add aliases so legacy DB values (e.g. "claude-code") resolve correctly.
@@ -952,10 +952,14 @@ class _SchedulerDepsImpl:
     def executor(self) -> ContainerAgentExecutor | None:
         return _executor
 
-    async def send_message(self, jid: str, raw_text: str) -> None:
+    def get_executor(self, backend_name: str) -> ContainerAgentExecutor | None:
+        return _executors.get(backend_name)
+
+    async def send_message(self, jid: str, raw_text: str, coworker_id: str = "") -> None:
         text = format_outbound(raw_text)
         if text:
-            await _send_via_coworker(None, jid, text)
+            cw_state = _state.coworkers.get(coworker_id) if coworker_id else None
+            await _send_via_coworker(cw_state, jid, text)
 
 
 class _IpcDepsImpl:

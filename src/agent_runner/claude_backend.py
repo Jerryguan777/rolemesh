@@ -11,8 +11,7 @@ import asyncio
 import json
 import os
 import sys
-from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -28,56 +27,13 @@ from .backend import (
     ResultEvent,
     SessionInitEvent,
 )
+from .message_stream import MessageStream
 from .tools.claude_adapter import create_rolemesh_mcp_server
 from .tools.context import ToolContext
 
 
 def _log(message: str) -> None:
     print(f"[claude-backend] {message}", file=sys.stderr, flush=True)
-
-
-# ---------------------------------------------------------------------------
-# MessageStream — push-based async iterable for SDK user messages
-# ---------------------------------------------------------------------------
-
-
-class MessageStream:
-    """Push-based async iterable for streaming user messages to the SDK.
-
-    Keeps the iterable alive until end() is called, preventing isSingleUserTurn.
-    """
-
-    def __init__(self) -> None:
-        self._queue: deque[dict[str, Any]] = deque()
-        self._event: asyncio.Event = asyncio.Event()
-        self._done: bool = False
-
-    def push(self, text: str) -> None:
-        self._queue.append(
-            {
-                "type": "user",
-                "message": {"role": "user", "content": text},
-                "parent_tool_use_id": None,
-                "session_id": "",
-            }
-        )
-        self._event.set()
-
-    def end(self) -> None:
-        self._done = True
-        self._event.set()
-
-    async def __aiter__(self) -> AsyncIterator[dict[str, Any]]:
-        while True:
-            while self._queue:
-                yield self._queue.popleft()
-            if self._done:
-                return
-            self._event.clear()
-            # Re-check after clearing to avoid missed wakeup race
-            if self._queue or self._done:
-                continue
-            await self._event.wait()
 
 
 # ---------------------------------------------------------------------------

@@ -61,10 +61,28 @@ CLAUDE_CODE_BACKEND = AgentBackendConfig(
     extra_env={"AGENT_BACKEND": "claude"},
 )
 
+def _pi_extra_env() -> dict[str, str]:
+    """Build extra env for Pi backend — model selection only.
+
+    API keys are NOT injected here; all LLM requests go through the
+    credential proxy which injects real keys at the HTTP level.
+    """
+    import os
+
+    from rolemesh.core.env import read_env_file
+
+    secrets = read_env_file(["PI_MODEL_ID"])
+    env: dict[str, str] = {"AGENT_BACKEND": "pi"}
+    model_id = secrets.get("PI_MODEL_ID") or os.environ.get("PI_MODEL_ID", "")
+    if model_id:
+        env["PI_MODEL_ID"] = model_id
+    return env
+
+
 PI_BACKEND = AgentBackendConfig(
     name="pi",
     image="rolemesh-agent:latest",
-    extra_env={"AGENT_BACKEND": "pi"},
+    extra_env=_pi_extra_env(),
     skip_claude_session=True,
 )
 

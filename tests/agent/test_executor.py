@@ -91,7 +91,7 @@ def test_pi_backend_preset() -> None:
     assert PI_BACKEND.image == "rolemesh-agent:latest"
     assert PI_BACKEND.entrypoint is None
     assert PI_BACKEND.skip_claude_session is True
-    assert PI_BACKEND.extra_env == {"AGENT_BACKEND": "pi"}
+    assert PI_BACKEND.extra_env["AGENT_BACKEND"] == "pi"
 
 
 def test_backend_configs_map() -> None:

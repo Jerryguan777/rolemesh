@@ -230,11 +230,16 @@ def build_container_spec(
     image = backend_config.image if backend_config else CONTAINER_IMAGE
     nats_url = NATS_URL.replace("localhost", CONTAINER_HOST_GATEWAY)
 
+    proxy_base = f"http://{CONTAINER_HOST_GATEWAY}:{CREDENTIAL_PROXY_PORT}"
+
     env: dict[str, str] = {
         "TZ": TIMEZONE,
         "NATS_URL": nats_url,
         "JOB_ID": job_id,
-        "ANTHROPIC_BASE_URL": f"http://{CONTAINER_HOST_GATEWAY}:{CREDENTIAL_PROXY_PORT}",
+        # Legacy: Claude backend reads ANTHROPIC_BASE_URL directly (no /proxy prefix)
+        "ANTHROPIC_BASE_URL": proxy_base,
+        # Multi-provider proxy URLs for Pi backend (each SDK reads its own env var)
+        "OPENAI_BASE_URL": f"{proxy_base}/proxy/openai",
     }
 
     # Mirror the host's auth method with a placeholder value.
@@ -243,6 +248,8 @@ def build_container_spec(
         env["ANTHROPIC_API_KEY"] = "placeholder"
     else:
         env["CLAUDE_CODE_OAUTH_TOKEN"] = "placeholder"
+    # Placeholder for OpenAI (Pi reads OPENAI_API_KEY from env)
+    env["OPENAI_API_KEY"] = "placeholder"
 
     if backend_config:
         env.update(backend_config.extra_env)
