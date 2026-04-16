@@ -11,6 +11,8 @@ import logging
 from contextlib import AsyncExitStack
 from typing import Any
 
+import httpx
+
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamable_http_client
@@ -48,7 +50,10 @@ class McpServerConnection:
             if self.server_type == "sse":
                 transport = sse_client(self.url, headers=self.headers)
             else:
-                transport = streamable_http_client(self.url, headers=self.headers)
+                # streamable_http_client (new API) doesn't accept headers directly;
+                # inject them via a custom httpx.AsyncClient.
+                http_client = httpx.AsyncClient(headers=self.headers) if self.headers else None
+                transport = streamable_http_client(self.url, http_client=http_client)
 
             streams = await asyncio.wait_for(
                 self._exit_stack.enter_async_context(transport),
