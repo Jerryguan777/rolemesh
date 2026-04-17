@@ -45,17 +45,19 @@ class WebInboundMessage:
 
 @dataclass(frozen=True, slots=True)
 class WebStreamChunk:
-    """Streaming text chunk from Orchestrator to FastAPI (web.stream.{binding_id}.{chat_id}).
+    """Streaming chunk from Orchestrator to FastAPI (web.stream.{binding_id}.{chat_id}).
 
-    type="text" carries a content fragment; type="done" signals end of stream.
+    type="text"   — content carries a text fragment
+    type="done"   — end-of-stream marker (content ignored)
+    type="status" — content carries a JSON-encoded progress payload
     """
 
-    type: str  # "text" | "done"
+    type: str  # "text" | "done" | "status"
     content: str = ""
 
     def to_bytes(self) -> bytes:
         d: dict[str, str] = {"type": self.type}
-        if self.type == "text":
+        if self.type != "done":
             d["content"] = self.content
         return json.dumps(d).encode()
 
