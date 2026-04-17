@@ -497,6 +497,14 @@ async def stream_openai_completions(
             return len(blocks) - 1
 
         async for chunk in openai_stream:
+            # Honor abort signal mid-stream. Pi's port uses asyncio.Event for
+            # cancellation (is_set()); the existing post-loop checks below
+            # read a non-existent `.aborted` attribute inherited from the TS
+            # AbortSignal origin and never fire. Checking per chunk is the
+            # point where the orchestrator's Stop button actually truncates
+            # an in-flight LLM response.
+            if options and options.signal is not None and options.signal.is_set():
+                raise RuntimeError("Request was aborted")
             # Usage chunk
             if hasattr(chunk, "usage") and chunk.usage:
                 usage = chunk.usage
@@ -638,7 +646,7 @@ async def stream_openai_completions(
             current_block.arguments = parse_streaming_json(partial_args)
             yield ToolCallEndEvent(content_index=block_index(), tool_call=current_block, partial=output)
 
-        if options and options.signal and getattr(options.signal, "aborted", False):
+        if options and options.signal is not None and options.signal.is_set():
             raise RuntimeError("Request was aborted")
         if output.stop_reason in ("aborted", "error"):
             raise RuntimeError("An unknown error occurred")
@@ -647,7 +655,9 @@ async def stream_openai_completions(
 
     except Exception as exc:
         output.stop_reason = (
-            "aborted" if options and options.signal and getattr(options.signal, "aborted", False) else "error"
+            "aborted"
+            if options and options.signal is not None and options.signal.is_set()
+            else "error"
         )
         output.error_message = str(exc)
         yield ErrorEvent(reason=output.stop_reason, error=output)

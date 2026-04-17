@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import nats
+from nats.js.api import DeliverPolicy
 
 from rolemesh.ipc.protocol import AgentInitData
 
@@ -228,12 +229,23 @@ async def run_query_loop(
         alive. Unlike handle_shutdown, this does NOT set shutdown_received, so
         the main loop continues waiting for the next user message after abort.
         """
-        await msg.respond(b"ack")
+        await msg.ack()
         log("Interrupt signal received, aborting current turn")
         await backend.abort()
 
     shutdown_sub = await nc.subscribe(f"agent.{job_id}.shutdown", cb=handle_shutdown)
-    interrupt_sub = await nc.subscribe(f"agent.{job_id}.interrupt", cb=handle_interrupt)
+    # Interrupt is on JetStream (DeliverPolicy.NEW, ordered consumer): the
+    # Stop button publishes fire-and-forget and the message is stored until
+    # our consumer picks it up, even if the event loop is busy with LLM
+    # streaming. Core NATS callback subscriptions were unreliable here —
+    # server-side SUB could race with client registration and the request
+    # would NoRespondersError.
+    interrupt_sub = await js.subscribe(
+        f"agent.{job_id}.interrupt",
+        cb=handle_interrupt,
+        ordered_consumer=True,
+        deliver_policy=DeliverPolicy.NEW,
+    )
     input_sub = await js.subscribe(f"agent.{job_id}.input")
 
     # Build initial prompt

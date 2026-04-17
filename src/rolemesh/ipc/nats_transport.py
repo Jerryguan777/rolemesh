@@ -64,13 +64,28 @@ class NatsTransport:
         # Uses LIMITS retention (default) — WorkQueue doesn't allow multiple
         # consumers with overlapping subject filters, which we need since both
         # orchestrator and agent subscribe to different subjects in this stream.
-        await self._js.add_stream(
-            StreamConfig(
-                name="agent-ipc",
-                subjects=["agent.*.results", "agent.*.input", "agent.*.messages", "agent.*.tasks"],
-                max_age=_STREAM_MAX_AGE_S,
-            )
+        # `agent.*.interrupt` moved to JetStream so the Stop button works even
+        # when Pi's event loop is under heavy stream-processing load. With core
+        # NATS callback subscriptions, the interrupt SUB could race with the
+        # orchestrator's publish and raise NoRespondersError; JetStream stores
+        # the message and delivers once the consumer is ready.
+        agent_stream = StreamConfig(
+            name="agent-ipc",
+            subjects=[
+                "agent.*.results",
+                "agent.*.input",
+                "agent.*.interrupt",
+                "agent.*.messages",
+                "agent.*.tasks",
+            ],
+            max_age=_STREAM_MAX_AGE_S,
         )
+        try:
+            await self._js.add_stream(agent_stream)
+        except Exception:
+            # Stream already exists with different config (e.g. older deploy
+            # didn't include agent.*.interrupt) — update it instead of failing.
+            await self._js.update_stream(agent_stream)
 
         # Create KV buckets
         await self._js.create_key_value(config=KeyValueConfig(bucket="agent-init", ttl=_KV_TTL_SECONDS))

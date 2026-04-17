@@ -101,16 +101,24 @@ async def nats_conn():
     """Connect to NATS and ensure the agent-ipc stream exists."""
     nc = await nats.connect(NATS_URL)
     js = nc.jetstream()
-    # Ensure stream exists (idempotent)
+    # Ensure stream exists (idempotent) with the current subject list, which
+    # must include agent.*.interrupt so the bridge's JS consumer can bind.
+    cfg = StreamConfig(
+        name="agent-ipc",
+        subjects=[
+            "agent.*.results",
+            "agent.*.input",
+            "agent.*.interrupt",
+            "agent.*.messages",
+            "agent.*.tasks",
+        ],
+    )
     try:
-        await js.add_stream(
-            StreamConfig(
-                name="agent-ipc",
-                subjects=["agent.*.results", "agent.*.input", "agent.*.messages", "agent.*.tasks"],
-            )
-        )
+        await js.add_stream(cfg)
     except Exception:
-        pass  # Stream already exists
+        # Stream already exists with a stale subject list — update in place
+        # so the new agent.*.interrupt subject gets routed.
+        await js.update_stream(cfg)
     # Ensure KV bucket exists
     try:
         await js.create_key_value(bucket="agent-init")
