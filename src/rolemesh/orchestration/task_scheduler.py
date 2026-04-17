@@ -188,7 +188,7 @@ async def _run_task(
         loop = asyncio.get_running_loop()
         close_handle = loop.call_later(
             _TASK_CLOSE_DELAY_S,
-            lambda: deps.queue.close_stdin(chat_jid),
+            lambda: deps.queue.request_shutdown(chat_jid),
         )
 
     try:
@@ -205,7 +205,7 @@ async def _run_task(
                 # With the is_final contract, per-prompt replies arrive as
                 # is_final=False and must not fire notify_idle — otherwise a
                 # concurrently pending task on the same chat_jid would preempt
-                # (close_stdin) the container mid-batch.
+                # (request_shutdown) the container mid-batch.
                 if streamed_output.is_final:
                     deps.queue.notify_idle(chat_jid)
                 _schedule_close()

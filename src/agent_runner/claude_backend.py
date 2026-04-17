@@ -156,7 +156,6 @@ class ClaudeBackend:
         self._session_id: str | None = None
         self._last_assistant_uuid: str | None = None
         self._stream: MessageStream | None = None
-        self._close_received: asyncio.Event = asyncio.Event()
         self._sdk_env: dict[str, str | None] = dict(os.environ)
 
         # Claude-specific state

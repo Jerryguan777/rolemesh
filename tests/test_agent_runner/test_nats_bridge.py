@@ -7,7 +7,7 @@ that simulates agent behavior without Claude SDK or Pi. This tests all
   1. KV init (agent-init bucket)
   2. Results stream (agent.{id}.results)
   3. Follow-up input (agent.{id}.input)
-  4. Close signal (agent.{id}.close, request-reply)
+  4. Shutdown signal (agent.{id}.shutdown, request-reply)
   5. Messages (agent.{id}.messages, via send_message tool)
   6. Tasks (agent.{id}.tasks, via schedule_task tool)
 """
@@ -278,7 +278,7 @@ class TestChannel3FollowUpInput:
             await asyncio.sleep(0.2)
 
             # Send close signal to exit the loop
-            reply = await nc.request(f"agent.{job_id}.close", b"", timeout=2)
+            reply = await nc.request(f"agent.{job_id}.shutdown", b"", timeout=2)
             assert reply.data == b"ack"
 
             await asyncio.wait_for(loop_task, timeout=5)
@@ -315,7 +315,7 @@ class TestChannel4CloseSignal:
             await asyncio.sleep(0.3)
 
             # Send close signal
-            reply = await nc.request(f"agent.{job_id}.close", b"", timeout=2)
+            reply = await nc.request(f"agent.{job_id}.shutdown", b"", timeout=2)
             assert reply.data == b"ack"
 
             await asyncio.wait_for(loop_task, timeout=5)
@@ -345,7 +345,7 @@ class TestChannel4CloseSignal:
             await asyncio.sleep(0.2)
 
             # Send close during query
-            reply = await nc.request(f"agent.{job_id}.close", b"", timeout=2)
+            reply = await nc.request(f"agent.{job_id}.shutdown", b"", timeout=2)
             assert reply.data == b"ack"
 
             await asyncio.wait_for(loop_task, timeout=5)
@@ -468,7 +468,7 @@ class TestBridgeFullCycle:
                     break
 
             # Close to exit
-            await nc.request(f"agent.{job_id}.close", b"", timeout=2)
+            await nc.request(f"agent.{job_id}.shutdown", b"", timeout=2)
             await asyncio.wait_for(loop_task, timeout=5)
 
             # Verify result was published
@@ -495,7 +495,7 @@ class TestBridgeFullCycle:
         try:
             loop_task = asyncio.create_task(run_query_loop(init, nc, js, job_id))
             await asyncio.sleep(0.3)
-            await nc.request(f"agent.{job_id}.close", b"", timeout=2)
+            await nc.request(f"agent.{job_id}.shutdown", b"", timeout=2)
             await asyncio.wait_for(loop_task, timeout=5)
 
             assert len(backend.prompts) >= 1
@@ -531,7 +531,7 @@ class TestBridgeFullCycle:
             await asyncio.sleep(0.3)
 
             # Close
-            await nc.request(f"agent.{job_id}.close", b"", timeout=2)
+            await nc.request(f"agent.{job_id}.shutdown", b"", timeout=2)
             await asyncio.wait_for(loop_task, timeout=5)
 
             assert backend.prompts == ["first question", "second question"]
