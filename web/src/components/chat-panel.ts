@@ -239,6 +239,27 @@ export class ChatPanel extends LitElement {
       this.updateUrl();
     }
 
+    // Follow-up mid-turn: finalize any still-streaming assistant bubble
+    // before inserting the user's new message. If the previous bubble is
+    // an empty placeholder (three-dot spinner from a 'thinking' event
+    // that hasn't yet received text), drop it — otherwise it becomes an
+    // orphan once the agent's text lands in a fresh bubble after the
+    // user message, and the spinner animates forever.
+    // If the previous bubble already has partial content, mark it as
+    // non-streaming (removes the blinking caret) so any remaining text
+    // from the original turn starts a new bubble instead of continuing
+    // into an outdated one.
+    const last = this.messages[this.messages.length - 1];
+    if (last?.role === 'assistant' && last.streaming) {
+      if (!last.content) {
+        this.messages = this.messages.slice(0, -1);
+      } else {
+        this.messages = [...this.messages.slice(0, -1), { ...last, streaming: false }];
+      }
+      // Allow the next 'thinking' event to spawn a fresh placeholder.
+      this.isStreaming = false;
+    }
+
     this.messages = [...this.messages, { role: 'user', content }];
     this.client.send(content);
   }
