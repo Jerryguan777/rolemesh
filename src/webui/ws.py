@@ -41,7 +41,7 @@ def _is_valid_uuid(s: str) -> bool:
     return True
 
 
-async def _broadcast(binding_id: str, chat_id: str, data: dict[str, str]) -> None:
+async def _broadcast(binding_id: str, chat_id: str, data: dict[str, object]) -> None:
     """Send a JSON message to all WebSocket connections for a chat_id."""
     ws_list = connections.get(binding_id, {}).get(chat_id, [])
     for ws in ws_list:
@@ -136,10 +136,18 @@ async def handle_ws(ws: WebSocket, agent_id: str, token: str, chat_id: str = "")
         async for msg in stream_sub.messages:
             try:
                 data = json.loads(msg.data)
-                if data.get("type") == "text":
+                kind = data.get("type")
+                if kind == "text":
                     await _broadcast(binding_id, chat_id, {"type": "text", "content": data["content"]})
-                elif data.get("type") == "done":
+                elif kind == "done":
                     await _broadcast(binding_id, chat_id, {"type": "done"})
+                elif kind == "status":
+                    # content is a JSON-encoded progress payload; unwrap and
+                    # forward as a typed status frame to the browser. Spread
+                    # payload first so a literal "type": "status" always wins.
+                    payload = json.loads(data.get("content", "{}"))
+                    out = {**payload, "type": "status"}
+                    await _broadcast(binding_id, chat_id, out)
                 await msg.ack()
             except (WebSocketDisconnect, RuntimeError):
                 return

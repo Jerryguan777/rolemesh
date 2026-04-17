@@ -16,7 +16,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, query
+from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, ToolUseBlock, query
 
 from rolemesh.ipc.protocol import AgentInitData, McpServerSpec
 
@@ -25,7 +25,10 @@ from .backend import (
     CompactionEvent,
     ErrorEvent,
     ResultEvent,
+    RunningEvent,
     SessionInitEvent,
+    ToolUseEvent,
+    tool_input_preview,
 )
 from .message_stream import MessageStream
 from .tools.claude_adapter import create_rolemesh_mcp_server
@@ -186,6 +189,11 @@ class ClaudeBackend:
         """Run a single query through the Claude SDK."""
         assert self._init is not None
 
+        # Defensive per-turn signal: the SDK's SystemMessage(init) also
+        # triggers RunningEvent below, but guaranteeing one here means the
+        # UI status bar doesn't depend on SDK internals staying stable.
+        await self._emit(RunningEvent())
+
         stream = MessageStream()
         stream.push(text)
         self._stream = stream
@@ -283,6 +291,7 @@ class ClaudeBackend:
                         if sid:
                             self._session_id = sid
                             await self._emit(SessionInitEvent(session_id=sid))
+                            await self._emit(RunningEvent())
                             _log(f"Session initialized: {sid}")
                     elif subtype == "task_notification":
                         _log(f"Task notification: {data}" if not isinstance(data, dict) else
@@ -292,6 +301,22 @@ class ClaudeBackend:
                     uuid = getattr(message, "uuid", None)
                     if uuid:
                         self._last_assistant_uuid = uuid
+                    # Emit one ToolUseEvent per ToolUseBlock in this message.
+                    # Multiple tools in a single AssistantMessage mean parallel
+                    # tool calls — emitting one event per block keeps the UI's
+                    # overwrite-style progress bar showing advancement.
+                    content = getattr(message, "content", None)
+                    if isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, ToolUseBlock):
+                                tool_name = str(block.name or "")
+                                tool_input = block.input if isinstance(block.input, dict) else {}
+                                await self._emit(
+                                    ToolUseEvent(
+                                        tool=tool_name,
+                                        input_preview=tool_input_preview(tool_name, tool_input),
+                                    )
+                                )
 
                 elif cls_name == "ResultMessage":
                     result_count += 1

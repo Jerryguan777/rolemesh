@@ -1,6 +1,12 @@
 import { LitElement, html } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
-import { AgentClient, type ConversationSummary, type ServerMessage } from '../services/agent-client.js';
+import { AgentClient, type AgentStatus, type ConversationSummary, type ServerMessage } from '../services/agent-client.js';
+
+interface AgentStatusState {
+  status: AgentStatus;
+  tool?: string;
+  input?: string;
+}
 
 export interface ChatMessage {
   role: 'user' | 'assistant';
@@ -21,6 +27,7 @@ export class ChatPanel extends LitElement {
   @state() activeChatId: string | null = null;
   @state() sidebarCollapsed: boolean;
   @state() pendingNewChat = false;
+  @state() agentStatus: AgentStatusState | null = null;
 
   constructor() {
     super();
@@ -100,7 +107,13 @@ export class ChatPanel extends LitElement {
           this.isStreaming = true;
         }
         break;
+      case 'status':
+        // Progress indicator — overwrites prior status; cleared on text/done/error.
+        this.agentStatus = { status: msg.status, tool: msg.tool, input: msg.input };
+        break;
       case 'text': {
+        // First text chunk means real output has begun — retire the status bar.
+        this.agentStatus = null;
         const last = this.messages[this.messages.length - 1];
         if (last?.role === 'assistant' && last.streaming) {
           this.messages = [
@@ -113,6 +126,7 @@ export class ChatPanel extends LitElement {
         break;
       }
       case 'done': {
+        this.agentStatus = null;
         const last = this.messages[this.messages.length - 1];
         if (last?.role === 'assistant') {
           this.messages = [...this.messages.slice(0, -1), { ...last, streaming: false }];
@@ -122,6 +136,7 @@ export class ChatPanel extends LitElement {
         break;
       }
       case 'error': {
+        this.agentStatus = null;
         const last = this.messages[this.messages.length - 1];
         if (last?.role === 'assistant' && last.streaming && !last.content) {
           this.messages = [
@@ -133,6 +148,21 @@ export class ChatPanel extends LitElement {
         }
         this.isStreaming = false;
         break;
+      }
+    }
+  }
+
+  private renderStatusLine(s: AgentStatusState): string {
+    switch (s.status) {
+      case 'queued':
+        return 'Queued…';
+      case 'container_starting':
+        return 'Starting…';
+      case 'running':
+        return 'Thinking…';
+      case 'tool_use': {
+        const tool = s.tool || 'Tool';
+        return s.input ? `${tool} · ${s.input}` : tool;
       }
     }
   }
@@ -161,6 +191,7 @@ export class ChatPanel extends LitElement {
     this.pendingNewChat = false;
     this.messages = [];
     this.isStreaming = false;
+    this.agentStatus = null;
     this.updateUrl();
     this.client.reconnect(chatId);
     this.loadHistory(chatId);
@@ -171,6 +202,7 @@ export class ChatPanel extends LitElement {
     this.pendingNewChat = true;
     this.messages = [];
     this.isStreaming = false;
+    this.agentStatus = null;
     this.updateUrl();
   }
 
@@ -247,6 +279,16 @@ export class ChatPanel extends LitElement {
               ${this.messages.length > 0 ? html`<div class="h-8"></div>` : ''}
             </div>
           </div>
+
+          <!-- Status indicator — one-line transient progress above the input -->
+          ${this.agentStatus ? html`
+            <div class="shrink-0 px-4">
+              <div class="max-w-[720px] mx-auto w-full flex items-center gap-2 py-1.5 text-[12px] text-ink-3 dark:text-d-ink-3">
+                <span class="w-1.5 h-1.5 rounded-full bg-brand animate-pulse"></span>
+                <span class="truncate">${this.renderStatusLine(this.agentStatus)}</span>
+              </div>
+            </div>
+          ` : ''}
 
           <!-- Input -->
           <div class="shrink-0 pb-5 pt-2 px-4">
