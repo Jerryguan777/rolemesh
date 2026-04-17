@@ -413,7 +413,7 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
         loop = asyncio.get_running_loop()
         idle_handle = loop.call_later(
             IDLE_TIMEOUT / 1000.0,
-            lambda: _queue.close_stdin(conversation_id),
+            lambda: _queue.request_shutdown(conversation_id),
         )
 
     # Set typing

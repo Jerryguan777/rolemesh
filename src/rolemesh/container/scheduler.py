@@ -200,7 +200,7 @@ class GroupQueue:
                 )
             )
             if state.idle_waiting:
-                self.close_stdin(group_jid)
+                self.request_shutdown(group_jid)
             logger.debug("Container active, task queued", group_jid=group_jid, task_id=task_id)
             return
 
@@ -247,7 +247,7 @@ class GroupQueue:
         state = self._get_group(group_jid)
         state.idle_waiting = True
         if state.pending_tasks:
-            self.close_stdin(group_jid)
+            self.request_shutdown(group_jid)
 
     def send_message(self, group_jid: str, text: str) -> bool:
         """Send a follow-up message to the active container via NATS JetStream."""
@@ -277,8 +277,18 @@ class GroupQueue:
             logger.exception("Failed to send follow-up message via NATS", group_jid=group_jid)
             return False
 
-    def close_stdin(self, group_jid: str) -> None:
-        """Signal the active container to wind down via NATS request-reply."""
+    def request_shutdown(self, group_jid: str) -> None:
+        """Ask the active container to wind down, via NATS request-reply.
+
+        Publishes a request on `agent.{job_id}.shutdown` and waits briefly for
+        the agent's ack. The agent will finish its current turn (if any) and
+        then exit. Fire-and-forget from the caller's perspective: the actual
+        exit is asynchronous and may take seconds.
+
+        Historical note: this used to be called `close_stdin` from the era
+        when IPC ran over the container's stdin pipe. NATS replaced stdin
+        long ago; the name is aligned with reality as of 2026-04-17.
+        """
         state = self._get_group(group_jid)
         if not state.active or not state.job_id:
             return
@@ -286,27 +296,27 @@ class GroupQueue:
         if self._transport is None:
             return
 
-        async def _send_close() -> None:
+        async def _send_shutdown() -> None:
             assert self._transport is not None
             assert state.job_id is not None
             try:
                 await self._transport.nc.request(
-                    f"agent.{state.job_id}.close",
-                    b"close",
+                    f"agent.{state.job_id}.shutdown",
+                    b"shutdown",
                     timeout=5.0,
                 )
             except (OSError, TimeoutError):
-                logger.debug("Close signal not acknowledged (agent may have exited)", group_jid=group_jid)
+                logger.debug("Shutdown request not acknowledged (agent may have exited)", group_jid=group_jid)
 
-        task = asyncio.ensure_future(_send_close())
+        task = asyncio.ensure_future(_send_shutdown())
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
     def interrupt_current_turn(self, group_jid: str) -> None:
         """Abort the active container's current turn without closing it.
 
-        Unlike close_stdin (which signals container to exit), interrupt tells
-        the agent to stop generating but keeps the container alive for
+        Unlike request_shutdown (which signals container to exit), interrupt
+        tells the agent to stop generating but keeps the container alive for
         subsequent prompts. Used by the web Stop button.
         """
         state = self._get_group(group_jid)

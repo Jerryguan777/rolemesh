@@ -70,9 +70,9 @@ async def test_notify_idle() -> None:
     assert state.idle_waiting is True
 
 
-async def test_close_stdin_no_active() -> None:
+async def test_request_shutdown_no_active() -> None:
     queue = GroupQueue()
-    queue.close_stdin("group1")  # Should not raise
+    queue.request_shutdown("group1")  # Should not raise
 
 
 async def test_interrupt_current_turn_no_active() -> None:

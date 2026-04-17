@@ -8,7 +8,7 @@ and translates backend events into NATS publishes.
 Input protocol:
   NATS KV: Reads initial config from KV bucket "agent-init" key JOB_ID
   NATS JetStream: Follow-up messages via agent.{JOB_ID}.input
-  NATS request-reply: Close signal via agent.{JOB_ID}.close
+  NATS request-reply: Shutdown signal via agent.{JOB_ID}.shutdown
 
 Output protocol:
   NATS JetStream: Results published to agent.{JOB_ID}.results
@@ -217,22 +217,22 @@ async def run_query_loop(
     # Subscribe once for the entire loop lifetime to avoid JetStream
     # redelivery of already-consumed messages when ephemeral consumers
     # are repeatedly created and destroyed.
-    close_received = asyncio.Event()
+    shutdown_received = asyncio.Event()
 
-    async def handle_close(msg: Any) -> None:
+    async def handle_shutdown(msg: Any) -> None:
         await msg.respond(b"ack")
-        close_received.set()
+        shutdown_received.set()
 
     async def handle_interrupt(msg: Any) -> None:
         """User clicked Stop. Abort the current turn but keep the container
-        alive. Unlike handle_close, this does NOT set close_received, so the
-        main loop continues waiting for the next user message after abort.
+        alive. Unlike handle_shutdown, this does NOT set shutdown_received, so
+        the main loop continues waiting for the next user message after abort.
         """
         await msg.respond(b"ack")
         log("Interrupt signal received, aborting current turn")
         await backend.abort()
 
-    close_sub = await nc.subscribe(f"agent.{job_id}.close", cb=handle_close)
+    shutdown_sub = await nc.subscribe(f"agent.{job_id}.shutdown", cb=handle_shutdown)
     interrupt_sub = await nc.subscribe(f"agent.{job_id}.interrupt", cb=handle_interrupt)
     input_sub = await js.subscribe(f"agent.{job_id}.input")
 
@@ -253,15 +253,15 @@ async def run_query_loop(
         while True:
             log(f"Starting query (session: {session_id or 'new'})...")
 
-            closed_during_query = False
+            shutdown_during_query = False
             ipc_polling = True
 
             async def poll_nats_during_query() -> None:
-                nonlocal ipc_polling, closed_during_query
+                nonlocal ipc_polling, shutdown_during_query
                 while ipc_polling:
-                    if close_received.is_set():
-                        log("Close signal detected during query")
-                        closed_during_query = True
+                    if shutdown_received.is_set():
+                        log("Shutdown signal detected during query")
+                        shutdown_during_query = True
                         await backend.abort()
                         ipc_polling = False
                         return
@@ -286,8 +286,8 @@ async def run_query_loop(
                 with contextlib.suppress(asyncio.CancelledError):
                     await poll_task
 
-            if closed_during_query:
-                log("Close signal consumed during query, exiting")
+            if shutdown_during_query:
+                log("Shutdown signal consumed during query, exiting")
                 break
 
             # Batch-final marker — the anchor of the is_final contract. Every
@@ -309,10 +309,10 @@ async def run_query_loop(
 
             log("Query ended, waiting for next NATS message...")
 
-            # Wait for next input or close signal using the shared subscriptions.
+            # Wait for next input or shutdown signal using the shared subscriptions.
             next_message: str | None = None
             while True:
-                if close_received.is_set():
+                if shutdown_received.is_set():
                     break
                 try:
                     msg = await asyncio.wait_for(input_sub.next_msg(timeout=0.5), timeout=0.5)
@@ -325,14 +325,14 @@ async def run_query_loop(
                     pass
 
             if next_message is None:
-                log("Close signal received, exiting")
+                log("Shutdown signal received, exiting")
                 break
 
             log(f"Got new message ({len(next_message)} chars), starting new query")
             prompt = next_message
     finally:
         await input_sub.unsubscribe()
-        await close_sub.unsubscribe()
+        await shutdown_sub.unsubscribe()
         await interrupt_sub.unsubscribe()
         await backend.shutdown()
 
