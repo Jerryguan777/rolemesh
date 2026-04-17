@@ -189,6 +189,11 @@ class ClaudeBackend:
         """Run a single query through the Claude SDK."""
         assert self._init is not None
 
+        # Defensive per-turn signal: the SDK's SystemMessage(init) also
+        # triggers RunningEvent below, but guaranteeing one here means the
+        # UI status bar doesn't depend on SDK internals staying stable.
+        await self._emit(RunningEvent())
+
         stream = MessageStream()
         stream.push(text)
         self._stream = stream

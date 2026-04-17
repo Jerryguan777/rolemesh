@@ -262,6 +262,11 @@ class PiBackend:
     async def run_prompt(self, text: str) -> None:
         assert self._session is not None
         self._last_result_text = None
+        # Emit RunningEvent per-turn so warm-container follow-ups also get a
+        # progress signal. Pi's AgentSession is created once in start() and
+        # reused across prompts — without this, turns 2..N would have no
+        # running event and the UI status bar would stay empty.
+        await self._emit(RunningEvent())
         try:
             # AgentSession.prompt() awaits Agent.prompt() which awaits _run_loop(),
             # so this call is fully blocking until the agent finishes.
@@ -278,6 +283,7 @@ class PiBackend:
 
     async def handle_follow_up(self, text: str) -> None:
         assert self._session is not None
+        await self._emit(RunningEvent())
         try:
             if self._session.is_streaming:
                 await self._session.prompt(text, streaming_behavior="followUp")
