@@ -1,19 +1,13 @@
-"""Agent execution protocol and data types.
+"""Agent execution data types and backend configs.
 
-Defines AgentInput, AgentOutput, AgentBackendConfig, and the AgentExecutor
-protocol.  Concrete implementations (e.g. ContainerAgentExecutor) live in
-separate modules.
+Defines AgentInput, AgentOutput, and AgentBackendConfig.
+The concrete executor (ContainerAgentExecutor) lives in container_executor.py.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, Protocol
-
-if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
-    from rolemesh.container.runtime import ContainerHandle
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -62,27 +56,39 @@ class AgentBackendConfig:
 
 
 CLAUDE_CODE_BACKEND = AgentBackendConfig(
-    name="claude-code",
+    name="claude",
     image="rolemesh-agent:latest",
+    extra_env={"AGENT_BACKEND": "claude"},
 )
 
-PIMONO_BACKEND = AgentBackendConfig(
-    name="pi-mono",
-    image="ppi-agent:latest",
-    entrypoint=["python", "-m", "ppi.coding_agent", "--mode", "rolemesh"],
+def _pi_extra_env() -> dict[str, str]:
+    """Build extra env for Pi backend — model selection only.
+
+    API keys are NOT injected here; all LLM requests go through the
+    credential proxy which injects real keys at the HTTP level.
+    """
+    import os
+
+    from rolemesh.core.env import read_env_file
+
+    secrets = read_env_file(["PI_MODEL_ID"])
+    env: dict[str, str] = {"AGENT_BACKEND": "pi"}
+    model_id = secrets.get("PI_MODEL_ID") or os.environ.get("PI_MODEL_ID", "")
+    if model_id:
+        env["PI_MODEL_ID"] = model_id
+    return env
+
+
+PI_BACKEND = AgentBackendConfig(
+    name="pi",
+    image="rolemesh-agent:latest",
+    extra_env=_pi_extra_env(),
     skip_claude_session=True,
 )
 
-
-class AgentExecutor(Protocol):
-    """Protocol for agent execution backends."""
-
-    @property
-    def name(self) -> str: ...
-
-    async def execute(
-        self,
-        inp: AgentInput,
-        on_process: Callable[[ContainerHandle, str, str], None],
-        on_output: Callable[[AgentOutput], Awaitable[None]] | None = None,
-    ) -> AgentOutput: ...
+# Map backend names to configs for dispatch.
+BACKEND_CONFIGS: dict[str, AgentBackendConfig] = {
+    "claude": CLAUDE_CODE_BACKEND,
+    "claude-code": CLAUDE_CODE_BACKEND,  # legacy alias
+    "pi": PI_BACKEND,
+}

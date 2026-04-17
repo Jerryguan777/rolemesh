@@ -154,12 +154,6 @@ def _build_coworker_state(
 
 
 @dataclass
-class _FakeHandle:
-    name: str = "mock-container"
-    pid: int = 12345
-
-
-@dataclass
 class CapturedExecution:
     coworker_name: str
     chat_id: str
@@ -200,7 +194,7 @@ class MockExecutor:
                 conversation_id=inp.conversation_id,
             )
         )
-        on_process(_FakeHandle(), "mock-container", f"job-{uuid.uuid4().hex[:6]}")
+        on_process("mock-container", f"job-{uuid.uuid4().hex[:6]}")
         output = AgentOutput(
             status="success",
             result=self._response,
@@ -236,7 +230,7 @@ class FailingExecutor(MockExecutor):
                 conversation_id=inp.conversation_id,
             )
         )
-        on_process(_FakeHandle(), "crash-container", f"job-{uuid.uuid4().hex[:6]}")
+        on_process("crash-container", f"job-{uuid.uuid4().hex[:6]}")
         if on_output:
             await on_output(AgentOutput(status="error", result=None, error="Container crashed"))
         return AgentOutput(status="error", result=None, error="Container crashed")
@@ -297,6 +291,7 @@ def _wire_main_state(
 
     m._state = state
     m._executor = executor  # type: ignore[assignment]
+    m._executors = {"claude": executor, "claude-code": executor, "pi": executor}  # type: ignore[assignment]
     m._gateways = gateways  # type: ignore[assignment]
     m._queue = m.GroupQueue()
     m._queue.set_process_messages_fn(m._process_conversation_messages)
@@ -534,6 +529,7 @@ class TestSessionIsolation:
         # Now: fail in Group A
         fail_executor = FailingExecutor()
         m._executor = fail_executor  # type: ignore[assignment]
+        m._executors = {"claude": fail_executor, "claude-code": fail_executor, "pi": fail_executor}  # type: ignore[assignment]
 
         await _inject_message(tenant.id, convs[0].id, "This will fail", timestamp="2024-06-01T12:00:02+00:00")
         result = await m._process_conversation_messages(convs[0].id)

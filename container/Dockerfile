@@ -12,16 +12,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python agent SDK (bundles Claude Code CLI)
-RUN pip install --no-cache-dir claude-agent-sdk croniter nats-py
+# Install Python agent SDK (bundles Claude Code CLI) and Pi backend dependencies
+RUN pip install --no-cache-dir \
+    claude-agent-sdk croniter nats-py \
+    anthropic openai google-genai boto3 httpx mcp \
+    partial-json-parser pyyaml filelock Pillow mistune wcwidth
 
 # Create app directory
 WORKDIR /app
 
-# Copy agent runner code and shared IPC protocol.
+# Copy agent runner code, Pi backend, and shared IPC protocol.
 # protocol.py imports rolemesh.auth.permissions, so we mirror the package
 # layout under /app rather than flattening to a single module.
 COPY src/agent_runner/ ./agent_runner/
+COPY src/pi/ ./pi/
 COPY src/rolemesh/ipc/protocol.py ./rolemesh/ipc/protocol.py
 COPY src/rolemesh/auth/permissions.py ./rolemesh/auth/permissions.py
 RUN touch ./rolemesh/__init__.py ./rolemesh/ipc/__init__.py ./rolemesh/auth/__init__.py

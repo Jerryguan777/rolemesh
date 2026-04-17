@@ -41,6 +41,9 @@ MAX_CONCURRENT_CONTAINERS: int = max(1, int(os.environ.get("MAX_CONCURRENT_CONTA
 GLOBAL_MAX_CONTAINERS: int = max(1, int(os.environ.get("GLOBAL_MAX_CONTAINERS", "20")))
 CONTAINER_RUNTIME: str = os.environ.get("CONTAINER_RUNTIME", "docker")
 
+# Agent backend: "claude" or "pi"
+AGENT_BACKEND_DEFAULT: str = os.environ.get("ROLEMESH_AGENT_BACKEND", "claude")
+
 # Auth configuration
 AUTH_MODE: str = os.environ.get("AUTH_MODE", "external")
 ROLEMESH_TOKEN_SECRET: str = os.environ.get("ROLEMESH_TOKEN_SECRET", "")
