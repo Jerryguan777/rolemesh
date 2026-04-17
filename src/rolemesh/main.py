@@ -259,6 +259,35 @@ async def _auto_create_web_conversation(
     return None
 
 
+async def _emit_status_for_conversation(conversation_id: str, payload: dict[str, object]) -> None:
+    """Route a progress-status payload to the web gateway for this conversation.
+
+    Non-web channels silently ignore status events — progress reporting is a
+    WebUI-only feature.
+    """
+    found = _state.get_conversation(conversation_id)
+    if not found:
+        return
+    cw_state, conv_state = found
+    conv = conv_state.conversation
+    channel_type = _get_channel_type_for_conv(cw_state, conv)
+    binding = cw_state.channel_bindings.get(channel_type)
+    gw = _gateways.get(channel_type) if binding else None
+    if binding and isinstance(gw, WebNatsGateway):
+        try:
+            await gw.send_status(binding.id, conv.channel_chat_id, payload)
+        except (OSError, RuntimeError):
+            logger.debug("send_status failed", conversation_id=conversation_id, exc_info=True)
+
+
+async def _emit_queued_status(conversation_id: str) -> None:
+    await _emit_status_for_conversation(conversation_id, {"status": "queued"})
+
+
+async def _emit_container_starting_status(conversation_id: str) -> None:
+    await _emit_status_for_conversation(conversation_id, {"status": "container_starting"})
+
+
 async def _handle_incoming(
     binding_id: str,
     chat_id: str,
@@ -382,6 +411,19 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
 
     async def _on_output(result: AgentOutput) -> None:
         nonlocal had_error, output_sent_to_user
+        # Progress events (running / tool_use / queued / container_starting)
+        # are transient UX indicators — route to web gateway as status and
+        # early-return. Don't touch idle timer or notify_idle.
+        if result.is_progress():
+            if binding and isinstance(gw, WebNatsGateway):
+                payload: dict[str, object] = {"status": result.status}
+                if result.metadata:
+                    payload.update(result.metadata)
+                try:
+                    await gw.send_status(binding.id, conv.channel_chat_id, payload)
+                except (OSError, RuntimeError):
+                    logger.debug("send_status failed", conversation_id=conv.id, exc_info=True)
+            return
         if result.result:
             raw = result.result
             text = re.sub(r"<internal>[\s\S]*?</internal>", "", raw).strip()
@@ -890,6 +932,8 @@ async def main() -> None:
     ipc_tasks = await _start_nats_ipc_subscriptions(_transport, ipc_deps)
 
     _queue.set_process_messages_fn(_process_conversation_messages)
+    _queue.set_on_queued(_emit_queued_status)
+    _queue.set_on_container_starting(_emit_container_starting_status)
     await _recover_pending_messages()
 
     await _message_loop(shutdown_event)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from typing import TYPE_CHECKING
 
 from rolemesh.core.logger import get_logger
@@ -90,6 +91,20 @@ class WebNatsGateway:
     async def send_stream_done(self, binding_id: str, chat_id: str) -> None:
         """Publish end-of-stream marker to ``web.stream.{binding_id}.{chat_id}``."""
         chunk = WebStreamChunk(type="done")
+        await self._transport.js.publish(
+            f"web.stream.{binding_id}.{chat_id}",
+            chunk.to_bytes(),
+        )
+
+    async def send_status(
+        self, binding_id: str, chat_id: str, payload: dict[str, object]
+    ) -> None:
+        """Publish a progress-status payload on the same stream subject.
+
+        Status chunks piggyback on ``web.stream.*`` so they remain ordered
+        relative to text/done. ws.py branches on chunk.type to separate them.
+        """
+        chunk = WebStreamChunk(type="status", content=json.dumps(payload))
         await self._transport.js.publish(
             f"web.stream.{binding_id}.{chat_id}",
             chunk.to_bytes(),

@@ -19,6 +19,7 @@ from pi.agent.types import (
     AgentEndEvent,
     AgentEvent,
     MessageEndEvent,
+    ToolExecutionStartEvent,
     TurnEndEvent,
 )
 from pi.ai.types import TextContent
@@ -33,7 +34,10 @@ from .backend import (
     BackendEvent,
     ErrorEvent,
     ResultEvent,
+    RunningEvent,
     SessionInitEvent,
+    ToolUseEvent,
+    tool_input_preview,
 )
 from pi.mcp import McpServerConnection, load_mcp_tools
 
@@ -221,6 +225,7 @@ class PiBackend:
         self._unsubscribe = self._session.subscribe(self._handle_event)
 
         await self._emit(SessionInitEvent(session_id=self._session_file or ""))
+        await self._emit(RunningEvent())
         _log(f"Pi session started (session_id={self._session.session_id})")
 
     def _schedule_emit(self, event: BackendEvent) -> None:
@@ -246,6 +251,13 @@ class PiBackend:
             text = _extract_text(event.message) if hasattr(event, "message") else ""
             if text:
                 self._last_result_text = text
+        elif isinstance(event, ToolExecutionStartEvent):
+            self._schedule_emit(
+                ToolUseEvent(
+                    tool=event.tool_name,
+                    input_preview=tool_input_preview(event.tool_name, event.args),
+                )
+            )
 
     async def run_prompt(self, text: str) -> None:
         assert self._session is not None

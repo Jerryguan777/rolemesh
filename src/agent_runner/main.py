@@ -29,7 +29,15 @@ import nats
 
 from rolemesh.ipc.protocol import AgentInitData
 
-from .backend import BackendEvent, CompactionEvent, ErrorEvent, ResultEvent, SessionInitEvent
+from .backend import (
+    BackendEvent,
+    CompactionEvent,
+    ErrorEvent,
+    ResultEvent,
+    RunningEvent,
+    SessionInitEvent,
+    ToolUseEvent,
+)
 from .tools.context import ToolContext
 
 if TYPE_CHECKING:
@@ -47,10 +55,11 @@ AGENT_BACKEND = os.environ.get("AGENT_BACKEND", "claude")
 
 @dataclass
 class ContainerOutput:
-    status: str  # "success" | "error"
+    status: str  # "success" | "error" | "running" | "tool_use"
     result: str | None
     new_session_id: str | None = None
     error: str | None = None
+    metadata: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"status": self.status, "result": self.result}
@@ -58,6 +67,8 @@ class ContainerOutput:
             d["newSessionId"] = self.new_session_id
         if self.error is not None:
             d["error"] = self.error
+        if self.metadata is not None:
+            d["metadata"] = self.metadata
         return d
 
 
@@ -150,6 +161,20 @@ async def run_query_loop(
                     status="success",
                     result=event.text,
                     new_session_id=session_id,
+                ),
+            )
+        elif isinstance(event, RunningEvent):
+            await publish_output(
+                js, job_id,
+                ContainerOutput(status="running", result=None),
+            )
+        elif isinstance(event, ToolUseEvent):
+            await publish_output(
+                js, job_id,
+                ContainerOutput(
+                    status="tool_use",
+                    result=None,
+                    metadata={"tool": event.tool, "input": event.input_preview},
                 ),
             )
         elif isinstance(event, SessionInitEvent):

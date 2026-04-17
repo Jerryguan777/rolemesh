@@ -29,14 +29,33 @@ class AgentInput:
     role_config: dict[str, object] | None = None
 
 
+# Progress statuses are transient UX indicators; terminal statuses carry the
+# final result or error. The tuple is the single source of truth — the Literal
+# below and is_progress() both derive from it.
+PROGRESS_STATUSES: tuple[str, ...] = ("queued", "container_starting", "running", "tool_use")
+TERMINAL_STATUSES: tuple[str, ...] = ("success", "error")
+
+ProgressStatus = Literal["queued", "container_starting", "running", "tool_use"]
+TerminalStatus = Literal["success", "error"]
+
+
 @dataclass(frozen=True)
 class AgentOutput:
-    """Output from an agent execution."""
+    """Output from an agent execution.
 
-    status: Literal["success", "error"]
+    Terminal statuses ("success" / "error") carry the final result or error.
+    Progress statuses (see PROGRESS_STATUSES) are transient indicators for UX;
+    `metadata` carries the structured payload.
+    """
+
+    status: Literal["success", "error", "queued", "container_starting", "running", "tool_use"]
     result: str | None
     new_session_id: str | None = None
     error: str | None = None
+    metadata: dict[str, object] | None = None
+
+    def is_progress(self) -> bool:
+        return self.status in PROGRESS_STATUSES
 
 
 @dataclass(frozen=True)

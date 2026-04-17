@@ -52,7 +52,50 @@ class ErrorEvent:
     error: str
 
 
-BackendEvent = ResultEvent | SessionInitEvent | CompactionEvent | ErrorEvent
+@dataclass(frozen=True)
+class RunningEvent:
+    """Emitted once when the backend session is ready to process prompts."""
+
+
+@dataclass(frozen=True)
+class ToolUseEvent:
+    """Emitted when the agent starts invoking a tool."""
+
+    tool: str
+    input_preview: str = ""
+
+
+BackendEvent = ResultEvent | SessionInitEvent | CompactionEvent | ErrorEvent | RunningEvent | ToolUseEvent
+
+
+def tool_input_preview(tool_name: str, tool_input: dict[str, Any]) -> str:
+    """Extract a short user-facing preview from a tool call's input dict.
+
+    Handles both Claude Code SDK (PascalCase: "Bash", "Read") and Pi
+    (lowercase: "bash", "read") tool naming conventions. MCP tools arrive
+    namespaced as "mcp__<server>__<tool>" — strip the prefix so the base
+    name can hit the match table below.
+    """
+    # Namespaced MCP tools: mcp__<server>__<tool> → <tool>
+    base = tool_name.rsplit("__", 1)[-1] if "__" in tool_name else tool_name
+    tn = base.lower()
+    if tn in ("read", "write", "edit", "glob", "grep", "notebookedit"):
+        val = (
+            tool_input.get("file_path")
+            or tool_input.get("path")
+            or tool_input.get("pattern")
+            or ""
+        )
+        return str(val)[:80]
+    if tn == "bash":
+        return str(tool_input.get("command", ""))[:80]
+    if tn in ("websearch", "webfetch"):
+        val = tool_input.get("query") or tool_input.get("url") or ""
+        return str(val)[:80]
+    if tn in ("task", "taskoutput", "taskstop"):
+        val = tool_input.get("description") or tool_input.get("taskId") or ""
+        return str(val)[:80]
+    return ""
 
 
 # ---------------------------------------------------------------------------

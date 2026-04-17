@@ -68,6 +68,8 @@ class GroupQueue:
         self._active_count: int = 0
         self._waiting_groups: list[str] = []
         self._process_messages_fn: Callable[[str], Awaitable[bool]] | None = None
+        self._on_queued: Callable[[str], Awaitable[None]] | None = None
+        self._on_container_starting: Callable[[str], Awaitable[None]] | None = None
         self._shutting_down: bool = False
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._transport = transport
@@ -110,6 +112,30 @@ class GroupQueue:
         """Set the callback for processing messages for a group."""
         self._process_messages_fn = fn
 
+    def set_on_queued(self, fn: Callable[[str], Awaitable[None]]) -> None:
+        """Callback invoked when a group enters the cross-group waiting queue.
+
+        Fired only when the container can't start immediately due to
+        concurrency limits, not when the group's own container is still
+        running (that case is same-conversation follow-up, not queueing).
+        """
+        self._on_queued = fn
+
+    def set_on_container_starting(self, fn: Callable[[str], Awaitable[None]]) -> None:
+        """Callback invoked at the very start of _run_for_group.
+
+        Represents the transition from "nothing running" to "container
+        about to be provisioned." Called for both fresh starts and drains
+        off the waiting queue.
+        """
+        self._on_container_starting = fn
+
+    def _fire(self, cb: Callable[[str], Awaitable[None]] | None, group_jid: str) -> None:
+        if cb is None:
+            return
+        coro = cb(group_jid)
+        self._spawn(coro)
+
     def enqueue_message_check(
         self,
         group_jid: str,
@@ -138,6 +164,7 @@ class GroupQueue:
                 group_jid=group_jid,
                 active_count=self._active_count,
             )
+            self._fire(self._on_queued, group_jid)
             return
 
         self._spawn(self._run_for_group(group_jid, "messages"))
@@ -289,6 +316,7 @@ class GroupQueue:
             reason=reason,
             active_count=self._active_count,
         )
+        self._fire(self._on_container_starting, group_jid)
 
         try:
             if self._process_messages_fn:

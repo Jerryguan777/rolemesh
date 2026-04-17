@@ -68,6 +68,28 @@ def test_agent_output_optional_fields() -> None:
     out = AgentOutput(status="success", result=None)
     assert out.new_session_id is None
     assert out.error is None
+    assert out.metadata is None
+
+
+def test_agent_output_is_progress_for_transient_statuses() -> None:
+    for status in ("queued", "container_starting", "running", "tool_use"):
+        out = AgentOutput(status=status, result=None)  # type: ignore[arg-type]
+        assert out.is_progress() is True, f"{status} should be progress"
+
+
+def test_agent_output_is_progress_false_for_terminal() -> None:
+    assert AgentOutput(status="success", result="x").is_progress() is False
+    assert AgentOutput(status="error", result=None, error="e").is_progress() is False
+
+
+def test_agent_output_metadata_survives_construction() -> None:
+    out = AgentOutput(
+        status="tool_use",
+        result=None,
+        metadata={"tool": "Bash", "input": "ls /tmp"},
+    )
+    assert out.metadata == {"tool": "Bash", "input": "ls /tmp"}
+    assert out.is_progress() is True
 
 
 def test_agent_backend_config_defaults() -> None:

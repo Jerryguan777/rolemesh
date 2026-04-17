@@ -1,11 +1,18 @@
 import { refreshTokenSilent } from './oidc-auth.js';
 
+export type AgentStatus =
+  | 'queued'
+  | 'container_starting'
+  | 'running'
+  | 'tool_use';
+
 export type ServerMessage =
   | { type: 'session'; chatId: string; agentId: string }
   | { type: 'thinking' }
   | { type: 'text'; content: string }
   | { type: 'done' }
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  | { type: 'status'; status: AgentStatus; tool?: string; input?: string };
 
 export type MessageHandler = (msg: ServerMessage) => void;
 
