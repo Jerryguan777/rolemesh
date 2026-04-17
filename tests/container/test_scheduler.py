@@ -75,6 +75,23 @@ async def test_close_stdin_no_active() -> None:
     queue.close_stdin("group1")  # Should not raise
 
 
+async def test_interrupt_current_turn_no_active() -> None:
+    queue = GroupQueue()
+    queue.interrupt_current_turn("group1")  # Should not raise
+
+
+async def test_interrupt_current_turn_active_no_transport() -> None:
+    queue = GroupQueue()
+    state = queue._get_group("group1")
+    state.active = True
+    state.job_id = "job-abc"
+    # No transport configured — should gracefully no-op, not raise
+    queue.interrupt_current_turn("group1")
+    # State is unchanged (interrupt doesn't touch state)
+    assert state.active is True
+    assert state.job_id == "job-abc"
+
+
 async def test_enqueue_message_while_active() -> None:
     queue = GroupQueue()
     call_count = 0

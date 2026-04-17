@@ -11,6 +11,8 @@ import contextlib
 import json
 from typing import TYPE_CHECKING
 
+from nats.js.api import DeliverPolicy
+
 from rolemesh.core.logger import get_logger
 from rolemesh.ipc.web_protocol import (
     WebInboundMessage,
@@ -20,6 +22,8 @@ from rolemesh.ipc.web_protocol import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from nats.js.client import JetStreamContext
 
     from rolemesh.channels.gateway import MessageCallback
@@ -42,6 +46,17 @@ class WebNatsGateway:
         self._transport = transport
         self._bindings: dict[str, ChannelBinding] = {}
         self._sub_task: asyncio.Task[None] | None = None
+        self._stop_sub_task: asyncio.Task[None] | None = None
+        self._on_stop: Callable[[str, str], Awaitable[None]] | None = None
+
+    def set_on_stop(self, fn: Callable[[str, str], Awaitable[None]]) -> None:
+        """Register callback for browser-initiated Stop signals.
+
+        fn(binding_id, chat_id) — called when a user clicks Stop in the
+        WebUI. binding_id and chat_id are always authenticated values from
+        the subject, never from client-controlled payload.
+        """
+        self._on_stop = fn
 
     # -- ChannelGateway protocol ------------------------------------------------
 
@@ -72,11 +87,13 @@ class WebNatsGateway:
         )
 
     async def shutdown(self) -> None:
-        if self._sub_task is not None:
-            self._sub_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._sub_task
-            self._sub_task = None
+        for task in (self._sub_task, self._stop_sub_task):
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+        self._sub_task = None
+        self._stop_sub_task = None
 
     # -- Web-specific streaming methods ----------------------------------------
 
@@ -154,4 +171,39 @@ class WebNatsGateway:
                         await msg.ack()
 
         self._sub_task = asyncio.create_task(_listener())
+
+        # Subscribe to user-initiated Stop signals from FastAPI.
+        # Subject: web.stop.{binding_id}.{chat_id}
+        # Body is ignored — the authenticated identifiers are in the subject,
+        # never in the payload (prevents IDOR from a compromised browser).
+        with contextlib.suppress(Exception):
+            await js.delete_consumer("web-ipc", "orch-web-stop")
+        # deliver_policy=NEW so a restarted orchestrator doesn't replay old
+        # stop signals whose conversations have already completed.
+        stop_sub = await js.subscribe(
+            "web.stop.*.*",
+            durable="orch-web-stop",
+            deliver_policy=DeliverPolicy.NEW,
+        )
+
+        async def _stop_listener() -> None:
+            async for msg in stop_sub.messages:
+                # One info-level log per stop is useful for ops diagnosing
+                # "I clicked Stop but nothing happened" — keep, don't spam
+                # additional logs in the downstream handlers.
+                logger.info("Web stop received", subject=msg.subject)
+                try:
+                    parts = msg.subject.split(".")
+                    # web.stop.{binding_id}.{chat_id} — 4 parts
+                    if len(parts) >= 4 and self._on_stop is not None:
+                        binding_id = parts[2]
+                        chat_id = parts[3]
+                        await self._on_stop(binding_id, chat_id)
+                    await msg.ack()
+                except Exception:
+                    logger.exception("Error processing web stop")
+                    with contextlib.suppress(Exception):
+                        await msg.ack()
+
+        self._stop_sub_task = asyncio.create_task(_stop_listener())
         logger.info("WebNatsGateway started")

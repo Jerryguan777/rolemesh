@@ -65,7 +65,25 @@ class ToolUseEvent:
     input_preview: str = ""
 
 
-BackendEvent = ResultEvent | SessionInitEvent | CompactionEvent | ErrorEvent | RunningEvent | ToolUseEvent
+@dataclass(frozen=True)
+class StoppedEvent:
+    """Emitted after abort() has halted the current turn.
+
+    Sent as confirmation to the UI so the Stop button can exit the
+    'stopping' transitional state. The container remains alive and
+    ready to receive the next prompt.
+    """
+
+
+BackendEvent = (
+    ResultEvent
+    | SessionInitEvent
+    | CompactionEvent
+    | ErrorEvent
+    | RunningEvent
+    | ToolUseEvent
+    | StoppedEvent
+)
 
 
 def tool_input_preview(tool_name: str, tool_input: dict[str, Any]) -> str:

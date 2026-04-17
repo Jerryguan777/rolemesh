@@ -28,6 +28,13 @@ export class ChatPanel extends LitElement {
   @state() sidebarCollapsed: boolean;
   @state() pendingNewChat = false;
   @state() agentStatus: AgentStatusState | null = null;
+  // UI state machine: 'idle' | 'running' | 'stopping'
+  //  idle     — send button active, accepts new message
+  //  running  — stop button active, agent is working (new messages queued)
+  //  stopping — user clicked stop, waiting for server confirmation
+  //             (button disabled with spinner, auto-recovers after timeout)
+  @state() agentState: 'idle' | 'running' | 'stopping' = 'idle';
+  private stoppingTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
     super();
@@ -73,6 +80,7 @@ export class ChatPanel extends LitElement {
 
   override disconnectedCallback() {
     super.disconnectedCallback();
+    this.clearStoppingTimer();
     this.unsubscribe?.();
     if (this.tokenRefreshHandler) {
       window.removeEventListener('rm-token-refreshed', this.tokenRefreshHandler);
@@ -105,11 +113,30 @@ export class ChatPanel extends LitElement {
         if (!this.isStreaming) {
           this.messages = [...this.messages, { role: 'assistant', content: '', streaming: true }];
           this.isStreaming = true;
+          // Only elevate idle → running. Don't overwrite a 'stopping' state.
+          if (this.agentState === 'idle') {
+            this.agentState = 'running';
+          }
         }
         break;
       case 'status':
+        if (msg.status === 'stopped') {
+          // Server confirmed the turn was aborted. Clear indicators and
+          // exit the 'stopping' transitional state. Don't touch messages
+          // array — any partial text remains visible in the last bubble.
+          this.clearStoppingTimer();
+          this.agentStatus = null;
+          this.agentState = 'idle';
+          this.isStreaming = false;
+          break;
+        }
         // Progress indicator — overwrites prior status; cleared on text/done/error.
+        // Don't reset 'stopping' back to 'running' if a late progress event
+        // arrives after the user clicked Stop.
         this.agentStatus = { status: msg.status, tool: msg.tool, input: msg.input };
+        if (this.agentState === 'idle') {
+          this.agentState = 'running';
+        }
         break;
       case 'text': {
         // First text chunk means real output has begun — retire the status bar.
@@ -126,16 +153,19 @@ export class ChatPanel extends LitElement {
         break;
       }
       case 'done': {
+        this.clearStoppingTimer();
         this.agentStatus = null;
         const last = this.messages[this.messages.length - 1];
         if (last?.role === 'assistant') {
           this.messages = [...this.messages.slice(0, -1), { ...last, streaming: false }];
         }
         this.isStreaming = false;
+        this.agentState = 'idle';
         this.refreshConversations();
         break;
       }
       case 'error': {
+        this.clearStoppingTimer();
         this.agentStatus = null;
         const last = this.messages[this.messages.length - 1];
         if (last?.role === 'assistant' && last.streaming && !last.content) {
@@ -147,8 +177,33 @@ export class ChatPanel extends LitElement {
           this.messages = [...this.messages, { role: 'assistant', content: `**Error:** ${msg.message}` }];
         }
         this.isStreaming = false;
+        this.agentState = 'idle';
         break;
       }
+    }
+  }
+
+  private handleStop() {
+    if (this.agentState !== 'running') return;
+    this.agentState = 'stopping';
+    this.client.stop();
+    // Fallback: if server never confirms (e.g. container crashed mid-abort),
+    // recover to idle after 10s so the UI doesn't wedge.
+    this.clearStoppingTimer();
+    this.stoppingTimer = setTimeout(() => {
+      if (this.agentState === 'stopping') {
+        this.agentState = 'idle';
+        this.agentStatus = null;
+        this.isStreaming = false;
+      }
+      this.stoppingTimer = null;
+    }, 10_000);
+  }
+
+  private clearStoppingTimer() {
+    if (this.stoppingTimer) {
+      clearTimeout(this.stoppingTimer);
+      this.stoppingTimer = null;
     }
   }
 
@@ -164,6 +219,10 @@ export class ChatPanel extends LitElement {
         const tool = s.tool || 'Tool';
         return s.input ? `${tool} · ${s.input}` : tool;
       }
+      case 'stopped':
+        // handleMessage clears agentStatus on 'stopped', so this branch
+        // is defensive — the bar shouldn't render in this state.
+        return 'Stopped';
     }
   }
 
@@ -180,6 +239,27 @@ export class ChatPanel extends LitElement {
       this.updateUrl();
     }
 
+    // Follow-up mid-turn: finalize any still-streaming assistant bubble
+    // before inserting the user's new message. If the previous bubble is
+    // an empty placeholder (three-dot spinner from a 'thinking' event
+    // that hasn't yet received text), drop it — otherwise it becomes an
+    // orphan once the agent's text lands in a fresh bubble after the
+    // user message, and the spinner animates forever.
+    // If the previous bubble already has partial content, mark it as
+    // non-streaming (removes the blinking caret) so any remaining text
+    // from the original turn starts a new bubble instead of continuing
+    // into an outdated one.
+    const last = this.messages[this.messages.length - 1];
+    if (last?.role === 'assistant' && last.streaming) {
+      if (!last.content) {
+        this.messages = this.messages.slice(0, -1);
+      } else {
+        this.messages = [...this.messages.slice(0, -1), { ...last, streaming: false }];
+      }
+      // Allow the next 'thinking' event to spawn a fresh placeholder.
+      this.isStreaming = false;
+    }
+
     this.messages = [...this.messages, { role: 'user', content }];
     this.client.send(content);
   }
@@ -192,6 +272,8 @@ export class ChatPanel extends LitElement {
     this.messages = [];
     this.isStreaming = false;
     this.agentStatus = null;
+    this.agentState = 'idle';
+    this.clearStoppingTimer();
     this.updateUrl();
     this.client.reconnect(chatId);
     this.loadHistory(chatId);
@@ -203,6 +285,8 @@ export class ChatPanel extends LitElement {
     this.messages = [];
     this.isStreaming = false;
     this.agentStatus = null;
+    this.agentState = 'idle';
+    this.clearStoppingTimer();
     this.updateUrl();
   }
 
@@ -294,9 +378,10 @@ export class ChatPanel extends LitElement {
           <div class="shrink-0 pb-5 pt-2 px-4">
             <div class="max-w-[720px] mx-auto w-full">
               <rm-message-editor
-                .isStreaming=${this.isStreaming}
+                .agentState=${this.agentState}
                 .connected=${this.connected}
                 @send=${(e: CustomEvent) => this.handleSend(e)}
+                @stop=${() => this.handleStop()}
               ></rm-message-editor>
               <div class="text-center mt-2.5 text-[11px] text-ink-3 dark:text-d-ink-3 select-none">
                 AI responses may be inaccurate. Verify important information.

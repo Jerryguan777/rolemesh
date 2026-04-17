@@ -302,6 +302,39 @@ class GroupQueue:
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
+    def interrupt_current_turn(self, group_jid: str) -> None:
+        """Abort the active container's current turn without closing it.
+
+        Unlike close_stdin (which signals container to exit), interrupt tells
+        the agent to stop generating but keeps the container alive for
+        subsequent prompts. Used by the web Stop button.
+        """
+        state = self._get_group(group_jid)
+        if not state.active or not state.job_id:
+            return
+
+        if self._transport is None:
+            return
+
+        async def _send_interrupt() -> None:
+            assert self._transport is not None
+            assert state.job_id is not None
+            try:
+                await self._transport.nc.request(
+                    f"agent.{state.job_id}.interrupt",
+                    b"interrupt",
+                    timeout=5.0,
+                )
+            except (OSError, TimeoutError):
+                logger.debug(
+                    "Interrupt signal not acknowledged (agent may have exited)",
+                    group_jid=group_jid,
+                )
+
+        task = asyncio.ensure_future(_send_interrupt())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
     async def _run_for_group(self, group_jid: str, reason: str) -> None:
         state = self._get_group(group_jid)
         state.active = True

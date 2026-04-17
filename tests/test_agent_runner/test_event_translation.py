@@ -17,6 +17,7 @@ from agent_runner.backend import (
     ResultEvent,
     RunningEvent,
     SessionInitEvent,
+    StoppedEvent,
     ToolUseEvent,
     tool_input_preview,
 )
@@ -157,6 +158,16 @@ class TestEventToOutputMapping:
         # Ensure the marker event is a singleton-shaped dataclass.
         ev = RunningEvent()
         assert ev == RunningEvent()
+
+    def test_stopped_event_maps_to_stopped_status(self) -> None:
+        ev = StoppedEvent()
+        assert ev == StoppedEvent()
+        out = ContainerOutput(status="stopped", result=None, new_session_id="s1")
+        d = out.to_dict()
+        assert d["status"] == "stopped"
+        assert d["result"] is None
+        assert d["newSessionId"] == "s1"
+        assert "metadata" not in d
 
     def test_session_id_tracks_across_events(self) -> None:
         """Simulate a sequence of events and verify session_id propagation."""

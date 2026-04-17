@@ -36,6 +36,7 @@ from .backend import (
     ResultEvent,
     RunningEvent,
     SessionInitEvent,
+    StoppedEvent,
     ToolUseEvent,
 )
 from .tools.context import ToolContext
@@ -177,6 +178,11 @@ async def run_query_loop(
                     metadata={"tool": event.tool, "input": event.input_preview},
                 ),
             )
+        elif isinstance(event, StoppedEvent):
+            await publish_output(
+                js, job_id,
+                ContainerOutput(status="stopped", result=None, new_session_id=session_id),
+            )
         elif isinstance(event, SessionInitEvent):
             session_id = event.session_id
             log(f"Session initialized: {session_id}")
@@ -206,7 +212,17 @@ async def run_query_loop(
         await msg.respond(b"ack")
         close_received.set()
 
+    async def handle_interrupt(msg: Any) -> None:
+        """User clicked Stop. Abort the current turn but keep the container
+        alive. Unlike handle_close, this does NOT set close_received, so the
+        main loop continues waiting for the next user message after abort.
+        """
+        await msg.respond(b"ack")
+        log("Interrupt signal received, aborting current turn")
+        await backend.abort()
+
     close_sub = await nc.subscribe(f"agent.{job_id}.close", cb=handle_close)
+    interrupt_sub = await nc.subscribe(f"agent.{job_id}.interrupt", cb=handle_interrupt)
     input_sub = await js.subscribe(f"agent.{job_id}.input")
 
     # Build initial prompt
@@ -295,6 +311,7 @@ async def run_query_loop(
     finally:
         await input_sub.unsubscribe()
         await close_sub.unsubscribe()
+        await interrupt_sub.unsubscribe()
         await backend.shutdown()
 
 

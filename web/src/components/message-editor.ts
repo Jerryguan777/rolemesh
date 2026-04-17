@@ -1,9 +1,15 @@
 import { LitElement, html } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
+export type AgentState = 'idle' | 'running' | 'stopping';
+
 @customElement('rm-message-editor')
 export class MessageEditor extends LitElement {
-  @property({ type: Boolean }) isStreaming = false;
+  // Three-state UI:
+  //  idle     — brand-colored Send button (↑), enabled when text present
+  //  running  — dark Stop button (■), always enabled; clicking emits 'stop'
+  //  stopping — dimmed Stop button with spinner ring, disabled
+  @property({ type: String }) agentState: AgentState = 'idle';
   @property({ type: Boolean }) connected = false;
   @state() private value = '';
   @state() private focused = false;
@@ -11,7 +17,10 @@ export class MessageEditor extends LitElement {
   protected override createRenderRoot() { return this; }
 
   private handleKeyDown(e: KeyboardEvent) {
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); this.handleSend(); }
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      this.handleSend();
+    }
   }
 
   private handleInput(e: Event) {
@@ -19,7 +28,9 @@ export class MessageEditor extends LitElement {
   }
 
   private handleSend() {
-    if (this.isStreaming || !this.value.trim()) return;
+    // Follow-up messages are allowed even while the agent is running.
+    // The orchestrator queues them for after the current turn (see README).
+    if (!this.value.trim()) return;
     this.dispatchEvent(new CustomEvent('send', {
       detail: { content: this.value },
       bubbles: true, composed: true,
@@ -27,8 +38,66 @@ export class MessageEditor extends LitElement {
     this.value = '';
   }
 
-  private get canSend() {
-    return !this.isStreaming && this.value.trim().length > 0;
+  private handleStop() {
+    this.dispatchEvent(new CustomEvent('stop', {
+      bubbles: true, composed: true,
+    }));
+  }
+
+  private handleButtonClick() {
+    if (this.agentState === 'idle') this.handleSend();
+    else if (this.agentState === 'running') this.handleStop();
+    // stopping: no-op (button is disabled)
+  }
+
+  private get canSend(): boolean {
+    return this.agentState === 'idle' && this.value.trim().length > 0;
+  }
+
+  private renderButtonContent() {
+    if (this.agentState === 'idle') {
+      // Up-arrow (send)
+      return html`<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg>`;
+    }
+    if (this.agentState === 'running') {
+      // Filled square (stop)
+      return html`<span class="block w-2.5 h-2.5 bg-white rounded-sm"></span>`;
+    }
+    // stopping: dimmed square + rotating ring overlay
+    return html`
+      <span class="absolute inset-0 flex items-center justify-center">
+        <span class="block w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"></span>
+      </span>
+      <span class="block w-2 h-2 bg-white/80 rounded-sm"></span>
+    `;
+  }
+
+  private get buttonClass(): string {
+    const base = 'flex items-center justify-center w-7 h-7 rounded-lg transition-all duration-150 relative';
+    if (this.agentState === 'idle') {
+      return this.canSend
+        ? `${base} bg-brand text-white hover:bg-brand-dark active:scale-95 shadow-sm`
+        : `${base} bg-surface-2 dark:bg-d-surface-2 text-ink-4 dark:text-d-ink-4 cursor-default`;
+    }
+    if (this.agentState === 'running') {
+      return `${base} bg-ink-0 dark:bg-d-ink-0 text-white hover:bg-ink-1 dark:hover:bg-d-ink-1 active:scale-95 shadow-sm cursor-pointer`;
+    }
+    // stopping
+    return `${base} bg-ink-0/60 dark:bg-d-ink-0/60 text-white cursor-wait`;
+  }
+
+  private get buttonTitle(): string {
+    switch (this.agentState) {
+      case 'idle': return 'Send';
+      case 'running': return 'Stop';
+      case 'stopping': return 'Stopping…';
+    }
+  }
+
+  private get buttonDisabled(): boolean {
+    if (this.agentState === 'idle') return !this.canSend;
+    if (this.agentState === 'stopping') return true;
+    return false;  // running: always enabled
   }
 
   override render() {
@@ -54,17 +123,12 @@ export class MessageEditor extends LitElement {
 
         <div class="flex items-center justify-end px-2.5 pb-2">
           <button
-            class="flex items-center justify-center w-7 h-7 rounded-lg transition-all duration-150
-              ${this.canSend
-                ? 'bg-brand text-white hover:bg-brand-dark active:scale-95 shadow-sm'
-                : 'bg-surface-2 dark:bg-d-surface-2 text-ink-4 dark:text-d-ink-4 cursor-default'}"
-            ?disabled=${!this.canSend}
-            @click=${this.handleSend}
+            class=${this.buttonClass}
+            ?disabled=${this.buttonDisabled}
+            title=${this.buttonTitle}
+            @click=${this.handleButtonClick}
           >
-            ${this.isStreaming
-              ? html`<span class="block w-3 h-3 border-2 border-white/50 border-t-white rounded-full animate-spin"></span>`
-              : html`<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg>`
-            }
+            ${this.renderButtonContent()}
           </button>
         </div>
       </div>

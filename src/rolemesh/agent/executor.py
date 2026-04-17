@@ -33,22 +33,29 @@ class AgentInput:
 # final result or error. The tuple is the single source of truth — the Literal
 # below and is_progress() both derive from it.
 PROGRESS_STATUSES: tuple[str, ...] = ("queued", "container_starting", "running", "tool_use")
-TERMINAL_STATUSES: tuple[str, ...] = ("success", "error")
+TERMINAL_STATUSES: tuple[str, ...] = ("success", "error", "stopped")
 
 ProgressStatus = Literal["queued", "container_starting", "running", "tool_use"]
-TerminalStatus = Literal["success", "error"]
+TerminalStatus = Literal["success", "error", "stopped"]
 
 
 @dataclass(frozen=True)
 class AgentOutput:
     """Output from an agent execution.
 
-    Terminal statuses ("success" / "error") carry the final result or error.
+    Terminal statuses ("success" / "error" / "stopped") end the current turn:
+      - success: turn completed normally with a result
+      - error:   turn failed; error field carries the reason
+      - stopped: user interrupted the turn via Stop button; container is
+                 still alive for subsequent prompts
     Progress statuses (see PROGRESS_STATUSES) are transient indicators for UX;
     `metadata` carries the structured payload.
     """
 
-    status: Literal["success", "error", "queued", "container_starting", "running", "tool_use"]
+    status: Literal[
+        "success", "error", "stopped",
+        "queued", "container_starting", "running", "tool_use",
+    ]
     result: str | None
     new_session_id: str | None = None
     error: str | None = None
