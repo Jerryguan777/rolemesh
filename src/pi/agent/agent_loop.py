@@ -23,6 +23,7 @@ from pi.agent.types import (
     MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
+    PromptTurnCompleteEvent,
     StreamFn,
     ToolExecutionEndEvent,
     ToolExecutionStartEvent,
@@ -141,6 +142,9 @@ async def _run_loop(
     while True:
         has_more_tool_calls = True
         steering_after_tools: list[AgentMessage] | None = None
+        # Tracks the last assistant message produced by the inner loop so that
+        # we can attach it to PromptTurnCompleteEvent when the prompt finishes.
+        last_assistant_message: AssistantMessage | None = None
 
         while has_more_tool_calls or len(pending_messages) > 0:
             if not first_turn:
@@ -159,6 +163,7 @@ async def _run_loop(
                 )
                 new_messages.append(limit_msg)
                 yield TurnEndEvent(message=limit_msg, tool_results=[])
+                yield PromptTurnCompleteEvent(message=limit_msg)
                 yield AgentEndEvent(messages=new_messages)
                 return
 
@@ -178,9 +183,11 @@ async def _run_loop(
             for event in events:
                 yield event
             new_messages.append(message)
+            last_assistant_message = message
 
             if message.stop_reason in ("error", "aborted"):
                 yield TurnEndEvent(message=message, tool_results=[])
+                yield PromptTurnCompleteEvent(message=message)
                 yield AgentEndEvent(messages=new_messages)
                 return
 
@@ -211,6 +218,11 @@ async def _run_loop(
                 steering_after_tools = None
             else:
                 pending_messages = await _call_get_messages(config.get_steering_messages)
+
+        # Inner loop exited — this prompt is answered. Emit a single
+        # per-prompt completion marker carrying the last assistant message.
+        if last_assistant_message is not None:
+            yield PromptTurnCompleteEvent(message=last_assistant_message)
 
         # Check for follow-up messages after agent would stop
         follow_up_messages = await _call_get_messages(config.get_follow_up_messages)

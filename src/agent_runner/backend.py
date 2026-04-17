@@ -24,10 +24,19 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class ResultEvent:
-    """A (possibly intermediate) result from the agent."""
+    """A reply the agent produced for one user prompt.
+
+    When a prompt batch contains multiple user messages (e.g. a follow-up was
+    queued during an active turn), the backend emits one ResultEvent per
+    answered user message. `is_final=False` means "more user messages in this
+    batch may still be answered"; `is_final=True` marks the end of the batch.
+    The NATS bridge uses `is_final` to gate host-side scheduling side effects
+    (notify_idle) so they only fire once per run_prompt call, not per reply.
+    """
 
     text: str | None
     new_session_id: str | None = None
+    is_final: bool = True
 
 
 @dataclass(frozen=True)

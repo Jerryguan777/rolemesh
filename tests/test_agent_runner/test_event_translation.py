@@ -49,6 +49,23 @@ class TestContainerOutput:
         assert "newSessionId" not in d
         assert "error" not in d
 
+    def test_is_final_default_true_omitted_from_dict(self) -> None:
+        """is_final=True is the legacy semantics (one reply per turn) — to keep
+        the wire payload minimal and backwards-compatible with older hosts
+        that don't know about isFinal, we only emit the key when False."""
+        out = ContainerOutput(status="success", result="x", is_final=True)
+        d = out.to_dict()
+        assert "isFinal" not in d
+
+    def test_is_final_false_emitted_as_camel_case(self) -> None:
+        """is_final=False MUST land in the JSON payload (camelCase). The host
+        uses this to skip notify_idle until the batch settles."""
+        out = ContainerOutput(status="success", result="reply1", is_final=False)
+        d = out.to_dict()
+        assert d["isFinal"] is False
+        # And it must survive a JSON roundtrip.
+        assert json.loads(json.dumps(d))["isFinal"] is False
+
 
 class TestEventToOutputMapping:
     """Verify the on_event logic from run_query_loop maps events correctly.
@@ -68,6 +85,7 @@ class TestEventToOutputMapping:
                 status="success",
                 result=event.text,
                 new_session_id=session_id,
+                is_final=event.is_final,
             )
         elif isinstance(event, SessionInitEvent):
             session_id = event.session_id
@@ -126,6 +144,22 @@ class TestEventToOutputMapping:
         )
         assert out is not None
         assert out.new_session_id == "s3"
+
+    def test_intermediate_result_event_propagates_is_final_false(self) -> None:
+        """ResultEvent(is_final=False) must become ContainerOutput(is_final=False)
+        so the host skips notify_idle for this reply."""
+        out, _ = self._translate(ResultEvent(text="reply1", is_final=False))
+        assert out is not None
+        assert out.is_final is False
+        assert out.to_dict()["isFinal"] is False
+
+    def test_final_result_event_propagates_is_final_true(self) -> None:
+        """ResultEvent defaults to is_final=True; ContainerOutput inherits
+        that and omits the key from the wire payload."""
+        out, _ = self._translate(ResultEvent(text="final", is_final=True))
+        assert out is not None
+        assert out.is_final is True
+        assert "isFinal" not in out.to_dict()
 
     def test_compaction_event_no_output(self) -> None:
         out, sid = self._translate(CompactionEvent(), session_id="s4")

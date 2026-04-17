@@ -201,7 +201,13 @@ async def _run_task(
                     await deps.send_message(chat_jid, streamed_output.result, coworker_id=task.coworker_id)
                 _schedule_close()
             if streamed_output.status == "success":
-                deps.queue.notify_idle(chat_jid)
+                # Only release idle-gating once the run_prompt batch settles.
+                # With the is_final contract, per-prompt replies arrive as
+                # is_final=False and must not fire notify_idle — otherwise a
+                # concurrently pending task on the same chat_jid would preempt
+                # (close_stdin) the container mid-batch.
+                if streamed_output.is_final:
+                    deps.queue.notify_idle(chat_jid)
                 _schedule_close()
             if streamed_output.status == "error":
                 error = streamed_output.error or "Unknown error"

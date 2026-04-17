@@ -56,11 +56,17 @@ AGENT_BACKEND = os.environ.get("AGENT_BACKEND", "claude")
 
 @dataclass
 class ContainerOutput:
-    status: str  # "success" | "error" | "running" | "tool_use"
+    status: str  # "success" | "error" | "running" | "tool_use" | "stopped"
     result: str | None
     new_session_id: str | None = None
     error: str | None = None
     metadata: dict[str, Any] | None = None
+    # is_final is only meaningful for status="success". When False, the outer
+    # scheduler must NOT treat this as end-of-turn (another reply is still
+    # coming in the same run_prompt batch). Default True preserves legacy
+    # single-reply semantics for status values that don't participate in
+    # batched replies (running/tool_use/error/stopped).
+    is_final: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"status": self.status, "result": self.result}
@@ -70,6 +76,10 @@ class ContainerOutput:
             d["error"] = self.error
         if self.metadata is not None:
             d["metadata"] = self.metadata
+        # Emit isFinal only when it carries non-default information, so legacy
+        # consumers keep seeing the same JSON shape.
+        if not self.is_final:
+            d["isFinal"] = False
         return d
 
 
@@ -162,6 +172,7 @@ async def run_query_loop(
                     status="success",
                     result=event.text,
                     new_session_id=session_id,
+                    is_final=event.is_final,
                 ),
             )
         elif isinstance(event, RunningEvent):
@@ -279,10 +290,21 @@ async def run_query_loop(
                 log("Close signal consumed during query, exiting")
                 break
 
-            # Emit session update
+            # Batch-final marker — the anchor of the is_final contract. Every
+            # per-prompt ResultEvent emitted by the backend is is_final=False;
+            # this publish is what releases host-side idle gating (notify_idle)
+            # once the whole run_prompt call (initial + any queued follow-ups)
+            # has settled. Keep is_final=True explicit, not relying on the
+            # dataclass default, so the semantics don't silently regress if
+            # the default changes.
             await publish_output(
                 js, job_id,
-                ContainerOutput(status="success", result=None, new_session_id=session_id),
+                ContainerOutput(
+                    status="success",
+                    result=None,
+                    new_session_id=session_id,
+                    is_final=True,
+                ),
             )
 
             log("Query ended, waiting for next NATS message...")

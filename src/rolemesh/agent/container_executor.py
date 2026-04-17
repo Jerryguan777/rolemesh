@@ -74,12 +74,17 @@ def _parse_container_output(raw: dict[str, object]) -> AgentOutput:
     new_sid = raw.get("newSessionId")
     err_val = raw.get("error")
     meta_val = raw.get("metadata")
+    # isFinal is only emitted when the container has something non-default
+    # (False) to say; absence means True (legacy single-reply-per-turn).
+    is_final_val = raw.get("isFinal")
+    is_final = bool(is_final_val) if isinstance(is_final_val, bool) else True
     return AgentOutput(
         status=str(raw.get("status", "error")),  # type: ignore[arg-type]
         result=str(result_val) if result_val is not None else None,
         new_session_id=str(new_sid) if new_sid is not None else None,
         error=str(err_val) if err_val is not None else None,
         metadata=meta_val if isinstance(meta_val, dict) else None,
+        is_final=is_final,
     )
 
 

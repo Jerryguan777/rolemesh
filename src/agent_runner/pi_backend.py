@@ -16,11 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from pi.agent.types import (
-    AgentEndEvent,
-    AgentEvent,
-    MessageEndEvent,
+    PromptTurnCompleteEvent,
     ToolExecutionStartEvent,
-    TurnEndEvent,
 )
 from pi.ai.types import TextContent
 from pi.coding_agent.core.agent_session import AgentSession, AgentSessionEvent
@@ -82,7 +79,6 @@ class PiBackend:
         self._unsubscribe: Callable[[], None] | None = None
         self._mcp_connections: list[McpServerConnection] = []
         self._bg_tasks: set[asyncio.Task[None]] = set()
-        self._last_result_text: str | None = None
 
     @property
     def session_id(self) -> str | None:
@@ -241,17 +237,26 @@ class PiBackend:
         task.add_done_callback(_task_done_callback)
 
     def _handle_event(self, event: AgentSessionEvent) -> None:
-        """Synchronous event handler — collects the last assistant text.
+        """Synchronous event handler — translates Pi session events into
+        BackendEvents on NATS.
 
-        We do NOT emit ResultEvent on every TurnEndEvent because the host
-        calls notify_idle on each result, which can cause scheduling issues.
-        Instead, we track the last assistant message and emit a single
-        ResultEvent after run_prompt() returns.
+        PromptTurnCompleteEvent fires once per answered user prompt — including
+        follow-ups queued during an active turn — and carries the final
+        assistant message for that prompt. Each one becomes a ResultEvent with
+        is_final=False so the host streams every reply to the user but does
+        not release idle-gating until the whole batch settles. The is_final
+        marker is published by the NATS bridge after run_prompt returns.
         """
-        if isinstance(event, TurnEndEvent):
-            text = _extract_text(event.message) if hasattr(event, "message") else ""
+        if isinstance(event, PromptTurnCompleteEvent):
+            text = _extract_text(event.message) if getattr(event, "message", None) else ""
             if text:
-                self._last_result_text = text
+                self._schedule_emit(
+                    ResultEvent(
+                        text=text,
+                        new_session_id=self._session_file,
+                        is_final=False,
+                    )
+                )
         elif isinstance(event, ToolExecutionStartEvent):
             self._schedule_emit(
                 ToolUseEvent(
@@ -262,7 +267,6 @@ class PiBackend:
 
     async def run_prompt(self, text: str) -> None:
         assert self._session is not None
-        self._last_result_text = None
         # Emit RunningEvent per-turn so warm-container follow-ups also get a
         # progress signal. Pi's AgentSession is created once in start() and
         # reused across prompts — without this, turns 2..N would have no
@@ -270,17 +274,23 @@ class PiBackend:
         await self._emit(RunningEvent())
         try:
             # AgentSession.prompt() awaits Agent.prompt() which awaits _run_loop(),
-            # so this call is fully blocking until the agent finishes.
+            # so this call is fully blocking until every queued follow-up is
+            # answered. Per-prompt ResultEvents flow from _handle_event via
+            # PromptTurnCompleteEvent; the bridge emits the batch-final marker.
             await self._session.prompt(text)
         except Exception as exc:
             await self._emit(ErrorEvent(error=str(exc)))
             raise
-
-        # Emit a single final result after the agent is done.
-        await self._emit(ResultEvent(
-            text=self._last_result_text,
-            new_session_id=self._session_file,
-        ))
+        finally:
+            # Drain any ResultEvent/ToolUseEvent publishes scheduled synchronously
+            # from _handle_event so they hit the wire before the bridge's
+            # batch-final marker (or before the exception propagates up). Without
+            # this, the final marker can race ahead of the last per-prompt
+            # ResultEvent and the host sees notify_idle before the reply text;
+            # on error, already-scheduled replies would be left as orphaned
+            # tasks with no publish guarantee.
+            if self._bg_tasks:
+                await asyncio.gather(*list(self._bg_tasks), return_exceptions=True)
 
     async def handle_follow_up(self, text: str) -> None:
         assert self._session is not None

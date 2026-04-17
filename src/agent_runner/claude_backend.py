@@ -325,9 +325,14 @@ class ClaudeBackend:
                     session_id_from_result = getattr(message, "session_id", None)
                     if session_id_from_result:
                         self._session_id = session_id_from_result
+                    # Each ResultMessage answers one user message in the prompt
+                    # stream. Mark these intermediate so the host streams them
+                    # to the UI without releasing idle-gating; the NATS bridge
+                    # publishes the batch-final marker after run_prompt returns.
                     await self._emit(ResultEvent(
                         text=text_result or None,
                         new_session_id=self._session_id,
+                        is_final=False,
                     ))
         except Exception as exc:
             await self._emit(ErrorEvent(error=str(exc)))
