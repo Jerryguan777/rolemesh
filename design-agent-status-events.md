@@ -13,7 +13,7 @@
 本方案的目标是让用户看到：
 
 ```
-用户发消息 → 排队中(第2位) → 容器启动中 → Claude 思考中 → 执行 Bash: npm test → 读取 src/app.ts → 编辑 src/app.ts → 结果
+用户发消息 → 排队中(第2位) → 容器启动中 → 思考中 → 执行 Bash: npm test → 读取 src/app.ts → 编辑 src/app.ts → 结果
 ```
 
 ## 不做什么
@@ -26,53 +26,107 @@
 - 不做可查询的"当前状态"
 - 不新建 EventBus 模块或 NATS stream
 
-## 现有数据链路
+## 现有架构
 
-理解方案需要先理解现有的数据流。当前一条消息从 agent 到用户屏幕经过 8 个节点：
+### agent_runner 三层结构
+
+`feat/pi` 分支引入了 `AgentBackend` 抽象层，agent_runner 被拆为三层：
 
 ```
-容器内                              orchestrator 进程                              Web UI
-─────                               ──────────                                    ──────
-
-agent_runner/main.py
-  query() 迭代 SDK 消息
-  遇到 ResultMessage 时:
-    publish_output()
-      ↓
-  NATS: agent.{job_id}.results ──→ container_executor.py: _read_results()
-                                     解析 JSON, 调回调:
-                                       ↓
-                                   main.py: _on_output(result)
-                                     判断是 Web 还是 Slack/TG
-                                     如果是 Web:
-                                       ↓
-                                   web_nats_gateway.py: send_stream_chunk()
-                                       ↓
-                                   NATS: web.stream.{binding}.{chat} ──→ ws.py: _forward_stream()
-                                                                            解析 JSON, 推到 WebSocket:
-                                                                              ↓
-                                                                          WebSocket → 浏览器
-                                                                              ↓
-                                                                          agent-client.ts: onmessage
-                                                                              ↓
-                                                                          chat-panel.ts: handleMessage()
-                                                                            渲染到 UI
+main.py (NATS bridge)              ← 后端无关，只管 NATS 通信 + 事件翻译
+    │
+    ▼
+backend.py (AgentBackend 协议)     ← 定义 BackendEvent 统一事件接口
+    │
+    ├── claude_backend.py          ← 包装 claude_agent_sdk
+    └── pi_backend.py              ← 包装 pi.coding_agent
 ```
 
-关键观察: 这条链路已经是实时流式的。现在的问题是容器内只在 `ResultMessage`
-时才发数据, SDK 迭代器产出的其他消息类型（`SystemMessage`、`AssistantMessage`
-含 `ToolUseBlock`）都被丢弃了。
+所有后端通过 `BackendEvent` 向 NATS bridge 汇报，bridge 统一翻译成
+`ContainerOutput` 发到 NATS。
+
+### 现有 BackendEvent 类型
+
+```python
+# agent_runner/backend.py
+BackendEvent = ResultEvent | SessionInitEvent | CompactionEvent | ErrorEvent
+```
+
+注意：没有 ToolUseEvent。两个后端当前都把 tool_use 信息丢弃了。
+
+### 现有数据链路
+
+一条消息从 agent 到用户屏幕经过的完整路径：
+
+```
+容器内                              orchestrator 进程                       Web UI
+─────                               ──────────                             ──────
+
+后端 emit BackendEvent
+    ↓
+main.py on_event()
+  翻译为 ContainerOutput
+  publish_output()
+    ↓
+NATS: agent.{job_id}.results ──→ container_executor.py: _read_results()
+                                   解析 JSON, 调回调:
+                                     ↓
+                                 main.py: _on_output(result)
+                                   如果是 Web:
+                                     ↓
+                                 web_nats_gateway.py: send_stream_chunk()
+                                     ↓
+                                 NATS: web.stream.{binding}.{chat} ──→ ws.py
+                                                                        ↓
+                                                                     WebSocket
+                                                                        ↓
+                                                                     agent-client.ts
+                                                                        ↓
+                                                                     chat-panel.ts
+```
+
+关键观察: 这条链路已经是实时流式的。现在的问题是后端只在
+`ResultEvent` 时才发数据，tool_use 信息被丢弃了。
+
+### 两个后端的事件能力对比
+
+Claude SDK 的 `query()` 迭代器产出的消息类型：
+- `SystemMessage(subtype="init")` — session 建立
+- `AssistantMessage` — 内含 `ToolUseBlock(name, input)` ← **当前被丢弃**
+- `ResultMessage` — 最终结果 ← 唯一被翻译成 BackendEvent 的
+
+Pi 的 `AgentEvent` 类型体系（`pi/agent/types.py`）：
+- `AgentStartEvent` / `AgentEndEvent`
+- `TurnStartEvent` / `TurnEndEvent`
+- `MessageStartEvent` / `MessageUpdateEvent` / `MessageEndEvent`
+- `ToolExecutionStartEvent(tool_name, args)` ← **当前被忽略**
+- `ToolExecutionUpdateEvent(partial_result)`
+- `ToolExecutionEndEvent(result, is_error)`
+
+Pi 有一级公民的 tool execution 事件，比 Claude SDK 更丰富。
 
 ## 改动思路
 
-不新建任何通道或模块。沿着上面这条链路, 在每一层增加对新消息类型的处理:
+利用现有 `BackendEvent` 抽象层，新增事件类型。两个后端各自翻译，
+NATS bridge 统一处理。不新建任何通道或模块。
 
-1. 容器内: agent_runner 多发几种 status
-2. orchestrator: 识别新 status, 转发到 Web channel
-3. 前端: 渲染新消息类型
-
-另外, orchestrator 进程内部产生的 `queued` 事件不需要经过容器, 直接从
-scheduler 发到 Web channel。
+```
+Claude SDK                     Pi
+──────────                     ──
+AssistantMessage               ToolExecutionStartEvent
+  含 ToolUseBlock                含 tool_name, args
+    ↓                              ↓
+claude_backend.py              pi_backend.py
+  _emit(ToolUseEvent)            _schedule_emit(ToolUseEvent)
+    ↓                              ↓
+    └──────────┬───────────────────┘
+               ↓
+         main.py on_event()
+           isinstance(event, ToolUseEvent)
+           → publish_output(status="tool_use")
+               ↓
+         (沿现有链路一路到前端)
+```
 
 ## WebSocket 协议变更
 
@@ -87,7 +141,7 @@ scheduler 发到 Web channel。
 // 容器正在启动
 {"type": "status", "status": "container_starting"}
 
-// Claude 会话已建立, 开始处理
+// 后端会话已建立, 开始处理
 {"type": "status", "status": "running"}
 
 // Agent 正在调用工具 (可能连续多次)
@@ -103,99 +157,183 @@ scheduler 发到 Web channel。
 
 ## 各层详细改动
 
-### 第 1 层: agent_runner/main.py (容器内)
+### 第 1 层: agent_runner/backend.py (事件定义)
 
-位置: `run_query()` 函数的 `async for message in query(...)` 循环。
+新增两个事件类型:
 
-现状: 只处理 3 种 SDK 消息类型。
+```python
+@dataclass(frozen=True)
+class ToolUseEvent:
+    """Emitted when the agent starts executing a tool."""
+    tool: str           # "Bash", "Read", "Edit", etc.
+    input_preview: str  # 用户可读的摘要, 如文件路径或命令前 80 字符
+
+@dataclass(frozen=True)
+class RunningEvent:
+    """Emitted when the backend session is established and ready."""
+    pass
+
+BackendEvent = ResultEvent | SessionInitEvent | CompactionEvent | ErrorEvent | ToolUseEvent | RunningEvent
+```
+
+### 第 2 层: claude_backend.py (Claude SDK 翻译)
+
+位置: `run_prompt()` 中 `async for message in query(...)` 循环。
+
+现状: `AssistantMessage` 分支只提取 `uuid`。
 
 改动:
 
 ```python
-async for message in query(prompt=stream, options=options):
-    cls_name = type(message).__name__
+elif cls_name == "AssistantMessage":
+    uuid = getattr(message, "uuid", None)
+    if uuid:
+        self._last_assistant_uuid = uuid
 
-    if cls_name == "SystemMessage":
-        subtype = getattr(message, "subtype", "")
-        data = getattr(message, "data", {})
-
-        if subtype == "init":
-            result.new_session_id = data.get("session_id") if isinstance(data, dict) else None
-            # ★ 新增: 发送 running 状态
-            await publish_output(js, job_id, ContainerOutput(
-                status="running", result=None,
-            ))
-
-    elif cls_name == "AssistantMessage":
-        uuid = getattr(message, "uuid", None)
-        if uuid:
-            result.last_assistant_uuid = uuid
-
-        # ★ 新增: 提取 ToolUseBlock, 发送 tool_use 状态
-        content = getattr(getattr(message, "message", None), "content", None)
-        if content is None:
-            content = getattr(message, "content", None)
-        if isinstance(content, list):
-            for block in content:
-                block_type = getattr(block, "type", None) or (block.get("type") if isinstance(block, dict) else None)
-                if block_type == "tool_use":
-                    tool_name = getattr(block, "name", None) or (block.get("name") if isinstance(block, dict) else "")
-                    tool_input = getattr(block, "input", None) or (block.get("input") if isinstance(block, dict) else {})
-                    input_preview = _tool_input_preview(tool_name, tool_input)
-                    await publish_output(js, job_id, ContainerOutput(
-                        status="tool_use",
-                        result=json.dumps({"tool": tool_name, "input": input_preview}),
-                    ))
-
-    elif cls_name == "ResultMessage":
-        # ... 现有逻辑不变 ...
+    # ★ 新增: 提取 ToolUseBlock, 发送 ToolUseEvent
+    content = getattr(message, "content", None)
+    if isinstance(content, list):
+        for block in content:
+            if getattr(block, "type", None) == "tool_use":
+                tool_name = getattr(block, "name", "") or ""
+                tool_input = getattr(block, "input", {}) or {}
+                await self._emit(ToolUseEvent(
+                    tool=tool_name,
+                    input_preview=_tool_input_preview(tool_name, tool_input),
+                ))
 ```
 
-其中 `_tool_input_preview` 是一个纯函数, 从 tool input 中提取用户可读的摘要:
+`SystemMessage(subtype="init")` 分支在现有 `SessionInitEvent` 之后追加:
+
+```python
+if subtype == "init":
+    # ... 现有 SessionInitEvent 逻辑 ...
+    await self._emit(RunningEvent())
+```
+
+新增辅助函数:
 
 ```python
 def _tool_input_preview(tool_name: str, tool_input: dict) -> str:
-    """从 tool input 中提取简短预览, 用于状态显示。"""
+    """从 tool input 中提取简短预览。"""
     if tool_name in ("Read", "Write", "Edit", "Glob", "Grep"):
-        return tool_input.get("file_path") or tool_input.get("path") or tool_input.get("pattern") or ""
+        return (tool_input.get("file_path")
+                or tool_input.get("path")
+                or tool_input.get("pattern")
+                or "")
     if tool_name == "Bash":
-        cmd = tool_input.get("command", "")
-        return cmd[:80]
+        return tool_input.get("command", "")[:80]
     if tool_name in ("WebSearch", "WebFetch"):
         return tool_input.get("query") or tool_input.get("url") or ""
     return ""
 ```
 
-`ContainerOutput.status` 类型需要从 `"success" | "error"` 扩展, 新增
-`"running"` 和 `"tool_use"`。
+### 第 3 层: pi_backend.py (Pi 翻译)
 
-### 第 2 层: agent/executor.py + container_executor.py (orchestrator 侧解析)
+位置: `_handle_event()` 方法。
 
-`AgentOutput.status` 当前是 `Literal["success", "error"]`。
+现状: 只处理 `TurnEndEvent`。
 
-改动: 扩展为 `Literal["success", "error", "running", "tool_use"]`。
+改动:
 
-`container_executor.py` 的 `_parse_container_output` 函数已经是通用的
-`str(raw.get("status", "error"))`, 不需要改代码, 只需要类型标注跟上。
+```python
+def _handle_event(self, event: AgentSessionEvent) -> None:
+    if isinstance(event, TurnEndEvent):
+        text = _extract_text(event.message) if hasattr(event, "message") else ""
+        if text:
+            self._last_result_text = text
 
-`_read_results` 中调 `on_output(parsed)` 也不需要改, 新 status 会原样
-传到 `_on_output` 回调。
+    # ★ 新增: tool execution 事件
+    elif isinstance(event, ToolExecutionStartEvent):
+        self._schedule_emit(ToolUseEvent(
+            tool=event.tool_name,
+            input_preview=_tool_input_preview(event.tool_name, event.args),
+        ))
+```
 
-### 第 3 层: main.py _on_output (orchestrator 侧路由)
+注意: `_handle_event` 是同步回调, 所以用 `_schedule_emit`
+(已有, 内部创建 asyncio.Task)。
 
-现有的 `_on_output` 回调只处理 `result.result` 有值的情况
-(即 `status="success"` 且有文本结果)。
+`start()` 方法在 `SessionInitEvent` 之后追加 `RunningEvent`:
 
-改动: 在 `_on_output` 开头增加对 `status` 事件的处理:
+```python
+await self._emit(SessionInitEvent(session_id=self._session_file or ""))
+await self._emit(RunningEvent())  # ★ 新增
+```
+
+`_tool_input_preview` 函数在两个后端之间共享, 放到
+`agent_runner/backend.py` 中。
+
+### 第 4 层: agent_runner/main.py NATS bridge (事件 → NATS)
+
+位置: `on_event()` 回调。
+
+现状: 只处理 `ResultEvent`、`SessionInitEvent`、`CompactionEvent`、`ErrorEvent`。
+
+改动:
+
+```python
+from .backend import ToolUseEvent, RunningEvent
+
+async def on_event(event: BackendEvent) -> None:
+    nonlocal session_id
+
+    if isinstance(event, ToolUseEvent):
+        await publish_output(
+            js, job_id,
+            ContainerOutput(
+                status="tool_use",
+                result=json.dumps({"tool": event.tool, "input": event.input_preview}),
+            ),
+        )
+    elif isinstance(event, RunningEvent):
+        await publish_output(
+            js, job_id,
+            ContainerOutput(status="running", result=None),
+        )
+    elif isinstance(event, ResultEvent):
+        # ... 现有逻辑不变 ...
+```
+
+### 第 5 层: rolemesh/agent/executor.py (类型扩展)
+
+`AgentOutput.status` 扩展:
+
+```python
+@dataclass(frozen=True)
+class AgentOutput:
+    status: Literal["success", "error", "running", "tool_use", "container_starting"]
+    result: str | None
+    new_session_id: str | None = None
+    error: str | None = None
+```
+
+### 第 6 层: rolemesh/agent/container_executor.py (container_starting)
+
+在 `execute()` 方法中, 调用 `self._runtime.run(spec)` 之前:
+
+```python
+if on_output is not None:
+    await on_output(AgentOutput(status="container_starting", result=None))
+
+handle = await self._runtime.run(spec)
+```
+
+`_parse_container_output` 无需改动 — 它已经用
+`str(raw.get("status", "error"))` 做通用解析。
+
+### 第 7 层: rolemesh/main.py _on_output (orchestrator 路由)
+
+在 `_on_output` 开头增加状态事件处理:
 
 ```python
 async def _on_output(result: AgentOutput) -> None:
     nonlocal had_error, output_sent_to_user
 
-    # ★ 新增: 状态事件 → 仅 Web channel, 发送 status 类型的 stream chunk
-    if result.status in ("running", "tool_use"):
+    # ★ 新增: 状态事件 → 仅 Web channel
+    if result.status in ("running", "tool_use", "container_starting"):
         if binding and isinstance(gw, WebNatsGateway):
-            status_payload = {"type": "status", "status": result.status}
+            status_payload: dict[str, Any] = {"type": "status", "status": result.status}
             if result.status == "tool_use" and result.result:
                 tool_info = json.loads(result.result)
                 status_payload["tool"] = tool_info.get("tool", "")
@@ -205,34 +343,49 @@ async def _on_output(result: AgentOutput) -> None:
                 json.dumps(status_payload),
             )
         _reset_idle_timer()
-        return  # 不是最终结果, 不更新 output_sent_to_user
+        return
 
     # ... 现有 result.result 处理逻辑不变 ...
 ```
 
-注意: `send_stream_chunk` 现在既可以发纯文本 (现有 `text` 场景),
-也可以发 JSON 字符串 (新 `status` 场景)。需要在下一层区分。
+### 第 8 层: rolemesh/container/scheduler.py (排队事件)
 
-### 第 4 层: web_nats_gateway.py (NATS 发布)
-
-不需要改动。`send_stream_chunk(content)` 只是把 content 包装成
-`WebStreamChunk(type="text", content=...)` 发到 NATS, 不关心内容是什么。
-
-### 第 5 层: webui/ws.py (WebSocket 转发)
-
-`_forward_stream` 现有逻辑:
+给 `GroupQueue` 增加 `on_queued` 回调:
 
 ```python
-if data.get("type") == "text":
-    await _broadcast(binding_id, chat_id, {"type": "text", "content": data["content"]})
+class GroupQueue:
+    def __init__(self, ...) -> None:
+        # ... 现有代码 ...
+        self._on_queued: Callable[[str, int], None] | None = None
+
+    def set_on_queued(self, fn: Callable[[str, int], None]) -> None:
+        self._on_queued = fn
+
+    def enqueue_message_check(self, group_jid: str, ...) -> None:
+        state = self._get_group(group_jid)
+        if state.active:
+            state.pending_messages = True
+            if self._on_queued:
+                position = len(state.pending_tasks) + 1
+                self._on_queued(group_jid, position)
+            return
+        if not self._can_start(state.tenant_id, state.coworker_id):
+            state.pending_messages = True
+            if self._on_queued:
+                position = len(self._waiting_groups) + 1
+                self._on_queued(group_jid, position)
+            # ... 现有 _waiting_groups 逻辑 ...
 ```
 
-改动: 检查 content 是否为 JSON 格式的 status 消息, 如果是则直接透传:
+main.py 初始化时注入回调, 查找 conversation → binding → gateway → send_stream_chunk。
+
+### 第 9 层: webui/ws.py (WebSocket 透传)
+
+`_forward_stream` 检测 status 消息:
 
 ```python
 if data.get("type") == "text":
     content = data["content"]
-    # ★ 新增: 检测 status 消息并透传
     if content.startswith('{"type":"status"'):
         try:
             status_msg = json.loads(content)
@@ -242,61 +395,10 @@ if data.get("type") == "text":
                 continue
         except (json.JSONDecodeError, KeyError):
             pass
-    # 普通文本, 走原有逻辑
     await _broadcast(binding_id, chat_id, {"type": "text", "content": content})
 ```
 
-### 第 6 层: scheduler.py (排队事件, orchestrator 进程内)
-
-排队事件不来自容器, 而是发生在 orchestrator 进程的 `GroupQueue` 中。
-
-当 `enqueue_message_check` 判定需要排队时 (`state.active` 为 True
-或并发达到上限), 需要通知用户。
-
-问题: scheduler 当前不知道 binding_id 和 chat_id, 也没有 gateway 引用。
-
-方案: 给 `GroupQueue` 增加一个可选的 `on_queued` 回调, 在 main.py 初始化
-时注入:
-
-```python
-# scheduler.py
-def enqueue_message_check(self, group_jid: str, ...) -> None:
-    state = self._get_group(group_jid)
-    if state.active:
-        state.pending_messages = True
-        # ★ 新增: 通知排队
-        if self._on_queued:
-            position = len(state.pending_tasks) + (1 if state.pending_messages else 0)
-            self._on_queued(group_jid, position)
-        return
-    # ... 并发满时同理 ...
-
-# main.py 初始化时
-def _handle_queued(group_jid: str, position: int) -> None:
-    # 查找 group_jid 对应的 conversation → binding → gateway
-    # 发送 {"type": "status", "status": "queued", "position": position}
-    ...
-_queue.set_on_queued(_handle_queued)
-```
-
-### 第 7 层: container_executor.py (container_starting 事件)
-
-在 `execute()` 方法中, 调用 `self._runtime.run(spec)` 之前, 通过 `on_output`
-回调发送 `container_starting` 状态:
-
-```python
-# 启动容器前通知
-if on_output is not None:
-    await on_output(AgentOutput(
-        status="container_starting", result=None,
-    ))
-
-handle = await self._runtime.run(spec)
-```
-
-`AgentOutput.status` 类型标注相应增加 `"container_starting"`。
-
-### 第 8 层: 前端 agent-client.ts + chat-panel.ts
+### 第 10 层: 前端 agent-client.ts + chat-panel.ts
 
 **agent-client.ts** — `ServerMessage` 类型扩展:
 
@@ -307,7 +409,6 @@ export type ServerMessage =
   | { type: 'text'; content: string }
   | { type: 'done' }
   | { type: 'error'; message: string }
-  // ★ 新增
   | { type: 'status'; status: string; tool?: string; input?: string; position?: number };
 ```
 
@@ -316,7 +417,6 @@ export type ServerMessage =
 ```typescript
 case 'status': {
     this.agentStatus = msg;  // 新增 @state 属性
-    // 不追加到 messages 数组, 只更新状态栏
     break;
 }
 case 'text': {
@@ -324,12 +424,12 @@ case 'text': {
     // ... 现有逻辑 ...
 }
 case 'done': {
-    this.agentStatus = null;  // 完成时清除状态
+    this.agentStatus = null;
     // ... 现有逻辑 ...
 }
 ```
 
-**渲染**: 在消息列表底部 (输入框上方) 显示一个状态指示条:
+渲染 — 在消息列表底部显示状态指示条:
 
 ```typescript
 ${this.agentStatus ? html`
@@ -352,14 +452,14 @@ ${this.agentStatus ? html`
 一次完整的用户交互中, 事件按以下顺序到达前端:
 
 ```
-1. session         — WebSocket 建连时 (现有)
-2. status/queued   — 如果排队了才发 (新增, 来自 scheduler.py)
+1. session                  — WebSocket 建连时 (现有)
+2. status/queued            — 如果排队了才发 (新增, 来自 scheduler.py)
 3. status/container_starting — 容器启动前 (新增, 来自 container_executor.py)
-4. thinking        — typing 指示器 (现有, 来自 main.py set_typing)
-5. status/running  — Claude 会话建立 (新增, 来自 agent_runner)
-6. status/tool_use — 每次工具调用 (新增, 来自 agent_runner, 可连续多次)
-7. text            — 最终结果文本 (现有, 来自 agent_runner ResultMessage)
-8. done            — 流结束 (现有)
+4. thinking                 — typing 指示器 (现有, 来自 main.py set_typing)
+5. status/running           — 后端会话建立 (新增, 来自后端 RunningEvent)
+6. status/tool_use          — 每次工具调用 (新增, 来自后端 ToolUseEvent, 可连续多次)
+7. text                     — 最终结果文本 (现有, 来自后端 ResultEvent)
+8. done                     — 流结束 (现有)
 ```
 
 如果 agent 在一次执行中调了 10 个工具, 用户会连续收到 10 条
@@ -367,34 +467,40 @@ ${this.agentStatus ? html`
 
 ## 边界情况
 
-**用户在 agent 执行中又发消息**: 现有的多轮机制 (NATS input channel +
-MessageStream) 不受影响。新消息通过 `agent.{job_id}.input` 注入,
-agent_runner 继续执行, 状态事件继续发送。
+**用户在 agent 执行中又发消息**: 现有的多轮机制 (NATS input channel)
+不受影响。新消息通过 `agent.{job_id}.input` 注入,
+后端继续执行, 状态事件继续发送。
 
 **agent 执行超时**: `container_executor.py` 的 timeout_watcher 终止容器,
 `_on_output` 最终收到 `status="error"`, 前端清除状态栏。
 
-**agent 调用 send_message MCP tool**: agent 主动发消息给用户,
-走的是 `agent.{job_id}.messages` → `_handle_messages` → `_send_via_coworker`
-这条独立通道, 不经过 `_on_output`, 不影响状态事件。
+**agent 调用 send_message MCP tool**: 走独立的
+`agent.{job_id}.messages` 通道, 不经过 `_on_output`, 不影响状态事件。
 
-**断线重连**: 用户断线后重连, 不会补发之前的状态事件。重连后如果 agent
+**断线重连**: 不会补发之前的状态事件。重连后如果 agent
 仍在执行, 用户看到的是 `thinking` (因为 `set_typing` 在 agent 开始时
-就设置了), 但看不到具体 tool_use。这是"纯事件流, 不做状态查询"的
-预期行为, 可以接受。
+就设置了), 但看不到具体 tool_use。可接受。
 
-**非 Web channel**: Slack/Telegram 的 `_on_output` 分支不处理
-`running`/`tool_use` status, 直接 return, 不影响现有行为。
+**非 Web channel**: `_on_output` 中 Slack/Telegram 分支不处理
+`running`/`tool_use`/`container_starting`, 直接 return, 不影响现有行为。
+
+**Pi 后端 vs Claude 后端**: 两者产出相同的 `ToolUseEvent` 和
+`RunningEvent`, NATS bridge 和下游完全一致。唯一差异是 Pi 的
+`ToolExecutionStartEvent` 自带 `tool_name` 和 `args`, 而 Claude 需要
+从 `AssistantMessage.content` 中手动提取 `ToolUseBlock`。
 
 ## 改动文件汇总
 
 | 文件 | 改动内容 |
 |------|---------|
-| `src/agent_runner/main.py` | `run_query()` 中 SystemMessage(init) 发 running; AssistantMessage 提取 ToolUseBlock 发 tool_use; 新增 `_tool_input_preview()` |
+| `src/agent_runner/backend.py` | 新增 `ToolUseEvent`、`RunningEvent` 定义; 新增 `tool_input_preview()` 辅助函数; 扩展 `BackendEvent` 联合类型 |
+| `src/agent_runner/claude_backend.py` | `AssistantMessage` 分支提取 `ToolUseBlock` → emit `ToolUseEvent`; `SystemMessage(init)` 后 emit `RunningEvent` |
+| `src/agent_runner/pi_backend.py` | `_handle_event` 增加 `ToolExecutionStartEvent` → emit `ToolUseEvent`; `start()` 末尾 emit `RunningEvent` |
+| `src/agent_runner/main.py` | `on_event` 增加 `ToolUseEvent`/`RunningEvent` → `publish_output` |
 | `src/rolemesh/agent/executor.py` | `AgentOutput.status` 类型扩展: 增加 `running` / `tool_use` / `container_starting` |
 | `src/rolemesh/agent/container_executor.py` | `execute()` 中 `_runtime.run()` 前通过 on_output 发 `container_starting` |
 | `src/rolemesh/main.py` | `_on_output()` 新增 status 事件处理分支; 初始化时注入 `on_queued` 回调 |
 | `src/rolemesh/container/scheduler.py` | `enqueue_message_check()` 排队时调 `on_queued` 回调 |
 | `src/webui/ws.py` | `_forward_stream()` 检测 status JSON 并透传 |
 | `web/src/services/agent-client.ts` | `ServerMessage` 类型增加 `status` |
-| `web/src/components/chat-panel.ts` | `handleMessage()` 增加 status case; 渲染状态指示条 |
+| `web/src/components/chat-panel.ts` | `handleMessage()` 增加 status case; 新增 `agentStatus` 状态; 渲染状态指示条 |
