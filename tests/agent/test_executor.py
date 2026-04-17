@@ -13,6 +13,51 @@ from rolemesh.agent.executor import (
 from rolemesh.auth.permissions import AgentPermissions
 
 
+def test_agent_output_is_final_default_true() -> None:
+    """AgentOutput.is_final defaults True so legacy backends (no isFinal on
+    the wire) continue to signal end-of-turn on their sole success event."""
+    out = AgentOutput(status="success", result="done")
+    assert out.is_final is True
+
+
+def test_agent_output_is_final_false_explicit() -> None:
+    """is_final=False is how batched-reply backends say 'more replies are
+    coming in this run_prompt'."""
+    out = AgentOutput(status="success", result="part1", is_final=False)
+    assert out.is_final is False
+
+
+def test_parse_container_output_reads_is_final_false() -> None:
+    """The orchestrator parses isFinal=False off the NATS payload and carries
+    it into AgentOutput so _on_output can gate notify_idle."""
+    from rolemesh.agent.container_executor import _parse_container_output
+
+    raw = {"status": "success", "result": "reply1", "isFinal": False}
+    out = _parse_container_output(raw)
+    assert out.status == "success"
+    assert out.result == "reply1"
+    assert out.is_final is False
+
+
+def test_parse_container_output_missing_is_final_defaults_true() -> None:
+    """Legacy wire format without isFinal → is_final=True (end of turn)."""
+    from rolemesh.agent.container_executor import _parse_container_output
+
+    raw = {"status": "success", "result": "reply"}
+    out = _parse_container_output(raw)
+    assert out.is_final is True
+
+
+def test_parse_container_output_non_bool_is_final_falls_back_true() -> None:
+    """Garbage in the isFinal slot must NOT silently turn into a truthy value;
+    anything that isn't a real bool is treated as 'legacy payload' → True."""
+    from rolemesh.agent.container_executor import _parse_container_output
+
+    raw = {"status": "success", "result": "r", "isFinal": "false"}  # string, not bool
+    out = _parse_container_output(raw)
+    assert out.is_final is True
+
+
 def test_agent_input_frozen() -> None:
     perms = AgentPermissions.for_role("super_agent").to_dict()
     inp = AgentInput(prompt="hello", group_folder="g", chat_jid="j", permissions=perms)

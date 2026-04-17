@@ -162,6 +162,23 @@ class TurnEndEvent:
 
 
 @dataclass
+class PromptTurnCompleteEvent:
+    """Fired once per user-visible prompt (initial + each follow-up) when the
+    agent has finished answering it — i.e. when the tool-call-driven inner loop
+    exits and no steering messages are queued.
+
+    Distinguishes a per-prompt completion from a per-turn completion
+    (TurnEndEvent fires after every LLM call, including tool-calling turns).
+    Consumers that bridge prompt batches to an outer protocol (for example, a
+    NATS bridge delivering one visible reply per user message) should key off
+    this event rather than TurnEndEvent.
+    """
+
+    message: AgentMessage = field(default_factory=AssistantMessage)
+    type: Literal["prompt_turn_complete"] = "prompt_turn_complete"
+
+
+@dataclass
 class MessageStartEvent:
     message: AgentMessage = field(default_factory=AssistantMessage)
     type: Literal["message_start"] = "message_start"
@@ -212,6 +229,7 @@ AgentEvent = (
     | AgentEndEvent
     | TurnStartEvent
     | TurnEndEvent
+    | PromptTurnCompleteEvent
     | MessageStartEvent
     | MessageUpdateEvent
     | MessageEndEvent

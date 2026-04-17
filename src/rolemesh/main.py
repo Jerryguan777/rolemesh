@@ -471,11 +471,20 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
             _reset_idle_timer()
         if result.status == "success":
             # Send stream done immediately for web channel (don't wait for
-            # _run_agent to return — the container stays alive until idle timeout)
+            # _run_agent to return — the container stays alive until idle timeout).
+            # send_stream_done fires per success so a followed-up batch can
+            # finalize each reply bubble separately.
             if binding and isinstance(gw, WebNatsGateway):
                 with contextlib.suppress(OSError, RuntimeError, TypeError, ValueError):
                     await gw.send_stream_done(binding.id, conv.channel_chat_id)
-            _queue.notify_idle(conversation_id)
+            # Only release idle-gating once the whole batch is done. When a
+            # user queued a follow-up during the active turn, the container
+            # emits one success per answered message; all but the last carry
+            # is_final=False. Calling notify_idle mid-batch would mark the
+            # container idle while it is still processing queued messages and
+            # can race with scheduled-task preemption.
+            if result.is_final:
+                _queue.notify_idle(conversation_id)
         if result.status == "stopped":
             # User-initiated stop. Forward a status frame so the UI exits
             # the transitional 'stopping' state, then emit done to close

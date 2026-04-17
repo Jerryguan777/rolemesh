@@ -50,6 +50,12 @@ class AgentOutput:
                  still alive for subsequent prompts
     Progress statuses (see PROGRESS_STATUSES) are transient indicators for UX;
     `metadata` carries the structured payload.
+
+    `is_final` is only meaningful for status="success". A run_prompt call that
+    answers multiple queued user messages emits one success per message; only
+    the final one carries is_final=True, and only that one should release
+    idle-gating in the scheduler (notify_idle). Older runtimes that don't
+    emit is_final default to True, preserving one-reply-per-turn semantics.
     """
 
     status: Literal[
@@ -60,6 +66,7 @@ class AgentOutput:
     new_session_id: str | None = None
     error: str | None = None
     metadata: dict[str, object] | None = None
+    is_final: bool = True
 
     def is_progress(self) -> bool:
         return self.status in PROGRESS_STATUSES
