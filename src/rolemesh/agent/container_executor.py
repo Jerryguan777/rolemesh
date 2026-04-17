@@ -37,7 +37,7 @@ from rolemesh.ipc.protocol import AgentInitData, McpServerSpec
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from rolemesh.container.runtime import ContainerHandle, ContainerRuntime
+    from rolemesh.container.runtime import ContainerRuntime
     from rolemesh.core.types import Coworker, McpServerConfig
     from rolemesh.ipc.nats_transport import NatsTransport
 
@@ -103,7 +103,7 @@ class ContainerAgentExecutor:
     async def execute(
         self,
         inp: AgentInput,
-        on_process: Callable[[ContainerHandle, str, str], None],
+        on_process: Callable[[str, str], None],
         on_output: Callable[[AgentOutput], Awaitable[None]] | None = None,
     ) -> AgentOutput:
         """Run an agent in a container."""
@@ -186,7 +186,7 @@ class ContainerAgentExecutor:
 
         # Start container via ContainerRuntime
         handle = await self._runtime.run(spec)
-        on_process(handle, container_name, job_id)
+        on_process(container_name, job_id)
 
         stderr_buf = ""
         stderr_truncated = False

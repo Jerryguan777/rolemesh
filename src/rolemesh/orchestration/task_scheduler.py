@@ -31,7 +31,6 @@ from rolemesh.db.pg import (
 
 if TYPE_CHECKING:
     from rolemesh.agent.container_executor import ContainerAgentExecutor
-    from rolemesh.container.runtime import ContainerHandle
     from rolemesh.container.scheduler import GroupQueue
     from rolemesh.core.orchestrator_state import OrchestratorState
     from rolemesh.core.types import Coworker
@@ -82,16 +81,16 @@ class SchedulerDependencies(Protocol):
     def on_process(
         self,
         group_jid: str,
-        proc: ContainerHandle,
         container_name: str,
         group_folder: str,
         job_id: str | None = None,
     ) -> None: ...
-    def send_message(self, jid: str, text: str) -> Awaitable[None]: ...
+    def send_message(self, jid: str, text: str, coworker_id: str = "") -> Awaitable[None]: ...
     @property
     def transport(self) -> NatsTransport | None: ...
     @property
     def executor(self) -> ContainerAgentExecutor | None: ...
+    def get_executor(self, backend_name: str) -> ContainerAgentExecutor | None: ...
 
 
 _TASK_CLOSE_DELAY_S: float = 10.0
@@ -122,7 +121,7 @@ async def _run_task(
 
     logger.info("Running scheduled task", task_id=task.id, coworker=coworker.name)
 
-    executor = deps.executor
+    executor = deps.get_executor(coworker.agent_backend) or deps.executor
     if executor is None:
         logger.error("Agent executor not available for task", task_id=task.id)
         await log_task_run(
@@ -199,7 +198,7 @@ async def _run_task(
             if streamed_output.result:
                 result = streamed_output.result
                 if chat_jid:
-                    await deps.send_message(chat_jid, streamed_output.result)
+                    await deps.send_message(chat_jid, streamed_output.result, coworker_id=task.coworker_id)
                 _schedule_close()
             if streamed_output.status == "success":
                 deps.queue.notify_idle(chat_jid)
@@ -220,8 +219,8 @@ async def _run_task(
                 coworker_id=task.coworker_id,
                 conversation_id=conversation_id,
             ),
-            lambda handle, container_name, job_id: deps.on_process(
-                chat_jid, handle, container_name, coworker.folder, job_id
+            lambda container_name, job_id: deps.on_process(
+                chat_jid, container_name, coworker.folder, job_id
             ),
             _on_output,
         )

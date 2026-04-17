@@ -1,0 +1,58 @@
+"""Shared context for RoleMesh IPC tools."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import sys
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from nats.js.client import JetStreamContext
+
+
+def _publish_done(task: asyncio.Task[None]) -> None:
+    """Log unhandled exceptions from fire-and-forget publishes."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        print(f"[tools] NATS publish error: {exc}", file=sys.stderr, flush=True)
+
+
+@dataclass
+class ToolContext:
+    """Shared runtime context for all RoleMesh IPC tools."""
+
+    js: JetStreamContext
+    job_id: str
+    chat_jid: str
+    group_folder: str
+    permissions: dict[str, object]
+    tenant_id: str
+    coworker_id: str
+    conversation_id: str
+
+    # Internal: background tasks for fire-and-forget publishes
+    _bg_tasks: set[asyncio.Task[None]] | None = None
+
+    def publish(self, subject: str, data: dict[str, Any]) -> None:
+        """Fire-and-forget publish to NATS JetStream."""
+        if self._bg_tasks is None:
+            self._bg_tasks = set()
+        tasks = self._bg_tasks
+        task = asyncio.ensure_future(
+            self.js.publish(subject, json.dumps(data, indent=2).encode())  # type: ignore[arg-type]
+        )
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+        task.add_done_callback(_publish_done)
+
+    @property
+    def has_tenant_scope(self) -> bool:
+        return self.permissions.get("data_scope") == "tenant"
+
+    @property
+    def can_schedule(self) -> bool:
+        return bool(self.permissions.get("task_schedule"))
