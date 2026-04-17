@@ -35,6 +35,13 @@ export class ChatPanel extends LitElement {
   //             (button disabled with spinner, auto-recovers after timeout)
   @state() agentState: 'idle' | 'running' | 'stopping' = 'idle';
   private stoppingTimer: ReturnType<typeof setTimeout> | null = null;
+  // Watchdog while agentState='running'. Reset on every event; fires after
+  // RUNNING_WATCHDOG_MS of silence. Purpose: recover from the case where a
+  // WebSocket reconnect happens after the agent's 'done' event was already
+  // published — the NATS consumer uses DeliverPolicy.NEW and will never see
+  // it, so without this fallback the UI stays stuck on 'thinking' forever.
+  private runningWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly RUNNING_WATCHDOG_MS = 120_000;
 
   constructor() {
     super();
@@ -81,6 +88,7 @@ export class ChatPanel extends LitElement {
   override disconnectedCallback() {
     super.disconnectedCallback();
     this.clearStoppingTimer();
+    this.clearRunningWatchdog();
     this.unsubscribe?.();
     if (this.tokenRefreshHandler) {
       window.removeEventListener('rm-token-refreshed', this.tokenRefreshHandler);
@@ -100,6 +108,12 @@ export class ChatPanel extends LitElement {
   }
 
   private handleMessage(msg: ServerMessage) {
+    // Any inbound event while running means the turn is still alive — push
+    // the watchdog deadline out. Terminal events (done/error/stopped) clear
+    // it explicitly below.
+    if (this.agentState === 'running') {
+      this.resetRunningWatchdog();
+    }
     switch (msg.type) {
       case 'session':
         this.connected = true;
@@ -116,6 +130,7 @@ export class ChatPanel extends LitElement {
           // Only elevate idle → running. Don't overwrite a 'stopping' state.
           if (this.agentState === 'idle') {
             this.agentState = 'running';
+            this.resetRunningWatchdog();
           }
         }
         break;
@@ -125,6 +140,7 @@ export class ChatPanel extends LitElement {
           // exit the 'stopping' transitional state. Don't touch messages
           // array — any partial text remains visible in the last bubble.
           this.clearStoppingTimer();
+          this.clearRunningWatchdog();
           this.agentStatus = null;
           this.agentState = 'idle';
           this.isStreaming = false;
@@ -136,6 +152,7 @@ export class ChatPanel extends LitElement {
         this.agentStatus = { status: msg.status, tool: msg.tool, input: msg.input };
         if (this.agentState === 'idle') {
           this.agentState = 'running';
+          this.resetRunningWatchdog();
         }
         break;
       case 'text': {
@@ -154,6 +171,7 @@ export class ChatPanel extends LitElement {
       }
       case 'done': {
         this.clearStoppingTimer();
+        this.clearRunningWatchdog();
         this.agentStatus = null;
         const last = this.messages[this.messages.length - 1];
         if (last?.role === 'assistant') {
@@ -166,6 +184,7 @@ export class ChatPanel extends LitElement {
       }
       case 'error': {
         this.clearStoppingTimer();
+        this.clearRunningWatchdog();
         this.agentStatus = null;
         const last = this.messages[this.messages.length - 1];
         if (last?.role === 'assistant' && last.streaming && !last.content) {
@@ -180,6 +199,34 @@ export class ChatPanel extends LitElement {
         this.agentState = 'idle';
         break;
       }
+    }
+  }
+
+  private resetRunningWatchdog() {
+    this.clearRunningWatchdog();
+    this.runningWatchdogTimer = setTimeout(() => {
+      // No inbound events for ~2 minutes while running. Most likely the
+      // 'done' event was published during a WebSocket reconnect window and
+      // our NATS subscription (DeliverPolicy.NEW) missed it. Recover the
+      // UI so the user isn't trapped reloading the page. Any partial text
+      // already rendered stays visible.
+      if (this.agentState === 'running') {
+        this.agentState = 'idle';
+        this.agentStatus = null;
+        this.isStreaming = false;
+        const last = this.messages[this.messages.length - 1];
+        if (last?.role === 'assistant' && last.streaming) {
+          this.messages = [...this.messages.slice(0, -1), { ...last, streaming: false }];
+        }
+      }
+      this.runningWatchdogTimer = null;
+    }, ChatPanel.RUNNING_WATCHDOG_MS);
+  }
+
+  private clearRunningWatchdog() {
+    if (this.runningWatchdogTimer) {
+      clearTimeout(this.runningWatchdogTimer);
+      this.runningWatchdogTimer = null;
     }
   }
 
