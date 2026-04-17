@@ -8,6 +8,7 @@ Tool names follow the convention: mcp__{server_name}__{tool_name}
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from typing import Any
 
@@ -69,11 +70,62 @@ class McpProxiedTool(AgentTool):
         )
 
 
+async def _connect_one(
+    spec: Any, user_id: str
+) -> tuple[list[AgentTool], McpServerConnection | None]:
+    """Connect to a single MCP server and discover its tools.
+
+    Runs in its own asyncio.Task so any anyio cancel-scope unwind from
+    mcp/streamable-http internals stays contained within this task and
+    does not propagate to the caller as CancelledError.
+
+    Returns ([], None) on any failure — caller skips dead servers.
+    """
+    headers: dict[str, str] = {}
+    if user_id:
+        headers["X-RoleMesh-User-Id"] = user_id
+
+    conn = McpServerConnection(
+        name=spec.name,
+        server_type=spec.type,
+        url=spec.url,
+        headers=headers or None,
+    )
+    try:
+        await conn.connect()
+        remote_tools = await conn.list_tools()
+        logger.info("MCP server '%s': %d tools discovered", spec.name, len(remote_tools))
+        tools: list[AgentTool] = [
+            McpProxiedTool(
+                tool_name=f"mcp__{spec.name}__{tool_info['name']}",
+                tool_description=tool_info["description"],
+                tool_parameters=tool_info["inputSchema"],
+                connection=conn,
+                remote_tool_name=tool_info["name"],
+            )
+            for tool_info in remote_tools
+        ]
+        return tools, conn
+    # Catch CancelledError explicitly: mcp library uses anyio TaskGroup and
+    # AsyncExitStack-based teardown can surface failures as CancelledError
+    # rather than the original network/HTTP error. Without this, one dead
+    # MCP server tears down the entire agent session.
+    except (Exception, asyncio.CancelledError) as exc:
+        logger.warning("MCP server '%s' unavailable, skipping: %s", spec.name, exc)
+        with contextlib.suppress(Exception, asyncio.CancelledError):
+            await conn.close()
+        return [], None
+
+
 async def load_mcp_tools(
     specs: list[Any],
     user_id: str = "",
 ) -> tuple[list[AgentTool], list[McpServerConnection]]:
     """Connect to MCP servers and discover their tools.
+
+    Connects to all servers in parallel and isolates failures: a single
+    dead server produces a warning and does not prevent other servers
+    (or the agent session itself) from starting.
 
     Args:
         specs: List of objects with name, type, url attributes.
@@ -81,43 +133,17 @@ async def load_mcp_tools(
 
     Returns:
         Tuple of (tools, connections). Connections must be closed on shutdown.
-        Failed servers are skipped with a warning.
     """
+    results = await asyncio.gather(
+        *(_connect_one(spec, user_id) for spec in specs),
+        return_exceptions=False,
+    )
+
     all_tools: list[AgentTool] = []
     connections: list[McpServerConnection] = []
-
-    for spec in specs:
-        # Build headers for credential proxy (user identity for token injection).
-        headers: dict[str, str] = {}
-        if user_id:
-            headers["X-RoleMesh-User-Id"] = user_id
-
-        conn = McpServerConnection(
-            name=spec.name,
-            server_type=spec.type,
-            url=spec.url,
-            headers=headers or None,
-        )
-        try:
-            await conn.connect()
+    for tools, conn in results:
+        all_tools.extend(tools)
+        if conn is not None:
             connections.append(conn)
-
-            remote_tools = await conn.list_tools()
-            logger.info("MCP server '%s': %d tools discovered", spec.name, len(remote_tools))
-
-            for tool_info in remote_tools:
-                prefixed_name = f"mcp__{spec.name}__{tool_info['name']}"
-                all_tools.append(
-                    McpProxiedTool(
-                        tool_name=prefixed_name,
-                        tool_description=tool_info["description"],
-                        tool_parameters=tool_info["inputSchema"],
-                        connection=conn,
-                        remote_tool_name=tool_info["name"],
-                    )
-                )
-        except Exception as exc:
-            logger.warning("Failed to connect to MCP server '%s': %s", spec.name, exc)
-            continue
 
     return all_tools, connections
