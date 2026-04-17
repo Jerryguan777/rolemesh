@@ -27,6 +27,7 @@ from .backend import (
     ResultEvent,
     RunningEvent,
     SessionInitEvent,
+    StoppedEvent,
     ToolUseEvent,
     tool_input_preview,
 )
@@ -341,9 +342,16 @@ class ClaudeBackend:
             self._stream.push(text)
 
     async def abort(self) -> None:
-        """End the message stream to signal the SDK to stop."""
+        """End the message stream to signal the SDK to stop.
+
+        Emits StoppedEvent so the UI can exit the 'stopping' transitional
+        state. This is best-effort: the SDK may continue draining until
+        the current tool call returns, but the event fires immediately so
+        the user gets instant feedback.
+        """
         if self._stream:
             self._stream.end()
+        await self._emit(StoppedEvent())
 
     async def shutdown(self) -> None:
         pass

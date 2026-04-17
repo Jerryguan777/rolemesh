@@ -4,7 +4,8 @@ export type AgentStatus =
   | 'queued'
   | 'container_starting'
   | 'running'
-  | 'tool_use';
+  | 'tool_use'
+  | 'stopped';
 
 export type ServerMessage =
   | { type: 'session'; chatId: string; agentId: string }
@@ -140,6 +141,21 @@ export class AgentClient {
     } else if (this.ws && this.ws.readyState === WebSocket.CONNECTING) {
       // Queue message to be sent once connection opens
       this.pendingMessages.push(payload);
+    }
+  }
+
+  /** Send a stop signal to interrupt the agent's current turn.
+   *
+   * Unlike `send()`, this does NOT queue the signal if the WebSocket is
+   * reconnecting — a Stop is time-sensitive and a late replay after
+   * reconnect would likely abort a turn the user no longer wants stopped.
+   * If the caller sees no Stop effect, they can click again once connected.
+   */
+  stop(): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type: 'stop' }));
+    } else {
+      console.warn('AgentClient.stop: WebSocket not open, stop signal dropped');
     }
   }
 

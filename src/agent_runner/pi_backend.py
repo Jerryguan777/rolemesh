@@ -36,6 +36,7 @@ from .backend import (
     ResultEvent,
     RunningEvent,
     SessionInitEvent,
+    StoppedEvent,
     ToolUseEvent,
     tool_input_preview,
 )
@@ -293,8 +294,15 @@ class PiBackend:
             _log(f"Follow-up error: {exc}")
 
     async def abort(self) -> None:
+        """Abort the current turn and emit StoppedEvent for UI confirmation.
+
+        session.abort() waits for the agent to become idle, then returns.
+        We emit StoppedEvent after it settles so the UI can transition out
+        of the 'stopping' state.
+        """
         if self._session is not None:
             await self._session.abort()
+        await self._emit(StoppedEvent())
 
     async def shutdown(self) -> None:
         if self._unsubscribe:

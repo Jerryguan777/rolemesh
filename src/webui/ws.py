@@ -209,6 +209,13 @@ async def handle_ws(ws: WebSocket, agent_id: str, token: str, chat_id: str = "")
                     f"web.inbound.{binding_id}",
                     inbound.to_bytes(),
                 )
+            elif data.get("type") == "stop":
+                # User clicked Stop. Interrupt the active agent turn.
+                # Do NOT use data.get("chat_id") / data.get("binding_id")
+                # from the payload — always use the authenticated
+                # binding_id/chat_id from the WebSocket handshake to
+                # prevent IDOR from a compromised or malicious client.
+                await _js.publish(f"web.stop.{binding_id}.{chat_id}", b"{}")
     except WebSocketDisconnect:
         pass
     except (OSError, ValueError, TypeError, RuntimeError):

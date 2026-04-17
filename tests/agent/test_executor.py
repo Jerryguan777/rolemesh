@@ -80,6 +80,17 @@ def test_agent_output_is_progress_for_transient_statuses() -> None:
 def test_agent_output_is_progress_false_for_terminal() -> None:
     assert AgentOutput(status="success", result="x").is_progress() is False
     assert AgentOutput(status="error", result=None, error="e").is_progress() is False
+    assert AgentOutput(status="stopped", result=None).is_progress() is False
+
+
+def test_agent_output_stopped_terminal_status() -> None:
+    out = AgentOutput(status="stopped", result=None, new_session_id="s1")
+    assert out.status == "stopped"
+    assert out.result is None
+    assert out.new_session_id == "s1"
+    # stopped is in TERMINAL_STATUSES
+    from rolemesh.agent.executor import TERMINAL_STATUSES
+    assert "stopped" in TERMINAL_STATUSES
 
 
 def test_agent_output_metadata_survives_construction() -> None:

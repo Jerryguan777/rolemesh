@@ -288,6 +288,24 @@ async def _emit_container_starting_status(conversation_id: str) -> None:
     await _emit_status_for_conversation(conversation_id, {"status": "container_starting"})
 
 
+async def _handle_web_stop(binding_id: str, chat_id: str) -> None:
+    """User clicked Stop in the WebUI. Interrupt current turn, keep container alive.
+
+    Resolves the web binding+chat to a conversation, then asks the scheduler
+    to send an interrupt signal to the active agent container.
+    """
+    # The gateway already logged "Web stop received" at info level for ops
+    # visibility. Keep the internal routing at debug level.
+    logger.debug("handle_web_stop", binding_id=binding_id, chat_id=chat_id)
+    result = _state.find_conversation_by_binding_and_chat(binding_id, chat_id)
+    if result is None:
+        logger.warning("Stop received for unknown binding/chat", binding_id=binding_id, chat_id=chat_id)
+        return
+    _, conv_state = result
+    conv = conv_state.conversation
+    _queue.interrupt_current_turn(conv.id)
+
+
 async def _handle_incoming(
     binding_id: str,
     chat_id: str,
@@ -456,6 +474,19 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
             # _run_agent to return — the container stays alive until idle timeout)
             if binding and isinstance(gw, WebNatsGateway):
                 with contextlib.suppress(OSError, RuntimeError, TypeError, ValueError):
+                    await gw.send_stream_done(binding.id, conv.channel_chat_id)
+            _queue.notify_idle(conversation_id)
+        if result.status == "stopped":
+            # User-initiated stop. Forward a status frame so the UI exits
+            # the transitional 'stopping' state, then emit done to close
+            # the stream. Container stays alive for follow-up prompts.
+            if binding and isinstance(gw, WebNatsGateway):
+                with contextlib.suppress(OSError, RuntimeError, TypeError, ValueError):
+                    await gw.send_status(
+                        binding.id,
+                        conv.channel_chat_id,
+                        {"status": "stopped"},
+                    )
                     await gw.send_stream_done(binding.id, conv.channel_chat_id)
             _queue.notify_idle(conversation_id)
         if result.status == "error":
@@ -934,6 +965,7 @@ async def main() -> None:
     _queue.set_process_messages_fn(_process_conversation_messages)
     _queue.set_on_queued(_emit_queued_status)
     _queue.set_on_container_starting(_emit_container_starting_status)
+    _web_gw.set_on_stop(_handle_web_stop)
     await _recover_pending_messages()
 
     await _message_loop(shutdown_event)
