@@ -253,6 +253,13 @@ class AgentSession:
         # don't leak into the next turn's LLM context. None means no prompt
         # has been captured (e.g. abort arrived between turns — no-op).
         self._pre_prompt_leaf_id: str | None = None
+        # Latches True whenever an assistant MessageEndEvent arrives with
+        # stop_reason="aborted". Kept separate from _last_assistant_message
+        # because that field is deliberately cleared inside the agent_end
+        # handler before abort() gets a chance to inspect it (agent_end is
+        # dispatched during wait_for_idle, before abort() resumes). Cleared
+        # at the start of each prompt() and at the end of abort().
+        self._last_turn_aborted: bool = False
 
         # Subscribe to agent events
         self._unsubscribe_agent = self._agent.subscribe(self._handle_agent_event)
@@ -380,12 +387,34 @@ class AgentSession:
 
                 if role == "assistant":
                     self._last_assistant_message = msg
+                    if getattr(msg, "stop_reason", None) == "aborted":
+                        # Set BEFORE the agent_end handler below runs (same
+                        # event dispatch pass) so abort()'s post-wait check
+                        # can see it. _last_assistant_message gets cleared
+                        # in the agent_end branch; _last_turn_aborted
+                        # persists until abort() acts on it.
+                        self._last_turn_aborted = True
 
-        if event_type == "agent_end" and self._last_assistant_message is not None:
-            msg = self._last_assistant_message
-            self._last_assistant_message = None
-            # Schedule auto-compaction check (don't block event handler)
-            self._compaction_task = asyncio.ensure_future(self._check_compaction(msg))
+        if event_type == "agent_end":
+            # Belt-and-suspenders abort detection: if the agent's inner
+            # exception handler (agent.py _run_loop's except branch) caught
+            # the abort before it produced a MessageEndEvent, the aborted
+            # message arrives here as an item in AgentEndEvent.messages.
+            # Checking both paths keeps _last_turn_aborted reliable whether
+            # the provider yielded ErrorEvent (message_end path) or the
+            # stream_fn raised outright (agent_end-only path).
+            for m in getattr(event, "messages", []) or []:
+                if (
+                    getattr(m, "role", "") == "assistant"
+                    and getattr(m, "stop_reason", None) == "aborted"
+                ):
+                    self._last_turn_aborted = True
+                    break
+            if self._last_assistant_message is not None:
+                msg = self._last_assistant_message
+                self._last_assistant_message = None
+                # Schedule auto-compaction check (don't block event handler)
+                self._compaction_task = asyncio.ensure_future(self._check_compaction(msg))
 
     def _get_user_message_text(self, message: Message) -> str:
         """Extract text content from a user message."""
@@ -490,6 +519,7 @@ class AgentSession:
         # aborted assistant become an orphan branch (preserved on disk for
         # debugging, but excluded from the active parent chain).
         self._pre_prompt_leaf_id = self._session_manager.get_leaf_id()
+        self._last_turn_aborted = False
 
         await self._agent.prompt(messages)
 
@@ -507,10 +537,11 @@ class AgentSession:
         self._agent.abort()
         await self._agent.wait_for_idle()
 
-        if (
-            self._last_assistant_message is not None
-            and getattr(self._last_assistant_message, "stop_reason", None) == "aborted"
-        ):
+        # Use _last_turn_aborted (latched in _handle_agent_event on the
+        # aborted MessageEndEvent). Reading _last_assistant_message here
+        # would always see None because the agent_end handler clears it
+        # before wait_for_idle returns.
+        if self._last_turn_aborted:
             pre = self._pre_prompt_leaf_id
             # `branch(id)` requires a known id; reset_leaf() handles the
             # None case (turn started on an empty session). Direct-assign
@@ -528,6 +559,7 @@ class AgentSession:
             context = self._session_manager.build_session_context()
             self._agent.replace_messages(context.messages)
         self._pre_prompt_leaf_id = None
+        self._last_turn_aborted = False
 
     # =========================================================================
     # Model management
