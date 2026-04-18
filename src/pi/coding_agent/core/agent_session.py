@@ -248,6 +248,11 @@ class AgentSession:
         self._last_assistant_message: AssistantMessage | None = None
         # Background task reference for auto-compaction (kept to prevent GC)
         self._compaction_task: asyncio.Future[None] | None = None
+        # Leaf id at the instant prompt() begins a turn. On abort, used to
+        # rewind the active branch so aborted entries become orphaned and
+        # don't leak into the next turn's LLM context. None means no prompt
+        # has been captured (e.g. abort arrived between turns — no-op).
+        self._pre_prompt_leaf_id: str | None = None
 
         # Subscribe to agent events
         self._unsubscribe_agent = self._agent.subscribe(self._handle_agent_event)
@@ -480,13 +485,49 @@ class AgentSession:
             messages.append(msg)
         self._pending_next_turn_messages.clear()
 
+        # Snapshot the leaf right before this turn starts appending. If the
+        # user aborts, abort() rewinds back to this id so Q1 + any partial
+        # aborted assistant become an orphan branch (preserved on disk for
+        # debugging, but excluded from the active parent chain).
+        self._pre_prompt_leaf_id = self._session_manager.get_leaf_id()
+
         await self._agent.prompt(messages)
 
     async def abort(self) -> None:
-        """Abort current operation and wait for agent to become idle."""
+        """Abort current operation and wait for agent to become idle.
+
+        If the aborted turn produced any entries on disk (user message,
+        tool calls, partial aborted assistant), rewind the session's active
+        leaf to the pre-prompt snapshot and rebuild the agent's in-memory
+        message list from it. Without this the next prompt's LLM context
+        would still chain through the aborted user message and Pi would
+        visibly conflate the cancelled question with the new one.
+        """
         self._abort_retry()
         self._agent.abort()
         await self._agent.wait_for_idle()
+
+        if (
+            self._last_assistant_message is not None
+            and getattr(self._last_assistant_message, "stop_reason", None) == "aborted"
+        ):
+            pre = self._pre_prompt_leaf_id
+            # `branch(id)` requires a known id; reset_leaf() handles the
+            # None case (turn started on an empty session). Direct-assign
+            # mirrors Pi's own internal rewind style (see sdk.py's resume
+            # path which also treats _leaf_id as writable).
+            if pre is None:
+                self._session_manager.reset_leaf()
+            else:
+                self._session_manager._leaf_id = pre
+            # Rebuild agent context from the rewound leaf. agent._state.messages
+            # still has every MessageEndEvent from this turn appended, so we
+            # must replace it wholesale — the same pattern create_agent_session
+            # uses to prime a resumed session (see sdk.py:270 /
+            # _handle_agent_event paths).
+            context = self._session_manager.build_session_context()
+            self._agent.replace_messages(context.messages)
+        self._pre_prompt_leaf_id = None
 
     # =========================================================================
     # Model management
