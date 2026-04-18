@@ -330,14 +330,25 @@ class GroupQueue:
             assert self._transport is not None
             assert state.job_id is not None
             try:
-                await self._transport.nc.request(
+                # JetStream publish (fire-and-forget) — message is persisted
+                # and delivered to the agent's JS consumer even if its event
+                # loop is momentarily saturated by LLM streaming. Core NATS
+                # request-reply previously raised NoRespondersError when the
+                # agent's callback SUB hadn't fully flushed or was starved.
+                #
+                # Intentionally asymmetric vs request_shutdown (which uses
+                # nc.request with timeout=5.0): interrupt is best-effort by
+                # nature — cancel propagation through the SDK takes time no
+                # matter what, and the orchestrator observes completion via
+                # the StoppedEvent on the result stream rather than waiting
+                # for a synchronous ack here.
+                await self._transport.js.publish(
                     f"agent.{state.job_id}.interrupt",
                     b"interrupt",
-                    timeout=5.0,
                 )
             except (OSError, TimeoutError):
                 logger.debug(
-                    "Interrupt signal not acknowledged (agent may have exited)",
+                    "Interrupt publish failed (agent may have exited)",
                     group_jid=group_jid,
                 )
 

@@ -16,12 +16,15 @@ import httpx
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import create_mcp_http_client
 
 logger = logging.getLogger(__name__)
 
 # Timeout for connect + initialize handshake (seconds).
 CONNECT_TIMEOUT = 30
-# Timeout for a single tool call (seconds).
+# Timeout for a single tool call (seconds). Applied both to the outer
+# asyncio.wait_for and to the underlying httpx read timeout so a slow MCP
+# server streaming a long SSE response doesn't get silently cut off.
 CALL_TOOL_TIMEOUT = 300
 
 
@@ -50,9 +53,15 @@ class McpServerConnection:
             if self.server_type == "sse":
                 transport = sse_client(self.url, headers=self.headers)
             else:
-                # streamable_http_client (new API) doesn't accept headers directly;
-                # inject them via a custom httpx.AsyncClient.
-                http_client = httpx.AsyncClient(headers=self.headers) if self.headers else None
+                # streamable_http_client doesn't accept headers directly; inject
+                # them via a custom httpx.AsyncClient. Use MCP SDK's helper so
+                # the read timeout matches CALL_TOOL_TIMEOUT — a raw
+                # httpx.AsyncClient() defaults to 5s, which silently cuts off
+                # any tool call whose SSE response takes longer than a blink.
+                http_client = create_mcp_http_client(
+                    headers=self.headers,
+                    timeout=httpx.Timeout(CONNECT_TIMEOUT, read=CALL_TOOL_TIMEOUT),
+                )
                 transport = streamable_http_client(self.url, http_client=http_client)
 
             streams = await asyncio.wait_for(

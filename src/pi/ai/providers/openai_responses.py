@@ -170,9 +170,17 @@ async def stream_openai_responses(
         )
 
         async for event in process_responses_stream(openai_stream, output, model, stream_options):
+            # Honor abort signal mid-stream. Pi's port uses asyncio.Event
+            # (is_set()); the pre-existing `.aborted` attribute checks below
+            # inherited from the TS AbortSignal origin never fire because
+            # asyncio.Event has no `aborted` attribute. Checking per chunk
+            # is the point where the Stop button actually truncates an
+            # in-flight LLM response.
+            if options and options.signal is not None and options.signal.is_set():
+                raise RuntimeError("Request was aborted")
             yield event
 
-        if options and options.signal and getattr(options.signal, "aborted", False):
+        if options and options.signal is not None and options.signal.is_set():
             raise RuntimeError("Request was aborted")
         if output.stop_reason in ("aborted", "error"):
             raise RuntimeError("An unknown error occurred")
@@ -181,7 +189,9 @@ async def stream_openai_responses(
 
     except Exception as exc:
         output.stop_reason = (
-            "aborted" if options and options.signal and getattr(options.signal, "aborted", False) else "error"
+            "aborted"
+            if options and options.signal is not None and options.signal.is_set()
+            else "error"
         )
         output.error_message = str(exc)
         yield ErrorEvent(reason=output.stop_reason, error=output)

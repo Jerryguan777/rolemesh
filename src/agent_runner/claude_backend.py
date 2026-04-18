@@ -162,6 +162,20 @@ class ClaudeBackend:
         self._mcp_server: Any = None
         self._init: AgentInitData | None = None
         self._assistant_name: str | None = None
+        # Running query task — abort() cancels this to force the async for
+        # loop inside run_prompt to unwind immediately. Without it,
+        # stream.end() only closes the input pipe; the Claude CLI subprocess
+        # happily finishes the in-flight LLM response and ResultMessage
+        # arrives after the UI is already idle.
+        self._query_task: asyncio.Task[None] | None = None
+        # Snapshot of _last_assistant_uuid at prompt start. Used to rewind
+        # the resume-session-at anchor on abort so the next turn doesn't
+        # chain through the aborted Q1's partial assistant entry.
+        self._pre_prompt_assistant_uuid: str | None = None
+        # Set True for the duration of abort() so handle_follow_up rejects
+        # late-arriving follow-ups that would otherwise race into the
+        # still-alive MessageStream queue before cancel propagates.
+        self._aborting: bool = False
 
     @property
     def session_id(self) -> str | None:
@@ -193,6 +207,15 @@ class ClaudeBackend:
         # triggers RunningEvent below, but guaranteeing one here means the
         # UI status bar doesn't depend on SDK internals staying stable.
         await self._emit(RunningEvent())
+
+        # Snapshot the current resume anchor so we can roll back on abort.
+        # Do NOT reset _aborting here: abort() already clears it when
+        # there's no active query (P2 fix), and the prior turn's finally
+        # clears it when there was one. Overwriting False at this point
+        # would clobber a True latched by an abort() that raced into the
+        # window between run_prompt's first await (RunningEvent emit) and
+        # the creation of the consumer task below — the P1 race.
+        self._pre_prompt_assistant_uuid = self._last_assistant_uuid
 
         stream = MessageStream()
         stream.push(text)
@@ -278,8 +301,28 @@ class ClaudeBackend:
         message_count = 0
         result_count = 0
 
-        try:
+        # Run the async-for over the SDK stream inside a dedicated task so
+        # abort() can cancel it. A bare `async for ...: ...` can't be
+        # interrupted from another coroutine — cancelling run_prompt's own
+        # task would also tear down the outer bridge loop.
+        async def _consume_query() -> None:
+            nonlocal message_count, result_count
+            # Guard against two races abort() can't fix with task.cancel() alone:
+            #   1. Pre-task race: abort() arrives between run_prompt's first
+            #      await (RunningEvent emit) and the task being created —
+            #      _query_task is still None so cancel() skips, but _aborting
+            #      is already True.
+            #   2. In-loop lag: CancelledError only propagates at the next
+            #      await inside the async-for. Between SDK yielding a message
+            #      and the next await we could process and emit one more
+            #      ResultEvent despite the cancel being in flight. Checking
+            #      _aborting at the top of each iteration makes the loop bail
+            #      at the next safe point even before cancel lands.
+            if self._aborting:
+                return
             async for message in query(prompt=stream, options=options):
+                if self._aborting:
+                    break
                 message_count += 1
                 cls_name = type(message).__name__
 
@@ -333,29 +376,74 @@ class ClaudeBackend:
                         new_session_id=self._session_id,
                         is_final=False,
                     ))
+
+        try:
+            self._query_task = asyncio.create_task(_consume_query())
+            await self._query_task
+        except asyncio.CancelledError:
+            _log("Query cancelled by abort — rewinding resume anchor")
+            # Rewind: the aborted turn's last AssistantMessage uuid (if any
+            # was set mid-stream) would otherwise make the next run_prompt
+            # issue resume-session-at pointing into Q1's partial output.
+            # Reset to the snapshot so the next turn continues from the
+            # pre-Q1 state, just like Pi's leaf rewind on abort.
+            self._last_assistant_uuid = self._pre_prompt_assistant_uuid
+            # Don't re-raise: the outer agent_runner bridge loop is awaiting
+            # run_prompt, and propagating CancelledError would tear it down
+            # along with the container. We want the container to stay alive
+            # for the next prompt.
         except Exception as exc:
             await self._emit(ErrorEvent(error=str(exc)))
             raise
+        finally:
+            self._query_task = None
+            self._stream = None
+            self._aborting = False
 
         _log(f"Query done. Messages: {message_count}, results: {result_count}")
 
     async def handle_follow_up(self, text: str) -> None:
-        """Pipe a follow-up message into the active query stream."""
+        """Pipe a follow-up message into the active query stream.
+
+        Rejects follow-ups that arrive once abort() has started: otherwise
+        the SDK could drain a pushed Q2 from MessageStream's queue before
+        the cancel propagates, and Q2's reply would be generated with Q1's
+        aborted context still in the LLM session.
+        """
+        if self._aborting:
+            _log(f"Ignoring follow-up during abort ({len(text)} chars)")
+            return
         if self._stream:
             _log(f"Piping follow-up message into active query ({len(text)} chars)")
             self._stream.push(text)
 
     async def abort(self) -> None:
-        """End the message stream to signal the SDK to stop.
+        """Cancel the active query and emit StoppedEvent.
 
-        Emits StoppedEvent so the UI can exit the 'stopping' transitional
-        state. This is best-effort: the SDK may continue draining until
-        the current tool call returns, but the event fires immediately so
-        the user gets instant feedback.
+        stream.end() alone doesn't stop the Claude CLI subprocess from
+        finishing the in-flight LLM call; cancelling the query task is the
+        only reliable way to prevent a late ResultMessage from reaching the
+        UI after the user already saw 'stopped'. Order matters: set the
+        guard flag before the cancel hits so concurrently-arriving
+        follow-ups can't slip into the stream in the gap.
+
+        If no query is in flight (abort called between turns), _aborting
+        is cleared at the end — otherwise it would stay latched forever
+        since only run_prompt's finally clears it, and no run_prompt was
+        triggered by this abort. Leaving it True would silently gag any
+        future handle_follow_up calls in the same session.
         """
+        had_active_query = self._query_task is not None and not self._query_task.done()
+        self._aborting = True
+        if had_active_query:
+            _log("Aborting active query")
+            assert self._query_task is not None  # narrowed by had_active_query
+            self._query_task.cancel()
         if self._stream:
             self._stream.end()
         await self._emit(StoppedEvent())
+        if not had_active_query:
+            self._aborting = False
 
     async def shutdown(self) -> None:
         pass

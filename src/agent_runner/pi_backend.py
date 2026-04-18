@@ -79,6 +79,11 @@ class PiBackend:
         self._unsubscribe: Callable[[], None] | None = None
         self._mcp_connections: list[McpServerConnection] = []
         self._bg_tasks: set[asyncio.Task[None]] = set()
+        # Set True for the duration of abort() so handle_follow_up rejects
+        # late-arriving follow-ups that would otherwise land on Pi's
+        # follow_up_queue — mirrors the guard Claude's backend added in
+        # 143fd03. Cleared at the end of abort().
+        self._aborting: bool = False
 
     @property
     def session_id(self) -> str | None:
@@ -294,6 +299,14 @@ class PiBackend:
 
     async def handle_follow_up(self, text: str) -> None:
         assert self._session is not None
+        # Reject follow-ups once abort() has started: otherwise Pi's
+        # _queue_follow_up lands the message on _follow_up_queue, which
+        # AgentSession.abort()'s rewind now clears — but if the push races
+        # in AFTER the clear, the queue grows a ghost entry that resurrects
+        # on the NEXT turn's get_follow_up_messages() poll.
+        if self._aborting:
+            _log(f"Ignoring follow-up during abort ({len(text)} chars)")
+            return
         await self._emit(RunningEvent())
         try:
             if self._session.is_streaming:
@@ -308,11 +321,17 @@ class PiBackend:
 
         session.abort() waits for the agent to become idle, then returns.
         We emit StoppedEvent after it settles so the UI can transition out
-        of the 'stopping' state.
+        of the 'stopping' state. _aborting gates handle_follow_up for the
+        duration so concurrently-arriving follow-ups can't sneak onto the
+        queue between abort starting and session.abort()'s internal rewind.
         """
-        if self._session is not None:
-            await self._session.abort()
-        await self._emit(StoppedEvent())
+        self._aborting = True
+        try:
+            if self._session is not None:
+                await self._session.abort()
+            await self._emit(StoppedEvent())
+        finally:
+            self._aborting = False
 
     async def shutdown(self) -> None:
         if self._unsubscribe:

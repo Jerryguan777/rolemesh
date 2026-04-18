@@ -248,6 +248,18 @@ class AgentSession:
         self._last_assistant_message: AssistantMessage | None = None
         # Background task reference for auto-compaction (kept to prevent GC)
         self._compaction_task: asyncio.Future[None] | None = None
+        # Leaf id at the instant prompt() begins a turn. On abort, used to
+        # rewind the active branch so aborted entries become orphaned and
+        # don't leak into the next turn's LLM context. None means no prompt
+        # has been captured (e.g. abort arrived between turns — no-op).
+        self._pre_prompt_leaf_id: str | None = None
+        # Latches True whenever an assistant MessageEndEvent arrives with
+        # stop_reason="aborted". Kept separate from _last_assistant_message
+        # because that field is deliberately cleared inside the agent_end
+        # handler before abort() gets a chance to inspect it (agent_end is
+        # dispatched during wait_for_idle, before abort() resumes). Cleared
+        # at the start of each prompt() and at the end of abort().
+        self._last_turn_aborted: bool = False
 
         # Subscribe to agent events
         self._unsubscribe_agent = self._agent.subscribe(self._handle_agent_event)
@@ -375,12 +387,34 @@ class AgentSession:
 
                 if role == "assistant":
                     self._last_assistant_message = msg
+                    if getattr(msg, "stop_reason", None) == "aborted":
+                        # Set BEFORE the agent_end handler below runs (same
+                        # event dispatch pass) so abort()'s post-wait check
+                        # can see it. _last_assistant_message gets cleared
+                        # in the agent_end branch; _last_turn_aborted
+                        # persists until abort() acts on it.
+                        self._last_turn_aborted = True
 
-        if event_type == "agent_end" and self._last_assistant_message is not None:
-            msg = self._last_assistant_message
-            self._last_assistant_message = None
-            # Schedule auto-compaction check (don't block event handler)
-            self._compaction_task = asyncio.ensure_future(self._check_compaction(msg))
+        if event_type == "agent_end":
+            # Belt-and-suspenders abort detection: if the agent's inner
+            # exception handler (agent.py _run_loop's except branch) caught
+            # the abort before it produced a MessageEndEvent, the aborted
+            # message arrives here as an item in AgentEndEvent.messages.
+            # Checking both paths keeps _last_turn_aborted reliable whether
+            # the provider yielded ErrorEvent (message_end path) or the
+            # stream_fn raised outright (agent_end-only path).
+            for m in getattr(event, "messages", []) or []:
+                if (
+                    getattr(m, "role", "") == "assistant"
+                    and getattr(m, "stop_reason", None) == "aborted"
+                ):
+                    self._last_turn_aborted = True
+                    break
+            if self._last_assistant_message is not None:
+                msg = self._last_assistant_message
+                self._last_assistant_message = None
+                # Schedule auto-compaction check (don't block event handler)
+                self._compaction_task = asyncio.ensure_future(self._check_compaction(msg))
 
     def _get_user_message_text(self, message: Message) -> str:
         """Extract text content from a user message."""
@@ -480,13 +514,65 @@ class AgentSession:
             messages.append(msg)
         self._pending_next_turn_messages.clear()
 
+        # Snapshot the leaf right before this turn starts appending. If the
+        # user aborts, abort() rewinds back to this id so Q1 + any partial
+        # aborted assistant become an orphan branch (preserved on disk for
+        # debugging, but excluded from the active parent chain).
+        self._pre_prompt_leaf_id = self._session_manager.get_leaf_id()
+        self._last_turn_aborted = False
+
         await self._agent.prompt(messages)
 
     async def abort(self) -> None:
-        """Abort current operation and wait for agent to become idle."""
+        """Abort current operation and wait for agent to become idle.
+
+        If the aborted turn produced any entries on disk (user message,
+        tool calls, partial aborted assistant), rewind the session's active
+        leaf to the pre-prompt snapshot and rebuild the agent's in-memory
+        message list from it. Without this the next prompt's LLM context
+        would still chain through the aborted user message and Pi would
+        visibly conflate the cancelled question with the new one.
+        """
         self._abort_retry()
         self._agent.abort()
         await self._agent.wait_for_idle()
+
+        # Use _last_turn_aborted (latched in _handle_agent_event on the
+        # aborted MessageEndEvent). Reading _last_assistant_message here
+        # would always see None because the agent_end handler clears it
+        # before wait_for_idle returns.
+        if self._last_turn_aborted:
+            pre = self._pre_prompt_leaf_id
+            # `branch(id)` requires a known id; reset_leaf() handles the
+            # None case (turn started on an empty session). Direct-assign
+            # mirrors Pi's own internal rewind style (see sdk.py's resume
+            # path which also treats _leaf_id as writable).
+            if pre is None:
+                self._session_manager.reset_leaf()
+            else:
+                self._session_manager._leaf_id = pre
+            # Rebuild agent context from the rewound leaf. agent._state.messages
+            # still has every MessageEndEvent from this turn appended, so we
+            # must replace it wholesale — the same pattern create_agent_session
+            # uses to prime a resumed session (see sdk.py:270 /
+            # _handle_agent_event paths).
+            context = self._session_manager.build_session_context()
+            self._agent.replace_messages(context.messages)
+            # Orphan the follow-up queue too: any Q2 queued mid-flight
+            # belongs to the aborted turn. Without this, a ghost Q2 left on
+            # _follow_up_queue resurfaces on the NEXT turn's outer-loop
+            # get_follow_up_messages() poll and gets processed as a phantom
+            # continuation of the supposedly-new conversation.
+            if hasattr(self._agent, "clear_follow_up_queue"):
+                self._agent.clear_follow_up_queue()
+            # Clear AgentSession's mirror list too — it's used by
+            # _handle_agent_event to decide whether an incoming user message
+            # text was one we injected via queue_follow_up. Stale entries
+            # here would cause mis-classification on the next turn.
+            self._follow_up_messages.clear()
+            self._steering_messages.clear()
+        self._pre_prompt_leaf_id = None
+        self._last_turn_aborted = False
 
     # =========================================================================
     # Model management
