@@ -206,11 +206,16 @@ def _make_agent_session(tmp_path: Path, stream_fn: Any) -> tuple[AgentSession, S
     return session, sm
 
 
-def test_event_dispatch_timing_preserves_abort_signal() -> None:
+async def test_event_dispatch_timing_preserves_abort_signal() -> None:
     """Regression for the *silent* bug in the previous fix: agent_end fires
     inside wait_for_idle(), clearing _last_assistant_message before abort()
     gets to inspect it. This test simulates the exact dispatch sequence and
-    pins that the signal abort() relies on (_last_turn_aborted) survives."""
+    pins that the signal abort() relies on (_last_turn_aborted) survives.
+
+    Declared async because _handle_agent_event's agent_end branch calls
+    asyncio.ensure_future for the compaction task — that needs a running
+    event loop. In Python 3.14+ running this synchronously would raise
+    RuntimeError instead of the 3.12/3.13 DeprecationWarning."""
 
     # Don't need a real session_manager file — we're only poking the event
     # handler's flag logic. Use a stub that records append_message calls.
@@ -225,9 +230,18 @@ def test_event_dispatch_timing_preserves_abort_signal() -> None:
         def append_custom_message_entry(self, *a: Any, **kw: Any) -> str:
             return "id"
 
+    # Stub for the compaction hook so the agent_end branch's background
+    # asyncio.ensure_future doesn't crash with AttributeError on missing
+    # _settings_manager. Returning enabled=False lets _check_compaction
+    # bail out immediately.
+    class _StubSettingsManager:
+        def get_compaction_settings(self) -> dict[str, Any]:
+            return {"enabled": False}
+
     # Minimal AgentSession just to call _handle_agent_event on.
     session = AgentSession.__new__(AgentSession)
     session._session_manager = _StubSM()  # type: ignore[attr-defined]
+    session._settings_manager = _StubSettingsManager()  # type: ignore[attr-defined]
     session._steering_messages = []  # type: ignore[attr-defined]
     session._follow_up_messages = []  # type: ignore[attr-defined]
     session._event_listeners = []  # type: ignore[attr-defined]
