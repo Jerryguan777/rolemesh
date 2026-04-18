@@ -208,9 +208,13 @@ class ClaudeBackend:
         # UI status bar doesn't depend on SDK internals staying stable.
         await self._emit(RunningEvent())
 
-        # Fresh turn: clear any abort flag left by a previous aborted turn
-        # and snapshot the current resume anchor so we can roll back on abort.
-        self._aborting = False
+        # Snapshot the current resume anchor so we can roll back on abort.
+        # Do NOT reset _aborting here: abort() already clears it when
+        # there's no active query (P2 fix), and the prior turn's finally
+        # clears it when there was one. Overwriting False at this point
+        # would clobber a True latched by an abort() that raced into the
+        # window between run_prompt's first await (RunningEvent emit) and
+        # the creation of the consumer task below — the P1 race.
         self._pre_prompt_assistant_uuid = self._last_assistant_uuid
 
         stream = MessageStream()
@@ -303,7 +307,22 @@ class ClaudeBackend:
         # task would also tear down the outer bridge loop.
         async def _consume_query() -> None:
             nonlocal message_count, result_count
+            # Guard against two races abort() can't fix with task.cancel() alone:
+            #   1. Pre-task race: abort() arrives between run_prompt's first
+            #      await (RunningEvent emit) and the task being created —
+            #      _query_task is still None so cancel() skips, but _aborting
+            #      is already True.
+            #   2. In-loop lag: CancelledError only propagates at the next
+            #      await inside the async-for. Between SDK yielding a message
+            #      and the next await we could process and emit one more
+            #      ResultEvent despite the cancel being in flight. Checking
+            #      _aborting at the top of each iteration makes the loop bail
+            #      at the next safe point even before cancel lands.
+            if self._aborting:
+                return
             async for message in query(prompt=stream, options=options):
+                if self._aborting:
+                    break
                 message_count += 1
                 cls_name = type(message).__name__
 
@@ -407,14 +426,24 @@ class ClaudeBackend:
         UI after the user already saw 'stopped'. Order matters: set the
         guard flag before the cancel hits so concurrently-arriving
         follow-ups can't slip into the stream in the gap.
+
+        If no query is in flight (abort called between turns), _aborting
+        is cleared at the end — otherwise it would stay latched forever
+        since only run_prompt's finally clears it, and no run_prompt was
+        triggered by this abort. Leaving it True would silently gag any
+        future handle_follow_up calls in the same session.
         """
+        had_active_query = self._query_task is not None and not self._query_task.done()
         self._aborting = True
-        if self._query_task is not None and not self._query_task.done():
+        if had_active_query:
             _log("Aborting active query")
+            assert self._query_task is not None  # narrowed by had_active_query
             self._query_task.cancel()
         if self._stream:
             self._stream.end()
         await self._emit(StoppedEvent())
+        if not had_active_query:
+            self._aborting = False
 
     async def shutdown(self) -> None:
         pass

@@ -306,30 +306,100 @@ async def test_abort_rewinds_last_assistant_uuid(
     )
 
 
+async def test_abort_before_query_task_exists_still_suppresses_emits(
+    monkeypatch: pytest.MonkeyPatch,
+    init_data: Any,
+) -> None:
+    """Pre-task race: abort() can arrive between run_prompt's first await
+    (RunningEvent) and asyncio.create_task(_consume_query()), so _query_task
+    is None and cancel() can't land. _aborting is set though, and the
+    in-loop guard at the top of _consume_query must short-circuit instead
+    of letting the SDK stream emit events for an already-aborted turn.
+
+    Simulates the window by manually setting _aborting=True before calling
+    run_prompt, so the consume_query task starts with the flag already set."""
+
+    # Messages that WOULD be emitted if the guard didn't kick in.
+    fake_query = _fake_query_factory(
+        messages=[SystemMessage(), ResultMessage(result="should-never-appear")],
+    )
+    backend, listener = _make_backend(monkeypatch, fake_query)
+    await backend.start(init_data, tool_ctx=object())
+
+    # Manually recreate the pre-task race state: abort latched True right
+    # before run_prompt creates its consumer task.
+    backend._aborting = True
+
+    # Run run_prompt — _consume_query should immediately return without
+    # draining the SDK generator.
+    await backend.run_prompt("Q1")
+
+    # No ResultEvent carrying the fake text should ever have reached the
+    # listener — the guard prevented iteration over the SDK generator.
+    result_events = [e for e in listener.events if isinstance(e, ResultEvent)]
+    assert not any(e.text == "should-never-appear" for e in result_events), (
+        f"pre-task abort guard didn't suppress emits: {result_events}"
+    )
+
+
 async def test_abort_without_active_query_is_noop(
     monkeypatch: pytest.MonkeyPatch,
     init_data: Any,
 ) -> None:
     """abort() called between turns (no query_task) must still emit
-    StoppedEvent and not blow up. Also must clear _aborting so the next
-    handle_follow_up isn't permanently gagged."""
+    StoppedEvent, not blow up, and crucially NOT leave _aborting latched
+    True. Latent True would gag every handle_follow_up that arrives later
+    in the same session — the fix must prove this can't happen."""
 
     fake_query = _fake_query_factory(messages=[])
     backend, listener = _make_backend(monkeypatch, fake_query)
     await backend.start(init_data, tool_ctx=object())
 
-    # No run_prompt in flight.
+    # No run_prompt in flight when abort fires.
     await backend.abort()
 
     assert any(isinstance(e, StoppedEvent) for e in listener.events)
-    # _aborting clears inside run_prompt's finally — with no run_prompt,
-    # nothing resets it. Ensure abort() itself leaves the backend usable
-    # for the next turn (symptom of a regression would be _aborting staying
-    # True and muzzling every future follow-up).
-    # In the current implementation abort() doesn't reset _aborting itself;
-    # the next run_prompt does. Assert that contract so a well-meaning
-    # 'cleanup' of either code path preserves it.
-    assert backend._aborting is True
-    # But once run_prompt starts (even trivially), the flag clears.
-    await backend.run_prompt("Q1")
+    # Regression: previously _aborting stayed True until the next run_prompt
+    # because only that path's finally cleared it. abort() now resets
+    # _aborting itself when there was no active query, so follow-ups on the
+    # NEXT turn work immediately.
     assert backend._aborting is False
+
+
+async def test_abort_without_active_query_does_not_gag_next_turn_follow_up(
+    monkeypatch: pytest.MonkeyPatch,
+    init_data: Any,
+) -> None:
+    """Concrete behavioral test for the latched-flag regression: after an
+    idle-state abort(), the NEXT turn's follow-up must land on the stream."""
+
+    hold = asyncio.Event()
+    fake_query = _fake_query_factory(
+        messages=[SystemMessage(), ResultMessage()],
+        hold_before_result=hold,
+    )
+    backend, _listener = _make_backend(monkeypatch, fake_query)
+    await backend.start(init_data, tool_ctx=object())
+
+    # 1. Spurious idle-state abort (e.g. UI misfire).
+    await backend.abort()
+
+    # 2. User sends a real message that becomes the next turn.
+    prompt_task = asyncio.create_task(backend.run_prompt("Q1"))
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if backend._stream is not None:
+            break
+    assert backend._stream is not None
+
+    # 3. User sends a follow-up during Q1. Must actually land on the stream.
+    await backend.handle_follow_up("Q2 follow-up")
+    stream = backend._stream
+    assert stream is not None
+    queued = [item["message"]["content"] for item in stream._queue]
+    assert "Q2 follow-up" in queued, (
+        f"follow-up gagged by leaked _aborting latch: {queued}"
+    )
+
+    hold.set()
+    await prompt_task
