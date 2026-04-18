@@ -187,9 +187,14 @@ async def stream_azure_openai_responses(
         yield StartEvent(partial=output)
 
         async for event in process_responses_stream(openai_stream, output, model):
+            # Honor abort signal mid-stream — same reasoning as
+            # openai_responses.py. The pre-existing `.aborted` checks below
+            # never fire because asyncio.Event has no `aborted` attribute.
+            if options and options.signal is not None and options.signal.is_set():
+                raise RuntimeError("Request was aborted")
             yield event
 
-        if options and options.signal and getattr(options.signal, "aborted", False):
+        if options and options.signal is not None and options.signal.is_set():
             raise RuntimeError("Request was aborted")
         if output.stop_reason in ("aborted", "error"):
             raise RuntimeError("An unknown error occurred")
@@ -198,7 +203,9 @@ async def stream_azure_openai_responses(
 
     except Exception as exc:
         output.stop_reason = (
-            "aborted" if options and options.signal and getattr(options.signal, "aborted", False) else "error"
+            "aborted"
+            if options and options.signal is not None and options.signal.is_set()
+            else "error"
         )
         output.error_message = str(exc)
         yield ErrorEvent(reason=output.stop_reason, error=output)

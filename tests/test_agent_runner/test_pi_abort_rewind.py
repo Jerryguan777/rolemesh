@@ -363,6 +363,57 @@ async def test_abort_during_real_prompt_rewinds_session(tmp_path: Path) -> None:
     )
 
 
+async def test_abort_clears_follow_up_queue_so_no_phantom_on_next_turn(tmp_path: Path) -> None:
+    """After abort, any Q2 that was queued mid-flight via follow_up() must
+    NOT resurface on the next turn. Previously the rewind cleared the
+    session tree but left agent._follow_up_queue populated; _run_loop's
+    outer get_follow_up_messages() poll would pull the ghost Q2 out on a
+    subsequent turn and process it as a phantom continuation."""
+
+    from pi.ai.types import UserMessage
+
+    sm = SessionManager.create(str(tmp_path))
+    sm.set_session_file(str(tmp_path / "session.jsonl"))
+
+    async def scripted_stream_fn(model: Model, context: Any, options: Any) -> Any:
+        # Block forever until aborted — gives us a window to queue Q2.
+        if options is not None and options.signal is not None:
+            await options.signal.wait()
+            raise RuntimeError("Request was aborted")
+        yield DoneEvent(  # pragma: no cover
+            reason="stop",
+            message=AssistantMessage(api=model.api, provider=model.provider, model=model.id),
+        )
+
+    agent = Agent(AgentOptions(stream_fn=scripted_stream_fn, max_turns=3))
+    agent._state.model = Model(id="gpt-4o-mini", name="test", api="openai-responses", provider="openai")
+
+    cfg = AgentSessionConfig(agent=agent, session_manager=sm, cwd=str(tmp_path))
+    session = AgentSession(cfg)
+
+    # Start Q1, queue Q2 as a follow-up while Q1 is in flight.
+    prompt_task = asyncio.create_task(session.prompt("Q1"))
+
+    for _ in range(50):
+        await asyncio.sleep(0)
+        if session.is_streaming:
+            break
+    assert session.is_streaming
+
+    # Queue Q2 as a follow-up (lands in agent._follow_up_queue).
+    agent.follow_up(UserMessage(content=[TextContent(text="Q2 ghost")]))
+    assert agent.has_queued_messages(), "Q2 should be queued before abort"
+
+    # Abort — the rewind must also clear the follow-up queue.
+    await session.abort()
+    await prompt_task
+
+    assert not agent.has_queued_messages(), (
+        "Q2 survived abort on agent._follow_up_queue — will resurface as "
+        "a phantom on the next turn."
+    )
+
+
 def test_orphaned_branch_remains_in_file_entries(sm: SessionManager) -> None:
     """Aborted entries should stay in the linear file for debug/audit, only
     excluded from the parent-chain walk. Regression guards against a future

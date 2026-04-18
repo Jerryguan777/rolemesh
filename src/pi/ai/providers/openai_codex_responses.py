@@ -281,7 +281,9 @@ async def stream_openai_codex_responses(
         last_error: Exception | None = None
 
         for attempt in range(_MAX_RETRIES + 1):
-            if options and options.signal and getattr(options.signal, "aborted", False):
+            # Pre-attempt abort check: asyncio.Event.is_set(), not the
+            # non-existent .aborted attribute from the TS port.
+            if options and options.signal is not None and options.signal.is_set():
                 raise RuntimeError("Request was aborted")
 
             try:
@@ -299,9 +301,13 @@ async def stream_openai_codex_responses(
                         async for event in process_responses_stream(
                             _map_codex_events(_parse_sse(response)), output, model
                         ):
+                            # Per-chunk abort check — truncates the stream
+                            # mid-response when Stop is clicked.
+                            if options and options.signal is not None and options.signal.is_set():
+                                raise RuntimeError("Request was aborted")
                             yield event
 
-                        if options and options.signal and getattr(options.signal, "aborted", False):
+                        if options and options.signal is not None and options.signal.is_set():
                             raise RuntimeError("Request was aborted")
                         if output.stop_reason in ("aborted", "error"):
                             raise RuntimeError("An unknown error occurred")
@@ -333,7 +339,9 @@ async def stream_openai_codex_responses(
 
     except Exception as exc:
         output.stop_reason = (
-            "aborted" if options and options.signal and getattr(options.signal, "aborted", False) else "error"
+            "aborted"
+            if options and options.signal is not None and options.signal.is_set()
+            else "error"
         )
         output.error_message = str(exc)
         yield ErrorEvent(reason=output.stop_reason, error=output)

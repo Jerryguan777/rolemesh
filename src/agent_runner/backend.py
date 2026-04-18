@@ -131,7 +131,14 @@ def tool_input_preview(tool_name: str, tool_input: dict[str, Any]) -> str:
 
 
 class AgentBackend(Protocol):
-    """Thin interface that each backend must implement."""
+    """Thin interface that each backend must implement.
+
+    New backend authors: BEFORE wiring up abort(), read
+    `docs/backend-stop-contract.md` (in the repo root) — it lists the
+    behaviors Stop must produce end-to-end. Getting stop wrong is easy
+    and the failure modes are silent (late replies, leaked context into
+    the next turn, ghost follow-ups resurfacing turns later).
+    """
 
     async def start(
         self,
@@ -147,7 +154,14 @@ class AgentBackend(Protocol):
         ...
 
     async def handle_follow_up(self, text: str) -> None:
-        """Handle a follow-up message (may arrive while agent is running)."""
+        """Handle a follow-up message (may arrive while agent is running).
+
+        Implementations MUST reject follow-ups that arrive after abort()
+        has started and before run_prompt has returned — otherwise the
+        in-flight message can race onto whatever queue/stream the backend
+        uses to feed the provider, and the cancelled turn's context ends
+        up concatenated with the new user message.
+        """
         ...
 
     def subscribe(self, listener: Any) -> None:
@@ -158,7 +172,31 @@ class AgentBackend(Protocol):
         ...
 
     async def abort(self) -> None:
-        """Abort current execution."""
+        """Abort current execution. See docs/backend-stop-contract.md.
+
+        Summary of the contract a backend's abort() must deliver:
+
+          1. Stop the underlying provider call. stream.end() / setting a
+             cooperative signal is not enough — you must ensure no further
+             BackendEvent is emitted for the aborted turn (no late
+             ResultEvent, no late ToolUseEvent).
+          2. Rewind the "resume anchor" the backend uses to chain turns
+             (session tree leaf, conversation uuid, thread id, whatever)
+             back to the pre-prompt value. Otherwise the NEXT turn's
+             context chains through the aborted message and the provider
+             conflates Q1's cancelled question with Q2's fresh one.
+          3. Clear any internal queues that buffered follow-ups / steering
+             / pending-next-turn messages for the aborted turn. Queue
+             residue resurfaces as phantom replies on subsequent turns.
+          4. Emit StoppedEvent so the UI can exit the 'stopping' state.
+          5. Leave the backend usable for the next turn (container stays
+             alive, no latent flags gagging future follow-ups).
+
+        Pi backend uses cooperative cancellation (signal event) + session
+        tree leaf rewind. Claude backend uses preemptive cancellation
+        (task.cancel) + resume-session-at uuid rewind. The mechanics
+        differ; the OBSERVABLE contract above is the same.
+        """
         ...
 
     async def shutdown(self) -> None:

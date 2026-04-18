@@ -558,6 +558,19 @@ class AgentSession:
             # _handle_agent_event paths).
             context = self._session_manager.build_session_context()
             self._agent.replace_messages(context.messages)
+            # Orphan the follow-up queue too: any Q2 queued mid-flight
+            # belongs to the aborted turn. Without this, a ghost Q2 left on
+            # _follow_up_queue resurfaces on the NEXT turn's outer-loop
+            # get_follow_up_messages() poll and gets processed as a phantom
+            # continuation of the supposedly-new conversation.
+            if hasattr(self._agent, "clear_follow_up_queue"):
+                self._agent.clear_follow_up_queue()
+            # Clear AgentSession's mirror list too — it's used by
+            # _handle_agent_event to decide whether an incoming user message
+            # text was one we injected via queue_follow_up. Stale entries
+            # here would cause mis-classification on the next turn.
+            self._follow_up_messages.clear()
+            self._steering_messages.clear()
         self._pre_prompt_leaf_id = None
         self._last_turn_aborted = False
 

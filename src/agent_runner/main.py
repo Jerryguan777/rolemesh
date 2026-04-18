@@ -221,6 +221,9 @@ async def run_query_loop(
     shutdown_received = asyncio.Event()
 
     async def handle_shutdown(msg: Any) -> None:
+        # Core NATS request-reply: the orchestrator's request() awaits this
+        # ack to know the container really received the shutdown (it's a
+        # lifecycle event — caller wants synchronous confirmation).
         await msg.respond(b"ack")
         shutdown_received.set()
 
@@ -228,6 +231,12 @@ async def run_query_loop(
         """User clicked Stop. Abort the current turn but keep the container
         alive. Unlike handle_shutdown, this does NOT set shutdown_received, so
         the main loop continues waiting for the next user message after abort.
+
+        Ack pattern differs from handle_shutdown by design: interrupt flows
+        over JetStream (fire-and-forget publish from orchestrator — scheduler
+        doesn't wait), so msg.ack() is a JS consumer ack, not a request-reply.
+        Interrupt is inherently best-effort — cancelling takes time anyway,
+        and the orchestrator learns completion via StoppedEvent, not ack.
         """
         await msg.ack()
         log("Interrupt signal received, aborting current turn")

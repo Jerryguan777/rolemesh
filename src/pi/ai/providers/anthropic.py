@@ -575,6 +575,14 @@ async def stream_anthropic(
 
         async with client.messages.stream(**{k: v for k, v in params.items() if k != "stream"}) as stream:
             async for event in stream:
+                # Honor abort signal mid-stream. Pi's Python port uses
+                # asyncio.Event (is_set()); the pre-existing post-loop checks
+                # below read a non-existent `.aborted` attribute inherited
+                # from the TS AbortSignal origin and never fire. Per-chunk
+                # check is what actually truncates an in-flight Claude API
+                # response when the user hits Stop.
+                if options and options.signal is not None and options.signal.is_set():
+                    raise RuntimeError("Request was aborted")
                 etype = getattr(event, "type", None)
 
                 if etype == "message_start":
@@ -705,7 +713,7 @@ async def stream_anthropic(
                     )
                     calculate_cost(model, output.usage)
 
-        if options and options.signal and getattr(options.signal, "aborted", False):
+        if options and options.signal is not None and options.signal.is_set():
             raise RuntimeError("Request was aborted")
 
         if output.stop_reason in ("aborted", "error"):
@@ -718,7 +726,9 @@ async def stream_anthropic(
 
     except Exception as exc:
         output.stop_reason = (
-            "aborted" if options and options.signal and getattr(options.signal, "aborted", False) else "error"
+            "aborted"
+            if options and options.signal is not None and options.signal.is_set()
+            else "error"
         )
         output.error_message = str(exc)
         yield ErrorEvent(reason=output.stop_reason, error=output)
