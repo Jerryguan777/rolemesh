@@ -187,7 +187,10 @@ class ApprovalWorker:
         # The claim's audit row ('executing') was written by the DB trigger
         # atomically with the status change. No manual write needed here.
         results = await self._execute_actions(
-            req.actions, req.action_hashes, req.user_id, msg=msg
+            req.actions,
+            req.user_id,
+            request_id=req.id,
+            msg=msg,
         )
         terminal = (
             "executed"
@@ -219,11 +222,25 @@ class ApprovalWorker:
     async def _execute_actions(
         self,
         actions: list[dict[str, Any]],
-        hashes: list[str],
         user_id: str,
         *,
+        request_id: str,
         msg: _HasRequestId | None = None,
     ) -> list[dict[str, Any]]:
+        """Execute each action; return a per-action result dict.
+
+        Idempotency key contract (v2):
+          We send ``X-Idempotency-Key = f"{request_id}:{i}"``.
+
+          ``request_id`` is a UUID scoped per approval request, which
+          is itself scoped per tenant — so two tenants issuing the
+          same semantic action produce distinct keys, preventing the
+          cross-tenant cache-replay attack that arises when the key
+          is only ``sha256(tool, params)``. This replaces the earlier
+          design that reused the pre-computed ``action_hashes`` (still
+          used as the dedup key for auto-intercept inside the
+          engine — two different roles for two different data).
+        """
         results: list[dict[str, Any]] = []
         # Reuse the long-lived session. Fallback to a transient session
         # only if start() was skipped (e.g. unit tests driving
@@ -240,7 +257,6 @@ class ApprovalWorker:
                 server = str(action.get("mcp_server") or "")
                 tool = str(action.get("tool_name") or "")
                 params = action.get("params") or {}
-                action_hash = hashes[i] if i < len(hashes) else ""
                 if not server or not tool:
                     results.append(
                         {"error": f"malformed action at index {i}"}
@@ -250,12 +266,8 @@ class ApprovalWorker:
                 headers: dict[str, str] = {
                     "Content-Type": "application/json",
                     "X-RoleMesh-User-Id": user_id,
+                    "X-Idempotency-Key": f"{request_id}:{i}",
                 }
-                # Only include idempotency key when we have one; an empty
-                # X-Idempotency-Key is worse than a missing one for MCP
-                # servers that treat empty strings as a distinct key.
-                if action_hash:
-                    headers["X-Idempotency-Key"] = action_hash
                 body = {
                     "jsonrpc": "2.0",
                     "id": i + 1,
@@ -271,15 +283,45 @@ class ApprovalWorker:
                     ) as resp:
                         text = await resp.text()
                         if resp.status >= 400:
+                            # Transport-level failure. Per-action error.
                             results.append(
                                 {"error": f"MCP {resp.status}: {text[:200]}"}
                             )
-                        else:
-                            try:
-                                parsed = json.loads(text)
-                            except json.JSONDecodeError:
-                                parsed = {"raw": text}
-                            results.append({"ok": True, "response": parsed})
+                            continue
+                        try:
+                            parsed = json.loads(text)
+                        except json.JSONDecodeError:
+                            # Non-JSON 2xx body — treat as an opaque
+                            # success so admins can still inspect it.
+                            results.append({"ok": True, "response": {"raw": text}})
+                            continue
+                        # JSON-RPC 2.0 §5.1: a response object with
+                        # ``error`` set and no ``result`` is an
+                        # application-level failure. HTTP status alone
+                        # is not enough — the MCP server returns 200
+                        # with a body that carries the failure.
+                        if (
+                            isinstance(parsed, dict)
+                            and parsed.get("error") is not None
+                            and parsed.get("result") is None
+                        ):
+                            err = parsed["error"]
+                            if isinstance(err, dict):
+                                msg_text = err.get("message") or str(err)
+                                code = err.get("code")
+                                results.append(
+                                    {
+                                        "error": (
+                                            f"MCP error{f' {code}' if code is not None else ''}: "
+                                            f"{msg_text}"
+                                        ),
+                                        "jsonrpc_error": err,
+                                    }
+                                )
+                            else:
+                                results.append({"error": f"MCP error: {err!r}"})
+                            continue
+                        results.append({"ok": True, "response": parsed})
                 except Exception as exc:  # noqa: BLE001 — record per-action
                     results.append({"error": str(exc)})
         finally:

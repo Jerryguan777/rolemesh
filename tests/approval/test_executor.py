@@ -173,7 +173,10 @@ class TestApprovedExecution:
         assert len(recorder.requests) == 1
         server, idk, body = recorder.requests[0]
         assert server == "erp"
-        assert idk == "hash-0"
+        # Idempotency key format: "<request_id>:<action_index>". See
+        # docs/approval-architecture.md — per-tenant isolation relies
+        # on the request UUID prefix, not the semantic action hash.
+        assert idk == f"{req_id}:0"
         assert body["method"] == "tools/call"
         assert body["params"]["name"] == "refund"
         assert msg.acks == [1]
