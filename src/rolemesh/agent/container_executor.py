@@ -185,12 +185,37 @@ class ContainerAgentExecutor:
             )
             if enabled:
                 approval_policies_dicts = [p.to_dict() for p in enabled]
-        except Exception as exc:  # noqa: BLE001 — approval lookup must not block a run
-            logger.warning(
-                "approval: failed to load policies for agent run; proceeding without",
-                coworker_id=inp.coworker_id,
-                error=str(exc),
-            )
+        except Exception as exc:
+            # The DB is unreachable at job-start. Two operator-selectable
+            # responses:
+            #   APPROVAL_FAIL_MODE=closed (default) — refuse to start.
+            #     A DB outage must not silently let every tool call run
+            #     unsupervised; this matches the fail-close posture of
+            #     the hook layer itself.
+            #   APPROVAL_FAIL_MODE=open — start without approvals.
+            #     Legacy behaviour for deployments that prioritize agent
+            #     availability over approval coverage during incidents.
+            from rolemesh.core.config import APPROVAL_FAIL_MODE
+
+            if APPROVAL_FAIL_MODE == "open":
+                logger.warning(
+                    "approval: DB unreachable — starting agent in "
+                    "fail-open mode (APPROVAL_FAIL_MODE=open). All tool "
+                    "calls will run without approval checks until the "
+                    "DB recovers and the container restarts.",
+                    coworker_id=inp.coworker_id,
+                    error=str(exc),
+                )
+            else:
+                logger.error(
+                    "approval: DB unreachable at job start — refusing "
+                    "to start agent (APPROVAL_FAIL_MODE=closed). Set "
+                    "APPROVAL_FAIL_MODE=open to permit fail-open "
+                    "startup.",
+                    coworker_id=inp.coworker_id,
+                    error=str(exc),
+                )
+                raise
 
         # Channel 1: Write initial input to KV before starting container
         kv_init = await self._transport.js.key_value("agent-init")

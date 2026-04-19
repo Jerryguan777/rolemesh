@@ -43,6 +43,7 @@ from .notification import (
     NotificationTargetResolver,
     format_approver_request_message,
     format_cancelled_message,
+    format_execution_stale_message,
     format_expired_message,
     format_skipped_message,
 )
@@ -347,10 +348,21 @@ class ApprovalEngine:
             for a in actions
         ]
 
-        # Case A: no action matches any policy. Create a row with
-        # policy_id=NULL and short-circuit to executed so the audit
-        # chain is continuous (created → approved → executing → executed).
+        # Case A: no action matches any policy. Behaviour is governed
+        # by the tenant's ``approval_default_mode``:
+        #   auto_execute     — legacy: create pending+approved, publish
+        #                      decided so the Worker executes.
+        #   require_approval — create the row as skipped so admins see
+        #                      it; actions never run without an
+        #                      explicit policy.
+        #   deny             — create the row as rejected (system note);
+        #                      Worker just delivers the rejection
+        #                      notification.
         if all(m is None for m in matched):
+            tenant = await pg.get_tenant(tenant_id)
+            default_mode = (
+                tenant.approval_default_mode if tenant else "auto_execute"
+            )
             req = await self._builder.create_from_proposal(
                 tenant_id=tenant_id,
                 coworker_id=coworker_id,
@@ -363,10 +375,32 @@ class ApprovalEngine:
                 policy=None,
                 approvers=[],
             )
-            # Transition pending → approved (system actor); audit trigger
-            # records 'approved' with NULL actor.
-            await pg.set_approval_status(req.id, "approved")
-            await self._publish_decided(req.id, status="approved", note=None)
+            if default_mode == "auto_execute":
+                await pg.set_approval_status(req.id, "approved")
+                await self._publish_decided(req.id, status="approved", note=None)
+            elif default_mode == "require_approval":
+                # Move pending → skipped (system transition). The
+                # originating conversation is notified; admins must
+                # create a policy or decide manually via a side channel.
+                await pg.set_approval_status(req.id, "skipped")
+                await self._send_to_origin(
+                    (await pg.get_approval_request(req.id)) or req,
+                    format_skipped_message(req),
+                )
+            else:  # "deny"
+                # Treat as a system rejection. Publish so the Worker
+                # delivers a uniform rejection notification; the note
+                # explains why.
+                note = (
+                    "No matching approval policy; this tenant is "
+                    "configured for deny-by-default."
+                )
+                await pg.set_approval_status(
+                    req.id, "rejected", note=note
+                )
+                await self._publish_decided(
+                    req.id, status="rejected", note=note
+                )
             return
 
         # Case B: at least one match — approval required.
@@ -597,6 +631,13 @@ class ApprovalEngine:
             if transitioned is None:
                 continue
             stale += 1
+            # Notify origin with a conservative "may have partially
+            # executed" warning. v1 does not persist per-action
+            # progress; if batch-level forensics becomes load-bearing,
+            # add execution_progress later.
+            await self._send_to_origin(
+                req, format_execution_stale_message(req)
+            )
         return {"republished": republished, "stale": stale}
 
     # -- Internal helpers -------------------------------------------------

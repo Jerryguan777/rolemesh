@@ -98,6 +98,9 @@ class Tenant:
     max_concurrent_containers: int = 5
     last_message_cursor: str | None = None  # TIMESTAMPTZ iso
     created_at: str = ""
+    # Approval module — default behaviour for proposals that do not
+    # match any enabled policy. See _create_schema comment.
+    approval_default_mode: str = "auto_execute"
 
 
 @dataclass

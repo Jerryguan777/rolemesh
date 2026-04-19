@@ -220,6 +220,22 @@ def format_cancelled_message(request: ApprovalRequest) -> str:
     )
 
 
+def format_execution_stale_message(request: ApprovalRequest) -> str:
+    """Notification the maintenance loop emits for a wedged ``executing``
+    row. Deliberately terse: v1 does not persist per-action progress,
+    so we cannot tell the user which actions completed. What matters
+    is that they DO NOT blindly retry — any action in the batch may
+    already have taken effect on the MCP side.
+    """
+    short = request.id[:8]
+    return (
+        f"Approval request #{short} did not complete cleanly "
+        "(execution_stale). Some actions in the batch may have "
+        "already taken effect on the downstream MCP server. "
+        "Please investigate manually — do NOT blindly re-submit."
+    )
+
+
 def format_execution_report(
     *, request: ApprovalRequest, results: list[dict[str, object]], status: str
 ) -> str:

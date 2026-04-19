@@ -78,6 +78,24 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             created_at TIMESTAMPTZ DEFAULT now()
         )
     """)
+    # Approval module — per-tenant default behaviour when a proposal
+    # matches NO policy. Values:
+    #   'auto_execute'     — legacy: run the actions unsupervised
+    #                        (audit chain created→approved→executing→
+    #                        executed, all with system actor).
+    #   'require_approval' — create the request as ``skipped`` so an
+    #                        operator sees it but it does not run.
+    #                        Use when the tenant treats "no matching
+    #                        policy" as a config gap, not an allowlist.
+    #   'deny'             — create the request as ``rejected`` with a
+    #                        system note. Use when the tenant is in a
+    #                        deny-by-default posture.
+    await conn.execute(
+        "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS "
+        "approval_default_mode TEXT DEFAULT 'auto_execute' "
+        "CHECK (approval_default_mode IN ("
+        "'auto_execute', 'require_approval', 'deny'))"
+    )
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -600,6 +618,14 @@ async def create_tenant(
 
 def _record_to_tenant(row: asyncpg.Record) -> Tenant:
     lmc = row["last_message_cursor"]
+    # ``approval_default_mode`` may be missing on rows read via older
+    # ``SELECT id, slug, name, plan, max_concurrent_containers,
+    # last_message_cursor, created_at`` projections; default it here
+    # so the dataclass stays stable regardless of the projection.
+    try:
+        default_mode = row["approval_default_mode"] or "auto_execute"
+    except (KeyError, IndexError):
+        default_mode = "auto_execute"
     return Tenant(
         id=str(row["id"]),
         name=row["name"],
@@ -608,6 +634,7 @@ def _record_to_tenant(row: asyncpg.Record) -> Tenant:
         max_concurrent_containers=row["max_concurrent_containers"],
         last_message_cursor=lmc.isoformat() if lmc else None,
         created_at=row["created_at"].isoformat() if row["created_at"] else "",
+        approval_default_mode=default_mode,
     )
 
 
@@ -626,6 +653,7 @@ async def update_tenant(
     *,
     name: str | None = None,
     max_concurrent_containers: int | None = None,
+    approval_default_mode: str | None = None,
 ) -> Tenant | None:
     """Update selected fields on a tenant."""
     fields: list[str] = []
@@ -639,6 +667,16 @@ async def update_tenant(
     if max_concurrent_containers is not None:
         fields.append(f"max_concurrent_containers = ${param_idx}")
         values.append(max_concurrent_containers)
+        param_idx += 1
+    if approval_default_mode is not None:
+        if approval_default_mode not in (
+            "auto_execute", "require_approval", "deny",
+        ):
+            raise ValueError(
+                f"invalid approval_default_mode: {approval_default_mode!r}"
+            )
+        fields.append(f"approval_default_mode = ${param_idx}")
+        values.append(approval_default_mode)
         param_idx += 1
 
     if not fields:

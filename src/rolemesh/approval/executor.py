@@ -287,41 +287,43 @@ class ApprovalWorker:
                             results.append(
                                 {"error": f"MCP {resp.status}: {text[:200]}"}
                             )
-                            continue
-                        try:
-                            parsed = json.loads(text)
-                        except json.JSONDecodeError:
-                            # Non-JSON 2xx body — treat as an opaque
-                            # success so admins can still inspect it.
-                            results.append({"ok": True, "response": {"raw": text}})
-                            continue
-                        # JSON-RPC 2.0 §5.1: a response object with
-                        # ``error`` set and no ``result`` is an
-                        # application-level failure. HTTP status alone
-                        # is not enough — the MCP server returns 200
-                        # with a body that carries the failure.
-                        if (
-                            isinstance(parsed, dict)
-                            and parsed.get("error") is not None
-                            and parsed.get("result") is None
-                        ):
-                            err = parsed["error"]
-                            if isinstance(err, dict):
-                                msg_text = err.get("message") or str(err)
-                                code = err.get("code")
-                                results.append(
-                                    {
-                                        "error": (
-                                            f"MCP error{f' {code}' if code is not None else ''}: "
-                                            f"{msg_text}"
-                                        ),
-                                        "jsonrpc_error": err,
-                                    }
-                                )
+                        else:
+                            try:
+                                parsed = json.loads(text)
+                            except json.JSONDecodeError:
+                                # Non-JSON 2xx body — treat as an opaque
+                                # success so admins can still inspect it.
+                                results.append({"ok": True, "response": {"raw": text}})
+                            # JSON-RPC 2.0 §5.1: a response object with
+                            # ``error`` set and no ``result`` is an
+                            # application-level failure. HTTP status
+                            # alone is not enough — the MCP server
+                            # returns 200 with a body that carries the
+                            # failure.
                             else:
-                                results.append({"error": f"MCP error: {err!r}"})
-                            continue
-                        results.append({"ok": True, "response": parsed})
+                                if (
+                                    isinstance(parsed, dict)
+                                    and parsed.get("error") is not None
+                                    and parsed.get("result") is None
+                                ):
+                                    err = parsed["error"]
+                                    if isinstance(err, dict):
+                                        msg_text = err.get("message") or str(err)
+                                        code = err.get("code")
+                                        results.append(
+                                            {
+                                                "error": (
+                                                    f"MCP error"
+                                                    f"{f' {code}' if code is not None else ''}: "
+                                                    f"{msg_text}"
+                                                ),
+                                                "jsonrpc_error": err,
+                                            }
+                                        )
+                                    else:
+                                        results.append({"error": f"MCP error: {err!r}"})
+                                else:
+                                    results.append({"ok": True, "response": parsed})
                 except Exception as exc:  # noqa: BLE001 — record per-action
                     results.append({"error": str(exc)})
         finally:
