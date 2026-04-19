@@ -42,7 +42,6 @@ from rolemesh.db.pg import (
     get_enabled_policies_for_coworker,
     list_approval_audit,
     list_approval_policies,
-    list_approval_requests,
     list_expired_pending_approvals,
     list_stuck_approved_approvals,
     list_stuck_executing_approvals,
@@ -535,7 +534,7 @@ class TestSchemaSanity:
         # If someone adds a new status to the DB CHECK constraint without
         # updating APPROVAL_STATUSES, the app code can't decide which path
         # to take — fail loudly.
-        assert APPROVAL_STATUSES == {
+        assert {
             "pending",
             "approved",
             "rejected",
@@ -546,10 +545,10 @@ class TestSchemaSanity:
             "executed",
             "execution_failed",
             "execution_stale",
-        }
+        } == APPROVAL_STATUSES
 
     async def test_audit_actions_domain_matches_module(self) -> None:
-        assert AUDIT_ACTIONS == {
+        assert {
             "created",
             "approved",
             "rejected",
@@ -560,4 +559,4 @@ class TestSchemaSanity:
             "executed",
             "execution_failed",
             "execution_stale",
-        }
+        } == AUDIT_ACTIONS

@@ -39,6 +39,14 @@ class IpcDeps(Protocol):
     def send_message(self, jid: str, text: str) -> Awaitable[None]: ...
     def on_tasks_changed(self) -> Awaitable[None]: ...
 
+    # Approval module IPC targets. on_proposal handles an agent-initiated
+    # submit_proposal call; on_auto_intercept handles a PreToolUse hook
+    # block that needs approval wrapped around it. Both hand off to the
+    # ApprovalEngine; neither is required for tasks that have no approval
+    # module configured (impls may be no-ops in that case).
+    def on_proposal(self, data: dict[str, object]) -> Awaitable[None]: ...
+    def on_auto_intercept(self, data: dict[str, object]) -> Awaitable[None]: ...
+
 
 async def process_task_ipc(
     data: dict[str, object],
@@ -236,6 +244,19 @@ async def process_task_ipc(
         await update_task(task_id_val, **updates)
         logger.info("Task updated via IPC", task_id=task_id_val, source_group=source_group, updates=updates)
         await deps.on_tasks_changed()
+
+    elif task_type == "submit_proposal":
+        # Approval authorization is evaluated inside ApprovalEngine against
+        # the resolved_approvers list on the generated request, not on the
+        # submitter's AgentPermissions — a low-permission agent may still
+        # propose if a policy exists.
+        await deps.on_proposal(data)
+
+    elif task_type == "auto_approval_request":
+        # The Hook already matched a policy; the orchestrator still
+        # revalidates (policy may have been disabled between snapshot and
+        # intercept) inside ApprovalEngine.handle_auto_intercept.
+        await deps.on_auto_intercept(data)
 
     else:
         logger.warning("Unknown IPC task type", type=task_type)

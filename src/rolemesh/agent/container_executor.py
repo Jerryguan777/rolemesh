@@ -171,6 +171,27 @@ class ContainerAgentExecutor:
                 for tool_cfg in coworker.tools
             ]
 
+        # Load per-coworker approval policies. Passed to the container
+        # as plain dicts so agent_runner.approval.policy (pure, stdlib-
+        # only) can evaluate them without a DB import. None when no
+        # policies exist, which keeps ApprovalHookHandler off the hook
+        # chain in zero-impact deployments.
+        approval_policies_dicts: list[dict[str, object]] | None = None
+        try:
+            from rolemesh.db.pg import get_enabled_policies_for_coworker
+
+            enabled = await get_enabled_policies_for_coworker(
+                tenant_id, inp.coworker_id
+            )
+            if enabled:
+                approval_policies_dicts = [p.to_dict() for p in enabled]
+        except Exception as exc:  # noqa: BLE001 — approval lookup must not block a run
+            logger.warning(
+                "approval: failed to load policies for agent run; proceeding without",
+                coworker_id=inp.coworker_id,
+                error=str(exc),
+            )
+
         # Channel 1: Write initial input to KV before starting container
         kv_init = await self._transport.js.key_value("agent-init")
         agent_init = AgentInitData(
@@ -188,6 +209,7 @@ class ContainerAgentExecutor:
             system_prompt=inp.system_prompt,
             role_config=inp.role_config,
             mcp_servers=mcp_specs,
+            approval_policies=approval_policies_dicts,
         )
         await kv_init.put(job_id, agent_init.serialize())
 

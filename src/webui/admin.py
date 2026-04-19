@@ -7,18 +7,31 @@ from typing import TYPE_CHECKING, Annotated
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 
+from rolemesh.approval.engine import ApprovalEngine, ConflictError, ForbiddenError
 from rolemesh.auth.permissions import AgentPermissions
 from rolemesh.auth.provider import AuthenticatedUser
 from rolemesh.core.group_folder import is_valid_group_folder
 from rolemesh.core.types import McpServerConfig
 from rolemesh.db import pg
-from webui.dependencies import require_manage_agents, require_manage_tenant, require_manage_users
+from webui.dependencies import (
+    get_current_user,
+    require_manage_agents,
+    require_manage_tenant,
+    require_manage_users,
+)
 from webui.schemas import (
     AgentCreate,
     AgentDetailResponse,
     AgentResponse,
     AgentSummary,
     AgentUpdate,
+    ApprovalAuditEntryResponse,
+    ApprovalDecisionRequest,
+    ApprovalPolicyCreate,
+    ApprovalPolicyResponse,
+    ApprovalPolicyUpdate,
+    ApprovalRequestDetailResponse,
+    ApprovalRequestResponse,
     AssignRequest,
     BindingCreate,
     BindingResponse,
@@ -35,12 +48,32 @@ from webui.schemas import (
 )
 
 if TYPE_CHECKING:
+    from rolemesh.approval.types import ApprovalAuditEntry, ApprovalPolicy, ApprovalRequest
     from rolemesh.core.types import ChannelBinding, Conversation, Coworker, ScheduledTask, Tenant, User
 
 # Annotated dependency types (avoids B008 lint warnings)
 OwnerUser = Annotated[AuthenticatedUser, Depends(require_manage_tenant)]
 AdminUser = Annotated[AuthenticatedUser, Depends(require_manage_agents)]
 UserManager = Annotated[AuthenticatedUser, Depends(require_manage_users)]
+AuthedUser = Annotated[AuthenticatedUser, Depends(get_current_user)]
+
+# Module-level ApprovalEngine handle — set from the WebUI bootstrap when
+# approvals are wired up. None means the approval feature is not active
+# in this process; decision endpoints will 503 rather than silently
+# no-op, and list/get continue to work because they only touch the DB.
+_approval_engine: ApprovalEngine | None = None
+
+
+def set_approval_engine(engine: ApprovalEngine | None) -> None:
+    """Attach or detach the process-wide ApprovalEngine."""
+    global _approval_engine
+    _approval_engine = engine
+
+
+def _require_engine() -> ApprovalEngine:
+    if _approval_engine is None:
+        raise HTTPException(status_code=503, detail="Approval engine not configured")
+    return _approval_engine
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -576,3 +609,236 @@ async def delete_task(
     if cw is None or cw.tenant_id != user.tenant_id:
         raise HTTPException(status_code=404, detail="Task not found")
     await pg.delete_task(task_id)
+
+
+# ---------------------------------------------------------------------------
+# Approval: policies (admin+)
+# ---------------------------------------------------------------------------
+
+
+def _policy_to_response(p: ApprovalPolicy) -> ApprovalPolicyResponse:
+    return ApprovalPolicyResponse(
+        id=p.id,
+        tenant_id=p.tenant_id,
+        coworker_id=p.coworker_id,
+        mcp_server_name=p.mcp_server_name,
+        tool_name=p.tool_name,
+        condition_expr=p.condition_expr,
+        approver_user_ids=p.approver_user_ids,
+        notify_conversation_id=p.notify_conversation_id,
+        auto_expire_minutes=p.auto_expire_minutes,
+        post_exec_mode=p.post_exec_mode,
+        enabled=p.enabled,
+        priority=p.priority,
+        created_at=p.created_at,
+        updated_at=p.updated_at,
+    )
+
+
+@router.get("/approval-policies", response_model=list[ApprovalPolicyResponse])
+async def list_approval_policies_ep(
+    user: AdminUser,
+    coworker_id: str | None = None,
+    enabled: bool | None = None,
+) -> list[ApprovalPolicyResponse]:
+    rows = await pg.list_approval_policies(
+        user.tenant_id, coworker_id=coworker_id, enabled=enabled
+    )
+    return [_policy_to_response(p) for p in rows]
+
+
+@router.post(
+    "/approval-policies",
+    response_model=ApprovalPolicyResponse,
+    status_code=201,
+)
+async def create_approval_policy_ep(
+    body: ApprovalPolicyCreate,
+    user: AdminUser,
+) -> ApprovalPolicyResponse:
+    if body.coworker_id is not None:
+        # Guard against cross-tenant policy creation: a tenant admin must
+        # not be able to attach a policy to a coworker they don't own.
+        await _get_agent_or_404(body.coworker_id, user.tenant_id)
+    p = await pg.create_approval_policy(
+        tenant_id=user.tenant_id,
+        coworker_id=body.coworker_id,
+        mcp_server_name=body.mcp_server_name,
+        tool_name=body.tool_name,
+        condition_expr=body.condition_expr,
+        approver_user_ids=body.approver_user_ids,
+        notify_conversation_id=body.notify_conversation_id,
+        auto_expire_minutes=body.auto_expire_minutes,
+        post_exec_mode=body.post_exec_mode,
+        enabled=body.enabled,
+        priority=body.priority,
+    )
+    return _policy_to_response(p)
+
+
+@router.get("/approval-policies/{policy_id}", response_model=ApprovalPolicyResponse)
+async def get_approval_policy_ep(
+    policy_id: str,
+    user: AdminUser,
+) -> ApprovalPolicyResponse:
+    p = await pg.get_approval_policy(policy_id)
+    if p is None or p.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    return _policy_to_response(p)
+
+
+@router.patch(
+    "/approval-policies/{policy_id}", response_model=ApprovalPolicyResponse
+)
+async def update_approval_policy_ep(
+    policy_id: str,
+    body: ApprovalPolicyUpdate,
+    user: AdminUser,
+) -> ApprovalPolicyResponse:
+    existing = await pg.get_approval_policy(policy_id)
+    if existing is None or existing.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    updated = await pg.update_approval_policy(
+        policy_id,
+        mcp_server_name=body.mcp_server_name,
+        tool_name=body.tool_name,
+        condition_expr=body.condition_expr,
+        approver_user_ids=body.approver_user_ids,
+        notify_conversation_id=body.notify_conversation_id,
+        auto_expire_minutes=body.auto_expire_minutes,
+        post_exec_mode=body.post_exec_mode,
+        enabled=body.enabled,
+        priority=body.priority,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    return _policy_to_response(updated)
+
+
+@router.delete("/approval-policies/{policy_id}", status_code=204)
+async def delete_approval_policy_ep(
+    policy_id: str,
+    user: AdminUser,
+) -> None:
+    existing = await pg.get_approval_policy(policy_id)
+    if existing is None or existing.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="Policy not found")
+    await pg.delete_approval_policy(policy_id)
+
+
+# ---------------------------------------------------------------------------
+# Approval: requests (any authenticated user can list their own;
+# admins see the full tenant)
+# ---------------------------------------------------------------------------
+
+
+def _request_to_response(r: ApprovalRequest) -> ApprovalRequestResponse:
+    return ApprovalRequestResponse(
+        id=r.id,
+        tenant_id=r.tenant_id,
+        coworker_id=r.coworker_id,
+        conversation_id=r.conversation_id,
+        policy_id=r.policy_id,
+        user_id=r.user_id,
+        job_id=r.job_id,
+        mcp_server_name=r.mcp_server_name,
+        actions=r.actions,
+        action_hashes=r.action_hashes,
+        rationale=r.rationale,
+        source=r.source,
+        status=r.status,
+        post_exec_mode=r.post_exec_mode,
+        resolved_approvers=r.resolved_approvers,
+        requested_at=r.requested_at,
+        expires_at=r.expires_at,
+        created_at=r.created_at,
+        updated_at=r.updated_at,
+    )
+
+
+def _audit_to_response(e: ApprovalAuditEntry) -> ApprovalAuditEntryResponse:
+    return ApprovalAuditEntryResponse(
+        id=e.id,
+        request_id=e.request_id,
+        action=e.action,
+        actor_user_id=e.actor_user_id,
+        note=e.note,
+        metadata=e.metadata,
+        created_at=e.created_at,
+    )
+
+
+@router.get("/approvals", response_model=list[ApprovalRequestResponse])
+async def list_approvals_ep(
+    user: AuthedUser,
+    status: str | None = None,
+    coworker_id: str | None = None,
+) -> list[ApprovalRequestResponse]:
+    rows = await pg.list_approval_requests(
+        user.tenant_id, status=status, coworker_id=coworker_id
+    )
+    return [_request_to_response(r) for r in rows]
+
+
+@router.get(
+    "/approvals/{request_id}", response_model=ApprovalRequestDetailResponse
+)
+async def get_approval_ep(
+    request_id: str,
+    user: AuthedUser,
+) -> ApprovalRequestDetailResponse:
+    req = await pg.get_approval_request(request_id)
+    if req is None or req.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="Approval not found")
+    audit = await pg.list_approval_audit(request_id)
+    return ApprovalRequestDetailResponse(
+        **_request_to_response(req).model_dump(),
+        audit_log=[_audit_to_response(e) for e in audit],
+    )
+
+
+@router.get(
+    "/approvals/{request_id}/audit-log",
+    response_model=list[ApprovalAuditEntryResponse],
+)
+async def get_approval_audit_ep(
+    request_id: str,
+    user: AuthedUser,
+) -> list[ApprovalAuditEntryResponse]:
+    req = await pg.get_approval_request(request_id)
+    if req is None or req.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="Approval not found")
+    rows = await pg.list_approval_audit(request_id)
+    return [_audit_to_response(r) for r in rows]
+
+
+@router.post(
+    "/approvals/{request_id}/decide",
+    response_model=ApprovalRequestResponse,
+)
+async def decide_approval_ep(
+    request_id: str,
+    body: ApprovalDecisionRequest,
+    user: AuthedUser,
+) -> ApprovalRequestResponse:
+    engine = _require_engine()
+    req = await pg.get_approval_request(request_id)
+    if req is None or req.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="Approval not found")
+    try:
+        updated = await engine.handle_decision(
+            request_id=request_id,
+            action=body.action,
+            user_id=user.user_id,
+            note=body.note,
+        )
+    except ForbiddenError as exc:
+        raise HTTPException(
+            status_code=403, detail="User is not an authorised approver"
+        ) from exc
+    except ConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Request already {exc.current_status}",
+        ) from exc
+    return _request_to_response(updated)

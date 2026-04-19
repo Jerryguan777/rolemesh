@@ -82,6 +82,41 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if _vault is not None:
         oidc_routes.set_token_vault(_vault)
 
+    # Approval engine for the WebUI's decide endpoint. The orchestrator
+    # process also owns an engine of its own for IPC events; they do not
+    # share in-memory state, only the DB. The decide endpoint returns
+    # 503 unless this is wired up, so the admin UI surfaces the missing
+    # configuration instead of silently 404'ing.
+    from rolemesh.approval.engine import ApprovalEngine
+    from rolemesh.approval.notification import NotificationTargetResolver
+    from rolemesh.db.pg import get_conversation as _pg_get_conv
+    from webui import admin as _admin
+    from webui.config import WEBUI_BASE_URL
+
+    class _WebuiNoopChannel:
+        async def send_to_conversation(
+            self, conversation_id: str, text: str
+        ) -> None:
+            # Notifications are authored by the orchestrator process,
+            # which owns the gateway fan-out. The WebUI process handles
+            # decide but does not push back to channels itself.
+            return
+
+    async def _no_convs(user_id: str, coworker_id: str) -> list[str]:
+        return []
+
+    _admin.set_approval_engine(
+        ApprovalEngine(
+            publisher=js,
+            channel_sender=_WebuiNoopChannel(),
+            resolver=NotificationTargetResolver(
+                get_conversations_for_user_and_coworker=_no_convs,
+                get_conversation=_pg_get_conv,
+                webui_base_url=WEBUI_BASE_URL or None,
+            ),
+        )
+    )
+
     yield
 
     # Shutdown

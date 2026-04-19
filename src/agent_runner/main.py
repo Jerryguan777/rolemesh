@@ -198,6 +198,16 @@ async def run_query_loop(
                 js, job_id,
                 ContainerOutput(status="stopped", result=None, new_session_id=session_id),
             )
+            # Approval cancel cascade. Best-effort publish — the approval
+            # stream may not exist at all in deployments without the
+            # approval module, and a failure here must not block the
+            # stop lifecycle. See docs/backend-stop-contract.md §8.
+            try:
+                await js.publish(
+                    f"approval.cancel_for_job.{job_id}", b""
+                )
+            except Exception as exc:  # noqa: BLE001 — cascade is best-effort
+                log(f"approval cancel cascade publish failed: {exc}")
         elif isinstance(event, SessionInitEvent):
             session_id = event.session_id
             log(f"Session initialized: {session_id}")

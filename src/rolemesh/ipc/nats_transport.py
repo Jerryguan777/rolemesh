@@ -100,6 +100,22 @@ class NatsTransport:
             )
         )
 
+        # Approval module streams. approval.decided.* drives the Worker
+        # (ApprovalWorker picks up one decided-and-approved request per
+        # message); approval.cancel_for_job.* carries Stop-cascade
+        # notifications from agent containers to the orchestrator. Kept
+        # in its own stream so the approval module can be removed without
+        # schema churn on agent-ipc.
+        approval_stream = StreamConfig(
+            name="approval-ipc",
+            subjects=["approval.decided.*", "approval.cancel_for_job.*"],
+            max_age=_STREAM_MAX_AGE_S,
+        )
+        try:
+            await self._js.add_stream(approval_stream)
+        except Exception:
+            await self._js.update_stream(approval_stream)
+
         logger.info("NATS connected", url=self._url)
 
     @property

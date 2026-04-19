@@ -2623,3 +2623,25 @@ async def list_approval_audit(request_id: str) -> list["ApprovalAuditEntry"]:
             request_id,
         )
     return [_record_to_audit_entry(r) for r in rows]
+
+
+async def expire_approval_if_pending(request_id: str) -> "ApprovalRequest | None":
+    """Atomic pending → expired with the CAS guard kept in one place.
+
+    Separate from set_approval_status because the maintenance loop
+    must not trample a concurrent decide_approval_request.
+    """
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE approval_requests
+            SET status = 'expired', updated_at = now()
+            WHERE id = $1::uuid AND status = 'pending'
+            RETURNING *
+            """,
+            request_id,
+        )
+    if row is None:
+        return None
+    return _record_to_approval_request(row)
