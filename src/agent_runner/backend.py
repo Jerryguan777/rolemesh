@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 if TYPE_CHECKING:
     from rolemesh.ipc.protocol import AgentInitData, McpServerSpec
 
+    from .hooks import HookRegistry
     from .tools.context import ToolContext
 
 
@@ -145,8 +146,18 @@ class AgentBackend(Protocol):
         init: AgentInitData,
         tool_ctx: ToolContext,
         mcp_servers: list[McpServerSpec] | None = None,
+        hooks: HookRegistry | None = None,
     ) -> None:
-        """Initialize the backend (create sessions, load tools, etc.)."""
+        """Initialize the backend (create sessions, load tools, etc.).
+
+        `hooks` is the unified HookRegistry. Implementations MUST treat
+        hooks=None as an empty registry (no handlers), NOT as a silent
+        disable of the hook system — callers like main.py always pass a
+        real registry, so a None here is typically a misuse that would
+        otherwise lose the transcript archive on compaction. The default
+        of None exists only for legacy tests that construct a backend
+        directly without building a registry.
+        """
         ...
 
     async def run_prompt(self, text: str) -> None:
