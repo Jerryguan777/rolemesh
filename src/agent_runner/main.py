@@ -41,7 +41,7 @@ from .backend import (
     ToolUseEvent,
 )
 from .hooks import HookRegistry
-from .hooks.handlers import TranscriptArchiveHandler
+from .hooks.handlers import ApprovalHookHandler, TranscriptArchiveHandler
 from .tools.context import ToolContext
 
 if TYPE_CHECKING:
@@ -156,6 +156,7 @@ async def run_query_loop(
         tenant_id=init.tenant_id,
         coworker_id=init.coworker_id,
         conversation_id=init.conversation_id,
+        user_id=init.user_id,
     )
 
     # Create and initialize backend
@@ -220,6 +221,17 @@ async def run_query_loop(
     # backend's PreCompact event via the shared HookRegistry.
     hook_registry = HookRegistry()
     hook_registry.register(TranscriptArchiveHandler(assistant_name=init.assistant_name))
+    # Register ApprovalHookHandler only when policies are provided. An empty
+    # or missing approval_policies list means the approval module is inactive
+    # for this run, and we keep the hook chain untouched so behaviour stays
+    # bit-identical to pre-approval builds.
+    if init.approval_policies:
+        hook_registry.register(
+            ApprovalHookHandler(
+                policies=init.approval_policies,
+                tool_ctx=tool_ctx,
+            )
+        )
 
     backend.subscribe(on_event)
     await backend.start(

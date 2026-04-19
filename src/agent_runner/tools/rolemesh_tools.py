@@ -114,6 +114,39 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "required": ["task_id"],
         },
     },
+    {
+        "name": "submit_proposal",
+        "description": (
+            "Submit a proposal for high-risk operations that require human approval. "
+            "Use this when you need to execute operations that may be gated by an "
+            "approval policy, especially for batch operations or when you want to "
+            "explain your rationale.\n\n"
+            "Each action specifies an MCP server, tool name, and parameters. "
+            "The proposal is sent to designated approvers. When approved, the "
+            "system executes the actions and sends a result report to the "
+            "conversation."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "actions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "mcp_server": {"type": "string", "description": "MCP server name"},
+                            "tool_name": {"type": "string", "description": "Tool name on the MCP server"},
+                            "params": {"type": "object", "description": "Tool parameters"},
+                        },
+                        "required": ["mcp_server", "tool_name", "params"],
+                    },
+                    "minItems": 1,
+                },
+                "rationale": {"type": "string", "description": "Why these actions are needed"},
+            },
+            "required": ["actions", "rationale"],
+        },
+    },
 ]
 
 
@@ -317,6 +350,46 @@ async def update_task(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     return _text_result(f"Task {task_id} update requested.")
 
 
+async def submit_proposal(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    """Forward a batch approval proposal to the orchestrator.
+
+    Validation is intentionally minimal here — the orchestrator's
+    ApprovalEngine is the source of truth for policy matching and audit.
+    This function only rejects trivially broken inputs (empty actions,
+    empty rationale) that would produce useless approval requests.
+    """
+    actions = args.get("actions") or []
+    rationale = args.get("rationale") or ""
+
+    if not isinstance(actions, list) or not actions:
+        return _text_result("At least one action is required.", is_error=True)
+    if not isinstance(rationale, str) or not rationale.strip():
+        return _text_result(
+            "Rationale is required so approvers understand why these actions "
+            "are needed.",
+            is_error=True,
+        )
+
+    ctx.publish(
+        f"agent.{ctx.job_id}.tasks",
+        {
+            "type": "submit_proposal",
+            "actions": actions,
+            "rationale": rationale,
+            "tenantId": ctx.tenant_id,
+            "coworkerId": ctx.coworker_id,
+            "conversationId": ctx.conversation_id,
+            "groupFolder": ctx.group_folder,
+            "jobId": ctx.job_id,
+            "userId": ctx.user_id,
+            "timestamp": datetime.now().isoformat(),
+        },
+    )
+    return _text_result(
+        f"Proposal submitted with {len(actions)} action(s). Awaiting human approval."
+    )
+
+
 # Map tool names to their implementation functions.
 TOOL_FUNCTIONS: dict[str, Any] = {
     "send_message": send_message,
@@ -326,4 +399,5 @@ TOOL_FUNCTIONS: dict[str, Any] = {
     "resume_task": resume_task,
     "cancel_task": cancel_task,
     "update_task": update_task,
+    "submit_proposal": submit_proposal,
 }

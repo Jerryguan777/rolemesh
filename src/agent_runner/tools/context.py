@@ -33,6 +33,10 @@ class ToolContext:
     tenant_id: str
     coworker_id: str
     conversation_id: str
+    # Identity of the user whose turn the agent is executing. Passed through
+    # to MCP calls via X-RoleMesh-User-Id and recorded on approval requests
+    # so the approval path can attribute the proposal to the originating user.
+    user_id: str = ""
 
     # Internal: background tasks for fire-and-forget publishes
     _bg_tasks: set[asyncio.Task[None]] | None = None
