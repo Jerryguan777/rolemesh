@@ -171,6 +171,52 @@ class ContainerAgentExecutor:
                 for tool_cfg in coworker.tools
             ]
 
+        # Load per-coworker approval policies. Passed to the container
+        # as plain dicts so agent_runner.approval.policy (pure, stdlib-
+        # only) can evaluate them without a DB import. None when no
+        # policies exist, which keeps ApprovalHookHandler off the hook
+        # chain in zero-impact deployments.
+        approval_policies_dicts: list[dict[str, object]] | None = None
+        try:
+            from rolemesh.db.pg import get_enabled_policies_for_coworker
+
+            enabled = await get_enabled_policies_for_coworker(
+                tenant_id, inp.coworker_id
+            )
+            if enabled:
+                approval_policies_dicts = [p.to_dict() for p in enabled]
+        except Exception as exc:
+            # The DB is unreachable at job-start. Two operator-selectable
+            # responses:
+            #   APPROVAL_FAIL_MODE=closed (default) — refuse to start.
+            #     A DB outage must not silently let every tool call run
+            #     unsupervised; this matches the fail-close posture of
+            #     the hook layer itself.
+            #   APPROVAL_FAIL_MODE=open — start without approvals.
+            #     Legacy behaviour for deployments that prioritize agent
+            #     availability over approval coverage during incidents.
+            from rolemesh.core.config import APPROVAL_FAIL_MODE
+
+            if APPROVAL_FAIL_MODE == "open":
+                logger.warning(
+                    "approval: DB unreachable — starting agent in "
+                    "fail-open mode (APPROVAL_FAIL_MODE=open). All tool "
+                    "calls will run without approval checks until the "
+                    "DB recovers and the container restarts.",
+                    coworker_id=inp.coworker_id,
+                    error=str(exc),
+                )
+            else:
+                logger.error(
+                    "approval: DB unreachable at job start — refusing "
+                    "to start agent (APPROVAL_FAIL_MODE=closed). Set "
+                    "APPROVAL_FAIL_MODE=open to permit fail-open "
+                    "startup.",
+                    coworker_id=inp.coworker_id,
+                    error=str(exc),
+                )
+                raise
+
         # Channel 1: Write initial input to KV before starting container
         kv_init = await self._transport.js.key_value("agent-init")
         agent_init = AgentInitData(
@@ -188,6 +234,7 @@ class ContainerAgentExecutor:
             system_prompt=inp.system_prompt,
             role_config=inp.role_config,
             mcp_servers=mcp_specs,
+            approval_policies=approval_policies_dicts,
         )
         await kv_init.put(job_id, agent_init.serialize())
 

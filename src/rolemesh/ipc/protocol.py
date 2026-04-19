@@ -42,6 +42,11 @@ class AgentInitData:
     system_prompt: str | None = None
     role_config: dict[str, object] | None = None
     mcp_servers: list[McpServerSpec] | None = None
+    # Approval policies applicable to this agent/user. None means "approval
+    # module is inactive for this run" — the container MUST NOT register
+    # ApprovalHookHandler in that case, so approvals are zero-impact when
+    # nobody configured them.
+    approval_policies: list[dict[str, object]] | None = None
 
     def serialize(self) -> bytes:
         return json.dumps(asdict(self)).encode()
@@ -76,4 +81,5 @@ class AgentInitData:
             system_prompt=raw.get("system_prompt"),
             role_config=raw.get("role_config"),
             mcp_servers=mcp_servers,
+            approval_policies=raw.get("approval_policies"),
         )

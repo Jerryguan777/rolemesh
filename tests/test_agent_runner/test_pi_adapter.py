@@ -87,10 +87,14 @@ class TestRoleMeshAgentTool:
 
 
 class TestCreateRoleMeshTools:
-    def test_creates_all_seven_tools(self) -> None:
+    def test_creates_all_tools(self) -> None:
+        # Adapter must produce exactly one AgentTool per TOOL_DEFINITIONS
+        # entry; the spec's "seven tools" count was extended when
+        # submit_proposal landed, so assert against the live definitions
+        # rather than a hardcoded number.
         ctx = _make_ctx()
         tools = create_rolemesh_tools(ctx)
-        assert len(tools) == 7
+        assert len(tools) == len(TOOL_DEFINITIONS)
 
     def test_tool_names_match_definitions(self) -> None:
         ctx = _make_ctx()

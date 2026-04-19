@@ -15,6 +15,11 @@ WEB_UI_HOST: str = os.environ.get("WEB_UI_HOST", "0.0.0.0")
 WEB_UI_DIST: Path = Path(os.environ.get("WEB_UI_DIST", "web/dist"))
 ADMIN_BOOTSTRAP_TOKEN: str = os.environ.get("ADMIN_BOOTSTRAP_TOKEN", "")
 
+# Base URL of the WebUI — injected into approval notifications so
+# messengers can link back to the approver-facing UI. Empty disables
+# link generation (notification still goes out as plain text).
+WEBUI_BASE_URL: str = os.environ.get("WEBUI_BASE_URL", "").rstrip("/")
+
 # --- OIDC configuration (used when AUTH_MODE=oidc) ---
 # Convenience re-export so existing webui imports keep working. The source of
 # truth is rolemesh.auth.oidc.config; new code may import from either location.

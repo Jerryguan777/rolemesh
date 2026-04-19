@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import re
 import signal
 import sys
@@ -64,6 +65,7 @@ from rolemesh.db.pg import (
     get_all_sessions,
     get_all_tasks,
     get_conversation_by_binding_and_chat,
+    get_conversations_for_coworker as pg_get_conversations_for_coworker,
     get_messages_since,
     get_new_messages_for_conversations,
     get_tenant_by_slug,
@@ -700,17 +702,29 @@ async def _start_nats_ipc_subscriptions(transport: NatsTransport, deps: _IpcDeps
             try:
                 data = json.loads(msg.data)
                 source_group = data.get("groupFolder", data.get("createdBy", ""))
-                source_tenant_id = data.get("tenantId", DEFAULT_TENANT)
-                source_coworker_id = data.get("coworkerId", "")
+                claimed_coworker_id = data.get("coworkerId", "")
 
-                # Determine permissions from coworker state (fallback to folder lookup)
-                source_cw = _state.coworkers.get(source_coworker_id) if source_coworker_id else None
+                # Determine the AUTHORITATIVE (tenant_id, coworker_id) from
+                # the orchestrator's in-memory state, NOT from the NATS
+                # payload. Claimed tenantId in the message body is a hint
+                # only; if the coworker resolves to a different tenant, we
+                # override with the server-side truth.
+                source_cw = (
+                    _state.coworkers.get(claimed_coworker_id)
+                    if claimed_coworker_id
+                    else None
+                )
                 if source_cw is None and source_group:
                     for tenant in _state.tenants.values():
                         source_cw = _state.get_coworker_by_folder(tenant.id, source_group)
                         if source_cw:
-                            source_coworker_id = source_cw.config.id
                             break
+                if source_cw is not None:
+                    source_tenant_id = source_cw.config.tenant_id
+                    source_coworker_id = source_cw.config.id
+                else:
+                    source_tenant_id = data.get("tenantId", DEFAULT_TENANT)
+                    source_coworker_id = claimed_coworker_id
                 permissions = source_cw.config.permissions if source_cw else AgentPermissions()
 
                 await process_task_ipc(
@@ -969,6 +983,103 @@ async def main() -> None:
     start_scheduler_loop(_SchedulerDepsImpl())
 
     ipc_deps = _IpcDepsImpl()
+
+    # Approval engine: wired up unconditionally so all three IPC
+    # routes (proposal, auto_intercept, decision from REST) go through
+    # a single coherent state machine. The orchestrator code that sends
+    # notifications hands the engine a ChannelSender adapter that
+    # resolves conversation_id → binding_id+chat_id via the gateway
+    # fan-out.
+    from rolemesh.approval.engine import ApprovalEngine
+    from rolemesh.approval.notification import NotificationTargetResolver
+    from rolemesh.db.pg import get_conversation as _pg_get_conv
+
+    async def _convs_for_user_and_cw(user_id: str, coworker_id: str) -> list[str]:
+        # Find conversations this user can talk to this coworker in.
+        # A simple heuristic: conversations whose channel_binding_id
+        # belongs to this coworker AND whose user_id matches (set for
+        # web conversations) are candidates, sorted by
+        # last_agent_invocation. Falling back to all conversations for
+        # the coworker when user_id match is absent (e.g. Telegram
+        # group conversations have no single user).
+        all_for_cw = await pg_get_conversations_for_coworker(coworker_id)
+        ranked = [
+            c.id
+            for c in all_for_cw
+            if c.user_id == user_id or c.user_id is None
+        ]
+        return ranked
+
+    class _OrchestratorChannelSender:
+        async def send_to_conversation(
+            self, conversation_id: str, text: str
+        ) -> None:
+            conv = await _pg_get_conv(conversation_id)
+            if conv is None:
+                logger.warning(
+                    "approval notification: conversation not found",
+                    conversation_id=conversation_id,
+                )
+                return
+            cw = _state.coworkers.get(conv.coworker_id)
+            await _send_via_coworker(cw, conv.channel_chat_id, text)
+
+    resolver = NotificationTargetResolver(
+        get_conversations_for_user_and_coworker=_convs_for_user_and_cw,
+        get_conversation=_pg_get_conv,
+        webui_base_url=os.environ.get("WEBUI_BASE_URL") or None,
+    )
+    approval_engine = ApprovalEngine(
+        publisher=_transport.js,
+        channel_sender=_OrchestratorChannelSender(),
+        resolver=resolver,
+    )
+    ipc_deps.set_approval_engine(approval_engine)
+
+    from rolemesh.approval.executor import ApprovalWorker
+    from rolemesh.approval.expiry import run_approval_maintenance_loop
+
+    approval_worker = ApprovalWorker(
+        js=_transport.js,
+        channel_sender=_OrchestratorChannelSender(),
+    )
+    await approval_worker.start()
+
+    approval_maintenance_stop = asyncio.Event()
+    approval_maintenance_task = asyncio.create_task(
+        run_approval_maintenance_loop(
+            approval_engine, stop_event=approval_maintenance_stop
+        )
+    )
+
+    # Cancel-for-job cascade: agent containers publish on StoppedEvent
+    # (see docs/backend-stop-contract.md §8). We fan those out through
+    # the engine so each pending approval for the aborted job gets
+    # status=cancelled + an audit row.
+    async def _on_cancel_for_job(msg: Any) -> None:
+        try:
+            jid = msg.subject.rsplit(".", 1)[-1]
+        except Exception:  # noqa: BLE001 — defensive, subject format is fixed
+            await msg.ack()
+            return
+        try:
+            await approval_engine.cancel_for_job(jid)
+        except Exception as exc:  # noqa: BLE001 — never let handler death leak
+            logger.warning(
+                "approval cancel_for_job handler failed",
+                job_id=jid,
+                error=str(exc),
+            )
+        with contextlib.suppress(Exception):
+            await msg.ack()
+
+    cancel_sub = await _transport.js.subscribe(
+        "approval.cancel_for_job.*",
+        durable="orch-approval-cancel",
+        cb=_on_cancel_for_job,
+        manual_ack=True,
+    )
+
     ipc_tasks = await _start_nats_ipc_subscriptions(_transport, ipc_deps)
 
     _queue.set_process_messages_fn(_process_conversation_messages)
@@ -984,6 +1095,13 @@ async def main() -> None:
         with contextlib.suppress(asyncio.CancelledError):
             await t
 
+    approval_maintenance_stop.set()
+    with contextlib.suppress(Exception):
+        await cancel_sub.unsubscribe()
+    approval_maintenance_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await approval_maintenance_task
+    await approval_worker.stop()
     await proxy_runner.cleanup()
     await _queue.shutdown(10000)
     for gw in _gateways.values():
@@ -1048,10 +1166,48 @@ class _SchedulerDepsImpl:
 
 
 class _IpcDepsImpl:
-    """Concrete IpcDeps backed by OrchestratorState."""
+    """Concrete IpcDeps backed by OrchestratorState.
+
+    The approval engine is attached lazily via set_approval_engine() so
+    deployments without ApprovalEngine fall through to no-op handlers —
+    keeps the approval module zero-impact when it is not wired up.
+    """
+
+    def __init__(self) -> None:
+        # ApprovalEngine type is imported lazily in main() to avoid the
+        # module-level import cycle (approval.engine imports db.pg which
+        # imports main-adjacent types).
+        self._approval_engine: object | None = None
+
+    def set_approval_engine(self, engine: object | None) -> None:
+        self._approval_engine = engine
 
     async def send_message(self, jid: str, text: str) -> None:
         await _send_via_coworker(None, jid, text)
+
+    async def on_proposal(
+        self, data: dict[str, object], *, tenant_id: str, coworker_id: str
+    ) -> None:
+        if self._approval_engine is None:
+            logger.warning(
+                "submit_proposal received but approval engine is not wired"
+            )
+            return
+        await self._approval_engine.handle_proposal(  # type: ignore[attr-defined]
+            data, tenant_id=tenant_id, coworker_id=coworker_id
+        )
+
+    async def on_auto_intercept(
+        self, data: dict[str, object], *, tenant_id: str, coworker_id: str
+    ) -> None:
+        if self._approval_engine is None:
+            logger.warning(
+                "auto_approval_request received but approval engine is not wired"
+            )
+            return
+        await self._approval_engine.handle_auto_intercept(  # type: ignore[attr-defined]
+            data, tenant_id=tenant_id, coworker_id=coworker_id
+        )
 
     async def on_tasks_changed(self) -> None:
         if _transport is None:
