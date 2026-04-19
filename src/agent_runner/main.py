@@ -40,6 +40,8 @@ from .backend import (
     StoppedEvent,
     ToolUseEvent,
 )
+from .hooks import HookRegistry
+from .hooks.handlers import TranscriptArchiveHandler
 from .tools.context import ToolContext
 
 if TYPE_CHECKING:
@@ -212,8 +214,20 @@ async def run_query_loop(
                 ),
             )
 
+    # Build the unified hook registry. TranscriptArchiveHandler replaces
+    # the Claude-specific in-line archive logic that used to live in
+    # claude_backend._create_pre_compact_hook; it now runs against either
+    # backend's PreCompact event via the shared HookRegistry.
+    hook_registry = HookRegistry()
+    hook_registry.register(TranscriptArchiveHandler(assistant_name=init.assistant_name))
+
     backend.subscribe(on_event)
-    await backend.start(init, tool_ctx, mcp_servers=init.mcp_servers)
+    await backend.start(
+        init,
+        tool_ctx,
+        mcp_servers=init.mcp_servers,
+        hooks=hook_registry,
+    )
 
     # Subscribe once for the entire loop lifetime to avoid JetStream
     # redelivery of already-consumed messages when ephemeral consumers

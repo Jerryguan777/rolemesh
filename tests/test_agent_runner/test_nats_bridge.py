@@ -70,7 +70,13 @@ class FakeBackend:
         if self._listener:
             await self._listener(event)
 
-    async def start(self, init: Any, tool_ctx: Any, mcp_servers: Any = None) -> None:
+    async def start(
+        self,
+        init: Any,
+        tool_ctx: Any,
+        mcp_servers: Any = None,
+        hooks: Any = None,
+    ) -> None:
         self.started = True
         self._session_id = "fake-session-1"
         await self._emit(SessionInitEvent(session_id=self._session_id))

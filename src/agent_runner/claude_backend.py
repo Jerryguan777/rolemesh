@@ -1,18 +1,24 @@
 """
 Claude SDK backend — wraps claude_agent_sdk as an AgentBackend.
 
-Extracted from the original main.py. All Claude-specific logic lives here;
-the NATS bridge in main.py is backend-agnostic.
+The hook surface is mediated through HookRegistry — this file is a thin
+bridge between Claude SDK's hook callback shape and the backend-neutral
+HookRegistry protocol. Transcript archiving now lives in
+`hooks/handlers/transcript_archive.py` and is wired as an ordinary
+PreCompact handler in main.py.
+
+Fail-close policy for control hooks is enforced here: any exception
+escaping HookRegistry.emit_pre_tool_use / emit_user_prompt_submit is
+converted into a deny/block response that the agent observes as a
+blocked call — never silently allowed.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import sys
 from collections.abc import Awaitable, Callable
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +28,6 @@ from rolemesh.ipc.protocol import AgentInitData, McpServerSpec
 
 from .backend import (
     BackendEvent,
-    CompactionEvent,
     ErrorEvent,
     ResultEvent,
     RunningEvent,
@@ -30,6 +35,14 @@ from .backend import (
     StoppedEvent,
     ToolUseEvent,
     tool_input_preview,
+)
+from .hooks import (
+    CompactionEvent,
+    HookRegistry,
+    StopEvent,
+    ToolCallEvent,
+    ToolResultEvent,
+    UserPromptEvent,
 )
 from .message_stream import MessageStream
 from .tools.claude_adapter import create_rolemesh_mcp_server
@@ -40,112 +53,169 @@ def _log(message: str) -> None:
     print(f"[claude-backend] {message}", file=sys.stderr, flush=True)
 
 
-# ---------------------------------------------------------------------------
-# Transcript archiving helpers
-# ---------------------------------------------------------------------------
+def _field(data: Any, key: str) -> Any:
+    """Pluck a field from input_data, which may be a dict or an object."""
+    if isinstance(data, dict):
+        return data.get(key)
+    return getattr(data, key, None)
 
 
-def _sanitize_filename(summary: str) -> str:
-    import re
+def _tool_response_text(response: Any) -> tuple[str, bool]:
+    """Normalize a Claude SDK PostToolUse tool_response into (text, is_error).
 
-    name = summary.lower()
-    name = re.sub(r"[^a-z0-9]+", "-", name)
-    name = name.strip("-")
-    return name[:50]
+    Handles:
+      - str: (response, False)
+      - dict with {"content": [...], "isError": bool}: flattened + error flag
+      - list: joined text blocks
+    """
+    if isinstance(response, str):
+        return response, False
+    if isinstance(response, dict):
+        is_error = bool(response.get("isError") or response.get("is_error"))
+        content = response.get("content")
+        if isinstance(content, list):
+            parts: list[str] = []
+            for block in content:
+                if isinstance(block, dict):
+                    text = block.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+                elif isinstance(block, str):
+                    parts.append(block)
+            return "".join(parts), is_error
+        if isinstance(content, str):
+            return content, is_error
+        return "", is_error
+    if isinstance(response, list):
+        parts2: list[str] = []
+        for block in response:
+            if isinstance(block, dict):
+                text = block.get("text")
+                if isinstance(text, str):
+                    parts2.append(text)
+            elif isinstance(block, str):
+                parts2.append(block)
+        return "".join(parts2), False
+    return "", False
 
 
-def _generate_fallback_name() -> str:
-    now = datetime.now()
-    return f"conversation-{now.hour:02d}{now.minute:02d}"
+def _deny(reason: str) -> dict[str, Any]:
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
 
 
-def _parse_transcript(content: str) -> list[tuple[str, str]]:
-    """Parse JSONL transcript into (role, text) pairs."""
-    messages: list[tuple[str, str]] = []
-    for line in content.split("\n"):
-        if not line.strip():
-            continue
+def _build_hook_callbacks(
+    hooks: HookRegistry,
+) -> dict[str, Any]:
+    """Translate HookRegistry into claude_agent_sdk hook callbacks."""
+
+    async def pre_tool_use(
+        input_data: Any, _tool_use_id: Any, _context: Any
+    ) -> dict[str, Any]:
+        tool_name = str(_field(input_data, "tool_name") or "")
+        tool_input_raw = _field(input_data, "tool_input")
+        tool_input = tool_input_raw if isinstance(tool_input_raw, dict) else {}
         try:
-            entry = json.loads(line)
-            if entry.get("type") == "user" and entry.get("message", {}).get("content"):
-                msg_content = entry["message"]["content"]
-                text = msg_content if isinstance(msg_content, str) else "".join(c.get("text", "") for c in msg_content)
-                if text:
-                    messages.append(("user", text))
-            elif entry.get("type") == "assistant" and entry.get("message", {}).get("content"):
-                text_parts = [c.get("text", "") for c in entry["message"]["content"] if c.get("type") == "text"]
-                text = "".join(text_parts)
-                if text:
-                    messages.append(("assistant", text))
-        except (json.JSONDecodeError, TypeError, KeyError):
-            pass
-    return messages
-
-
-def _get_session_summary(session_id: str, transcript_path: str) -> str | None:
-    project_dir = Path(transcript_path).parent
-    index_path = project_dir / "sessions-index.json"
-    if not index_path.exists():
-        return None
-    try:
-        index_data = json.loads(index_path.read_text())
-        for entry in index_data.get("entries", []):
-            if entry.get("sessionId") == session_id:
-                return entry.get("summary")
-    except (OSError, json.JSONDecodeError, KeyError, ValueError, RuntimeError):
-        pass
-    return None
-
-
-def _create_pre_compact_hook(assistant_name: str | None = None) -> Any:
-    """Return a PreCompact hook callback that archives transcripts."""
-
-    async def hook(input_data: Any, _tool_use_id: Any, _context: Any) -> dict[str, Any]:
-        transcript_path: str | None = getattr(input_data, "transcript_path", None)
-        session_id: str | None = getattr(input_data, "session_id", None)
-
-        if not transcript_path or not Path(transcript_path).exists():
-            _log("No transcript found for archiving")
+            verdict = await hooks.emit_pre_tool_use(
+                ToolCallEvent(
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    tool_call_id=str(_tool_use_id or ""),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — fail-close by design
+            _log(f"PreToolUse handler raised, failing closed: {exc}")
+            return _deny(f"Hook system error: {exc}")
+        if verdict is None:
             return {}
-
-        try:
-            content = Path(transcript_path).read_text()
-            messages = _parse_transcript(content)
-            if not messages:
-                _log("No messages to archive")
-                return {}
-
-            summary = _get_session_summary(session_id, transcript_path) if session_id else None
-            name = _sanitize_filename(summary) if summary else _generate_fallback_name()
-
-            conversations_dir = Path("/workspace/group/conversations")
-            conversations_dir.mkdir(parents=True, exist_ok=True)
-
-            date = datetime.now().strftime("%Y-%m-%d")
-            filename = f"{date}-{name}.md"
-            filepath = conversations_dir / filename
-
-            now = datetime.now()
-            date_str = now.strftime("%b %-d, %-I:%M %p")
-            lines: list[str] = [f"# {summary or 'Conversation'}", "", f"Archived: {date_str}", "", "---", ""]
-            for role, text in messages:
-                sender = "User" if role == "user" else (assistant_name or "Assistant")
-                content_str = text[:2000] + "..." if len(text) > 2000 else text
-                lines.append(f"**{sender}**: {content_str}")
-                lines.append("")
-            filepath.write_text("\n".join(lines))
-            _log(f"Archived conversation to {filepath}")
-        except (OSError, json.JSONDecodeError, KeyError, ValueError, RuntimeError) as exc:
-            _log(f"Failed to archive transcript: {exc}")
-
+        if verdict.block:
+            return _deny(verdict.reason or "Tool call blocked by hook")
+        if verdict.modified_input is not None:
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "updatedInput": verdict.modified_input,
+                }
+            }
         return {}
 
-    return hook
+    async def post_tool_use(
+        input_data: Any, _tool_use_id: Any, _context: Any
+    ) -> dict[str, Any]:
+        tool_name = str(_field(input_data, "tool_name") or "")
+        tool_input_raw = _field(input_data, "tool_input")
+        tool_input = tool_input_raw if isinstance(tool_input_raw, dict) else {}
+        tool_response = _field(input_data, "tool_response")
+        text, is_error = _tool_response_text(tool_response)
+        event = ToolResultEvent(
+            tool_name=tool_name,
+            tool_input=tool_input,
+            tool_result=text,
+            is_error=is_error,
+            tool_call_id=str(_tool_use_id or ""),
+        )
+        if is_error:
+            await hooks.emit_post_tool_use_failure(event)
+            return {}
+        verdict = await hooks.emit_post_tool_use(event)
+        if verdict and verdict.appended_context:
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "PostToolUse",
+                    "additionalContext": verdict.appended_context,
+                }
+            }
+        return {}
 
+    async def user_prompt_submit(
+        input_data: Any, _tool_use_id: Any, _context: Any
+    ) -> dict[str, Any]:
+        prompt = str(_field(input_data, "prompt") or "")
+        try:
+            verdict = await hooks.emit_user_prompt_submit(UserPromptEvent(prompt=prompt))
+        except Exception as exc:  # noqa: BLE001 — fail-close by design
+            _log(f"UserPromptSubmit handler raised, failing closed: {exc}")
+            return {"decision": "block", "reason": f"Hook system error: {exc}"}
+        if verdict is None:
+            return {}
+        if verdict.block:
+            return {
+                "decision": "block",
+                "reason": verdict.reason or "Prompt blocked by hook",
+            }
+        if verdict.appended_context:
+            return {
+                "hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": verdict.appended_context,
+                }
+            }
+        return {}
 
-# ---------------------------------------------------------------------------
-# ClaudeBackend
-# ---------------------------------------------------------------------------
+    async def pre_compact(
+        input_data: Any, _tool_use_id: Any, _context: Any
+    ) -> dict[str, Any]:
+        transcript_path = _field(input_data, "transcript_path")
+        session_id = _field(input_data, "session_id")
+        await hooks.emit_pre_compact(
+            CompactionEvent(
+                transcript_path=transcript_path if isinstance(transcript_path, str) else None,
+                session_id=session_id if isinstance(session_id, str) else None,
+            )
+        )
+        return {}
+
+    return {
+        "PreToolUse": [HookMatcher(hooks=[pre_tool_use])],
+        "PostToolUse": [HookMatcher(hooks=[post_tool_use])],
+        "UserPromptSubmit": [HookMatcher(hooks=[user_prompt_submit])],
+        "PreCompact": [HookMatcher(hooks=[pre_compact])],
+    }
 
 
 class ClaudeBackend:
@@ -158,7 +228,6 @@ class ClaudeBackend:
         self._stream: MessageStream | None = None
         self._sdk_env: dict[str, str | None] = dict(os.environ)
 
-        # Claude-specific state
         self._mcp_server: Any = None
         self._init: AgentInitData | None = None
         self._assistant_name: str | None = None
@@ -177,6 +246,9 @@ class ClaudeBackend:
         # still-alive MessageStream queue before cancel propagates.
         self._aborting: bool = False
 
+        self._hooks: HookRegistry = HookRegistry()
+        self._sdk_hooks: dict[str, Any] = {}
+
     @property
     def session_id(self) -> str | None:
         return self._session_id
@@ -188,16 +260,28 @@ class ClaudeBackend:
         if self._listener:
             await self._listener(event)
 
+    async def _emit_stop(self, reason: str) -> None:
+        """Manual Stop hook emission — observational, exceptions swallowed."""
+        try:
+            await self._hooks.emit_stop(
+                StopEvent(reason=reason, session_id=self._session_id)
+            )
+        except Exception as exc:  # noqa: BLE001 — defensive; emit_stop is already fail-safe
+            _log(f"Stop hook emission failed: {exc}")
+
     async def start(
         self,
         init: AgentInitData,
         tool_ctx: ToolContext,
         mcp_servers: list[McpServerSpec] | None = None,
+        hooks: HookRegistry | None = None,
     ) -> None:
         self._init = init
         self._session_id = init.session_id
         self._assistant_name = init.assistant_name
         self._mcp_server = create_rolemesh_mcp_server(tool_ctx)
+        self._hooks = hooks if hooks is not None else HookRegistry()
+        self._sdk_hooks = _build_hook_callbacks(self._hooks)
 
     async def run_prompt(self, text: str) -> None:
         """Run a single query through the Claude SDK."""
@@ -290,9 +374,7 @@ class ClaudeBackend:
             env=self._sdk_env,
             permission_mode="bypassPermissions",
             mcp_servers=mcp_servers_dict,
-            hooks={
-                "PreCompact": [HookMatcher(hooks=[_create_pre_compact_hook(self._assistant_name)])],
-            },
+            hooks=self._sdk_hooks,
             setting_sources=["project", "user"],
         )
         if extra_args:
@@ -300,6 +382,7 @@ class ClaudeBackend:
 
         message_count = 0
         result_count = 0
+        error_raised = False
 
         # Run the async-for over the SDK stream inside a dedicated task so
         # abort() can cancel it. A bare `async for ...: ...` can't be
@@ -377,10 +460,12 @@ class ClaudeBackend:
                         is_final=False,
                     ))
 
+        aborted = False
         try:
             self._query_task = asyncio.create_task(_consume_query())
             await self._query_task
         except asyncio.CancelledError:
+            aborted = True
             _log("Query cancelled by abort — rewinding resume anchor")
             # Rewind: the aborted turn's last AssistantMessage uuid (if any
             # was set mid-stream) would otherwise make the next run_prompt
@@ -393,12 +478,17 @@ class ClaudeBackend:
             # along with the container. We want the container to stay alive
             # for the next prompt.
         except Exception as exc:
+            error_raised = True
             await self._emit(ErrorEvent(error=str(exc)))
             raise
         finally:
             self._query_task = None
             self._stream = None
             self._aborting = False
+            # Stop hook: fire here for the completion/error cases. abort()
+            # fires its own with reason="aborted" after its work is done.
+            if not aborted:
+                await self._emit_stop("error" if error_raised else "completed")
 
         _log(f"Query done. Messages: {message_count}, results: {result_count}")
 
@@ -444,6 +534,10 @@ class ClaudeBackend:
         await self._emit(StoppedEvent())
         if not had_active_query:
             self._aborting = False
+        # Stop hook emission — AFTER StoppedEvent so the UI exits the
+        # 'stopping' state first; observability handlers run second. See
+        # docs/backend-stop-contract.md item 6.
+        await self._emit_stop("aborted")
 
     async def shutdown(self) -> None:
         pass
