@@ -282,4 +282,9 @@ class ApprovalRequestDetailResponse(ApprovalRequestResponse):
 
 class ApprovalDecisionRequest(BaseModel):
     action: str = Field(..., pattern=r"^(approve|reject)$")
-    note: str | None = None
+    # Optional human-readable rationale from the approver. Length-capped
+    # so a careless approver cannot store kilobytes of text per decision.
+    # Downstream notification channels may render Markdown; we strip
+    # control characters at the REST boundary (see admin.decide_approval_ep)
+    # to reduce the surface for unintentional formatting injection.
+    note: str | None = Field(None, max_length=1000)

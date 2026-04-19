@@ -144,9 +144,145 @@ def _engine(
     )
 
 
+async def _call_proposal(engine: ApprovalEngine, payload: dict[str, Any]) -> None:
+    """Wrapper that mirrors the IPC-dispatcher contract: pass the
+    orchestrator-trusted tenant_id / coworker_id alongside the payload.
+    Tests use the values claimed inside the payload itself (there is no
+    mismatch scenario to exercise here)."""
+    await engine.handle_proposal(
+        payload,
+        tenant_id=str(payload.get("tenantId", "")),
+        coworker_id=str(payload.get("coworkerId", "")),
+    )
+
+
+async def _call_auto_intercept(
+    engine: ApprovalEngine, payload: dict[str, Any]
+) -> None:
+    await engine.handle_auto_intercept(
+        payload,
+        tenant_id=str(payload.get("tenantId", "")),
+        coworker_id=str(payload.get("coworkerId", "")),
+    )
+
+
 # ---------------------------------------------------------------------------
 # submit_proposal path
 # ---------------------------------------------------------------------------
+
+
+class TestTrustedTenantGuard:
+    """The engine must refuse messages whose payload's tenantId / coworkerId
+    disagrees with the orchestrator's trusted lookup (container-compromise
+    defense). Tested at the engine boundary since the IPC dispatcher's
+    consistency check and the engine's own check are the two places that
+    enforce the invariant."""
+
+    async def test_mismatched_tenant_is_dropped(self) -> None:
+        tenant_id, user_id, cw_id, conv_id, job_id, _p = await _seed()
+        engine, pub, ch = _engine()
+        # Payload claims a DIFFERENT tenant_id than the trusted one we
+        # will pass alongside. The engine must drop silently (no row
+        # created, no publish, no notification).
+        forged_tenant = str(uuid.uuid4())
+        await engine.handle_proposal(
+            {
+                "tenantId": forged_tenant,  # forged by caller
+                "coworkerId": cw_id,
+                "conversationId": conv_id,
+                "jobId": job_id,
+                "userId": user_id,
+                "rationale": "r",
+                "actions": [
+                    {"mcp_server": "erp", "tool_name": "refund", "params": {"amount": 5000}}
+                ],
+            },
+            tenant_id=tenant_id,  # trusted
+            coworker_id=cw_id,
+        )
+        assert await list_approval_requests(tenant_id) == []
+        assert pub.publishes == []
+        assert ch.sent == []
+
+    async def test_mismatched_coworker_is_dropped(self) -> None:
+        tenant_id, user_id, cw_id, conv_id, job_id, _p = await _seed()
+        engine, pub, ch = _engine()
+        forged_cw = str(uuid.uuid4())
+        await engine.handle_proposal(
+            {
+                "tenantId": tenant_id,
+                "coworkerId": forged_cw,  # forged by caller
+                "conversationId": conv_id,
+                "jobId": job_id,
+                "userId": user_id,
+                "rationale": "r",
+                "actions": [
+                    {"mcp_server": "erp", "tool_name": "refund", "params": {"amount": 5000}}
+                ],
+            },
+            tenant_id=tenant_id,
+            coworker_id=cw_id,  # trusted
+        )
+        assert await list_approval_requests(tenant_id) == []
+        assert pub.publishes == []
+        assert ch.sent == []
+
+
+class TestStrictestPolicyWins:
+    async def test_batch_picks_strictest_by_priority(self) -> None:
+        # Three actions; two match a low-priority policy, one matches a
+        # high-priority one. Engine should use the high-priority policy's
+        # approvers + expiry for the request as a whole.
+        tenant_id, user_id, cw_id, conv_id, job_id, _ = await _seed(
+            with_policy=False
+        )
+        manager = await create_user(
+            tenant_id=tenant_id, name="Manager", email="m@x.com", role="admin"
+        )
+        low = await create_approval_policy(
+            tenant_id=tenant_id,
+            coworker_id=cw_id,
+            mcp_server_name="erp",
+            tool_name="refund",
+            condition_expr={"always": True},
+            approver_user_ids=[user_id],
+            priority=1,
+        )
+        high = await create_approval_policy(
+            tenant_id=tenant_id,
+            coworker_id=cw_id,
+            mcp_server_name="erp",
+            tool_name="cancel_order",
+            condition_expr={"always": True},
+            approver_user_ids=[manager.id],
+            priority=10,
+        )
+        engine, _pub, _ch = _engine()
+        await _call_proposal(
+            engine,
+            {
+                "tenantId": tenant_id,
+                "coworkerId": cw_id,
+                "conversationId": conv_id,
+                "jobId": job_id,
+                "userId": user_id,
+                "rationale": "batch",
+                "actions": [
+                    {"mcp_server": "erp", "tool_name": "refund", "params": {}},
+                    {"mcp_server": "erp", "tool_name": "refund", "params": {"id": 2}},
+                    {"mcp_server": "erp", "tool_name": "cancel_order", "params": {}},
+                ],
+            },
+        )
+        reqs = await list_approval_requests(tenant_id)
+        assert len(reqs) == 1
+        req = reqs[0]
+        assert req.status == "pending"
+        # Strictest wins: high-priority policy's approvers are snapshot.
+        assert req.resolved_approvers == [manager.id]
+        assert req.policy_id == high.id
+        # low is still around, just not selected
+        assert low.id != req.policy_id
 
 
 class TestHandleProposal:
@@ -154,7 +290,7 @@ class TestHandleProposal:
         tenant_id, user_id, cw_id, conv_id, job_id, _p = await _seed()
         engine, pub, ch = _engine()
 
-        await engine.handle_proposal(
+        await _call_proposal(engine,
             {
                 "tenantId": tenant_id,
                 "coworkerId": cw_id,
@@ -191,7 +327,7 @@ class TestHandleProposal:
         engine, pub, _ch = _engine()
 
         # Action that does not match the amount>1000 policy.
-        await engine.handle_proposal(
+        await _call_proposal(engine,
             {
                 "tenantId": tenant_id,
                 "coworkerId": cw_id,
@@ -214,8 +350,17 @@ class TestHandleProposal:
         assert reqs[0].status == "approved", (
             "no-match proposal short-circuits to approved for Worker pickup"
         )
+        # The audit trail for the no-match path MUST include the system
+        # 'approved' row so it matches the 4-row shape of a normal approve
+        # flow (created, approved, executing, executed). Without this
+        # the auto-executed path diverges from the trail shape admins
+        # would expect to reconstruct from audit_log alone.
         audit = await list_approval_audit(reqs[0].id)
-        assert [e.action for e in audit] == ["created"]
+        assert [e.action for e in audit] == ["created", "approved"]
+        assert audit[0].actor_user_id == user_id
+        assert audit[1].actor_user_id is None, (
+            "system transition to 'approved' should have NULL actor"
+        )
         # decided event published for Worker
         assert len(pub.publishes) == 1
         assert pub.publishes[0][0] == f"approval.decided.{reqs[0].id}"
@@ -253,7 +398,7 @@ class TestHandleProposal:
         )
 
         engine, _pub, ch = _engine()
-        await engine.handle_proposal(
+        await _call_proposal(engine,
             {
                 "tenantId": t.id,
                 "coworkerId": cw.id,
@@ -300,8 +445,8 @@ class TestAutoIntercept:
             "tool_params": {"amount": 5000, "order_id": "o1"},
             "action_hash": "deduped-hash",
         }
-        await engine.handle_auto_intercept(payload)
-        await engine.handle_auto_intercept(payload)
+        await _call_auto_intercept(engine, payload)
+        await _call_auto_intercept(engine, payload)
 
         reqs = await list_approval_requests(tenant_id)
         assert len(reqs) == 1, "dedup must prevent a second pending request"
@@ -340,7 +485,7 @@ class TestAutoIntercept:
             enabled=False,
         )
         engine, _pub, _ch = _engine()
-        await engine.handle_auto_intercept(
+        await _call_auto_intercept(engine,
             {
                 "tenantId": t.id,
                 "coworkerId": cw.id,
@@ -358,7 +503,7 @@ class TestAutoIntercept:
     async def test_intercept_created_audit_has_null_actor(self) -> None:
         tenant_id, user_id, cw_id, conv_id, _j, _p = await _seed()
         engine, _pub, _ch = _engine()
-        await engine.handle_auto_intercept(
+        await _call_auto_intercept(engine,
             {
                 "tenantId": tenant_id,
                 "coworkerId": cw_id,
@@ -386,7 +531,7 @@ class TestDecision:
     async def test_approve_writes_audit_and_publishes(self) -> None:
         tenant_id, user_id, cw_id, conv_id, job_id, _p = await _seed()
         engine, pub, _ch = _engine()
-        await engine.handle_proposal(
+        await _call_proposal(engine,
             {
                 "tenantId": tenant_id,
                 "coworkerId": cw_id,
@@ -422,7 +567,7 @@ class TestDecision:
         # to keep the WebUI's REST handler free of gateway dependencies.
         tenant_id, user_id, cw_id, conv_id, job_id, _p = await _seed()
         engine, pub, _ch = _engine()
-        await engine.handle_proposal(
+        await _call_proposal(engine,
             {
                 "tenantId": tenant_id,
                 "coworkerId": cw_id,
@@ -458,7 +603,7 @@ class TestDecision:
     async def test_concurrent_decide_raises_conflict(self) -> None:
         tenant_id, user_id, cw_id, conv_id, job_id, _p = await _seed()
         engine, _pub, _ch = _engine()
-        await engine.handle_proposal(
+        await _call_proposal(engine,
             {
                 "tenantId": tenant_id,
                 "coworkerId": cw_id,
@@ -490,7 +635,7 @@ class TestDecision:
             tenant_id=tenant_id, name="Eve", email="e@x.com", role="member"
         )
         engine, _pub, _ch = _engine()
-        await engine.handle_proposal(
+        await _call_proposal(engine,
             {
                 "tenantId": tenant_id,
                 "coworkerId": cw_id,
@@ -525,7 +670,7 @@ class TestCancelAndMaintenance:
         engine, _pub, _ch = _engine()
         # Create two proposals in the same job — one we approve first.
         for _ in range(2):
-            await engine.handle_proposal(
+            await _call_proposal(engine,
                 {
                     "tenantId": tenant_id,
                     "coworkerId": cw_id,

@@ -66,6 +66,19 @@ def _resolver() -> NotificationTargetResolver:
     )
 
 
+async def _call_proposal(
+    engine: ApprovalEngine, payload: dict[str, Any]
+) -> None:
+    """Mirror the IPC dispatcher: pass trusted tenant_id / coworker_id
+    alongside the payload. Tests take the values claimed inside the
+    payload since no mismatch scenario is being exercised here."""
+    await engine.handle_proposal(
+        payload,
+        tenant_id=str(payload.get("tenantId", "")),
+        coworker_id=str(payload.get("coworkerId", "")),
+    )
+
+
 async def _seed_two_requests(job_id: str) -> tuple[str, str, str, str, str, str]:
     """Seed (tenant, owner, coworker, conv, req_pending_id, req_approved_id)."""
     t = await create_tenant(name="T", slug=f"t-{uuid.uuid4().hex[:8]}")
@@ -99,7 +112,7 @@ async def _seed_two_requests(job_id: str) -> tuple[str, str, str, str, str, str]
         resolver=_resolver(),
     )
     # Pending request in this job
-    await engine.handle_proposal(
+    await _call_proposal(engine,
         {
             "tenantId": t.id,
             "coworkerId": cw.id,
@@ -113,7 +126,7 @@ async def _seed_two_requests(job_id: str) -> tuple[str, str, str, str, str, str]
         }
     )
     # Second request in same job → approve it before the cancel fires.
-    await engine.handle_proposal(
+    await _call_proposal(engine,
         {
             "tenantId": t.id,
             "coworkerId": cw.id,

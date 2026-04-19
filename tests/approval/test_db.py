@@ -34,7 +34,7 @@ from rolemesh.db.pg import (
     create_coworker,
     create_tenant,
     create_user,
-    decide_approval_request,
+    decide_approval_request_full,
     delete_approval_policy,
     find_pending_request_by_action_hash,
     get_approval_policy,
@@ -47,7 +47,6 @@ from rolemesh.db.pg import (
     list_stuck_executing_approvals,
     set_approval_status,
     update_approval_policy,
-    write_approval_audit,
 )
 
 pytestmark = pytest.mark.usefixtures("test_db")
@@ -261,17 +260,19 @@ class TestDecideAtomic:
             policy_id,
             resolved_approvers=[user_id, other.id],
         )
-        first = await decide_approval_request(
+        first = await decide_approval_request_full(
             request_id, new_status="approved", actor_user_id=user_id
         )
-        second = await decide_approval_request(
+        second = await decide_approval_request_full(
             request_id, new_status="rejected", actor_user_id=other.id
         )
-        assert first is not None and first.status == "approved"
-        assert second is None, (
-            "second decider must get None — the pending→approved transition "
-            "should be atomic and win-once"
+        assert first.kind == "updated"
+        assert first.request is not None and first.request.status == "approved"
+        assert second.kind == "conflict", (
+            "second decider must see a conflict — the pending→approved "
+            "transition should be atomic and win-once"
         )
+        assert second.current_status == "approved"
 
     async def test_non_approver_cannot_decide(self) -> None:
         tenant_id, user_id, cw_id, _b, conv_id = await _chain()
@@ -287,10 +288,10 @@ class TestDecideAtomic:
             policy_id,
             resolved_approvers=[user_id],
         )
-        result = await decide_approval_request(
+        result = await decide_approval_request_full(
             request_id, new_status="approved", actor_user_id=outsider.id
         )
-        assert result is None
+        assert result.kind == "forbidden"
 
     async def test_decide_only_from_pending(self) -> None:
         tenant_id, user_id, cw_id, _b, conv_id = await _chain()
@@ -304,10 +305,11 @@ class TestDecideAtomic:
             resolved_approvers=[user_id],
             status="approved",
         )
-        result = await decide_approval_request(
+        result = await decide_approval_request_full(
             request_id, new_status="approved", actor_user_id=user_id
         )
-        assert result is None
+        assert result.kind == "conflict"
+        assert result.current_status == "approved"
 
 
 class TestClaimForExecution:
@@ -481,7 +483,10 @@ class TestMaintenanceQueries:
 
 
 class TestAuditLog:
-    async def test_write_and_list_ordered_ascending(self) -> None:
+    async def test_trigger_writes_created_on_insert(self) -> None:
+        # The audit trigger fires on INSERT and writes a 'created' row.
+        # Tests here pin that behaviour — callers should NOT write a
+        # 'created' row manually; that would duplicate the trigger output.
         tenant_id, user_id, cw_id, _b, conv_id = await _chain()
         policy_id = await _make_policy(tenant_id, cw_id)
         request_id = await _request(
@@ -492,20 +497,31 @@ class TestAuditLog:
             policy_id,
             resolved_approvers=[user_id],
         )
-        await write_approval_audit(request_id=request_id, action="created")
-        await write_approval_audit(
-            request_id=request_id,
-            action="approved",
-            actor_user_id=user_id,
-            note="looks good",
+        entries = await list_approval_audit(request_id)
+        assert [e.action for e in entries] == ["created"]
+
+    async def test_trigger_writes_status_change_on_update(self) -> None:
+        tenant_id, user_id, cw_id, _b, conv_id = await _chain()
+        policy_id = await _make_policy(tenant_id, cw_id)
+        request_id = await _request(
+            tenant_id,
+            user_id,
+            cw_id,
+            conv_id,
+            policy_id,
+            resolved_approvers=[user_id],
+        )
+        # Transition pending → approved via set_approval_status; the
+        # trigger writes the 'approved' row in the same transaction.
+        await set_approval_status(
+            request_id, "approved", actor_user_id=user_id, note="looks good"
         )
         entries = await list_approval_audit(request_id)
         assert [e.action for e in entries] == ["created", "approved"]
-        assert entries[0].actor_user_id is None
         assert entries[1].actor_user_id == user_id
         assert entries[1].note == "looks good"
 
-    async def test_metadata_roundtrip(self) -> None:
+    async def test_metadata_on_terminal_status(self) -> None:
         tenant_id, user_id, cw_id, _b, conv_id = await _chain()
         policy_id = await _make_policy(tenant_id, cw_id)
         request_id = await _request(
@@ -515,13 +531,20 @@ class TestAuditLog:
             conv_id,
             policy_id,
             resolved_approvers=[user_id],
+            status="executing",
         )
+        # Worker path: executing → executed with metadata passed through.
         meta = {"results": [{"ok": True, "amount": 100}]}
-        await write_approval_audit(
-            request_id=request_id, action="executed", metadata=meta
+        await set_approval_status(
+            request_id, "executed", metadata=meta
         )
         entries = await list_approval_audit(request_id)
-        assert entries[0].metadata == meta
+        # INSERT with status='executing' yields 2 rows (created + executing).
+        # UPDATE to 'executed' yields 1 row with metadata.
+        actions = [e.action for e in entries]
+        assert actions[-1] == "executed"
+        executed_entry = entries[-1]
+        assert executed_entry.metadata == meta
 
 
 # ---------------------------------------------------------------------------

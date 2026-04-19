@@ -812,6 +812,23 @@ async def get_approval_audit_ep(
     return [_audit_to_response(r) for r in rows]
 
 
+def _sanitize_note(note: str | None) -> str | None:
+    """Trim whitespace and strip ASCII/C1 control characters.
+
+    Pydantic already enforces max_length=1000; we still strip control
+    characters here because a future Markdown-rendering channel could
+    interpret e.g. \\r\\n as a heading break or \\x1b as an escape
+    sequence. Keeping the filter at the REST boundary means stored
+    notes are clean without a downstream channel-by-channel sanitizer.
+    """
+    if note is None:
+        return None
+    cleaned = "".join(
+        c for c in note if c == "\n" or c == "\t" or (0x20 <= ord(c) < 0x7F) or ord(c) > 0xA0
+    ).strip()
+    return cleaned or None
+
+
 @router.post(
     "/approvals/{request_id}/decide",
     response_model=ApprovalRequestResponse,
@@ -830,7 +847,7 @@ async def decide_approval_ep(
             request_id=request_id,
             action=body.action,
             user_id=user.user_id,
-            note=body.note,
+            note=_sanitize_note(body.note),
         )
     except ForbiddenError as exc:
         raise HTTPException(

@@ -702,17 +702,29 @@ async def _start_nats_ipc_subscriptions(transport: NatsTransport, deps: _IpcDeps
             try:
                 data = json.loads(msg.data)
                 source_group = data.get("groupFolder", data.get("createdBy", ""))
-                source_tenant_id = data.get("tenantId", DEFAULT_TENANT)
-                source_coworker_id = data.get("coworkerId", "")
+                claimed_coworker_id = data.get("coworkerId", "")
 
-                # Determine permissions from coworker state (fallback to folder lookup)
-                source_cw = _state.coworkers.get(source_coworker_id) if source_coworker_id else None
+                # Determine the AUTHORITATIVE (tenant_id, coworker_id) from
+                # the orchestrator's in-memory state, NOT from the NATS
+                # payload. Claimed tenantId in the message body is a hint
+                # only; if the coworker resolves to a different tenant, we
+                # override with the server-side truth.
+                source_cw = (
+                    _state.coworkers.get(claimed_coworker_id)
+                    if claimed_coworker_id
+                    else None
+                )
                 if source_cw is None and source_group:
                     for tenant in _state.tenants.values():
                         source_cw = _state.get_coworker_by_folder(tenant.id, source_group)
                         if source_cw:
-                            source_coworker_id = source_cw.config.id
                             break
+                if source_cw is not None:
+                    source_tenant_id = source_cw.config.tenant_id
+                    source_coworker_id = source_cw.config.id
+                else:
+                    source_tenant_id = data.get("tenantId", DEFAULT_TENANT)
+                    source_coworker_id = claimed_coworker_id
                 permissions = source_cw.config.permissions if source_cw else AgentPermissions()
 
                 await process_task_ipc(
@@ -1173,21 +1185,29 @@ class _IpcDepsImpl:
     async def send_message(self, jid: str, text: str) -> None:
         await _send_via_coworker(None, jid, text)
 
-    async def on_proposal(self, data: dict[str, object]) -> None:
+    async def on_proposal(
+        self, data: dict[str, object], *, tenant_id: str, coworker_id: str
+    ) -> None:
         if self._approval_engine is None:
             logger.warning(
                 "submit_proposal received but approval engine is not wired"
             )
             return
-        await self._approval_engine.handle_proposal(data)  # type: ignore[attr-defined]
+        await self._approval_engine.handle_proposal(  # type: ignore[attr-defined]
+            data, tenant_id=tenant_id, coworker_id=coworker_id
+        )
 
-    async def on_auto_intercept(self, data: dict[str, object]) -> None:
+    async def on_auto_intercept(
+        self, data: dict[str, object], *, tenant_id: str, coworker_id: str
+    ) -> None:
         if self._approval_engine is None:
             logger.warning(
                 "auto_approval_request received but approval engine is not wired"
             )
             return
-        await self._approval_engine.handle_auto_intercept(data)  # type: ignore[attr-defined]
+        await self._approval_engine.handle_auto_intercept(  # type: ignore[attr-defined]
+            data, tenant_id=tenant_id, coworker_id=coworker_id
+        )
 
     async def on_tasks_changed(self) -> None:
         if _transport is None:

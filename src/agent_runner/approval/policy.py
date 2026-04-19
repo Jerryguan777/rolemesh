@@ -267,6 +267,14 @@ def compute_action_hash(tool_name: str, params: dict[str, Any]) -> str:
         pending approvals.
 
     Determinism must survive key ordering — tests assert that.
+
+    ``params`` is expected to be JSON-serializable. Non-serializable
+    values (e.g. ``set``, user-defined objects) fall through to
+    ``_json_default`` which calls ``str(obj)``. That is deterministic
+    within a single Python run but *may* differ across Python versions
+    for types whose ``__str__`` includes implementation details; callers
+    that need long-term stability across upgrades should normalize
+    their params upstream.
     """
     canonical = json.dumps(
         {"tool": tool_name, "params": params},

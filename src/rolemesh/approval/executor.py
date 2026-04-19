@@ -10,7 +10,10 @@ Execution model:
     ``/mcp-proxy/<server>/`` endpoint with the agent turn's user_id as
     ``X-RoleMesh-User-Id`` and the precomputed action_hash as
     ``X-Idempotency-Key``. Best-effort batching: one action failing
-    does not abort the others.
+    does not abort the others. The audit 'executing' and terminal
+    ('executed' | 'execution_failed') rows are written by the DB
+    trigger in the same transaction as the status change, so the log
+    is atomic with the transition.
   - status=rejected: send the rejection notification to the originating
     conversation. (The state transition pending→rejected was already
     done inside ApprovalEngine.handle_decision; the Worker only
@@ -31,6 +34,7 @@ import json
 from typing import TYPE_CHECKING, Any, Protocol
 
 import aiohttp
+from nats.js.api import ConsumerConfig
 
 from rolemesh.core.config import CREDENTIAL_PROXY_PORT
 from rolemesh.core.logger import get_logger
@@ -52,6 +56,18 @@ logger = get_logger()
 # runs co-located so 127.0.0.1 is correct and avoids a DNS round trip.
 _CREDENTIAL_PROXY_URL = f"http://127.0.0.1:{CREDENTIAL_PROXY_PORT}"
 
+# Per-action HTTP timeout against the credential proxy. Set high enough
+# for realistic MCP calls (e.g. an ERP refund that writes to a ledger).
+_ACTION_TIMEOUT_SECONDS = 30
+
+# NATS AckWait: must exceed the realistic worst-case batch duration so
+# that long batches don't trigger spurious redelivery. Safe to keep well
+# above _ACTION_TIMEOUT_SECONDS * max_batch — redelivery only hurts log
+# signal quality, not correctness (the atomic claim deduplicates), so
+# we set a generous ceiling and additionally call msg.in_progress()
+# between actions as belt-and-braces.
+_ACK_WAIT_SECONDS = 600
+
 
 class _HasRequestId(Protocol):
     @property
@@ -59,6 +75,7 @@ class _HasRequestId(Protocol):
     @property
     def subject(self) -> str: ...
     async def ack(self) -> None: ...
+    async def in_progress(self) -> None: ...
 
 
 class ApprovalWorker:
@@ -75,16 +92,20 @@ class ApprovalWorker:
         self._sub: Any = None
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
+        # Shared across all messages — avoids building a TCP pool per
+        # decided event. Created on start(), closed on stop().
+        self._http: aiohttp.ClientSession | None = None
 
     async def start(self) -> None:
-        # Durable consumer: if the orchestrator restarts, we pick up
-        # undelivered decisions from the last unacked offset instead of
-        # skipping to NEW and silently losing work.
+        # Durable consumer with an explicit AckWait so long-running
+        # batches don't trigger redelivery mid-execution.
         self._sub = await self._js.subscribe(
             "approval.decided.*",
             durable="orch-approval-worker",
             manual_ack=True,
+            config=ConsumerConfig(ack_wait=_ACK_WAIT_SECONDS),
         )
+        self._http = aiohttp.ClientSession()
         self._task = asyncio.create_task(self._run_loop())
 
     async def stop(self) -> None:
@@ -96,6 +117,9 @@ class ApprovalWorker:
         if self._sub is not None:
             with contextlib.suppress(Exception):
                 await self._sub.unsubscribe()
+        if self._http is not None:
+            await self._http.close()
+            self._http = None
 
     async def _run_loop(self) -> None:
         assert self._sub is not None
@@ -108,17 +132,22 @@ class ApprovalWorker:
                 logger.warning("approval worker: subscription error", error=str(exc))
                 await asyncio.sleep(1.0)
                 continue
+            request_id = msg.subject.rsplit(".", 1)[-1]
             try:
                 await self._handle_message(msg)
             except Exception as exc:
-                logger.exception("approval worker: handler crashed", error=str(exc))
+                logger.exception(
+                    "approval worker: handler crashed",
+                    request_id=request_id,
+                    error=str(exc),
+                )
                 with contextlib.suppress(Exception):
                     await msg.ack()
 
     async def _handle_message(self, msg: _HasRequestId) -> None:
         request_id = msg.subject.rsplit(".", 1)[-1]
         try:
-            body = json.loads(msg.data.decode() or "{}")
+            body = json.loads(msg.data.decode("utf-8") or "{}")
         except (UnicodeDecodeError, json.JSONDecodeError):
             body = {}
         status = str(body.get("status") or "approved")
@@ -140,6 +169,7 @@ class ApprovalWorker:
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "approval worker: reject notify failed",
+                        request_id=request_id,
                         conversation_id=req.conversation_id,
                         error=str(exc),
                     )
@@ -154,17 +184,20 @@ class ApprovalWorker:
             await msg.ack()
             return
 
-        await pg.write_approval_audit(
-            request_id=request_id, action="executing", actor_user_id=None
+        # The claim's audit row ('executing') was written by the DB trigger
+        # atomically with the status change. No manual write needed here.
+        results = await self._execute_actions(
+            req.actions, req.action_hashes, req.user_id, msg=msg
         )
-        results = await self._execute_actions(req.actions, req.action_hashes, req.user_id)
-        terminal = "executed" if all(not r.get("error") for r in results) else "execution_failed"
-        await pg.set_approval_status(request_id, terminal)
-        await pg.write_approval_audit(
-            request_id=request_id,
-            action=terminal,
-            actor_user_id=None,
-            metadata={"results": results},
+        terminal = (
+            "executed"
+            if all(not r.get("error") for r in results)
+            else "execution_failed"
+        )
+        # Pass metadata through the CRUD call so the trigger attaches it
+        # to the terminal audit row in the same transaction.
+        await pg.set_approval_status(
+            request_id, terminal, metadata={"results": results}
         )
         if req.conversation_id:
             try:
@@ -177,6 +210,7 @@ class ApprovalWorker:
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "approval worker: report send failed",
+                    request_id=request_id,
                     conversation_id=req.conversation_id,
                     error=str(exc),
                 )
@@ -187,10 +221,22 @@ class ApprovalWorker:
         actions: list[dict[str, Any]],
         hashes: list[str],
         user_id: str,
+        *,
+        msg: _HasRequestId | None = None,
     ) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
-        async with aiohttp.ClientSession() as session:
+        # Reuse the long-lived session. Fallback to a transient session
+        # only if start() was skipped (e.g. unit tests driving
+        # _handle_message directly).
+        owned = self._http is None
+        session = self._http or aiohttp.ClientSession()
+        try:
             for i, action in enumerate(actions):
+                # Extend the NATS ack deadline between actions so long
+                # batches don't trigger spurious redelivery.
+                if msg is not None:
+                    with contextlib.suppress(Exception):
+                        await msg.in_progress()
                 server = str(action.get("mcp_server") or "")
                 tool = str(action.get("tool_name") or "")
                 params = action.get("params") or {}
@@ -201,11 +247,15 @@ class ApprovalWorker:
                     )
                     continue
                 url = f"{self._proxy_base}/mcp-proxy/{server}/"
-                headers = {
+                headers: dict[str, str] = {
                     "Content-Type": "application/json",
                     "X-RoleMesh-User-Id": user_id,
-                    "X-Idempotency-Key": action_hash,
                 }
+                # Only include idempotency key when we have one; an empty
+                # X-Idempotency-Key is worse than a missing one for MCP
+                # servers that treat empty strings as a distinct key.
+                if action_hash:
+                    headers["X-Idempotency-Key"] = action_hash
                 body = {
                     "jsonrpc": "2.0",
                     "id": i + 1,
@@ -217,14 +267,12 @@ class ApprovalWorker:
                         url,
                         headers=headers,
                         json=body,
-                        timeout=aiohttp.ClientTimeout(total=30),
+                        timeout=aiohttp.ClientTimeout(total=_ACTION_TIMEOUT_SECONDS),
                     ) as resp:
                         text = await resp.text()
                         if resp.status >= 400:
                             results.append(
-                                {
-                                    "error": f"MCP {resp.status}: {text[:200]}",
-                                }
+                                {"error": f"MCP {resp.status}: {text[:200]}"}
                             )
                         else:
                             try:
@@ -234,6 +282,9 @@ class ApprovalWorker:
                             results.append({"ok": True, "response": parsed})
                 except Exception as exc:  # noqa: BLE001 — record per-action
                     results.append({"error": str(exc)})
+        finally:
+            if owned:
+                await session.close()
         return results
 
 

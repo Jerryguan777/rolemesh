@@ -18,8 +18,8 @@ from rolemesh.ipc.task_handler import process_task_ipc
 
 class _RecordingDeps:
     def __init__(self) -> None:
-        self.proposals: list[dict[str, Any]] = []
-        self.auto: list[dict[str, Any]] = []
+        self.proposals: list[tuple[dict[str, Any], str, str]] = []
+        self.auto: list[tuple[dict[str, Any], str, str]] = []
         self.sent_messages: list[tuple[str, str]] = []
         self.tasks_changed_count = 0
 
@@ -29,11 +29,15 @@ class _RecordingDeps:
     async def on_tasks_changed(self) -> None:
         self.tasks_changed_count += 1
 
-    async def on_proposal(self, data: dict[str, Any]) -> None:
-        self.proposals.append(data)
+    async def on_proposal(
+        self, data: dict[str, Any], *, tenant_id: str, coworker_id: str
+    ) -> None:
+        self.proposals.append((data, tenant_id, coworker_id))
 
-    async def on_auto_intercept(self, data: dict[str, Any]) -> None:
-        self.auto.append(data)
+    async def on_auto_intercept(
+        self, data: dict[str, Any], *, tenant_id: str, coworker_id: str
+    ) -> None:
+        self.auto.append((data, tenant_id, coworker_id))
 
 
 async def test_submit_proposal_routes_to_on_proposal() -> None:
@@ -57,7 +61,9 @@ async def test_submit_proposal_routes_to_on_proposal() -> None:
         coworker_id="cw-1",
     )
     assert len(deps.proposals) == 1
-    assert deps.proposals[0] == payload
+    assert deps.proposals[0][0] == payload
+    assert deps.proposals[0][1] == "tenant-1"
+    assert deps.proposals[0][2] == "cw-1"
     assert deps.auto == []
 
 
@@ -85,7 +91,9 @@ async def test_auto_approval_request_routes_to_on_auto_intercept() -> None:
         coworker_id="cw-1",
     )
     assert len(deps.auto) == 1
-    assert deps.auto[0] == payload
+    assert deps.auto[0][0] == payload
+    assert deps.auto[0][1] == "tenant-1"
+    assert deps.auto[0][2] == "cw-1"
     assert deps.proposals == []
 
 

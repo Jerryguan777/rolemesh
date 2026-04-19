@@ -344,7 +344,13 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             tenant_id          UUID NOT NULL REFERENCES tenants(id),
             coworker_id        UUID NOT NULL REFERENCES coworkers(id),
             conversation_id    UUID REFERENCES conversations(id),
-            policy_id          UUID NOT NULL REFERENCES approval_policies(id),
+            -- policy_id is nullable: proposals that do not match any policy
+            -- (short-circuit auto-executed path) keep NULL so the admin UI
+            -- and reporting queries can distinguish "policy X triggered
+            -- this" from "proposal was auto-executed because no policy
+            -- applied". ON DELETE SET NULL so disabling/deleting a policy
+            -- never orphans old requests.
+            policy_id          UUID REFERENCES approval_policies(id) ON DELETE SET NULL,
             user_id            UUID NOT NULL REFERENCES users(id),
             job_id             TEXT NOT NULL,
             mcp_server_name    TEXT NOT NULL,
@@ -367,6 +373,10 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             updated_at         TIMESTAMPTZ DEFAULT now()
         )
     """)
+    # Migrate existing deployments: drop the NOT NULL if present.
+    await conn.execute(
+        "ALTER TABLE approval_requests ALTER COLUMN policy_id DROP NOT NULL"
+    )
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_approval_requests_tenant_status "
         "ON approval_requests(tenant_id, status)"
@@ -408,6 +418,97 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         "CREATE INDEX IF NOT EXISTS idx_audit_log_request "
         "ON approval_audit_log(request_id)"
     )
+
+    # ---------------------------------------------------------------------
+    # Audit trigger: every INSERT or status-change UPDATE on
+    # approval_requests automatically appends an approval_audit_log row in
+    # the SAME transaction. This closes the two-step window where a crash
+    # between "UPDATE status" and "INSERT audit" could otherwise leave a
+    # ghost decision with no audit trail. The app layer can still add
+    # richer audit rows (e.g. with ``note`` or ``metadata.results``) via
+    # write_approval_audit — the trigger writes the minimal system row;
+    # the app layer then UPDATEs that row or writes a companion row with
+    # the extra payload.
+    #
+    # actor_user_id + note are passed through GUC session variables
+    # ``approval.actor_user_id`` / ``approval.note`` (set via ``SET LOCAL``
+    # inside the calling transaction). Unset GUCs → NULL, which is the
+    # right semantics for purely-system transitions (expiry / cancel /
+    # skipped / execute status bumps).
+    # ---------------------------------------------------------------------
+    await conn.execute("""
+        CREATE OR REPLACE FUNCTION _approval_write_audit_from_trigger()
+        RETURNS TRIGGER AS $$
+        DECLARE
+            v_actor TEXT;
+            v_actor_uuid UUID;
+            v_note TEXT;
+            v_meta TEXT;
+            v_meta_json JSONB;
+        BEGIN
+            -- Read the three optional GUC session variables. Missing ones
+            -- are treated as NULL. The GUCs are transaction-scoped (set
+            -- via set_config(..., true)), so they auto-clear after commit.
+            BEGIN
+                v_actor := current_setting('approval.actor_user_id', TRUE);
+            EXCEPTION WHEN OTHERS THEN v_actor := NULL; END;
+            BEGIN
+                v_note := current_setting('approval.note', TRUE);
+            EXCEPTION WHEN OTHERS THEN v_note := NULL; END;
+            BEGIN
+                v_meta := current_setting('approval.metadata', TRUE);
+            EXCEPTION WHEN OTHERS THEN v_meta := NULL; END;
+
+            IF v_actor IS NOT NULL AND v_actor <> '' THEN
+                BEGIN
+                    v_actor_uuid := v_actor::uuid;
+                EXCEPTION WHEN OTHERS THEN v_actor_uuid := NULL; END;
+            ELSE
+                v_actor_uuid := NULL;
+            END IF;
+
+            v_meta_json := COALESCE(NULLIF(v_meta, '')::jsonb, '{}'::jsonb);
+
+            IF TG_OP = 'INSERT' THEN
+                -- Every INSERT is a "created" row, attributed to the
+                -- caller (v_actor_uuid) when provided.
+                INSERT INTO approval_audit_log
+                    (request_id, action, actor_user_id, note, metadata)
+                VALUES
+                    (NEW.id, 'created', v_actor_uuid,
+                     NULLIF(v_note, ''), v_meta_json);
+                -- Rows created already in a terminal-ish state (e.g.
+                -- 'skipped' when resolve_approvers returned empty) need
+                -- a second audit row so the status transition is also
+                -- captured. The second row is attributed to the system
+                -- (NULL actor) because the transition was not a user
+                -- action — the same user who proposed could not have
+                -- chosen "skipped."
+                IF NEW.status <> 'pending' THEN
+                    INSERT INTO approval_audit_log
+                        (request_id, action, actor_user_id, note, metadata)
+                    VALUES
+                        (NEW.id, NEW.status, NULL, NULL, '{}'::jsonb);
+                END IF;
+            ELSIF TG_OP = 'UPDATE' AND NEW.status <> OLD.status THEN
+                INSERT INTO approval_audit_log
+                    (request_id, action, actor_user_id, note, metadata)
+                VALUES
+                    (NEW.id, NEW.status, v_actor_uuid,
+                     NULLIF(v_note, ''), v_meta_json);
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+    """)
+    await conn.execute(
+        "DROP TRIGGER IF EXISTS trg_approval_audit ON approval_requests"
+    )
+    await conn.execute("""
+        CREATE TRIGGER trg_approval_audit
+        AFTER INSERT OR UPDATE OF status ON approval_requests
+        FOR EACH ROW EXECUTE FUNCTION _approval_write_audit_from_trigger();
+    """)
 
     # Idempotent default tenant. OIDCAuthProvider._provision_tenant falls back
     # to slug='default' for single-tenant deployments where the IdP doesn't
@@ -2283,12 +2384,39 @@ def _record_to_approval_request(row: asyncpg.Record) -> "ApprovalRequest":
     )
 
 
+async def _set_approval_guc(
+    conn: asyncpg.Connection[asyncpg.Record],
+    *,
+    actor_user_id: str | None,
+    note: str | None,
+    metadata: dict[str, Any] | None,
+) -> None:
+    """Set approval.* transaction-local GUCs for the audit trigger.
+
+    The audit trigger (_approval_write_audit_from_trigger) reads these
+    to attribute the audit row it emits. Call inside an open transaction;
+    the ``is_local=true`` flag auto-clears on commit/rollback.
+    """
+    await conn.execute(
+        "SELECT set_config('approval.actor_user_id', $1, true)",
+        actor_user_id or "",
+    )
+    await conn.execute(
+        "SELECT set_config('approval.note', $1, true)",
+        note or "",
+    )
+    await conn.execute(
+        "SELECT set_config('approval.metadata', $1, true)",
+        json.dumps(metadata) if metadata else "",
+    )
+
+
 async def create_approval_request(
     *,
     tenant_id: str,
     coworker_id: str,
     conversation_id: str | None,
-    policy_id: str,
+    policy_id: str | None,
     user_id: str,
     job_id: str,
     mcp_server_name: str,
@@ -2300,10 +2428,18 @@ async def create_approval_request(
     resolved_approvers: list[str],
     expires_at: datetime,
     post_exec_mode: str = "report",
+    actor_user_id: str | None = None,
 ) -> "ApprovalRequest":
-    """Insert a new approval request row."""
+    """Insert a new approval request row.
+
+    ``actor_user_id`` is recorded by the audit trigger on the 'created'
+    row. None ⇒ audit 'created' row has NULL actor (system-initiated).
+    """
     pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
+        await _set_approval_guc(
+            conn, actor_user_id=actor_user_id, note=None, metadata=None
+        )
         row = await conn.fetchrow(
             """
             INSERT INTO approval_requests (
@@ -2409,37 +2545,94 @@ async def find_pending_request_by_action_hash(
     return _record_to_approval_request(row)
 
 
-async def decide_approval_request(
+class DecisionOutcome:
+    """Return value of decide_approval_request_full.
+
+    One of three shapes:
+      updated    — the actual UPDATE landed; ``request`` is the new row.
+      conflict   — the request was not pending; ``current_status`` says why.
+      forbidden  — the request is pending but the caller is not an approver.
+    """
+
+    __slots__ = ("kind", "request", "current_status")
+
+    def __init__(
+        self,
+        kind: str,
+        request: "ApprovalRequest | None" = None,
+        current_status: str | None = None,
+    ) -> None:
+        self.kind = kind  # "updated" | "conflict" | "forbidden" | "missing"
+        self.request = request
+        self.current_status = current_status
+
+
+async def decide_approval_request_full(
     request_id: str,
     *,
     new_status: str,
     actor_user_id: str,
-) -> "ApprovalRequest | None":
-    """Atomic decide: transition pending → approved|rejected.
+    note: str | None = None,
+) -> DecisionOutcome:
+    """Single-query decide that disambiguates 403 vs 409 vs 200 vs 404.
 
-    Returns the updated row iff the caller is an authorised approver AND
-    the request was still pending at UPDATE time. Returns None in every
-    other case (concurrent decide, already expired, not authorised) so
-    the caller can translate to 409/403 as needed.
+    Uses a CTE: we capture the pre-UPDATE status first, run the
+    conditional UPDATE in the same statement, and return both — one
+    round trip instead of two, and no race window where the status
+    changes between two separate reads.
+
+    Also sets the GUCs inside the same transaction so the audit trigger
+    records the approver as the actor_user_id on the 'approved' /
+    'rejected' row.
     """
     pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
+        await _set_approval_guc(
+            conn, actor_user_id=actor_user_id, note=note, metadata=None
+        )
         row = await conn.fetchrow(
             """
-            UPDATE approval_requests
-            SET status = $1, updated_at = now()
-            WHERE id = $2::uuid
-              AND status = 'pending'
-              AND $3::uuid = ANY(resolved_approvers)
-            RETURNING *
+            WITH before AS (
+                SELECT id, status, resolved_approvers
+                FROM approval_requests
+                WHERE id = $2::uuid
+                FOR UPDATE
+            ),
+            upd AS (
+                UPDATE approval_requests r
+                SET status = $1, updated_at = now()
+                FROM before b
+                WHERE r.id = b.id
+                  AND b.status = 'pending'
+                  AND $3::uuid = ANY(b.resolved_approvers)
+                RETURNING r.*
+            )
+            SELECT
+                (SELECT row_to_json(upd) FROM upd) AS updated_row,
+                (SELECT status FROM before) AS before_status,
+                (SELECT $3::uuid = ANY(resolved_approvers) FROM before) AS is_approver
             """,
             new_status,
             request_id,
             actor_user_id,
         )
     if row is None:
-        return None
-    return _record_to_approval_request(row)
+        return DecisionOutcome(kind="missing")
+    before_status = row["before_status"]
+    if before_status is None:
+        return DecisionOutcome(kind="missing")
+    updated_raw = row["updated_row"]
+    if updated_raw is not None:
+        if isinstance(updated_raw, str):
+            updated_raw = json.loads(updated_raw)
+        # row_to_json strips column types; fetch the real row to get
+        # datetime objects decoded correctly.
+        updated = await get_approval_request(request_id)
+        return DecisionOutcome(kind="updated", request=updated)
+    if before_status != "pending":
+        return DecisionOutcome(kind="conflict", current_status=before_status)
+    # pending but UPDATE did not land → caller is not an approver.
+    return DecisionOutcome(kind="forbidden", current_status=before_status)
 
 
 async def claim_approval_for_execution(request_id: str) -> "ApprovalRequest | None":
@@ -2448,9 +2641,17 @@ async def claim_approval_for_execution(request_id: str) -> "ApprovalRequest | No
     The Worker uses this to take exclusive ownership before hitting the
     MCP server. If two Workers race, only one sees the row returned; the
     other gets None and must drop the NATS message.
+
+    The audit trigger writes the 'executing' audit row with NULL actor
+    (system transition).
     """
     pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
+        # No actor: the Worker is a system process, so the trigger writes
+        # executing with NULL actor.
+        await _set_approval_guc(
+            conn, actor_user_id=None, note=None, metadata=None
+        )
         row = await conn.fetchrow(
             """
             UPDATE approval_requests
@@ -2466,13 +2667,28 @@ async def claim_approval_for_execution(request_id: str) -> "ApprovalRequest | No
 
 
 async def set_approval_status(
-    request_id: str, status: str
+    request_id: str,
+    status: str,
+    *,
+    actor_user_id: str | None = None,
+    note: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> "ApprovalRequest | None":
     """Unconditional status update. Used for system transitions that do
     not race (e.g. executing → executed by the Worker that already
-    holds the claim)."""
+    holds the claim).
+
+    ``actor_user_id`` / ``note`` / ``metadata`` flow through to the
+    audit trigger's 'status-change' row.
+    """
     pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
+        await _set_approval_guc(
+            conn,
+            actor_user_id=actor_user_id,
+            note=note,
+            metadata=metadata,
+        )
         row = await conn.fetchrow(
             """
             UPDATE approval_requests

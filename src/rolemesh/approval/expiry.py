@@ -19,13 +19,17 @@ if TYPE_CHECKING:
 
 logger = get_logger()
 
-_DEFAULT_INTERVAL_SECONDS = 30.0
+# Maintenance cadence. Long enough that the DB isn't hammered by scans
+# of empty tables (zero-policy tenants) and short enough that a missed
+# approval.decided publish turns around inside a minute
+# (reconcile_stuck_requests' 60s grace + this interval).
+_MAINTENANCE_INTERVAL_S = 30.0
 
 
 async def run_approval_maintenance_loop(
     engine: ApprovalEngine,
     *,
-    interval_seconds: float = _DEFAULT_INTERVAL_SECONDS,
+    interval_seconds: float = _MAINTENANCE_INTERVAL_S,
     stop_event: asyncio.Event | None = None,
 ) -> None:
     """Run expire + reconcile in a loop until stop_event is set.
