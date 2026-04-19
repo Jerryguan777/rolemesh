@@ -50,6 +50,15 @@ class CreateAgentSessionOptions:
     auth_storage: AuthStorage | None = None
     model_registry: ModelRegistry | None = None
     scoped_models: list[ScopedModel] | None = None
+    # External ExtensionRunner injection slot. When provided, the caller
+    # installs their own ExtensionRunner after create_agent_session returns
+    # by assigning extension_runner_ref["current"] = runner. All built-in
+    # and custom tools are then wrapped with extension interception so
+    # tool_call / tool_result events fire on every tool. When None (the
+    # default), the legacy in-process-only runner ref is used and no tool
+    # wrapping happens, preserving existing behavior for callers that do
+    # not need external hook interception.
+    extension_runner_ref: dict[str, Any] | None = None
 
 
 @dataclass
@@ -196,15 +205,25 @@ async def create_agent_session(
                 filtered.append(msg)
         return filtered
 
-    # Extension runner ref for transformContext
-    extension_runner_ref: dict[str, Any] = {}
+    # Extension runner ref for transformContext.
+    # When the caller passes their own ref via options.extension_runner_ref,
+    # we adopt it so the caller's post-session-creation ref["current"] = runner
+    # assignment activates interception for tools below.
+    extension_runner_ref: dict[str, Any] = (
+        options.extension_runner_ref if options.extension_runner_ref is not None else {}
+    )
 
-    # Build transformContext callback
+    # Build transformContext callback. runner.emit_context is async and
+    # MUST be awaited — without await this function returns a coroutine
+    # object to agent_loop's _call_async, which then tries to treat it as
+    # list[AgentMessage] and crashes the turn. The Agent swallows the
+    # crash into AgentEndEvent so the failure mode is invisible unless
+    # a test goes all the way through create_agent_session.
     async def _transform_context(messages: list[AgentMessage], _signal: Any = None) -> list[AgentMessage]:
         runner = extension_runner_ref.get("current")
         if runner is None:
             return messages
-        return runner.emit_context(messages)  # type: ignore[no-any-return]
+        return await runner.emit_context(messages)  # type: ignore[no-any-return]
 
     # Build get_api_key callback
     async def _get_api_key(provider: str) -> str:
@@ -236,6 +255,14 @@ async def create_agent_session(
     active_tools: list[Any] = [all_builtin[name] for name in initial_tool_names if name in all_builtin]
     if options.custom_tools:
         active_tools.extend(options.custom_tools)
+
+    # When the caller opted into external hook interception, wrap every
+    # tool (built-in + custom) in a lazy proxy. The real ExtensionRunner
+    # is installed after this function returns via ref["current"] = ...;
+    # the proxy reads the ref at execute() time so it skips wrapping
+    # cleanly when no runner is bound yet.
+    if options.extension_runner_ref is not None:
+        active_tools = _wrap_tools_lazy(active_tools, extension_runner_ref)
 
     # Create agent
     initial_state = AgentState(
@@ -298,6 +325,56 @@ async def create_agent_session(
         extensions_result=extensions_result,
         model_fallback_message=model_fallback_message,
     )
+
+
+def _wrap_tools_lazy(tools: list[Any], runner_ref: dict[str, Any]) -> list[Any]:
+    """Wrap tools in a lazy extension-interception proxy.
+
+    The caller installs the ExtensionRunner after this function returns,
+    so we cannot eagerly wrap_tools_with_extensions at construction time.
+    Instead each proxy reads runner_ref["current"] at execute() time —
+    None means "no interception" (pass-through), a bound runner delegates
+    to _ExtensionWrappedTool for the real wrapping behavior.
+    """
+    import asyncio as _asyncio  # noqa: TC003 — runtime use in execute signature
+
+    from pi.agent.types import AgentTool, AgentToolResult, AgentToolUpdateCallback
+    from pi.coding_agent.core.extensions.wrapper import _ExtensionWrappedTool
+
+    class _LazyWrappedTool(AgentTool):
+        def __init__(self, inner: AgentTool) -> None:
+            self._inner = inner
+
+        @property
+        def name(self) -> str:
+            return self._inner.name
+
+        @property
+        def label(self) -> str:
+            return self._inner.label
+
+        @property
+        def description(self) -> str:
+            return self._inner.description
+
+        @property
+        def parameters(self) -> dict[str, Any]:
+            return self._inner.parameters
+
+        async def execute(
+            self,
+            tool_call_id: str,
+            params: dict[str, Any],
+            signal: _asyncio.Event | None = None,
+            on_update: AgentToolUpdateCallback | None = None,
+        ) -> AgentToolResult:
+            runner = runner_ref.get("current")
+            if runner is None:
+                return await self._inner.execute(tool_call_id, params, signal, on_update)
+            wrapped = _ExtensionWrappedTool(self._inner, runner)
+            return await wrapped.execute(tool_call_id, params, signal, on_update)
+
+    return [_LazyWrappedTool(t) for t in tools]
 
 
 def _convert_thinking_budgets(settings_manager: SettingsManager) -> Any:
