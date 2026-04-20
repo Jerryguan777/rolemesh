@@ -45,8 +45,18 @@ RUN touch ./rolemesh/__init__.py ./rolemesh/ipc/__init__.py ./rolemesh/auth/__in
 RUN mkdir -p /workspace/group /workspace/global /workspace/extra
 
 # Non-root user with a fixed UID so host/container UID mapping is stable
-# across rebuilds and dev machines. 10001 avoids the host-user range.
-RUN useradd -m -u 10001 -s /bin/bash agent || true
+# across rebuilds and base-image version bumps. 1000 matches the typical
+# first-user UID on Linux dev hosts; this is deliberate — agent containers
+# bind-mount host-created directories (data/tenants/.../sessions/), and
+# those directories are owned by the host user that launched rolemesh.
+# Any UID mismatch here produces EACCES on session writes.
+#
+# A prior revision used 10001 on the "avoid host-user range" argument; that
+# broke session-file persistence on every dev laptop and was caught only by
+# manual acceptance (2026-04-20). If you ever need to collide-proof this,
+# set up userns-remap at the daemon level — see docs/safety/container-hardening.md
+# — rather than drifting the in-image UID away from 1000.
+RUN useradd -m -u 1000 -s /bin/bash agent || true
 RUN chown -R agent:agent /workspace && chmod 700 /home/agent
 
 # Switch to non-root user

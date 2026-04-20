@@ -252,13 +252,25 @@ def _default_tmpfs() -> dict[str, str]:
     /tmp                        — 64MB, typical scratch space
     /home/agent/.cache          — 64MB, XDG cache (pip/http/etc.)
     /home/agent/.config         — 8MB, XDG config (some SDKs write defaults)
+    /home/agent/.pi             — 32MB, Pi backend global config + sessions
+                                  (per-conversation sessions still go to
+                                  /workspace/sessions via bind mount; this
+                                  only holds ~/.pi/agent settings.json +
+                                  in-process runtime state that is
+                                  deliberately ephemeral across restarts).
+
+    Discovered during manual acceptance (R4.1) on 2026-04-20: Pi backend
+    errored with `[Errno 30] Read-only file system: '/home/agent/.pi'`
+    on first real invocation under readonly rootfs. If Pi ever moves to
+    a different dir or adds a sibling path, this list needs an update.
 
     The real persistent data is on bind mounts (/workspace/*, /home/agent/.claude).
     """
     return {
         "/tmp": "rw,size=64m,mode=1777",
-        "/home/agent/.cache": "rw,size=64m,uid=10001,gid=10001,mode=700",
-        "/home/agent/.config": "rw,size=8m,uid=10001,gid=10001,mode=700",
+        "/home/agent/.cache": "rw,size=64m,uid=1000,gid=1000,mode=700",
+        "/home/agent/.config": "rw,size=8m,uid=1000,gid=1000,mode=700",
+        "/home/agent/.pi": "rw,size=32m,uid=1000,gid=1000,mode=700",
     }
 
 
