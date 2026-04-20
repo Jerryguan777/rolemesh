@@ -333,3 +333,48 @@ class TestMetadataBlackholeAndNetwork:
         ):
             spec = build_container_spec([], "c", "j")
         assert spec.network_name is None
+
+
+# ---------------------------------------------------------------------------
+# R1: OCI runtime merge
+# ---------------------------------------------------------------------------
+
+
+class TestOciRuntimeMerge:
+    def test_global_default_runc(self) -> None:
+        with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
+            spec = build_container_spec([], "c", "j")
+        assert spec.runtime == "runc"
+
+    def test_global_default_runsc(self) -> None:
+        with (
+            patch("rolemesh.container.runner.CONTAINER_RUNTIME", "runsc"),
+            patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"),
+        ):
+            spec = build_container_spec([], "c", "j")
+        assert spec.runtime == "runsc"
+
+    def test_coworker_override_wins(self) -> None:
+        """A coworker incompatible with gVisor can downgrade to runc."""
+        cw = Coworker(
+            id="cw-1", tenant_id="t-1", name="LegacyTools", folder="f",
+            container_config=ContainerConfig(runtime="runc"),
+        )
+        with (
+            patch("rolemesh.container.runner.CONTAINER_RUNTIME", "runsc"),
+            patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"),
+        ):
+            spec = build_container_spec([], "c", "j", coworker=cw)
+        assert spec.runtime == "runc"
+
+    def test_coworker_inherits_global_when_unset(self) -> None:
+        cw = Coworker(
+            id="cw-1", tenant_id="t-1", name="Neutral", folder="f",
+            container_config=ContainerConfig(runtime=None),
+        )
+        with (
+            patch("rolemesh.container.runner.CONTAINER_RUNTIME", "runsc"),
+            patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"),
+        ):
+            spec = build_container_spec([], "c", "j", coworker=cw)
+        assert spec.runtime == "runsc"

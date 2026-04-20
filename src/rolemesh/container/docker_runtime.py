@@ -296,6 +296,13 @@ class DockerRuntime:
         if spec.network_name:
             host_config["NetworkMode"] = spec.network_name
 
+        # OCI runtime (R1). Docker only honours HostConfig.Runtime for values
+        # registered in /etc/docker/daemon.json — setting "runsc" on a host
+        # without gVisor installed will fail at container create time, which
+        # is the correct behaviour (fail closed).
+        if spec.runtime:
+            host_config["Runtime"] = spec.runtime
+
         config: dict[str, Any] = {
             "Image": spec.image,
             "Env": [f"{k}={v}" for k, v in spec.env.items()],

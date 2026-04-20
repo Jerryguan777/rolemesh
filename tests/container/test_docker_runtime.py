@@ -367,6 +367,32 @@ def test_spec_to_config_no_network_name_leaves_docker_default() -> None:
 
 
 # ---------------------------------------------------------------------------
+# R1: OCI runtime selection
+# ---------------------------------------------------------------------------
+
+
+def test_spec_to_config_runtime_runc() -> None:
+    spec = ContainerSpec(name="t", image="i", runtime="runc")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["Runtime"] == "runc"
+
+
+def test_spec_to_config_runtime_runsc() -> None:
+    spec = ContainerSpec(name="t", image="i", runtime="runsc")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["Runtime"] == "runsc"
+
+
+def test_spec_to_config_runtime_absent_when_none() -> None:
+    """runtime=None must leave HostConfig.Runtime unset so Docker picks
+    its default — existing deployments without gVisor registered must
+    keep working."""
+    spec = ContainerSpec(name="t", image="i", runtime=None)
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert "Runtime" not in hc
+
+
+# ---------------------------------------------------------------------------
 # R6: docker.sock bind blockade
 # ---------------------------------------------------------------------------
 

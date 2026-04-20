@@ -76,6 +76,11 @@ class ContainerSpec:
     # production runs should set this to a custom bridge with enable_icc=false.
     network_name: str | None = None
 
+    # Hardening — OCI runtime selection: "runc" (default) | "runsc" (gVisor).
+    # None means "let Docker pick its default runtime", which is backward-
+    # compatible with existing deployments that have not registered runsc.
+    runtime: str | None = None
+
 
 # ---------------------------------------------------------------------------
 # Protocols

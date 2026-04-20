@@ -30,6 +30,7 @@ from rolemesh.core.config import (
     CONTAINER_MEMORY_LIMIT,
     CONTAINER_NETWORK_NAME,
     CONTAINER_PIDS_LIMIT,
+    CONTAINER_RUNTIME,
     CREDENTIAL_PROXY_PORT,
     DATA_DIR,
     NATS_URL,
@@ -402,6 +403,11 @@ def build_container_spec(
     cpu_limit = (cfg.cpu_limit if cfg and cfg.cpu_limit else CONTAINER_CPU_LIMIT)
     cpu_limit = _clamp_cpu(cpu_limit, CONTAINER_MAX_CPU, coworker_name=coworker_name)
 
+    # OCI runtime: global default ← coworker override. No "max" clamp here —
+    # the downgrade path (coworker flagged as incompatible with runsc) is
+    # the whole point, and Docker itself will reject an unregistered runtime.
+    oci_runtime = (cfg.runtime if cfg and cfg.runtime else CONTAINER_RUNTIME)
+
     return ContainerSpec(
         name=container_name,
         image=image,
@@ -418,6 +424,7 @@ def build_container_spec(
         pids_limit=CONTAINER_PIDS_LIMIT,
         ulimits=_default_ulimits(),
         network_name=CONTAINER_NETWORK_NAME or None,
+        runtime=oci_runtime,
     )
 
 

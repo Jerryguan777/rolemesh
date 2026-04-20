@@ -44,6 +44,12 @@ GLOBAL_MAX_CONTAINERS: int = max(1, int(os.environ.get("GLOBAL_MAX_CONTAINERS", 
 # Renamed from CONTAINER_RUNTIME (which now means the OCI runtime: runc|runsc).
 CONTAINER_BACKEND: str = os.environ.get("CONTAINER_BACKEND", "docker")
 
+# OCI runtime selection (R1). "runc" is the default (backward compatible);
+# "runsc" enables gVisor syscall-level sandboxing and requires runsc to be
+# registered in /etc/docker/daemon.json on the host. Per-coworker overrides
+# live in ContainerConfig.runtime.
+CONTAINER_RUNTIME: str = os.environ.get("CONTAINER_RUNTIME", "runc")
+
 # Per-container resource ceilings (R7). Overrides come from ContainerConfig
 # on each coworker and are clamped to CONTAINER_MAX_* in runner.build_container_spec.
 CONTAINER_MEMORY_LIMIT: str = os.environ.get("CONTAINER_MEMORY_LIMIT", "2g")
