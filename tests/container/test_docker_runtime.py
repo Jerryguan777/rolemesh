@@ -438,6 +438,83 @@ def test_docker_socket_blockade_applies_to_full_pipeline() -> None:
 
 
 # ---------------------------------------------------------------------------
+# docker.sock detection — regression for substring false positive/negative
+# Before the basename-based check, `"docker.sock" in path` collided with
+# legitimate paths like /tmp/docker.socket-tests (substring hit inside
+# "docker.socket") and blocked valid mounts. The matrix below pins the
+# new semantics so future refactors can't silently reintroduce the bug.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", [
+    "/var/run/docker.sock",           # canonical path
+    "/run/docker.sock",                # rootless docker layout
+    "/some/nested/path/docker.sock",   # anywhere in tree
+    "/var/run/docker.sock/",           # trailing slash — still the same file
+])
+def test_is_docker_socket_path_rejects_real_socket(path: str) -> None:
+    from rolemesh.container.docker_runtime import _is_docker_socket_path
+    assert _is_docker_socket_path(path) is True
+
+
+@pytest.mark.parametrize("path", [
+    "/tmp/docker.socket-tests/foo",    # regression: .socket contains .sock as substring
+    "/home/agent/docker.socks.log",    # regression: .socks contains .sock
+    "/home/agent/mydocker.sock.bak",   # basename is mydocker.sock.bak, not docker.sock
+    "/workspace/my-docker.sock",       # different basename
+    "/var/run/docker-sock",            # hyphen instead of dot
+    "/dev/null",                       # unrelated
+    "",                                 # empty
+])
+def test_is_docker_socket_path_allows_legitimate_paths(path: str) -> None:
+    from rolemesh.container.docker_runtime import _is_docker_socket_path
+    assert _is_docker_socket_path(path) is False
+
+
+def test_mount_blockade_rejects_host_side_socket() -> None:
+    spec = ContainerSpec(
+        name="t", image="i",
+        mounts=[VolumeMount(
+            host_path="/var/run/docker.sock",
+            container_path="/safe/path",
+            readonly=True,
+        )],
+    )
+    with pytest.raises(ValueError, match="docker socket"):
+        DockerRuntime._spec_to_config(spec)
+
+
+def test_mount_blockade_rejects_container_side_socket() -> None:
+    """Even if the host path is innocuous, binding it TO docker.sock inside
+    the container is a misconfiguration the guard must still catch."""
+    spec = ContainerSpec(
+        name="t", image="i",
+        mounts=[VolumeMount(
+            host_path="/tmp/anything",
+            container_path="/var/run/docker.sock",
+            readonly=False,
+        )],
+    )
+    with pytest.raises(ValueError, match="docker socket"):
+        DockerRuntime._spec_to_config(spec)
+
+
+def test_mount_blockade_does_not_false_positive_on_docker_socket_dir() -> None:
+    """A directory named docker.socket-tests in the path must not trip the guard."""
+    spec = ContainerSpec(
+        name="t", image="i",
+        mounts=[VolumeMount(
+            host_path="/tmp/docker.socket-tests/fixtures",
+            container_path="/work/fixtures",
+            readonly=True,
+        )],
+    )
+    # Must not raise.
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert any("docker.socket-tests" in b for b in hc["Binds"])
+
+
+# ---------------------------------------------------------------------------
 # R5.1-1: dockerd version check
 # ---------------------------------------------------------------------------
 

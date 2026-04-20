@@ -6,6 +6,7 @@ Replaces all subprocess-based Docker calls with the Docker Engine API.
 from __future__ import annotations
 
 import contextlib
+import os
 from typing import TYPE_CHECKING, Any
 
 import aiodocker
@@ -65,21 +66,47 @@ def _parse_docker_version(value: str) -> tuple[int, int] | None:
         return None
 
 
+def _is_docker_socket_path(path: str) -> bool:
+    """Return True iff *path* has basename "docker.sock".
+
+    The earlier implementation used `"docker.sock" in path`, which
+    produced false positives against legitimate paths like
+    `/tmp/docker.socket-tests/foo` or `/home/agent/docker.socks.log`
+    (substring collision with `.socket` / `.socks`). Basename match is
+    the right granularity: Docker's actual control socket is always the
+    file basename `docker.sock`; operators who need different names can
+    rename the symlink on the host side, which this function would not
+    reject (nor should it — that is a mount-allowlist decision, not a
+    pattern-match decision).
+
+    Symlink bypass on the host is a separate concern and is covered at
+    the mount-allowlist layer (`rolemesh.security.mount_security`):
+    only paths under the operator-configured roots may be bound, so an
+    attacker-planted symlink outside those roots cannot reach this
+    function in the first place.
+    """
+    return os.path.basename(path.rstrip("/\\")) == "docker.sock"
+
+
 def _mounts_to_binds(mounts: list[VolumeMount]) -> list[str]:
     """Convert VolumeMount list to Docker bind strings.
 
-    Enforces the docker-socket blockade (R6): no bind may expose /var/run/docker.sock
-    to a container — a socket bind would hand the agent root on the host. This is
-    not expected to trigger in production (mount_security.py validates earlier),
-    but is kept here as defence in depth: the final serialization is the last
-    chance to catch a misconfiguration before the Docker API call.
+    Enforces the docker-socket blockade (R6): no bind may expose
+    docker.sock (on either host or container side) to an agent
+    container — a socket bind would hand the agent root on the host.
+    This is not expected to trigger in production (mount_security.py
+    validates earlier), but is kept here as defence in depth: the final
+    serialization is the last chance to catch a misconfiguration before
+    the Docker API call.
     """
-    binds = [f"{m.host_path}:{m.container_path}:{'ro' if m.readonly else 'rw'}" for m in mounts]
-    for b in binds:
-        if "docker.sock" in b:
-            msg = f"Refusing to mount docker socket into a container: {b}"
+    for m in mounts:
+        if _is_docker_socket_path(m.host_path) or _is_docker_socket_path(m.container_path):
+            msg = (
+                f"Refusing to mount docker socket into a container: "
+                f"{m.host_path}:{m.container_path}"
+            )
             raise ValueError(msg)
-    return binds
+    return [f"{m.host_path}:{m.container_path}:{'ro' if m.readonly else 'rw'}" for m in mounts]
 
 
 class DockerContainerHandle:
