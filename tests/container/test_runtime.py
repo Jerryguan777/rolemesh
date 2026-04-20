@@ -36,6 +36,23 @@ def test_container_spec_defaults() -> None:
     assert spec.extra_hosts == {}
     assert spec.remove_on_exit is True
     assert spec.entrypoint is None
+    # Hardening defaults: safe out of the box.
+    assert spec.cap_drop == ["ALL"]
+    assert spec.cap_add == []
+    assert spec.security_opt == []
+    assert spec.readonly_rootfs is True
+    assert spec.tmpfs == {}
+    assert spec.pids_limit == 512
+    assert spec.memory_swap is None
+    assert spec.memory_swappiness == 0
+    assert spec.ulimits == []
+
+
+def test_container_spec_cap_drop_isolation_between_instances() -> None:
+    """Default factory must not share the list between instances (mutable default trap)."""
+    a = ContainerSpec(name="a", image="i")
+    b = ContainerSpec(name="b", image="i")
+    assert a.cap_drop is not b.cap_drop
 
 
 def test_container_spec_frozen() -> None:
@@ -63,5 +80,5 @@ def test_get_runtime_k8s_not_implemented() -> None:
 
 
 def test_get_runtime_unknown() -> None:
-    with pytest.raises(ValueError, match="Unknown container runtime"):
+    with pytest.raises(ValueError, match="Unknown container backend"):
         get_runtime("podman")

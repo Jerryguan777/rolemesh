@@ -39,7 +39,48 @@ IDLE_TIMEOUT: int = int(os.environ.get("IDLE_TIMEOUT", "1800000"))  # 30 min
 MCP_PROXY_PREFIX: str = "mcp-proxy"
 MAX_CONCURRENT_CONTAINERS: int = max(1, int(os.environ.get("MAX_CONCURRENT_CONTAINERS", "5")))
 GLOBAL_MAX_CONTAINERS: int = max(1, int(os.environ.get("GLOBAL_MAX_CONTAINERS", "20")))
-CONTAINER_RUNTIME: str = os.environ.get("CONTAINER_RUNTIME", "docker")
+
+# Runtime-abstraction backend selector: "docker" | "k8s" (not OCI runtime).
+# Renamed from CONTAINER_RUNTIME (which now means the OCI runtime: runc|runsc).
+CONTAINER_BACKEND: str = os.environ.get("CONTAINER_BACKEND", "docker")
+
+# Per-container resource ceilings (R7). Overrides come from ContainerConfig
+# on each coworker and are clamped to CONTAINER_MAX_* in runner.build_container_spec.
+CONTAINER_MEMORY_LIMIT: str = os.environ.get("CONTAINER_MEMORY_LIMIT", "2g")
+CONTAINER_CPU_LIMIT: float = float(os.environ.get("CONTAINER_CPU_LIMIT", "2.0"))
+CONTAINER_PIDS_LIMIT: int = int(os.environ.get("CONTAINER_PIDS_LIMIT", "512"))
+CONTAINER_MAX_MEMORY: str = os.environ.get("CONTAINER_MAX_MEMORY", "8g")
+CONTAINER_MAX_CPU: float = float(os.environ.get("CONTAINER_MAX_CPU", "4.0"))
+
+# Allowlist for env vars that the orchestrator dynamically injects into
+# containers (R8). Anything produced by build_container_spec() or passed
+# via AgentBackendConfig.extra_env must be in this set; unknown keys are
+# dropped with a structured warning.
+#
+# The following are intentionally NOT in the allowlist:
+#   PATH             — Docker does not inherit parent PATH; the container's
+#                      PATH is set by the image's ENV layer and must stay
+#                      fixed there.
+#   LANG / LC_ALL    — Container locale must not track host locale; pinned
+#                      to C.UTF-8 in the Dockerfile.
+#   PYTHONUNBUFFERED — Image property, not a per-tenant knob; set to 1 in
+#                      the Dockerfile.
+#   HTTP_PROXY etc.  — Reserved for the future egress proxy task. Until
+#                      that lands we deliberately do not forward arbitrary
+#                      proxy env; that task will extend the allowlist.
+CONTAINER_ENV_ALLOWLIST: frozenset[str] = frozenset({
+    "TZ",
+    "NATS_URL",
+    "JOB_ID",
+    "AGENT_BACKEND",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "HOME",
+    "PI_MODEL_ID",
+})
 
 # Agent backend: "claude" or "pi"
 AGENT_BACKEND_DEFAULT: str = os.environ.get("ROLEMESH_AGENT_BACKEND", "claude")

@@ -142,7 +142,9 @@ class ContainerAgentExecutor:
         safe_name = re.sub(r"[^a-zA-Z0-9-]", "-", inp.group_folder)
         container_name = f"rolemesh-{safe_name}-{start_epoch_ms}"
 
-        spec = build_container_spec(mounts, container_name, job_id, self._config)
+        spec = build_container_spec(
+            mounts, container_name, job_id, self._config, coworker=coworker,
+        )
 
         logger.info(
             "Spawning container agent",

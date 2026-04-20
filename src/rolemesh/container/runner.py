@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import shutil
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from rolemesh.auth.permissions import AgentPermissions
+from rolemesh.container.docker_runtime import _parse_memory
 from rolemesh.container.runtime import (
     CONTAINER_HOST_GATEWAY,
     ContainerSpec,
@@ -20,7 +22,13 @@ from rolemesh.container.runtime import (
     get_host_gateway_extra_hosts,
 )
 from rolemesh.core.config import (
+    CONTAINER_CPU_LIMIT,
+    CONTAINER_ENV_ALLOWLIST,
     CONTAINER_IMAGE,
+    CONTAINER_MAX_CPU,
+    CONTAINER_MAX_MEMORY,
+    CONTAINER_MEMORY_LIMIT,
+    CONTAINER_PIDS_LIMIT,
     CREDENTIAL_PROXY_PORT,
     DATA_DIR,
     NATS_URL,
@@ -220,13 +228,98 @@ def build_volume_mounts(
     return mounts
 
 
+def _default_security_opt() -> list[str]:
+    """Baseline SecurityOpt entries applied to every agent container.
+
+    - no-new-privileges:true  always
+    - apparmor=docker-default Linux only (AppArmor is a Linux LSM)
+
+    seccomp is deliberately NOT set here — unset means Docker applies its
+    embedded default seccomp profile, which is what we want. Setting
+    seccomp=unconfined would DISABLE seccomp; we never emit that value.
+    """
+    opts = ["no-new-privileges:true"]
+    if platform.system() == "Linux":
+        opts.append("apparmor=docker-default")
+    return opts
+
+
+def _default_tmpfs() -> dict[str, str]:
+    """Writable tmpfs mounts needed for a readonly-rootfs container.
+
+    /tmp                        — 64MB, typical scratch space
+    /home/agent/.cache          — 64MB, XDG cache (pip/http/etc.)
+    /home/agent/.config         — 8MB, XDG config (some SDKs write defaults)
+
+    The real persistent data is on bind mounts (/workspace/*, /home/agent/.claude).
+    """
+    return {
+        "/tmp": "rw,size=64m,mode=1777",
+        "/home/agent/.cache": "rw,size=64m,uid=10001,gid=10001,mode=700",
+        "/home/agent/.config": "rw,size=8m,uid=10001,gid=10001,mode=700",
+    }
+
+
+def _default_ulimits() -> list[dict[str, object]]:
+    return [{"Name": "nofile", "Soft": 1024, "Hard": 2048}]
+
+
+def _clamp_memory(value: str, max_value: str, *, coworker_name: str) -> str:
+    """Return value if within cap, else max_value with a structured warning."""
+    req = _parse_memory(value)
+    cap = _parse_memory(max_value)
+    if req > cap:
+        logger.warning(
+            "Container memory_limit exceeds global cap — clamping",
+            coworker=coworker_name,
+            requested=value,
+            cap=max_value,
+        )
+        return max_value
+    return value
+
+
+def _clamp_cpu(value: float, max_value: float, *, coworker_name: str) -> float:
+    if value > max_value:
+        logger.warning(
+            "Container cpu_limit exceeds global cap — clamping",
+            coworker=coworker_name,
+            requested=value,
+            cap=max_value,
+        )
+        return max_value
+    return value
+
+
+def _filter_env_allowlist(env: dict[str, str], *, source: str) -> dict[str, str]:
+    """Drop env keys not in CONTAINER_ENV_ALLOWLIST. Values are never logged."""
+    allowed: dict[str, str] = {}
+    rejected: list[str] = []
+    for k, v in env.items():
+        if k in CONTAINER_ENV_ALLOWLIST:
+            allowed[k] = v
+        else:
+            rejected.append(k)
+    if rejected:
+        logger.warning(
+            "Dropping env keys not in allowlist",
+            source=source,
+            rejected=sorted(rejected),
+        )
+    return allowed
+
+
 def build_container_spec(
     mounts: list[VolumeMount],
     container_name: str,
     job_id: str,
     backend_config: AgentBackendConfig | None = None,
+    coworker: Coworker | None = None,
 ) -> ContainerSpec:
-    """Build a ContainerSpec from mounts and config. Replaces build_container_args()."""
+    """Build a ContainerSpec from mounts and config.
+
+    Merge order for resource limits: global default ← coworker override ← clamp to max.
+    """
     image = backend_config.image if backend_config else CONTAINER_IMAGE
     nats_url = NATS_URL.replace("localhost", CONTAINER_HOST_GATEWAY)
 
@@ -252,7 +345,12 @@ def build_container_spec(
     env["OPENAI_API_KEY"] = "placeholder"
 
     if backend_config:
-        env.update(backend_config.extra_env)
+        # Pre-filter backend extra_env to catch misconfigured backends early
+        # with a clear attribution to which source emitted the bad key.
+        filtered_backend_env = _filter_env_allowlist(
+            backend_config.extra_env, source=f"backend_config:{backend_config.name}",
+        )
+        env.update(filtered_backend_env)
 
     # Run as host user so bind-mounted files are accessible.
     user: str | None = None
@@ -263,6 +361,26 @@ def build_container_spec(
             user = f"{host_uid}:{host_gid}"
             env["HOME"] = "/home/agent"
 
+    # Final allowlist filter across the merged env dict. This is defense in
+    # depth — anything added via future code paths will hit this gate too.
+    env = _filter_env_allowlist(env, source="orchestrator")
+
+    # Structured log of only env keys (never values); the caller can still
+    # surface what went into the container for audit without leaking secrets.
+    logger.info(
+        "Container env composed",
+        container_name=container_name,
+        env_keys=sorted(env.keys()),
+    )
+
+    # Resource limits: global default ← coworker override ← clamp to max.
+    cfg = coworker.container_config if coworker and coworker.container_config else None
+    coworker_name = coworker.name if coworker else "<unknown>"
+    memory_limit = (cfg.memory_limit if cfg and cfg.memory_limit else CONTAINER_MEMORY_LIMIT)
+    memory_limit = _clamp_memory(memory_limit, CONTAINER_MAX_MEMORY, coworker_name=coworker_name)
+    cpu_limit = (cfg.cpu_limit if cfg and cfg.cpu_limit else CONTAINER_CPU_LIMIT)
+    cpu_limit = _clamp_cpu(cpu_limit, CONTAINER_MAX_CPU, coworker_name=coworker_name)
+
     return ContainerSpec(
         name=container_name,
         image=image,
@@ -271,6 +389,13 @@ def build_container_spec(
         user=user,
         extra_hosts=get_host_gateway_extra_hosts(),
         entrypoint=backend_config.entrypoint if backend_config else None,
+        memory_limit=memory_limit,
+        cpu_limit=cpu_limit,
+        security_opt=_default_security_opt(),
+        readonly_rootfs=True,
+        tmpfs=_default_tmpfs(),
+        pids_limit=CONTAINER_PIDS_LIMIT,
+        ulimits=_default_ulimits(),
     )
 
 

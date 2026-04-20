@@ -39,7 +39,12 @@ class VolumeMount:
 
 @dataclass(frozen=True)
 class ContainerSpec:
-    """Full specification for running a container."""
+    """Full specification for running a container.
+
+    Hardening fields (cap_drop, security_opt, readonly_rootfs, tmpfs, pids_limit,
+    memory_swap*, ulimits) default to safe values. All additions are backward
+    compatible — existing call sites that only set name/image/env remain valid.
+    """
 
     name: str
     image: str
@@ -51,6 +56,21 @@ class ContainerSpec:
     extra_hosts: dict[str, str] = field(default_factory=dict)
     remove_on_exit: bool = True
     entrypoint: list[str] | None = None
+
+    # Hardening — capabilities / LSM
+    cap_drop: list[str] = field(default_factory=lambda: ["ALL"])
+    cap_add: list[str] = field(default_factory=list)
+    security_opt: list[str] = field(default_factory=list)
+
+    # Hardening — filesystem
+    readonly_rootfs: bool = True
+    tmpfs: dict[str, str] = field(default_factory=dict)  # {"/tmp": "size=64m"}
+
+    # Hardening — resource ceilings
+    pids_limit: int | None = 512
+    memory_swap: int | None = None  # bytes; when set equal to Memory, disables swap
+    memory_swappiness: int | None = 0
+    ulimits: list[dict[str, object]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -166,10 +186,15 @@ def get_host_gateway_extra_hosts() -> dict[str, str]:
 
 
 def get_runtime(runtime_name: str | None = None) -> ContainerRuntime:
-    """Create a ContainerRuntime from name (defaults to CONTAINER_RUNTIME env var)."""
-    from rolemesh.core.config import CONTAINER_RUNTIME
+    """Create a ContainerRuntime from name (defaults to CONTAINER_BACKEND env var).
 
-    name = runtime_name or CONTAINER_RUNTIME
+    Note: this selects the runtime abstraction backend (Docker vs K8s), *not*
+    the OCI runtime. OCI runtime (runc/runsc) is controlled by CONTAINER_RUNTIME
+    and applied per-container via ContainerSpec.runtime.
+    """
+    from rolemesh.core.config import CONTAINER_BACKEND
+
+    name = runtime_name or CONTAINER_BACKEND
 
     if name == "docker":
         from rolemesh.container.docker_runtime import DockerRuntime
@@ -180,5 +205,5 @@ def get_runtime(runtime_name: str | None = None) -> ContainerRuntime:
         msg = "Kubernetes runtime is not yet implemented"
         raise NotImplementedError(msg)
 
-    msg = f"Unknown container runtime: {name}"
+    msg = f"Unknown container backend: {name}"
     raise ValueError(msg)

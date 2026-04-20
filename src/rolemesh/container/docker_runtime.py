@@ -166,16 +166,43 @@ class DockerRuntime:
         binds = _mounts_to_binds(spec.mounts)
         host_config: dict[str, Any] = {
             "Binds": binds,
+            # Hardening defaults. Lists come from ContainerSpec so callers
+            # can only *add* to cap_add / security_opt; the baseline of
+            # dropping ALL capabilities and readonly rootfs is not opt-out
+            # from the per-call spec path. See docs/safety/container-hardening.md.
+            "CapDrop": list(spec.cap_drop),
+            "CapAdd": list(spec.cap_add),
+            "SecurityOpt": list(spec.security_opt),
+            "ReadonlyRootfs": bool(spec.readonly_rootfs),
         }
 
         # AutoRemove races with wait/inspect, so we skip it and
         # delete explicitly in the handle's stop() method.
         if spec.memory_limit:
-            host_config["Memory"] = _parse_memory(spec.memory_limit)
+            memory_bytes = _parse_memory(spec.memory_limit)
+            host_config["Memory"] = memory_bytes
+            # MemorySwap semantics (Docker API):
+            #   unset or -1  → unlimited swap (bad: defeats memory limit)
+            #   equal to Memory → swap disabled (what we want)
+            # See https://docs.docker.com/engine/containers/resource_constraints/
+            if spec.memory_swap is None:
+                host_config["MemorySwap"] = memory_bytes
+            else:
+                host_config["MemorySwap"] = spec.memory_swap
+        if spec.memory_swappiness is not None:
+            host_config["MemorySwappiness"] = int(spec.memory_swappiness)
+
         if spec.cpu_limit:
             host_config["NanoCpus"] = int(spec.cpu_limit * 1e9)
         if spec.extra_hosts:
             host_config["ExtraHosts"] = [f"{h}:{ip}" for h, ip in spec.extra_hosts.items()]
+
+        if spec.tmpfs:
+            host_config["Tmpfs"] = dict(spec.tmpfs)
+        if spec.pids_limit is not None:
+            host_config["PidsLimit"] = int(spec.pids_limit)
+        if spec.ulimits:
+            host_config["Ulimits"] = [dict(u) for u in spec.ulimits]
 
         config: dict[str, Any] = {
             "Image": spec.image,

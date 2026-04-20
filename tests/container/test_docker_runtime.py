@@ -242,3 +242,111 @@ def test_spec_to_config_extra_hosts() -> None:
     spec = ContainerSpec(name="test", image="img", extra_hosts={"host.docker.internal": "host-gateway"})
     config: dict[str, Any] = DockerRuntime._spec_to_config(spec)
     assert "host.docker.internal:host-gateway" in config["HostConfig"]["ExtraHosts"]
+
+
+# ---------------------------------------------------------------------------
+# Hardening (R3, R4, R7) — defense-in-depth fields surface on HostConfig
+# ---------------------------------------------------------------------------
+
+
+def test_spec_to_config_cap_drop_all() -> None:
+    spec = ContainerSpec(name="t", image="i")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["CapDrop"] == ["ALL"]
+    assert hc["CapAdd"] == []
+
+
+def test_spec_to_config_readonly_rootfs_default_true() -> None:
+    spec = ContainerSpec(name="t", image="i")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["ReadonlyRootfs"] is True
+
+
+def test_spec_to_config_readonly_rootfs_opt_out() -> None:
+    """Callers can still disable readonly rootfs when explicitly needed."""
+    spec = ContainerSpec(name="t", image="i", readonly_rootfs=False)
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["ReadonlyRootfs"] is False
+
+
+def test_spec_to_config_security_opts_passthrough() -> None:
+    spec = ContainerSpec(
+        name="t", image="i",
+        security_opt=["no-new-privileges:true", "apparmor=docker-default"],
+    )
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert "no-new-privileges:true" in hc["SecurityOpt"]
+    assert "apparmor=docker-default" in hc["SecurityOpt"]
+
+
+def test_spec_to_config_no_seccomp_unconfined() -> None:
+    """We must never silently disable seccomp. Default: no seccomp entry
+    at all → Docker applies embedded default profile."""
+    spec = ContainerSpec(name="t", image="i")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert not any("seccomp=unconfined" in opt for opt in hc["SecurityOpt"])
+
+
+def test_spec_to_config_tmpfs() -> None:
+    spec = ContainerSpec(name="t", image="i", tmpfs={"/tmp": "rw,size=64m"})
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["Tmpfs"] == {"/tmp": "rw,size=64m"}
+
+
+def test_spec_to_config_tmpfs_absent_when_empty() -> None:
+    """Don't emit empty Tmpfs — some Docker versions reject {}."""
+    spec = ContainerSpec(name="t", image="i")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert "Tmpfs" not in hc
+
+
+def test_spec_to_config_pids_limit_default() -> None:
+    spec = ContainerSpec(name="t", image="i")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["PidsLimit"] == 512
+
+
+def test_spec_to_config_pids_limit_override() -> None:
+    spec = ContainerSpec(name="t", image="i", pids_limit=128)
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["PidsLimit"] == 128
+
+
+def test_spec_to_config_pids_limit_none_drops_key() -> None:
+    spec = ContainerSpec(name="t", image="i", pids_limit=None)
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert "PidsLimit" not in hc
+
+
+def test_spec_to_config_memory_swap_disabled_when_memory_set() -> None:
+    """Default behaviour: setting memory_limit without memory_swap disables swap.
+    MemorySwap == Memory → swap off. Not setting MemorySwap lets cgroups default
+    to unlimited swap, which defeats the memory cap."""
+    spec = ContainerSpec(name="t", image="i", memory_limit="512m")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["Memory"] == 512 * 1024**2
+    assert hc["MemorySwap"] == hc["Memory"]
+
+
+def test_spec_to_config_memory_swappiness_zero() -> None:
+    spec = ContainerSpec(name="t", image="i")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["MemorySwappiness"] == 0
+
+
+def test_spec_to_config_ulimits_passthrough() -> None:
+    spec = ContainerSpec(
+        name="t", image="i",
+        ulimits=[{"Name": "nofile", "Soft": 1024, "Hard": 2048}],
+    )
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["Ulimits"] == [{"Name": "nofile", "Soft": 1024, "Hard": 2048}]
+
+
+def test_spec_to_config_never_privileged() -> None:
+    """No public field on ContainerSpec exposes Privileged; assert the final
+    HostConfig never contains it either (paranoia check that no helper
+    silently enables privileged mode)."""
+    spec = ContainerSpec(name="t", image="i")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert "Privileged" not in hc or hc["Privileged"] is False
