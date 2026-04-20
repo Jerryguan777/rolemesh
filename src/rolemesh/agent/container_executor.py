@@ -207,6 +207,15 @@ class ContainerAgentExecutor:
                     error=str(exc),
                 )
             else:
+                # Fail-closed but ALSO silent: the orchestrator does not
+                # actively notify the tenant owner/admin. Users see "agent
+                # not responding"; operators must have external log alerts
+                # wired up to this ERROR line to notice. Acceptable for
+                # self-hosted / small-team deployments; for multi-tenant
+                # SaaS add a health endpoint + active push (Prometheus
+                # counter + in-chat notice to the tenant owner).
+                # See docs/approval-architecture.md §Known Gaps
+                # "Silent fail-closed on DB outage".
                 logger.error(
                     "approval: DB unreachable at job start — refusing "
                     "to start agent (APPROVAL_FAIL_MODE=closed). Set "
