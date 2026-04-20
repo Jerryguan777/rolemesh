@@ -60,9 +60,13 @@ class ErofsWatcher:
         self._reported.add(path)
         # Structured + human-readable. Operators typically wire this to
         # an alerting channel (PagerDuty/Slack) via log-level filters.
+        # To extend the whitelist: edit rolemesh.container.runner._default_tmpfs()
+        # and add a new entry with the same uid=/gid=/mode= pattern as its siblings.
+        # Restart the orchestrator; running containers keep their old tmpfs set
+        # but newly spawned agents pick up the change on next invocation.
         logger.warning(
             "agent hit readonly rootfs — tmpfs whitelist may need update "
-            "(see docs/safety/container-hardening.md for how to extend it)",
+            "(extend it in rolemesh.container.runner._default_tmpfs)",
             path=path,
             coworker=self._coworker,
             container=self._container,

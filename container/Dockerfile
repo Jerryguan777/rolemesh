@@ -54,8 +54,13 @@ RUN mkdir -p /workspace/group /workspace/global /workspace/extra
 # A prior revision used 10001 on the "avoid host-user range" argument; that
 # broke session-file persistence on every dev laptop and was caught only by
 # manual acceptance (2026-04-20). If you ever need to collide-proof this,
-# set up userns-remap at the daemon level — see docs/safety/container-hardening.md
-# — rather than drifting the in-image UID away from 1000.
+# set up userns-remap at the daemon level rather than drifting the in-image
+# UID away from 1000.
+#
+# IMPORTANT: this UID is also hardcoded in rolemesh/container/runner.py as
+# AGENT_UID. If you change the `-u 1000` below, change AGENT_UID too —
+# otherwise tmpfs mounts will be owned by the wrong UID and produce silent
+# EACCES on agent writes.
 RUN useradd -m -u 1000 -s /bin/bash agent || true
 RUN chown -R agent:agent /workspace && chmod 700 /home/agent
 

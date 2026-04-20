@@ -29,8 +29,8 @@ from rolemesh.core.config import (
     CONTAINER_MAX_MEMORY,
     CONTAINER_MEMORY_LIMIT,
     CONTAINER_NETWORK_NAME,
+    CONTAINER_OCI_RUNTIME,
     CONTAINER_PIDS_LIMIT,
-    CONTAINER_RUNTIME,
     CREDENTIAL_PROXY_PORT,
     DATA_DIR,
     NATS_URL,
@@ -230,6 +230,15 @@ def build_volume_mounts(
     return mounts
 
 
+# UID the agent image runs as. Set in container/Dockerfile via `useradd -u 1000`.
+# This constant exists to keep the tmpfs option strings below in sync with the
+# Dockerfile without a split-brain risk — if a future reviewer changes one,
+# the other needs to change too (or hardening-mounted tmpfs become owned by
+# a different UID than the container process and produce silent EACCES).
+AGENT_UID = 1000
+AGENT_GID = 1000
+
+
 def _default_security_opt() -> list[str]:
     """Baseline SecurityOpt entries applied to every agent container.
 
@@ -266,11 +275,12 @@ def _default_tmpfs() -> dict[str, str]:
 
     The real persistent data is on bind mounts (/workspace/*, /home/agent/.claude).
     """
+    _uid_opt = f"uid={AGENT_UID},gid={AGENT_GID}"
     return {
         "/tmp": "rw,size=64m,mode=1777",
-        "/home/agent/.cache": "rw,size=64m,uid=1000,gid=1000,mode=700",
-        "/home/agent/.config": "rw,size=8m,uid=1000,gid=1000,mode=700",
-        "/home/agent/.pi": "rw,size=32m,uid=1000,gid=1000,mode=700",
+        "/home/agent/.cache": f"rw,size=64m,{_uid_opt},mode=700",
+        "/home/agent/.config": f"rw,size=8m,{_uid_opt},mode=700",
+        "/home/agent/.pi": f"rw,size=32m,{_uid_opt},mode=700",
     }
 
 
@@ -418,7 +428,7 @@ def build_container_spec(
     # OCI runtime: global default ← coworker override. No "max" clamp here —
     # the downgrade path (coworker flagged as incompatible with runsc) is
     # the whole point, and Docker itself will reject an unregistered runtime.
-    oci_runtime = (cfg.runtime if cfg and cfg.runtime else CONTAINER_RUNTIME)
+    oci_runtime = (cfg.runtime if cfg and cfg.runtime else CONTAINER_OCI_RUNTIME)
 
     return ContainerSpec(
         name=container_name,

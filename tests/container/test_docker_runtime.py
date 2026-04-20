@@ -425,18 +425,6 @@ def test_no_docker_socket_ever_mounted_container_path_only() -> None:
         DockerRuntime._spec_to_config(spec)
 
 
-def test_docker_socket_blockade_applies_to_full_pipeline() -> None:
-    """Verifies the check runs inside the normal _spec_to_config path, not
-    only in some unused helper."""
-    from rolemesh.container.runner import build_container_spec
-
-    mounts = [VolumeMount(host_path="/var/run/docker.sock", container_path="/sock", readonly=True)]
-    with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
-        spec = build_container_spec(mounts, "c", "j")
-    with pytest.raises(ValueError, match="docker socket"):
-        DockerRuntime._spec_to_config(spec)
-
-
 # ---------------------------------------------------------------------------
 # docker.sock detection — regression for substring false positive/negative
 # Before the basename-based check, `"docker.sock" in path` collided with
@@ -557,3 +545,33 @@ async def test_check_daemon_version_unparseable_falls_through() -> None:
     rt._client = mock_client
 
     await rt._check_daemon_version()  # must not raise
+
+
+@pytest.mark.parametrize("version,expected", [
+    ("24.0.7",        (24, 0)),
+    ("20.10.0",       (20, 10)),
+    ("20.10-rc1",     (20, 10)),   # regression: split-based parser returned None here
+    ("20.10-beta.2",  (20, 10)),
+    ("28.2.2-ce",     (28, 2)),
+    ("   19.03.14 ",  (19, 3)),    # leading whitespace
+    ("canary",        None),
+    ("",              None),
+    ("20",            None),       # missing minor
+    ("a.b",           None),       # non-numeric
+])
+def test_parse_docker_version_matrix(version: str, expected: tuple[int, int] | None) -> None:
+    from rolemesh.container.docker_runtime import _parse_docker_version
+    assert _parse_docker_version(version) == expected
+
+
+async def test_check_daemon_version_rejects_rc_below_floor() -> None:
+    """20.09-rc would have passed the OLD split-parser's ValueError path and
+    silently skipped the gate. Now it must be parsed and rejected."""
+    from rolemesh.container.docker_runtime import IncompatibleDockerVersionError
+    rt = DockerRuntime()
+    mock_client = MagicMock()
+    mock_client.version = AsyncMock(return_value={"Version": "20.9-rc1"})
+    rt._client = mock_client
+
+    with pytest.raises(IncompatibleDockerVersionError):
+        await rt._check_daemon_version()

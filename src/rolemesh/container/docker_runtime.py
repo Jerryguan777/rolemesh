@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 from typing import TYPE_CHECKING, Any
 
 import aiodocker
@@ -53,17 +54,27 @@ def _parse_memory(value: str) -> int:
     return int(value)
 
 
+_DOCKER_VERSION_RE = re.compile(r"^\s*(\d+)\.(\d+)")
+
+
 def _parse_docker_version(value: str) -> tuple[int, int] | None:
-    """Parse a dockerd version string like '24.0.7' into (24, 0). Returns None on bad input."""
+    """Parse a dockerd version string into (major, minor).
+
+    Handles all the shapes dockerd emits in the wild:
+      '24.0.7'       → (24, 0)
+      '20.10.0'      → (20, 10)
+      '20.10-rc1'    → (20, 10)    ← regression guard: old split()-based
+                                       parser failed on this, causing the
+                                       version-gate check to be silently
+                                       skipped on RC builds.
+      '28.2.2-ce'    → (28, 2)
+      'canary-build' → None
+      ''             → None
+    """
     if not value:
         return None
-    parts = value.split(".")
-    if len(parts) < 2:
-        return None
-    try:
-        return (int(parts[0]), int(parts[1]))
-    except ValueError:
-        return None
+    m = _DOCKER_VERSION_RE.match(value)
+    return (int(m.group(1)), int(m.group(2))) if m else None
 
 
 def _is_docker_socket_path(path: str) -> bool:
@@ -174,9 +185,10 @@ class DockerRuntime:
     async def _check_daemon_version(self) -> None:
         """Fail fast if dockerd is older than the hardening floor (R5.1-1).
 
-        Cached implicitly: this runs once in ensure_available(). If the
-        daemon is replaced mid-process, we only re-check on full restart,
-        which is acceptable.
+        Runs once per process, from ensure_available() at startup. If the
+        daemon is replaced or upgraded mid-process, the new version is
+        only picked up on a full orchestrator restart — acceptable, since
+        operators typically restart rolemesh after dockerd upgrades anyway.
         """
         client = self._client
         if client is None:
@@ -285,7 +297,7 @@ class DockerRuntime:
             # Hardening defaults. Lists come from ContainerSpec so callers
             # can only *add* to cap_add / security_opt; the baseline of
             # dropping ALL capabilities and readonly rootfs is not opt-out
-            # from the per-call spec path. See docs/safety/container-hardening.md.
+            # from the per-call spec path.
             "CapDrop": list(spec.cap_drop),
             "CapAdd": list(spec.cap_add),
             "SecurityOpt": list(spec.security_opt),

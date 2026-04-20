@@ -886,7 +886,7 @@ async def _recover_pending_messages() -> None:
 async def _ensure_container_system_running() -> None:
     """Ensure the container runtime is running and clean up orphans.
 
-    Order matters (see docs/safety/container-hardening.md §Startup):
+    Order matters:
       1. get_runtime() + ensure_available() — dockerd version gate runs here
       2. ensure_agent_network() — creates/verifies the isolated bridge with
          icc=false. Must happen BEFORE the credential proxy starts so the
@@ -955,9 +955,10 @@ async def main() -> None:
 
     proxy_runner = await start_credential_proxy(CREDENTIAL_PROXY_PORT, PROXY_BIND_HOST)
 
-    # R5.1-2: Connectivity self-check. If the custom bridge cannot reach
-    # host.docker.internal:<PROXY_PORT>/health, agents will silently fail
-    # all credentialed traffic. Fail closed — abort orchestrator startup.
+    # R5.1-2: Connectivity self-check. If containers on the custom bridge
+    # cannot TCP-reach host.docker.internal:<PROXY_PORT> and get an HTTP
+    # response back, agents will silently fail all credentialed traffic.
+    # Fail closed — abort orchestrator startup.
     if hasattr(_runtime, "verify_proxy_reachable"):
         await _runtime.verify_proxy_reachable(CONTAINER_NETWORK_NAME, CREDENTIAL_PROXY_PORT)
 

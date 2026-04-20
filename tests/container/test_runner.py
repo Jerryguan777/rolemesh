@@ -429,7 +429,7 @@ class TestOciRuntimeMerge:
 
     def test_global_default_runsc(self) -> None:
         with (
-            patch("rolemesh.container.runner.CONTAINER_RUNTIME", "runsc"),
+            patch("rolemesh.container.runner.CONTAINER_OCI_RUNTIME", "runsc"),
             patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"),
         ):
             spec = build_container_spec([], "c", "j")
@@ -442,7 +442,7 @@ class TestOciRuntimeMerge:
             container_config=ContainerConfig(runtime="runc"),
         )
         with (
-            patch("rolemesh.container.runner.CONTAINER_RUNTIME", "runsc"),
+            patch("rolemesh.container.runner.CONTAINER_OCI_RUNTIME", "runsc"),
             patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"),
         ):
             spec = build_container_spec([], "c", "j", coworker=cw)
@@ -454,7 +454,7 @@ class TestOciRuntimeMerge:
             container_config=ContainerConfig(runtime=None),
         )
         with (
-            patch("rolemesh.container.runner.CONTAINER_RUNTIME", "runsc"),
+            patch("rolemesh.container.runner.CONTAINER_OCI_RUNTIME", "runsc"),
             patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"),
         ):
             spec = build_container_spec([], "c", "j", coworker=cw)

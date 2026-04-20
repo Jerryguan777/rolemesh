@@ -41,14 +41,21 @@ MAX_CONCURRENT_CONTAINERS: int = max(1, int(os.environ.get("MAX_CONCURRENT_CONTA
 GLOBAL_MAX_CONTAINERS: int = max(1, int(os.environ.get("GLOBAL_MAX_CONTAINERS", "20")))
 
 # Runtime-abstraction backend selector: "docker" | "k8s" (not OCI runtime).
-# Renamed from CONTAINER_RUNTIME (which now means the OCI runtime: runc|runsc).
+# Pairs with CONTAINER_OCI_RUNTIME below: BACKEND picks "which Python client
+# talks to which orchestrator", OCI_RUNTIME picks "which binary actually
+# runs the container process".
 CONTAINER_BACKEND: str = os.environ.get("CONTAINER_BACKEND", "docker")
 
-# OCI runtime selection (R1). "runc" is the default (backward compatible);
-# "runsc" enables gVisor syscall-level sandboxing and requires runsc to be
-# registered in /etc/docker/daemon.json on the host. Per-coworker overrides
-# live in ContainerConfig.runtime.
-CONTAINER_RUNTIME: str = os.environ.get("CONTAINER_RUNTIME", "runc")
+# OCI runtime selection (R1). "runc" is the default; "runsc" enables gVisor
+# syscall-level sandboxing and requires runsc to be registered in
+# /etc/docker/daemon.json on the host. Per-coworker overrides live in
+# ContainerConfig.runtime.
+#
+# Named OCI to disambiguate from CONTAINER_BACKEND (docker vs k8s). A
+# shorter name like CONTAINER_RUNTIME would collide with the old meaning
+# of that variable (runtime-abstraction selector) and confuse anyone who
+# saw both in an env file.
+CONTAINER_OCI_RUNTIME: str = os.environ.get("CONTAINER_OCI_RUNTIME", "runc")
 
 # Per-container resource ceilings (R7). Overrides come from ContainerConfig
 # on each coworker and are clamped to CONTAINER_MAX_* in runner.build_container_spec.

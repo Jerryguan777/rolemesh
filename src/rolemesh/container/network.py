@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import uuid
 from typing import Any
 
 import aiodocker
@@ -138,17 +139,26 @@ async def verify_proxy_reachable(
         logger.info("Skipping proxy reachability probe — no custom network configured")
         return
 
-    probe_name = "rolemesh-proxy-probe"
+    # uuid suffix so concurrent orchestrators (HA deploys, parallel
+    # integration tests) don't race on container create/delete. The
+    # finally-block cleanup uses this specific name, so there's no
+    # leaked-container risk from the randomization.
+    probe_name = f"rolemesh-proxy-probe-{uuid.uuid4().hex[:8]}"
     # -S prints the server response line ("HTTP/1.1 <code> <reason>") to
     # stderr for every HTTP code, so grep matches whether the proxy
     # returned 200, 401, 404, or 5xx. Only connection refused / timeout
     # / non-HTTP responses cause the probe to fail.
-    # -O /dev/null discards the body; -T 5 -t 1 keeps retries off.
+    # -O /dev/null discards the body; -t 1 keeps retries off.
+    #
+    # wget's internal timeout is derived from the caller's timeout_s and
+    # capped at 2s below it, so the outer asyncio.wait_for window always
+    # gets a chance to observe wget's exit cleanly rather than racing it.
+    wget_timeout = max(1, int(timeout_s) - 2)
     probe_cmd = [
         "sh",
         "-c",
-        f"wget -S -O /dev/null -T 5 -t 1 http://host.docker.internal:{proxy_port}/ 2>&1 "
-        "| grep -q 'HTTP/'",
+        f"wget -S -O /dev/null -T {wget_timeout} -t 1 "
+        f"http://host.docker.internal:{proxy_port}/ 2>&1 | grep -q 'HTTP/'",
     ]
 
     config: dict[str, Any] = {

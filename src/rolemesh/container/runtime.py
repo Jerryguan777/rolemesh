@@ -198,8 +198,8 @@ def get_runtime(runtime_name: str | None = None) -> ContainerRuntime:
     """Create a ContainerRuntime from name (defaults to CONTAINER_BACKEND env var).
 
     Note: this selects the runtime abstraction backend (Docker vs K8s), *not*
-    the OCI runtime. OCI runtime (runc/runsc) is controlled by CONTAINER_RUNTIME
-    and applied per-container via ContainerSpec.runtime.
+    the OCI runtime. OCI runtime (runc/runsc) is controlled by
+    CONTAINER_OCI_RUNTIME and applied per-container via ContainerSpec.runtime.
     """
     from rolemesh.core.config import CONTAINER_BACKEND
 
