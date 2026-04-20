@@ -104,11 +104,32 @@ async def verify_proxy_reachable(
     *,
     timeout_s: float = 10.0,
 ) -> None:
-    """Run a throwaway probe container on the agent network and GET /health.
+    """Prove that containers on the agent network can reach the credential
+    proxy over the host-gateway path (R5.1-2).
 
-    Raises RuntimeError if the probe cannot reach the credential proxy —
-    this is a fail-closed gate; the orchestrator will not enter ready
-    state when the path agents actually use is broken.
+    Raises RuntimeError on failure — this is a fail-closed gate, we refuse
+    to enter ready state when the path agents actually use is broken.
+
+    What we test: the probe container can reach the proxy's TCP port AND
+    the listener speaks HTTP. What we do NOT test: that the proxy's
+    forwarding logic is correct, nor that any particular endpoint exists.
+    A real agent request (e.g. POST /v1/messages) is proxied to Anthropic,
+    and Anthropic's response status may be anything (200, 401, 404, ...).
+    So the probe criterion is "ANY well-formed HTTP status line comes
+    back", which proves:
+        1. rolemesh-agent-net → host-gateway routing is up (R5.1-2)
+        2. dockerd accepted our HostConfig.ExtraHosts host-gateway magic
+        3. A process on the host port is speaking HTTP (not a stale TCP
+           listener from some other service)
+    That's the exact surface whose silent failure would produce the
+    "proxy is there, agents can't reach it" failure mode we're guarding.
+
+    An earlier revision probed a hardcoded /health path and required a
+    200. That was a category error: the credential proxy's catch-all
+    route forwards unknown paths upstream to Anthropic, so /health
+    returned a 404 from Anthropic — proof that connectivity works, but
+    the probe interpreted it as failure and blocked every startup.
+    This docstring + probe command together pin the lesson.
 
     On Linux host-gateway requires dockerd >= 20.10. DockerRuntime._check_daemon_version
     gates that separately; here we assume the version check has already passed.
@@ -118,12 +139,16 @@ async def verify_proxy_reachable(
         return
 
     probe_name = "rolemesh-proxy-probe"
-    # Shell loop: wget is in alpine; curl is not. Returns 0 only on HTTP 200.
+    # -S prints the server response line ("HTTP/1.1 <code> <reason>") to
+    # stderr for every HTTP code, so grep matches whether the proxy
+    # returned 200, 401, 404, or 5xx. Only connection refused / timeout
+    # / non-HTTP responses cause the probe to fail.
+    # -O /dev/null discards the body; -T 5 -t 1 keeps retries off.
     probe_cmd = [
         "sh",
         "-c",
-        f"wget -q -O- --timeout=5 http://host.docker.internal:{proxy_port}/health "
-        "| grep -q . && echo OK",
+        f"wget -S -O /dev/null -T 5 -t 1 http://host.docker.internal:{proxy_port}/ 2>&1 "
+        "| grep -q 'HTTP/'",
     ]
 
     config: dict[str, Any] = {
