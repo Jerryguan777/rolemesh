@@ -307,6 +307,87 @@ class TestEnvAllowlist:
         assert set(spec.env.keys()) <= CONTAINER_ENV_ALLOWLIST
 
 
+class TestEnvAllowlistDropNotRaiseContract:
+    """Pin the design decision that unknown env keys are DROPPED, not rejected.
+
+    A new backend that forgets to register its extra_env keys with
+    CONTAINER_ENV_ALLOWLIST will misbehave silently (agent starts, but
+    its config is missing a key). That's intentional:
+
+      * Raising would make a buggy backend config abort every
+        orchestrator startup — the agent population goes to zero instead
+        of merely degrading, which is a worse outage mode.
+      * The warning log lets operators grep for the misconfiguration.
+
+    If we ever flip this to raise, these tests fail on purpose — the
+    flip deserves a review thread, not a silent behaviour change."""
+
+    def test_unregistered_backend_key_is_dropped_not_raised(self) -> None:
+        config = AgentBackendConfig(
+            name="new-backend", image="img",
+            extra_env={"AGENT_BACKEND": "x", "UNREGISTERED_KEY_FROM_NEW_BACKEND": "v"},
+        )
+        # Must not raise — dropping is the contract.
+        with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
+            spec = build_container_spec([], "c", "j", backend_config=config)
+        # The unregistered key is absent from final env.
+        assert "UNREGISTERED_KEY_FROM_NEW_BACKEND" not in spec.env
+        # Registered keys from the same backend still pass.
+        assert spec.env.get("AGENT_BACKEND") == "x"
+
+    def test_drop_does_not_pollute_other_backend_keys(self) -> None:
+        """Future refactor might accidentally drop *everything* from a
+        backend whose extra_env contains any unknown key. Pin that the
+        filter is per-key, not all-or-nothing."""
+        config = AgentBackendConfig(
+            name="backend-x", image="img",
+            extra_env={"PI_MODEL_ID": "claude-opus-4-7", "ROGUE_KEY": "leak"},
+        )
+        with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
+            spec = build_container_spec([], "c", "j", backend_config=config)
+        assert spec.env.get("PI_MODEL_ID") == "claude-opus-4-7"
+        assert "ROGUE_KEY" not in spec.env
+
+    def test_rejected_key_logged_by_name_only_never_value(self) -> None:
+        """Values must never reach structured logs — if the allowlist
+        filter ever starts including values in its warning the blast
+        radius is that operator logs start leaking secrets from
+        misconfigured backends."""
+        config = AgentBackendConfig(
+            name="b", image="i",
+            extra_env={"API_TOKEN_LEAK": "super-secret-value-12345"},
+        )
+        with (
+            patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"),
+            patch("rolemesh.container.runner.logger") as mock_logger,
+        ):
+            build_container_spec([], "c", "j", backend_config=config)
+        # Collect all args/kwargs from every logger.warning call.
+        serialized = repr(mock_logger.warning.call_args_list)
+        assert "API_TOKEN_LEAK" in serialized  # key name must be loggable
+        assert "super-secret-value-12345" not in serialized  # value must not
+
+    def test_empty_extra_env_produces_no_warning(self) -> None:
+        """A well-behaved backend with only allowlisted keys must not
+        trigger the warning path. If this test fires it means the
+        filter is being over-eager."""
+        config = AgentBackendConfig(
+            name="clean", image="i",
+            extra_env={"AGENT_BACKEND": "claude"},
+        )
+        with (
+            patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"),
+            patch("rolemesh.container.runner.logger") as mock_logger,
+        ):
+            build_container_spec([], "c", "j", backend_config=config)
+        # The only warning that should fire here is nothing. The
+        # orchestrator-stage filter also runs but must not trigger for
+        # default-injected keys either.
+        for call in mock_logger.warning.call_args_list:
+            args, _kwargs = call
+            assert "Dropping env keys" not in (args[0] if args else "")
+
+
 # ---------------------------------------------------------------------------
 # R5: metadata blackhole + custom network
 # ---------------------------------------------------------------------------

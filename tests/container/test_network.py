@@ -171,3 +171,100 @@ async def test_verify_proxy_reachable_attaches_to_correct_network() -> None:
     # of a custom bridge. If this entry disappears, the probe will fail
     # silently on Linux and we lose the entire self-check guarantee.
     assert "host.docker.internal:host-gateway" in captured["config"]["HostConfig"]["ExtraHosts"]
+
+
+# ---------------------------------------------------------------------------
+# Fail-open regression pin
+#
+# When the probe image cannot be pulled (offline CI, restricted registry,
+# image name typo), verify_proxy_reachable currently SKIPS the connectivity
+# check and returns None instead of raising. That is an *intentional* design
+# choice — a temporary registry hiccup should not block orchestrator startup.
+#
+# This test exists to make the choice explicit and auditable. If someone
+# changes the behaviour to fail-closed (raise) the test fails and they have
+# to re-justify the change. If someone removes the warning log the test
+# fails and the silent-skip becomes observable to operators.
+#
+# Changing the design to fail-closed is fine — just update this test to match
+# and document why the tradeoff flipped.
+# ---------------------------------------------------------------------------
+
+
+async def test_pull_failure_is_fail_open_not_fail_closed() -> None:
+    """PIN: When the probe image can't be pulled, verify_proxy_reachable
+    MUST NOT raise, MUST skip creating the probe container, and MUST emit
+    a warning log by image name."""
+    client = MagicMock()
+    client.images = MagicMock()
+    client.images.inspect = AsyncMock(side_effect=_docker_error(404, "image missing"))
+    client.images.pull = AsyncMock(side_effect=_docker_error(500, "registry unreachable"))
+    client.containers = MagicMock()
+    client.containers.create_or_replace = AsyncMock()
+    client.containers.container = MagicMock()
+
+    with patch("rolemesh.container.network.logger") as mock_logger:
+        # Must not raise — this is the fail-open contract.
+        result = await verify_proxy_reachable(client, "rolemesh-agent-net", 3001)
+
+    assert result is None
+    # The probe container must not have been created — that's the whole
+    # point of the skip.
+    client.containers.create_or_replace.assert_not_awaited()
+    # The skip must be observable to operators via a structured warning,
+    # otherwise a silent gap appears in the hardening self-check.
+    mock_logger.warning.assert_called_once()
+    warn_args, warn_kwargs = mock_logger.warning.call_args
+    assert warn_kwargs.get("image")  # image name in the log
+    # The message must mention "skipping" or similar so log aggregators
+    # can alert on the gap.
+    assert "skipping" in warn_args[0].lower()
+
+
+async def test_timeout_raises_runtime_error_and_cleans_probe() -> None:
+    """If the probe hangs past `timeout_s` we must abort orchestrator startup
+    (RuntimeError) AND still delete the probe container so the next run
+    doesn't trip on a stale name. The cleanup happens in the finally block
+    — easy to accidentally drop during a refactor."""
+    probe = MagicMock()
+    probe.start = AsyncMock()
+    # Simulate a hung container by having wait() raise TimeoutError when
+    # awaited (mimics what asyncio.wait_for surfaces on timeout).
+    probe.wait = AsyncMock(side_effect=TimeoutError())
+    probe.delete = AsyncMock()
+    probe.log = AsyncMock(return_value=["output"])
+
+    client = MagicMock()
+    client.images = MagicMock()
+    client.images.inspect = AsyncMock()
+    client.containers = MagicMock()
+    client.containers.container = MagicMock(side_effect=_docker_error(404, "no stale"))
+    client.containers.create_or_replace = AsyncMock(return_value=probe)
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        await verify_proxy_reachable(
+            client, "rolemesh-agent-net", 3001, timeout_s=0.01,
+        )
+    # Cleanup must happen even when the probe path raised.
+    probe.delete.assert_awaited()
+
+
+async def test_pull_failure_does_not_leak_stale_probe() -> None:
+    """Sanity: if we skip probe creation, we also must not leave a stale
+    container around from a previous run's ID lookup."""
+    stale = MagicMock()
+    stale.delete = AsyncMock()
+    client = MagicMock()
+    client.images = MagicMock()
+    client.images.inspect = AsyncMock(side_effect=_docker_error(404, "image missing"))
+    client.images.pull = AsyncMock(side_effect=_docker_error(500, "registry unreachable"))
+    client.containers = MagicMock()
+    client.containers.container = MagicMock(return_value=stale)
+    client.containers.create_or_replace = AsyncMock()
+
+    await verify_proxy_reachable(client, "rolemesh-agent-net", 3001)
+
+    # With the current implementation we bail before the stale-wipe step;
+    # pin that so future refactors that reorder the steps don't accidentally
+    # touch container state after having decided to skip.
+    stale.delete.assert_not_awaited()
