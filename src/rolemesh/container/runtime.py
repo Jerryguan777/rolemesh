@@ -72,6 +72,10 @@ class ContainerSpec:
     memory_swappiness: int | None = 0
     ulimits: list[dict[str, object]] = field(default_factory=list)
 
+    # Hardening — network. None keeps Docker's default bridge (backward compat);
+    # production runs should set this to a custom bridge with enable_icc=false.
+    network_name: str | None = None
+
 
 # ---------------------------------------------------------------------------
 # Protocols

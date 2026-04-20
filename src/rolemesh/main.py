@@ -39,6 +39,7 @@ from rolemesh.container.runtime import (
 from rolemesh.container.scheduler import GroupQueue
 from rolemesh.core.config import (
     ASSISTANT_NAME,
+    CONTAINER_NETWORK_NAME,
     CREDENTIAL_PROXY_PORT,
     GLOBAL_MAX_CONTAINERS,
     IDLE_TIMEOUT,
@@ -883,10 +884,25 @@ async def _recover_pending_messages() -> None:
 
 
 async def _ensure_container_system_running() -> None:
-    """Ensure the container runtime is running and clean up orphans."""
+    """Ensure the container runtime is running and clean up orphans.
+
+    Order matters (see docs/safety/container-hardening.md §Startup):
+      1. get_runtime() + ensure_available() — dockerd version gate runs here
+      2. ensure_agent_network() — creates/verifies the isolated bridge with
+         icc=false. Must happen BEFORE the credential proxy starts so the
+         proxy's reachability probe has a network to attach to.
+      3. cleanup_orphans() — must run after the network exists; otherwise
+         orphan-removal logs cannot tell us anything useful about state.
+
+    The post-proxy connectivity probe (verify_proxy_reachable) is called
+    separately from the main() startup sequence, not here — this function
+    runs before the credential proxy exists.
+    """
     global _runtime
     _runtime = get_runtime()
     await _runtime.ensure_available()
+    if hasattr(_runtime, "ensure_agent_network"):
+        await _runtime.ensure_agent_network(CONTAINER_NETWORK_NAME)
     await _runtime.cleanup_orphans("rolemesh-")
 
 
@@ -938,6 +954,12 @@ async def main() -> None:
     _queue = GroupQueue(transport=_transport, runtime=_runtime, orchestrator_state=_state)
 
     proxy_runner = await start_credential_proxy(CREDENTIAL_PROXY_PORT, PROXY_BIND_HOST)
+
+    # R5.1-2: Connectivity self-check. If the custom bridge cannot reach
+    # host.docker.internal:<PROXY_PORT>/health, agents will silently fail
+    # all credentialed traffic. Fail closed — abort orchestrator startup.
+    if hasattr(_runtime, "verify_proxy_reachable"):
+        await _runtime.verify_proxy_reachable(CONTAINER_NETWORK_NAME, CREDENTIAL_PROXY_PORT)
 
     # Initialize TokenVault for per-user MCP token forwarding (OIDC mode only).
     # Note: this only sets the vault in THIS process. The WebUI runs in a

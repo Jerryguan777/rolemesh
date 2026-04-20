@@ -305,3 +305,31 @@ class TestEnvAllowlist:
         with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
             spec = build_container_spec([], "c", "j")
         assert set(spec.env.keys()) <= CONTAINER_ENV_ALLOWLIST
+
+
+# ---------------------------------------------------------------------------
+# R5: metadata blackhole + custom network
+# ---------------------------------------------------------------------------
+
+
+class TestMetadataBlackholeAndNetwork:
+    def test_metadata_blackhole_present_in_extra_hosts(self) -> None:
+        with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
+            spec = build_container_spec([], "c", "j")
+        assert spec.extra_hosts.get("169.254.169.254") == "127.0.0.1"
+        assert spec.extra_hosts.get("metadata.google.internal") == "127.0.0.1"
+
+    def test_custom_network_name_applied_from_config(self) -> None:
+        with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
+            spec = build_container_spec([], "c", "j")
+        # Default config points at rolemesh-agent-net unless CONTAINER_NETWORK_NAME='' is set.
+        assert spec.network_name == "rolemesh-agent-net"
+
+    def test_empty_network_name_yields_none(self) -> None:
+        """Operator escape hatch: CONTAINER_NETWORK_NAME='' -> None -> Docker default bridge."""
+        with (
+            patch("rolemesh.container.runner.CONTAINER_NETWORK_NAME", ""),
+            patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"),
+        ):
+            spec = build_container_spec([], "c", "j")
+        assert spec.network_name is None

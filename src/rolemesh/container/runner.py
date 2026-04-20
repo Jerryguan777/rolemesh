@@ -28,6 +28,7 @@ from rolemesh.core.config import (
     CONTAINER_MAX_CPU,
     CONTAINER_MAX_MEMORY,
     CONTAINER_MEMORY_LIMIT,
+    CONTAINER_NETWORK_NAME,
     CONTAINER_PIDS_LIMIT,
     CREDENTIAL_PROXY_PORT,
     DATA_DIR,
@@ -264,6 +265,26 @@ def _default_ulimits() -> list[dict[str, object]]:
     return [{"Name": "nofile", "Soft": 1024, "Hard": 2048}]
 
 
+# Cloud-instance-metadata services. Resolving these to 127.0.0.1 inside the
+# container means a compromised agent that tries to exfil IAM creds via
+# SSRF-style metadata access gets connection-refused instead of real
+# credentials. Covered endpoints:
+#   - 169.254.169.254         AWS / GCE / Azure / OpenStack / DO IMDS
+#   - metadata.google.internal GCE DNS alias for IMDS
+# See: https://cloud.google.com/compute/docs/metadata/overview
+_METADATA_BLACKHOLE: dict[str, str] = {
+    "metadata.google.internal": "127.0.0.1",
+    "169.254.169.254": "127.0.0.1",
+}
+
+
+def _build_extra_hosts() -> dict[str, str]:
+    """Merge host-gateway (Linux) with metadata blackhole entries."""
+    hosts = dict(get_host_gateway_extra_hosts())
+    hosts.update(_METADATA_BLACKHOLE)
+    return hosts
+
+
 def _clamp_memory(value: str, max_value: str, *, coworker_name: str) -> str:
     """Return value if within cap, else max_value with a structured warning."""
     req = _parse_memory(value)
@@ -387,7 +408,7 @@ def build_container_spec(
         mounts=mounts,
         env=env,
         user=user,
-        extra_hosts=get_host_gateway_extra_hosts(),
+        extra_hosts=_build_extra_hosts(),
         entrypoint=backend_config.entrypoint if backend_config else None,
         memory_limit=memory_limit,
         cpu_limit=cpu_limit,
@@ -396,6 +417,7 @@ def build_container_spec(
         tmpfs=_default_tmpfs(),
         pids_limit=CONTAINER_PIDS_LIMIT,
         ulimits=_default_ulimits(),
+        network_name=CONTAINER_NETWORK_NAME or None,
     )
 
 

@@ -109,6 +109,7 @@ async def test_ensure_available_success() -> None:
     mock_docker = MagicMock()
     mock_docker.system = MagicMock()
     mock_docker.system.info = AsyncMock()
+    mock_docker.version = AsyncMock(return_value={"Version": "24.0.7"})
     mock_docker.close = AsyncMock()
 
     with patch("rolemesh.container.docker_runtime.aiodocker.Docker", return_value=mock_docker):
@@ -350,3 +351,106 @@ def test_spec_to_config_never_privileged() -> None:
     spec = ContainerSpec(name="t", image="i")
     hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
     assert "Privileged" not in hc or hc["Privileged"] is False
+
+
+def test_spec_to_config_custom_network() -> None:
+    spec = ContainerSpec(name="t", image="i", network_name="rolemesh-agent-net")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["NetworkMode"] == "rolemesh-agent-net"
+
+
+def test_spec_to_config_no_network_name_leaves_docker_default() -> None:
+    spec = ContainerSpec(name="t", image="i")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    # Absence of NetworkMode means Docker default bridge is used.
+    assert "NetworkMode" not in hc
+
+
+# ---------------------------------------------------------------------------
+# R6: docker.sock bind blockade
+# ---------------------------------------------------------------------------
+
+
+def test_no_docker_socket_ever_mounted_direct() -> None:
+    """A spec with a docker.sock bind must be rejected before serialization."""
+    spec = ContainerSpec(
+        name="t", image="i",
+        mounts=[VolumeMount(
+            host_path="/var/run/docker.sock",
+            container_path="/var/run/docker.sock",
+            readonly=True,
+        )],
+    )
+    with pytest.raises(ValueError, match="docker socket"):
+        DockerRuntime._spec_to_config(spec)
+
+
+def test_no_docker_socket_ever_mounted_container_path_only() -> None:
+    """Defense-in-depth: match on any segment, not just host path."""
+    spec = ContainerSpec(
+        name="t", image="i",
+        mounts=[VolumeMount(
+            host_path="/tmp/innocent-looking",
+            container_path="/var/run/docker.sock",
+            readonly=False,
+        )],
+    )
+    with pytest.raises(ValueError, match="docker socket"):
+        DockerRuntime._spec_to_config(spec)
+
+
+def test_docker_socket_blockade_applies_to_full_pipeline() -> None:
+    """Verifies the check runs inside the normal _spec_to_config path, not
+    only in some unused helper."""
+    from rolemesh.container.runner import build_container_spec
+
+    mounts = [VolumeMount(host_path="/var/run/docker.sock", container_path="/sock", readonly=True)]
+    with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
+        spec = build_container_spec(mounts, "c", "j")
+    with pytest.raises(ValueError, match="docker socket"):
+        DockerRuntime._spec_to_config(spec)
+
+
+# ---------------------------------------------------------------------------
+# R5.1-1: dockerd version check
+# ---------------------------------------------------------------------------
+
+
+async def test_check_daemon_version_rejects_old_docker() -> None:
+    from rolemesh.container.docker_runtime import IncompatibleDockerVersionError
+
+    rt = DockerRuntime()
+    mock_client = MagicMock()
+    mock_client.version = AsyncMock(return_value={"Version": "19.3.14"})
+    rt._client = mock_client
+
+    with pytest.raises(IncompatibleDockerVersionError, match="below the hardening floor"):
+        await rt._check_daemon_version()
+
+
+async def test_check_daemon_version_accepts_floor() -> None:
+    rt = DockerRuntime()
+    mock_client = MagicMock()
+    mock_client.version = AsyncMock(return_value={"Version": "20.10.0"})
+    rt._client = mock_client
+
+    await rt._check_daemon_version()  # must not raise
+
+
+async def test_check_daemon_version_accepts_new_docker() -> None:
+    rt = DockerRuntime()
+    mock_client = MagicMock()
+    mock_client.version = AsyncMock(return_value={"Version": "24.0.7"})
+    rt._client = mock_client
+
+    await rt._check_daemon_version()
+
+
+async def test_check_daemon_version_unparseable_falls_through() -> None:
+    """Don't fail-closed on a garbage version string — log and proceed."""
+    rt = DockerRuntime()
+    mock_client = MagicMock()
+    mock_client.version = AsyncMock(return_value={"Version": "canary-build"})
+    rt._client = mock_client
+
+    await rt._check_daemon_version()  # must not raise

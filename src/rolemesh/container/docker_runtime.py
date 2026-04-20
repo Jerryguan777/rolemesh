@@ -14,6 +14,19 @@ import aiodocker.exceptions
 
 from rolemesh.core.logger import get_logger
 
+
+class IncompatibleDockerVersionError(RuntimeError):
+    """Raised when the connected dockerd is older than the hardening floor.
+
+    host-gateway in --add-host (used by RoleMesh to let agent containers
+    reach the credential proxy through a custom bridge network) was
+    introduced in Docker 20.10. Below that, the whole custom-network
+    path silently breaks; we fail closed instead.
+    """
+
+
+_MIN_DOCKERD_VERSION: tuple[int, int] = (20, 10)
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
@@ -39,9 +52,34 @@ def _parse_memory(value: str) -> int:
     return int(value)
 
 
+def _parse_docker_version(value: str) -> tuple[int, int] | None:
+    """Parse a dockerd version string like '24.0.7' into (24, 0). Returns None on bad input."""
+    if not value:
+        return None
+    parts = value.split(".")
+    if len(parts) < 2:
+        return None
+    try:
+        return (int(parts[0]), int(parts[1]))
+    except ValueError:
+        return None
+
+
 def _mounts_to_binds(mounts: list[VolumeMount]) -> list[str]:
-    """Convert VolumeMount list to Docker bind strings."""
-    return [f"{m.host_path}:{m.container_path}:{'ro' if m.readonly else 'rw'}" for m in mounts]
+    """Convert VolumeMount list to Docker bind strings.
+
+    Enforces the docker-socket blockade (R6): no bind may expose /var/run/docker.sock
+    to a container — a socket bind would hand the agent root on the host. This is
+    not expected to trigger in production (mount_security.py validates earlier),
+    but is kept here as defence in depth: the final serialization is the last
+    chance to catch a misconfiguration before the Docker API call.
+    """
+    binds = [f"{m.host_path}:{m.container_path}:{'ro' if m.readonly else 'rw'}" for m in mounts]
+    for b in binds:
+        if "docker.sock" in b:
+            msg = f"Refusing to mount docker socket into a container: {b}"
+            raise ValueError(msg)
+    return binds
 
 
 class DockerContainerHandle:
@@ -104,6 +142,42 @@ class DockerRuntime:
             )
             raise RuntimeError(msg) from exc
 
+        await self._check_daemon_version()
+
+    async def _check_daemon_version(self) -> None:
+        """Fail fast if dockerd is older than the hardening floor (R5.1-1).
+
+        Cached implicitly: this runs once in ensure_available(). If the
+        daemon is replaced mid-process, we only re-check on full restart,
+        which is acceptable.
+        """
+        client = self._client
+        if client is None:
+            return
+        try:
+            info = await client.version()
+        except aiodocker.exceptions.DockerError as exc:
+            logger.warning(
+                "Could not read dockerd version — proceeding without version gate",
+                error=str(exc),
+            )
+            return
+        version_str = str(info.get("Version", ""))
+        parsed = _parse_docker_version(version_str)
+        if parsed is None:
+            logger.warning("Unparseable dockerd version — skipping gate", version=version_str)
+            return
+        if parsed < _MIN_DOCKERD_VERSION:
+            msg = (
+                f"dockerd {version_str} is below the hardening floor "
+                f"{_MIN_DOCKERD_VERSION[0]}.{_MIN_DOCKERD_VERSION[1]}. "
+                "Upgrade Docker, or set CONTAINER_NETWORK_NAME='' to fall "
+                "back to the default bridge (at the cost of losing custom-"
+                "network isolation)."
+            )
+            raise IncompatibleDockerVersionError(msg)
+        logger.info("dockerd version OK", version=version_str)
+
     def _ensure_client(self) -> aiodocker.Docker:
         if self._client is None:
             msg = "DockerRuntime.ensure_available() must be called first"
@@ -160,6 +234,21 @@ class DockerRuntime:
             await self._client.close()
             self._client = None
 
+    # -----------------------------------------------------------------
+    # Network hardening hooks (R5 / R5.1). Thin adapters over the pure
+    # functions in container.network so tests can target either layer.
+    # -----------------------------------------------------------------
+
+    async def ensure_agent_network(self, network_name: str) -> None:
+        from rolemesh.container.network import ensure_agent_network
+
+        await ensure_agent_network(self._ensure_client(), network_name)
+
+    async def verify_proxy_reachable(self, network_name: str, proxy_port: int) -> None:
+        from rolemesh.container.network import verify_proxy_reachable
+
+        await verify_proxy_reachable(self._ensure_client(), network_name, proxy_port)
+
     @staticmethod
     def _spec_to_config(spec: ContainerSpec) -> dict[str, Any]:
         """Convert a ContainerSpec to a Docker API config dict."""
@@ -203,6 +292,9 @@ class DockerRuntime:
             host_config["PidsLimit"] = int(spec.pids_limit)
         if spec.ulimits:
             host_config["Ulimits"] = [dict(u) for u in spec.ulimits]
+
+        if spec.network_name:
+            host_config["NetworkMode"] = spec.network_name
 
         config: dict[str, Any] = {
             "Image": spec.image,

@@ -52,6 +52,12 @@ CONTAINER_PIDS_LIMIT: int = int(os.environ.get("CONTAINER_PIDS_LIMIT", "512"))
 CONTAINER_MAX_MEMORY: str = os.environ.get("CONTAINER_MAX_MEMORY", "8g")
 CONTAINER_MAX_CPU: float = float(os.environ.get("CONTAINER_MAX_CPU", "4.0"))
 
+# Custom bridge network for agent containers (R5). Setting this to the
+# empty string falls back to Docker's default bridge (loses ICC isolation
+# and metadata-blackhole scope; use only when custom networks are
+# unsupported on the host).
+CONTAINER_NETWORK_NAME: str = os.environ.get("CONTAINER_NETWORK_NAME", "rolemesh-agent-net")
+
 # Allowlist for env vars that the orchestrator dynamically injects into
 # containers (R8). Anything produced by build_container_spec() or passed
 # via AgentBackendConfig.extra_env must be in this set; unknown keys are
