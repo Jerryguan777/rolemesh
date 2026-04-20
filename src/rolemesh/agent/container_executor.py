@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from rolemesh.agent.executor import AgentBackendConfig, AgentInput, AgentOutput
 from rolemesh.auth.permissions import AgentPermissions
+from rolemesh.container.erofs_watcher import ErofsWatcher
 from rolemesh.container.runner import (
     build_container_spec,
     build_volume_mounts,
@@ -315,6 +316,15 @@ class ContainerAgentExecutor:
                     )
                     await msg.ack()
 
+        # Layer-2 hardening defense: surface readonly-rootfs misses so
+        # missing tmpfs entries get detected without waiting for user
+        # reports. Scoped to EROFS only; mount-security EACCES is tracked
+        # elsewhere.
+        erofs_watcher = ErofsWatcher(
+            coworker_name=coworker.name,
+            container_name=container_name,
+        )
+
         async def _read_stderr() -> None:
             nonlocal stderr_buf, stderr_truncated
             try:
@@ -328,6 +338,7 @@ class ContainerAgentExecutor:
                     for line in lines:
                         if line:
                             logger.debug(line, container=inp.group_folder)
+                            erofs_watcher.observe(line)
                     if stderr_truncated:
                         continue
                     remaining = CONTAINER_MAX_OUTPUT_SIZE - len(stderr_buf)
