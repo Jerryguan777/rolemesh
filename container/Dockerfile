@@ -2,8 +2,11 @@
 # Runs Claude Agent SDK in an isolated Linux container.
 #
 # Hardening defaults (R9):
-#   - Fixed UID 10001 (outside the 1000-1999 range typical for host users,
-#     so bind-mounted host files are not accidentally owned by the agent).
+#   - Fixed UID 1000 (matches the typical first-user UID on Linux dev
+#     hosts so bind-mounted data/ directories created by the orchestrator
+#     stay accessible to the agent inside the container; see the detailed
+#     comment above the `useradd` call for why this is deliberate and
+#     what to do if you ever need a different UID).
 #   - Locale and Python buffering pinned — these are image properties, not
 #     per-tenant configuration, so they belong here and not in
 #     CONTAINER_ENV_ALLOWLIST.
