@@ -51,6 +51,11 @@ class ContainerConfig:
 
     additional_mounts: list[AdditionalMount] = field(default_factory=list)
     timeout: int = 300_000
+    # Per-coworker overrides (None → fall back to global defaults in config.py).
+    # runtime is the OCI runtime: "runc" | "runsc". Clamped/validated in runner.
+    runtime: str | None = None
+    memory_limit: str | None = None  # e.g. "512m", "1g" — clamped to CONTAINER_MAX_MEMORY
+    cpu_limit: float | None = None  # cores — clamped to CONTAINER_MAX_CPU
 
 
 # ---------------------------------------------------------------------------

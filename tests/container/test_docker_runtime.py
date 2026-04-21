@@ -109,6 +109,7 @@ async def test_ensure_available_success() -> None:
     mock_docker = MagicMock()
     mock_docker.system = MagicMock()
     mock_docker.system.info = AsyncMock()
+    mock_docker.version = AsyncMock(return_value={"Version": "24.0.7"})
     mock_docker.close = AsyncMock()
 
     with patch("rolemesh.container.docker_runtime.aiodocker.Docker", return_value=mock_docker):
@@ -242,3 +243,335 @@ def test_spec_to_config_extra_hosts() -> None:
     spec = ContainerSpec(name="test", image="img", extra_hosts={"host.docker.internal": "host-gateway"})
     config: dict[str, Any] = DockerRuntime._spec_to_config(spec)
     assert "host.docker.internal:host-gateway" in config["HostConfig"]["ExtraHosts"]
+
+
+# ---------------------------------------------------------------------------
+# Hardening (R3, R4, R7) — defense-in-depth fields surface on HostConfig
+# ---------------------------------------------------------------------------
+
+
+def test_spec_to_config_cap_drop_all() -> None:
+    spec = ContainerSpec(name="t", image="i")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["CapDrop"] == ["ALL"]
+    assert hc["CapAdd"] == []
+
+
+def test_spec_to_config_readonly_rootfs_default_true() -> None:
+    spec = ContainerSpec(name="t", image="i")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["ReadonlyRootfs"] is True
+
+
+def test_spec_to_config_readonly_rootfs_opt_out() -> None:
+    """Callers can still disable readonly rootfs when explicitly needed."""
+    spec = ContainerSpec(name="t", image="i", readonly_rootfs=False)
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["ReadonlyRootfs"] is False
+
+
+def test_spec_to_config_security_opts_passthrough() -> None:
+    spec = ContainerSpec(
+        name="t", image="i",
+        security_opt=["no-new-privileges:true", "apparmor=docker-default"],
+    )
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert "no-new-privileges:true" in hc["SecurityOpt"]
+    assert "apparmor=docker-default" in hc["SecurityOpt"]
+
+
+def test_spec_to_config_no_seccomp_unconfined() -> None:
+    """We must never silently disable seccomp. Default: no seccomp entry
+    at all → Docker applies embedded default profile."""
+    spec = ContainerSpec(name="t", image="i")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert not any("seccomp=unconfined" in opt for opt in hc["SecurityOpt"])
+
+
+def test_spec_to_config_tmpfs() -> None:
+    spec = ContainerSpec(name="t", image="i", tmpfs={"/tmp": "rw,size=64m"})
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["Tmpfs"] == {"/tmp": "rw,size=64m"}
+
+
+def test_spec_to_config_tmpfs_absent_when_empty() -> None:
+    """Don't emit empty Tmpfs — some Docker versions reject {}."""
+    spec = ContainerSpec(name="t", image="i")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert "Tmpfs" not in hc
+
+
+def test_spec_to_config_pids_limit_default() -> None:
+    spec = ContainerSpec(name="t", image="i")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["PidsLimit"] == 512
+
+
+def test_spec_to_config_pids_limit_override() -> None:
+    spec = ContainerSpec(name="t", image="i", pids_limit=128)
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["PidsLimit"] == 128
+
+
+def test_spec_to_config_pids_limit_none_drops_key() -> None:
+    spec = ContainerSpec(name="t", image="i", pids_limit=None)
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert "PidsLimit" not in hc
+
+
+def test_spec_to_config_memory_swap_disabled_when_memory_set() -> None:
+    """Default behaviour: setting memory_limit without memory_swap disables swap.
+    MemorySwap == Memory → swap off. Not setting MemorySwap lets cgroups default
+    to unlimited swap, which defeats the memory cap."""
+    spec = ContainerSpec(name="t", image="i", memory_limit="512m")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["Memory"] == 512 * 1024**2
+    assert hc["MemorySwap"] == hc["Memory"]
+
+
+def test_spec_to_config_memory_swappiness_zero() -> None:
+    spec = ContainerSpec(name="t", image="i")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["MemorySwappiness"] == 0
+
+
+def test_spec_to_config_ulimits_passthrough() -> None:
+    spec = ContainerSpec(
+        name="t", image="i",
+        ulimits=[{"Name": "nofile", "Soft": 1024, "Hard": 2048}],
+    )
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["Ulimits"] == [{"Name": "nofile", "Soft": 1024, "Hard": 2048}]
+
+
+def test_spec_to_config_never_privileged() -> None:
+    """No public field on ContainerSpec exposes Privileged; assert the final
+    HostConfig never contains it either (paranoia check that no helper
+    silently enables privileged mode)."""
+    spec = ContainerSpec(name="t", image="i")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert "Privileged" not in hc or hc["Privileged"] is False
+
+
+def test_spec_to_config_custom_network() -> None:
+    spec = ContainerSpec(name="t", image="i", network_name="rolemesh-agent-net")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["NetworkMode"] == "rolemesh-agent-net"
+
+
+def test_spec_to_config_no_network_name_leaves_docker_default() -> None:
+    spec = ContainerSpec(name="t", image="i")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    # Absence of NetworkMode means Docker default bridge is used.
+    assert "NetworkMode" not in hc
+
+
+# ---------------------------------------------------------------------------
+# R1: OCI runtime selection
+# ---------------------------------------------------------------------------
+
+
+def test_spec_to_config_runtime_runc() -> None:
+    spec = ContainerSpec(name="t", image="i", runtime="runc")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["Runtime"] == "runc"
+
+
+def test_spec_to_config_runtime_runsc() -> None:
+    spec = ContainerSpec(name="t", image="i", runtime="runsc")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["Runtime"] == "runsc"
+
+
+def test_spec_to_config_runtime_absent_when_none() -> None:
+    """runtime=None must leave HostConfig.Runtime unset so Docker picks
+    its default — existing deployments without gVisor registered must
+    keep working."""
+    spec = ContainerSpec(name="t", image="i", runtime=None)
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert "Runtime" not in hc
+
+
+# ---------------------------------------------------------------------------
+# R6: docker.sock bind blockade
+# ---------------------------------------------------------------------------
+
+
+def test_no_docker_socket_ever_mounted_direct() -> None:
+    """A spec with a docker.sock bind must be rejected before serialization."""
+    spec = ContainerSpec(
+        name="t", image="i",
+        mounts=[VolumeMount(
+            host_path="/var/run/docker.sock",
+            container_path="/var/run/docker.sock",
+            readonly=True,
+        )],
+    )
+    with pytest.raises(ValueError, match="docker socket"):
+        DockerRuntime._spec_to_config(spec)
+
+
+def test_no_docker_socket_ever_mounted_container_path_only() -> None:
+    """Defense-in-depth: match on any segment, not just host path."""
+    spec = ContainerSpec(
+        name="t", image="i",
+        mounts=[VolumeMount(
+            host_path="/tmp/innocent-looking",
+            container_path="/var/run/docker.sock",
+            readonly=False,
+        )],
+    )
+    with pytest.raises(ValueError, match="docker socket"):
+        DockerRuntime._spec_to_config(spec)
+
+
+# ---------------------------------------------------------------------------
+# docker.sock detection — regression for substring false positive/negative
+# Before the basename-based check, `"docker.sock" in path` collided with
+# legitimate paths like /tmp/docker.socket-tests (substring hit inside
+# "docker.socket") and blocked valid mounts. The matrix below pins the
+# new semantics so future refactors can't silently reintroduce the bug.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", [
+    "/var/run/docker.sock",           # canonical path
+    "/run/docker.sock",                # rootless docker layout
+    "/some/nested/path/docker.sock",   # anywhere in tree
+    "/var/run/docker.sock/",           # trailing slash — still the same file
+])
+def test_is_docker_socket_path_rejects_real_socket(path: str) -> None:
+    from rolemesh.container.docker_runtime import _is_docker_socket_path
+    assert _is_docker_socket_path(path) is True
+
+
+@pytest.mark.parametrize("path", [
+    "/tmp/docker.socket-tests/foo",    # regression: .socket contains .sock as substring
+    "/home/agent/docker.socks.log",    # regression: .socks contains .sock
+    "/home/agent/mydocker.sock.bak",   # basename is mydocker.sock.bak, not docker.sock
+    "/workspace/my-docker.sock",       # different basename
+    "/var/run/docker-sock",            # hyphen instead of dot
+    "/dev/null",                       # unrelated
+    "",                                 # empty
+])
+def test_is_docker_socket_path_allows_legitimate_paths(path: str) -> None:
+    from rolemesh.container.docker_runtime import _is_docker_socket_path
+    assert _is_docker_socket_path(path) is False
+
+
+def test_mount_blockade_rejects_host_side_socket() -> None:
+    spec = ContainerSpec(
+        name="t", image="i",
+        mounts=[VolumeMount(
+            host_path="/var/run/docker.sock",
+            container_path="/safe/path",
+            readonly=True,
+        )],
+    )
+    with pytest.raises(ValueError, match="docker socket"):
+        DockerRuntime._spec_to_config(spec)
+
+
+def test_mount_blockade_rejects_container_side_socket() -> None:
+    """Even if the host path is innocuous, binding it TO docker.sock inside
+    the container is a misconfiguration the guard must still catch."""
+    spec = ContainerSpec(
+        name="t", image="i",
+        mounts=[VolumeMount(
+            host_path="/tmp/anything",
+            container_path="/var/run/docker.sock",
+            readonly=False,
+        )],
+    )
+    with pytest.raises(ValueError, match="docker socket"):
+        DockerRuntime._spec_to_config(spec)
+
+
+def test_mount_blockade_does_not_false_positive_on_docker_socket_dir() -> None:
+    """A directory named docker.socket-tests in the path must not trip the guard."""
+    spec = ContainerSpec(
+        name="t", image="i",
+        mounts=[VolumeMount(
+            host_path="/tmp/docker.socket-tests/fixtures",
+            container_path="/work/fixtures",
+            readonly=True,
+        )],
+    )
+    # Must not raise.
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert any("docker.socket-tests" in b for b in hc["Binds"])
+
+
+# ---------------------------------------------------------------------------
+# R5.1-1: dockerd version check
+# ---------------------------------------------------------------------------
+
+
+async def test_check_daemon_version_rejects_old_docker() -> None:
+    from rolemesh.container.docker_runtime import IncompatibleDockerVersionError
+
+    rt = DockerRuntime()
+    mock_client = MagicMock()
+    mock_client.version = AsyncMock(return_value={"Version": "19.3.14"})
+    rt._client = mock_client
+
+    with pytest.raises(IncompatibleDockerVersionError, match="below the hardening floor"):
+        await rt._check_daemon_version()
+
+
+async def test_check_daemon_version_accepts_floor() -> None:
+    rt = DockerRuntime()
+    mock_client = MagicMock()
+    mock_client.version = AsyncMock(return_value={"Version": "20.10.0"})
+    rt._client = mock_client
+
+    await rt._check_daemon_version()  # must not raise
+
+
+async def test_check_daemon_version_accepts_new_docker() -> None:
+    rt = DockerRuntime()
+    mock_client = MagicMock()
+    mock_client.version = AsyncMock(return_value={"Version": "24.0.7"})
+    rt._client = mock_client
+
+    await rt._check_daemon_version()
+
+
+async def test_check_daemon_version_unparseable_falls_through() -> None:
+    """Don't fail-closed on a garbage version string — log and proceed."""
+    rt = DockerRuntime()
+    mock_client = MagicMock()
+    mock_client.version = AsyncMock(return_value={"Version": "canary-build"})
+    rt._client = mock_client
+
+    await rt._check_daemon_version()  # must not raise
+
+
+@pytest.mark.parametrize("version,expected", [
+    ("24.0.7",        (24, 0)),
+    ("20.10.0",       (20, 10)),
+    ("20.10-rc1",     (20, 10)),   # regression: split-based parser returned None here
+    ("20.10-beta.2",  (20, 10)),
+    ("28.2.2-ce",     (28, 2)),
+    ("   19.03.14 ",  (19, 3)),    # leading whitespace
+    ("canary",        None),
+    ("",              None),
+    ("20",            None),       # missing minor
+    ("a.b",           None),       # non-numeric
+])
+def test_parse_docker_version_matrix(version: str, expected: tuple[int, int] | None) -> None:
+    from rolemesh.container.docker_runtime import _parse_docker_version
+    assert _parse_docker_version(version) == expected
+
+
+async def test_check_daemon_version_rejects_rc_below_floor() -> None:
+    """20.09-rc would have passed the OLD split-parser's ValueError path and
+    silently skipped the gate. Now it must be parsed and rejected."""
+    from rolemesh.container.docker_runtime import IncompatibleDockerVersionError
+    rt = DockerRuntime()
+    mock_client = MagicMock()
+    mock_client.version = AsyncMock(return_value={"Version": "20.9-rc1"})
+    rt._client = mock_client
+
+    with pytest.raises(IncompatibleDockerVersionError):
+        await rt._check_daemon_version()
