@@ -97,6 +97,16 @@ CONTAINER_ENV_ALLOWLIST: frozenset[str] = frozenset({
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "CLAUDE_CODE_OAUTH_TOKEN",
+    # Redirects Claude Code CLI's `.claude.json` from $HOME/.claude.json to
+    # $CLAUDE_CONFIG_DIR/.claude.json. Required under ReadonlyRootfs=True
+    # because /home/agent/ itself is read-only; without this env the CLI
+    # tries to write /home/agent/.claude.json, hits EROFS, and agent
+    # initialization times out.
+    # Value is injected in runner.build_container_spec pointing at the
+    # per-coworker bind mount /home/agent/.claude, which also makes the
+    # config file naturally persist (scoped per coworker) across container
+    # spawns.
+    "CLAUDE_CONFIG_DIR",
     "HOME",
     "PI_MODEL_ID",
 })

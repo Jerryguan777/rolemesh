@@ -377,6 +377,12 @@ def build_container_spec(
         "ANTHROPIC_BASE_URL": proxy_base,
         # Multi-provider proxy URLs for Pi backend (each SDK reads its own env var)
         "OPENAI_BASE_URL": f"{proxy_base}/proxy/openai",
+        # Redirect Claude Code CLI's .claude.json writes into the per-coworker
+        # writable bind mount at /home/agent/.claude. Without this, the CLI
+        # tries to write /home/agent/.claude.json on the readonly rootfs and
+        # the Claude backend fails its 30s initialize handshake.
+        # Pi backend ignores this env, so shipping it unconditionally is safe.
+        "CLAUDE_CONFIG_DIR": "/home/agent/.claude",
     }
 
     # Mirror the host's auth method with a placeholder value.
