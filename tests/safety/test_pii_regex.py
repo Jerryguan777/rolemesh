@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from rolemesh.safety.checks.pii_regex import PIICode, PIIRegexCheck
-from rolemesh.safety.types import CONTROL_STAGES, Finding, Stage
+from rolemesh.safety.types import Finding, Stage
 
 from .conftest import make_context
 

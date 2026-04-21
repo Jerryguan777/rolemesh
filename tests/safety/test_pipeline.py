@@ -35,7 +35,6 @@ from rolemesh.safety.types import (
 
 from .conftest import CapturePublisher, make_context, make_rule
 
-
 # ---------------------------------------------------------------------------
 # Stub checks — tailored to individual test scenarios
 # ---------------------------------------------------------------------------

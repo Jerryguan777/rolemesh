@@ -38,6 +38,9 @@ from webui.schemas import (
     BindingUpdate,
     ConversationCreate,
     ConversationResponse,
+    SafetyRuleCreate,
+    SafetyRuleResponse,
+    SafetyRuleUpdate,
     TaskResponse,
     TenantResponse,
     TenantUpdate,
@@ -50,6 +53,7 @@ from webui.schemas import (
 if TYPE_CHECKING:
     from rolemesh.approval.types import ApprovalAuditEntry, ApprovalPolicy, ApprovalRequest
     from rolemesh.core.types import ChannelBinding, Conversation, Coworker, ScheduledTask, Tenant, User
+    from rolemesh.safety.types import Rule as SafetyRule
 
 # Annotated dependency types (avoids B008 lint warnings)
 OwnerUser = Annotated[AuthenticatedUser, Depends(require_manage_tenant)]
@@ -859,3 +863,172 @@ async def decide_approval_ep(
             detail=f"Request already {exc.current_status}",
         ) from exc
     return _request_to_response(updated)
+
+
+# ---------------------------------------------------------------------------
+# Safety: rules (admin+)
+# ---------------------------------------------------------------------------
+
+
+def _safety_rule_to_response(r: SafetyRule) -> SafetyRuleResponse:
+    return SafetyRuleResponse(
+        id=r.id,
+        tenant_id=r.tenant_id,
+        coworker_id=r.coworker_id,
+        stage=r.stage.value,
+        check_id=r.check_id,
+        config=r.config,
+        priority=r.priority,
+        enabled=r.enabled,
+        description=r.description,
+        created_at=r.created_at,
+        updated_at=r.updated_at,
+    )
+
+
+def _validate_safety_rule_body(
+    check_id: str, stage: str, config: dict[str, object]
+) -> None:
+    """Raise HTTPException(400) if the rule cannot be satisfied at run-time.
+
+    V1 validation is deliberately minimal:
+      - ``check_id`` must be registered server-side (the container will
+        otherwise silently skip the rule with a warning).
+      - ``stage`` must be in ``check.stages``.
+      - ``config`` must be a dict. Deeper schema validation is a V2
+        concern once checks publish JSON schemas.
+    """
+    # Lazy import avoids a WebUI → rolemesh.safety cycle at module load.
+    from rolemesh.safety.registry import build_default_registry
+    from rolemesh.safety.types import Stage
+
+    registry = build_default_registry()
+    if not registry.has(check_id):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown safety check_id: {check_id}",
+        )
+    check = registry.get(check_id)
+    try:
+        stage_enum = Stage(stage)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"Unknown stage: {stage}"
+        ) from exc
+    if stage_enum not in check.stages:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Check {check_id} does not support stage {stage}; "
+                f"valid stages: {sorted(s.value for s in check.stages)}"
+            ),
+        )
+    if not isinstance(config, dict):
+        raise HTTPException(
+            status_code=400, detail="config must be a JSON object"
+        )
+
+
+@router.post(
+    "/safety/rules",
+    response_model=SafetyRuleResponse,
+    status_code=201,
+)
+async def create_safety_rule_ep(
+    body: SafetyRuleCreate,
+    user: AdminUser,
+) -> SafetyRuleResponse:
+    _validate_safety_rule_body(body.check_id, body.stage, body.config)
+    if body.coworker_id is not None:
+        # Guard against cross-tenant rule creation: a tenant admin MUST
+        # NOT be able to attach a rule to a coworker they don't own.
+        await _get_agent_or_404(body.coworker_id, user.tenant_id)
+    rule = await pg.create_safety_rule(
+        tenant_id=user.tenant_id,
+        coworker_id=body.coworker_id,
+        stage=body.stage,
+        check_id=body.check_id,
+        config=body.config,
+        priority=body.priority,
+        enabled=body.enabled,
+        description=body.description,
+    )
+    return _safety_rule_to_response(rule)
+
+
+@router.get(
+    "/safety/rules", response_model=list[SafetyRuleResponse]
+)
+async def list_safety_rules_ep(
+    user: AdminUser,
+    coworker_id: str | None = None,
+    stage: str | None = None,
+    enabled: bool | None = None,
+) -> list[SafetyRuleResponse]:
+    rows = await pg.list_safety_rules(
+        user.tenant_id,
+        coworker_id=coworker_id,
+        stage=stage,
+        enabled=enabled,
+    )
+    return [_safety_rule_to_response(r) for r in rows]
+
+
+@router.get(
+    "/safety/rules/{rule_id}", response_model=SafetyRuleResponse
+)
+async def get_safety_rule_ep(
+    rule_id: str,
+    user: AdminUser,
+) -> SafetyRuleResponse:
+    r = await pg.get_safety_rule(rule_id)
+    if r is None or r.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    return _safety_rule_to_response(r)
+
+
+@router.patch(
+    "/safety/rules/{rule_id}", response_model=SafetyRuleResponse
+)
+async def update_safety_rule_ep(
+    rule_id: str,
+    body: SafetyRuleUpdate,
+    user: AdminUser,
+) -> SafetyRuleResponse:
+    existing = await pg.get_safety_rule(rule_id)
+    if existing is None or existing.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="Rule not found")
+
+    # Re-validate when either check_id or stage changes: the stage must
+    # remain valid for the (possibly new) check_id.
+    eff_check = body.check_id if body.check_id is not None else existing.check_id
+    eff_stage = body.stage if body.stage is not None else existing.stage.value
+    eff_config = (
+        body.config if body.config is not None else existing.config
+    )
+    if body.check_id is not None or body.stage is not None:
+        _validate_safety_rule_body(eff_check, eff_stage, eff_config)
+
+    updated = await pg.update_safety_rule(
+        rule_id,
+        stage=body.stage,
+        check_id=body.check_id,
+        config=body.config,
+        priority=body.priority,
+        enabled=body.enabled,
+        description=body.description,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    return _safety_rule_to_response(updated)
+
+
+@router.delete("/safety/rules/{rule_id}", status_code=204)
+async def delete_safety_rule_ep(
+    rule_id: str,
+    user: AdminUser,
+) -> None:
+    existing = await pg.get_safety_rule(rule_id)
+    if existing is None or existing.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    await pg.delete_safety_rule(rule_id)

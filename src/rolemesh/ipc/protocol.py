@@ -47,6 +47,11 @@ class AgentInitData:
     # ApprovalHookHandler in that case, so approvals are zero-impact when
     # nobody configured them.
     approval_policies: list[dict[str, object]] | None = None
+    # Safety Framework rules snapshot. None means "safety is inactive for
+    # this run" — the container MUST NOT register SafetyHookHandler in
+    # that case. Shape is the dict form produced by
+    # ``rolemesh.safety.types.Rule.to_snapshot_dict``.
+    safety_rules: list[dict[str, object]] | None = None
 
     def serialize(self) -> bytes:
         return json.dumps(asdict(self)).encode()
@@ -82,4 +87,5 @@ class AgentInitData:
             role_config=raw.get("role_config"),
             mcp_servers=mcp_servers,
             approval_policies=raw.get("approval_policies"),
+            safety_rules=raw.get("safety_rules"),
         )

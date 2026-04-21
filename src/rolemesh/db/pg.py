@@ -32,6 +32,7 @@ if TYPE_CHECKING:
         ApprovalPolicy,
         ApprovalRequest,
     )
+    from rolemesh.safety.types import Rule as SafetyRule
 
 logger = get_logger()
 
@@ -528,6 +529,63 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         FOR EACH ROW EXECUTE FUNCTION _approval_write_audit_from_trigger();
     """)
 
+    # --- Safety Framework tables ---
+    # Admin-managed rules that the container loads as a snapshot at job
+    # start. ``coworker_id`` IS NULL means tenant-wide scope.
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS safety_rules (
+            id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            tenant_id       UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            coworker_id     UUID REFERENCES coworkers(id) ON DELETE CASCADE,
+            stage           TEXT NOT NULL,
+            check_id        TEXT NOT NULL,
+            config          JSONB NOT NULL DEFAULT '{}'::jsonb,
+            priority        INTEGER NOT NULL DEFAULT 100,
+            enabled         BOOLEAN NOT NULL DEFAULT TRUE,
+            description     TEXT NOT NULL DEFAULT '',
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+    """)
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_safety_rules_lookup "
+        "ON safety_rules (tenant_id, stage, enabled)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_safety_rules_coworker "
+        "ON safety_rules (coworker_id) WHERE coworker_id IS NOT NULL"
+    )
+
+    # Per-decision audit rows. We store only a SHA-256 digest of the
+    # payload + a short human summary (tool name, prompt prefix) — not
+    # the original text — so the audit table cannot double as a PII
+    # leak vector. Full-text reconstitution, when needed, comes from
+    # the conversation transcripts.
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS safety_decisions (
+            id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            tenant_id             UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            coworker_id           UUID REFERENCES coworkers(id) ON DELETE SET NULL,
+            conversation_id       TEXT,
+            job_id                TEXT,
+            stage                 TEXT NOT NULL,
+            verdict_action        TEXT NOT NULL,
+            triggered_rule_ids    UUID[] NOT NULL DEFAULT '{}',
+            findings              JSONB NOT NULL DEFAULT '[]'::jsonb,
+            context_digest        TEXT NOT NULL DEFAULT '',
+            context_summary       TEXT NOT NULL DEFAULT '',
+            created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+    """)
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_safety_decisions_tenant_time "
+        "ON safety_decisions (tenant_id, created_at DESC)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_safety_decisions_verdict "
+        "ON safety_decisions (tenant_id, verdict_action, created_at DESC)"
+    )
+
     # Idempotent default tenant. OIDCAuthProvider._provision_tenant falls back
     # to slug='default' for single-tenant deployments where the IdP doesn't
     # carry a tenant claim. Without this row, the first OIDC login on a fresh
@@ -556,6 +614,8 @@ async def _init_test_database(database_url: str) -> None:
     _pool = await asyncpg.create_pool(database_url, min_size=2, max_size=10)
     async with _pool.acquire() as conn:
         # Drop all tables for a clean slate
+        await conn.execute("DROP TABLE IF EXISTS safety_decisions CASCADE")
+        await conn.execute("DROP TABLE IF EXISTS safety_rules CASCADE")
         await conn.execute("DROP TABLE IF EXISTS approval_audit_log CASCADE")
         await conn.execute("DROP TABLE IF EXISTS approval_requests CASCADE")
         await conn.execute("DROP TABLE IF EXISTS approval_policies CASCADE")
@@ -2177,7 +2237,7 @@ async def get_users_for_agent(coworker_id: str) -> list[User]:
 # ---------------------------------------------------------------------------
 
 
-def _record_to_approval_policy(row: asyncpg.Record) -> "ApprovalPolicy":
+def _record_to_approval_policy(row: asyncpg.Record) -> ApprovalPolicy:
     from rolemesh.approval.types import ApprovalPolicy
 
     cond = row["condition_expr"]
@@ -2217,7 +2277,7 @@ async def create_approval_policy(
     post_exec_mode: str = "report",
     enabled: bool = True,
     priority: int = 0,
-) -> "ApprovalPolicy":
+) -> ApprovalPolicy:
     """Insert a new approval policy and return the stored row."""
     pool = _get_pool()
     approvers = approver_user_ids or []
@@ -2252,7 +2312,7 @@ async def create_approval_policy(
     return _record_to_approval_policy(row)
 
 
-async def get_approval_policy(policy_id: str) -> "ApprovalPolicy | None":
+async def get_approval_policy(policy_id: str) -> ApprovalPolicy | None:
     pool = _get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -2268,7 +2328,7 @@ async def list_approval_policies(
     *,
     coworker_id: str | None = None,
     enabled: bool | None = None,
-) -> list["ApprovalPolicy"]:
+) -> list[ApprovalPolicy]:
     """List policies for a tenant, optionally filtered by coworker and state."""
     pool = _get_pool()
     clauses = ["tenant_id = $1::uuid"]
@@ -2291,7 +2351,7 @@ async def list_approval_policies(
 
 async def get_enabled_policies_for_coworker(
     tenant_id: str, coworker_id: str
-) -> list["ApprovalPolicy"]:
+) -> list[ApprovalPolicy]:
     """Policies applicable to a specific coworker.
 
     Includes both coworker-scoped policies (coworker_id matches) and
@@ -2327,7 +2387,7 @@ async def update_approval_policy(
     post_exec_mode: str | None = None,
     enabled: bool | None = None,
     priority: int | None = None,
-) -> "ApprovalPolicy | None":
+) -> ApprovalPolicy | None:
     """Update selected fields on a policy; returns the new row or None."""
     fields: list[str] = []
     values: list[Any] = []
@@ -2391,7 +2451,7 @@ async def delete_approval_policy(policy_id: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _record_to_approval_request(row: asyncpg.Record) -> "ApprovalRequest":
+def _record_to_approval_request(row: asyncpg.Record) -> ApprovalRequest:
     from rolemesh.approval.types import ApprovalRequest
 
     actions = row["actions"]
@@ -2467,7 +2527,7 @@ async def create_approval_request(
     expires_at: datetime,
     post_exec_mode: str = "report",
     actor_user_id: str | None = None,
-) -> "ApprovalRequest":
+) -> ApprovalRequest:
     """Insert a new approval request row.
 
     ``actor_user_id`` is recorded by the audit trigger on the 'created'
@@ -2514,7 +2574,7 @@ async def create_approval_request(
     return _record_to_approval_request(row)
 
 
-async def get_approval_request(request_id: str) -> "ApprovalRequest | None":
+async def get_approval_request(request_id: str) -> ApprovalRequest | None:
     pool = _get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -2531,7 +2591,7 @@ async def list_approval_requests(
     status: str | None = None,
     coworker_id: str | None = None,
     limit: int = 100,
-) -> list["ApprovalRequest"]:
+) -> list[ApprovalRequest]:
     pool = _get_pool()
     clauses = ["tenant_id = $1::uuid"]
     params: list[Any] = [tenant_id]
@@ -2554,7 +2614,7 @@ async def list_approval_requests(
 
 async def find_pending_request_by_action_hash(
     tenant_id: str, action_hash: str, within_minutes: int = 5
-) -> "ApprovalRequest | None":
+) -> ApprovalRequest | None:
     """Dedup key for auto-intercept: return the most recent pending
     request whose action_hashes array contains ``action_hash`` and was
     created within the last ``within_minutes``.
@@ -2592,12 +2652,12 @@ class DecisionOutcome:
       forbidden  — the request is pending but the caller is not an approver.
     """
 
-    __slots__ = ("kind", "request", "current_status")
+    __slots__ = ("current_status", "kind", "request")
 
     def __init__(
         self,
         kind: str,
-        request: "ApprovalRequest | None" = None,
+        request: ApprovalRequest | None = None,
         current_status: str | None = None,
     ) -> None:
         self.kind = kind  # "updated" | "conflict" | "forbidden" | "missing"
@@ -2673,7 +2733,7 @@ async def decide_approval_request_full(
     return DecisionOutcome(kind="forbidden", current_status=before_status)
 
 
-async def claim_approval_for_execution(request_id: str) -> "ApprovalRequest | None":
+async def claim_approval_for_execution(request_id: str) -> ApprovalRequest | None:
     """Atomic claim: approved → executing.
 
     The Worker uses this to take exclusive ownership before hitting the
@@ -2711,7 +2771,7 @@ async def set_approval_status(
     actor_user_id: str | None = None,
     note: str | None = None,
     metadata: dict[str, Any] | None = None,
-) -> "ApprovalRequest | None":
+) -> ApprovalRequest | None:
     """Unconditional status update. Used for system transitions that do
     not race (e.g. executing → executed by the Worker that already
     holds the claim).
@@ -2762,7 +2822,7 @@ async def cancel_pending_approvals_for_job(job_id: str) -> list[str]:
     return [str(r["id"]) for r in rows]
 
 
-async def list_expired_pending_approvals() -> list["ApprovalRequest"]:
+async def list_expired_pending_approvals() -> list[ApprovalRequest]:
     pool = _get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -2777,7 +2837,7 @@ async def list_expired_pending_approvals() -> list["ApprovalRequest"]:
 
 async def list_stuck_approved_approvals(
     older_than_seconds: int = 60,
-) -> list["ApprovalRequest"]:
+) -> list[ApprovalRequest]:
     """Approved rows that have been sitting for a while without being
     claimed by a Worker — either the Worker missed the NATS publish or
     the orchestrator restarted mid-flight. The reconciler republishes
@@ -2798,7 +2858,7 @@ async def list_stuck_approved_approvals(
 
 async def list_stuck_executing_approvals(
     older_than_seconds: int = 300,
-) -> list["ApprovalRequest"]:
+) -> list[ApprovalRequest]:
     """Executing rows that never transitioned — a Worker probably crashed
     after claiming but before writing the terminal status. The reconciler
     marks them execution_stale rather than retrying, because we cannot
@@ -2822,7 +2882,7 @@ async def list_stuck_executing_approvals(
 # ---------------------------------------------------------------------------
 
 
-def _record_to_audit_entry(row: asyncpg.Record) -> "ApprovalAuditEntry":
+def _record_to_audit_entry(row: asyncpg.Record) -> ApprovalAuditEntry:
     from rolemesh.approval.types import ApprovalAuditEntry
 
     meta = row["metadata"]
@@ -2846,7 +2906,7 @@ async def write_approval_audit(
     actor_user_id: str | None = None,
     note: str | None = None,
     metadata: dict[str, Any] | None = None,
-) -> "ApprovalAuditEntry":
+) -> ApprovalAuditEntry:
     """Append a single audit row. There is deliberately no update or
     delete counterpart — the whole point of the audit table is that
     rows are immutable once written."""
@@ -2868,7 +2928,7 @@ async def write_approval_audit(
     return _record_to_audit_entry(row)
 
 
-async def list_approval_audit(request_id: str) -> list["ApprovalAuditEntry"]:
+async def list_approval_audit(request_id: str) -> list[ApprovalAuditEntry]:
     pool = _get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -2879,7 +2939,7 @@ async def list_approval_audit(request_id: str) -> list["ApprovalAuditEntry"]:
     return [_record_to_audit_entry(r) for r in rows]
 
 
-async def expire_approval_if_pending(request_id: str) -> "ApprovalRequest | None":
+async def expire_approval_if_pending(request_id: str) -> ApprovalRequest | None:
     """Atomic pending → expired with the CAS guard kept in one place.
 
     Separate from set_approval_status because the maintenance loop
@@ -2899,3 +2959,311 @@ async def expire_approval_if_pending(request_id: str) -> "ApprovalRequest | None
     if row is None:
         return None
     return _record_to_approval_request(row)
+
+
+# ---------------------------------------------------------------------------
+# Safety Framework CRUD
+# ---------------------------------------------------------------------------
+
+
+def _record_to_safety_rule(row: asyncpg.Record) -> SafetyRule:
+    from rolemesh.safety.types import Rule, Stage
+
+    cfg = row["config"]
+    if isinstance(cfg, str):
+        cfg = json.loads(cfg) if cfg else {}
+    return Rule(
+        id=str(row["id"]),
+        tenant_id=str(row["tenant_id"]),
+        coworker_id=str(row["coworker_id"]) if row["coworker_id"] else None,
+        stage=Stage(row["stage"]),
+        check_id=row["check_id"],
+        config=cfg if isinstance(cfg, dict) else {},
+        priority=int(row["priority"]),
+        enabled=bool(row["enabled"]),
+        description=row["description"] or "",
+        created_at=row["created_at"].isoformat() if row["created_at"] else "",
+        updated_at=row["updated_at"].isoformat() if row["updated_at"] else "",
+    )
+
+
+async def create_safety_rule(
+    *,
+    tenant_id: str,
+    stage: str,
+    check_id: str,
+    config: dict[str, Any],
+    coworker_id: str | None = None,
+    priority: int = 100,
+    enabled: bool = True,
+    description: str = "",
+) -> SafetyRule:
+    """Insert a new safety rule and return the stored row."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO safety_rules (
+                tenant_id, coworker_id, stage, check_id,
+                config, priority, enabled, description
+            )
+            VALUES (
+                $1::uuid, $2::uuid, $3, $4,
+                $5::jsonb, $6, $7, $8
+            )
+            RETURNING *
+            """,
+            tenant_id,
+            coworker_id,
+            stage,
+            check_id,
+            json.dumps(config),
+            priority,
+            enabled,
+            description,
+        )
+    assert row is not None
+    return _record_to_safety_rule(row)
+
+
+async def get_safety_rule(rule_id: str) -> SafetyRule | None:
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM safety_rules WHERE id = $1::uuid", rule_id
+        )
+    if row is None:
+        return None
+    return _record_to_safety_rule(row)
+
+
+async def list_safety_rules(
+    tenant_id: str,
+    *,
+    coworker_id: str | None = None,
+    stage: str | None = None,
+    enabled: bool | None = None,
+) -> list[SafetyRule]:
+    """List rules for a tenant, optionally filtered."""
+    pool = _get_pool()
+    clauses = ["tenant_id = $1::uuid"]
+    params: list[Any] = [tenant_id]
+    if coworker_id is not None:
+        params.append(coworker_id)
+        clauses.append(f"coworker_id = ${len(params)}::uuid")
+    if stage is not None:
+        params.append(stage)
+        clauses.append(f"stage = ${len(params)}")
+    if enabled is not None:
+        params.append(enabled)
+        clauses.append(f"enabled = ${len(params)}")
+    sql = (
+        "SELECT * FROM safety_rules WHERE "
+        + " AND ".join(clauses)
+        + " ORDER BY priority DESC, updated_at DESC"
+    )
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
+    return [_record_to_safety_rule(r) for r in rows]
+
+
+async def list_safety_rules_for_coworker(
+    tenant_id: str, coworker_id: str
+) -> list[SafetyRule]:
+    """Rules applicable to a specific coworker (coworker-scoped OR tenant-wide).
+
+    Mirrors ``get_enabled_policies_for_coworker`` in the approval module:
+    only enabled rows are returned, and a NULL ``coworker_id`` means the
+    rule applies to every coworker in the tenant.
+    """
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT * FROM safety_rules
+            WHERE tenant_id = $1::uuid
+              AND enabled = TRUE
+              AND (coworker_id IS NULL OR coworker_id = $2::uuid)
+            ORDER BY priority DESC, updated_at DESC
+            """,
+            tenant_id,
+            coworker_id,
+        )
+    return [_record_to_safety_rule(r) for r in rows]
+
+
+async def update_safety_rule(
+    rule_id: str,
+    *,
+    stage: str | None = None,
+    check_id: str | None = None,
+    config: dict[str, Any] | None = None,
+    coworker_id: str | None = None,
+    coworker_id_set: bool = False,
+    priority: int | None = None,
+    enabled: bool | None = None,
+    description: str | None = None,
+) -> SafetyRule | None:
+    """Update selected fields on a rule; returns the new row or None.
+
+    ``coworker_id_set=True`` is required to explicitly set coworker_id
+    (including setting it to NULL for a tenant-wide scope); without
+    this flag, passing ``coworker_id=None`` is indistinguishable from
+    "don't change". This mirrors the three-state Optional convention
+    used elsewhere in this module.
+    """
+    fields: list[str] = []
+    values: list[Any] = []
+    idx = 1
+
+    def _push(expr: str, value: Any) -> None:
+        nonlocal idx
+        fields.append(expr.format(i=idx))
+        values.append(value)
+        idx += 1
+
+    if stage is not None:
+        _push("stage = ${i}", stage)
+    if check_id is not None:
+        _push("check_id = ${i}", check_id)
+    if config is not None:
+        _push("config = ${i}::jsonb", json.dumps(config))
+    if coworker_id_set:
+        _push("coworker_id = ${i}::uuid", coworker_id)
+    if priority is not None:
+        _push("priority = ${i}", priority)
+    if enabled is not None:
+        _push("enabled = ${i}", enabled)
+    if description is not None:
+        _push("description = ${i}", description)
+
+    if not fields:
+        return await get_safety_rule(rule_id)
+
+    fields.append("updated_at = now()")
+    values.append(rule_id)
+    sql = (
+        "UPDATE safety_rules SET "
+        + ", ".join(fields)
+        + f" WHERE id = ${idx}::uuid RETURNING *"
+    )
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(sql, *values)
+    if row is None:
+        return None
+    return _record_to_safety_rule(row)
+
+
+async def delete_safety_rule(rule_id: str) -> bool:
+    """Hard-delete a rule. Returns True if a row was removed."""
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM safety_rules WHERE id = $1::uuid", rule_id
+        )
+    return result.endswith(" 1")
+
+
+async def insert_safety_decision(
+    *,
+    tenant_id: str,
+    stage: str,
+    verdict_action: str,
+    triggered_rule_ids: list[str],
+    findings: list[dict[str, Any]],
+    context_digest: str,
+    context_summary: str,
+    coworker_id: str | None = None,
+    conversation_id: str | None = None,
+    job_id: str | None = None,
+) -> str:
+    """Write one audit row; return its id.
+
+    Called by the safety_events subscriber for every decision the
+    container publishes. Never raises on per-row validation — malformed
+    inputs should be filtered upstream in ``SafetyEngine.handle_safety_event``.
+    """
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO safety_decisions (
+                tenant_id, coworker_id, conversation_id, job_id,
+                stage, verdict_action, triggered_rule_ids,
+                findings, context_digest, context_summary
+            )
+            VALUES (
+                $1::uuid, $2::uuid, $3, $4,
+                $5, $6, $7::uuid[],
+                $8::jsonb, $9, $10
+            )
+            RETURNING id
+            """,
+            tenant_id,
+            coworker_id,
+            conversation_id,
+            job_id,
+            stage,
+            verdict_action,
+            triggered_rule_ids,
+            json.dumps(findings),
+            context_digest,
+            context_summary,
+        )
+    assert row is not None
+    return str(row["id"])
+
+
+async def list_safety_decisions(
+    tenant_id: str,
+    *,
+    verdict_action: str | None = None,
+    coworker_id: str | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """Read recent safety decisions for a tenant.
+
+    Returns plain dicts (not a dataclass) because V1 does not expose
+    these via REST — the shape is internal to tests and V2's audit UI.
+    Newest-first ordering; ``limit`` caps the result set.
+    """
+    pool = _get_pool()
+    clauses = ["tenant_id = $1::uuid"]
+    params: list[Any] = [tenant_id]
+    if verdict_action is not None:
+        params.append(verdict_action)
+        clauses.append(f"verdict_action = ${len(params)}")
+    if coworker_id is not None:
+        params.append(coworker_id)
+        clauses.append(f"coworker_id = ${len(params)}::uuid")
+    params.append(limit)
+    sql = (
+        "SELECT * FROM safety_decisions WHERE "
+        + " AND ".join(clauses)
+        + f" ORDER BY created_at DESC LIMIT ${len(params)}"
+    )
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
+    result: list[dict[str, Any]] = []
+    for r in rows:
+        findings = r["findings"]
+        if isinstance(findings, str):
+            findings = json.loads(findings) if findings else []
+        result.append(
+            {
+                "id": str(r["id"]),
+                "tenant_id": str(r["tenant_id"]),
+                "coworker_id": str(r["coworker_id"]) if r["coworker_id"] else None,
+                "conversation_id": r["conversation_id"],
+                "job_id": r["job_id"],
+                "stage": r["stage"],
+                "verdict_action": r["verdict_action"],
+                "triggered_rule_ids": [str(u) for u in (r["triggered_rule_ids"] or [])],
+                "findings": findings if isinstance(findings, list) else [],
+                "context_digest": r["context_digest"],
+                "context_summary": r["context_summary"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else "",
+            }
+        )
+    return result

@@ -243,6 +243,22 @@ async def run_query_loop(
             )
         )
 
+    # Register SafetyHookHandler only when rules are provided. An empty
+    # or missing safety_rules list means the Safety Framework is
+    # inactive for this run, preserving zero runtime cost for agents
+    # that do not have rules configured — same convention as approval.
+    if init.safety_rules:
+        from .safety.hook_handler import SafetyHookHandler
+        from .safety.registry import build_default_registry
+
+        hook_registry.register(
+            SafetyHookHandler(
+                rules=init.safety_rules,
+                registry=build_default_registry(),
+                tool_ctx=tool_ctx,
+            )
+        )
+
     backend.subscribe(on_event)
     await backend.start(
         init,
