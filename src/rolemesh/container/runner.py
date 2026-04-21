@@ -230,11 +230,15 @@ def build_volume_mounts(
     return mounts
 
 
-# UID the agent image runs as. Set in container/Dockerfile via `useradd -u 1000`.
-# This constant exists to keep the tmpfs option strings below in sync with the
-# Dockerfile without a split-brain risk — if a future reviewer changes one,
-# the other needs to change too (or hardening-mounted tmpfs become owned by
-# a different UID than the container process and produce silent EACCES).
+# UID of the `agent` user baked into the image (see container/Dockerfile
+# `useradd -u 1000`). Used as a fallback in two cases:
+#   1. The host platform has no os.getuid() (Windows dev machine).
+#   2. The orchestrator is running as root (host_uid == 0). We deliberately
+#      DON'T propagate root into the agent container — that would undo
+#      the CapDrop/readonly-rootfs hardening for any operator who hasn't
+#      also configured userns-remap at the daemon level.
+# In every other case we resolve the runtime UID from the host at spawn
+# time and hand both the User field and the tmpfs options the same value.
 AGENT_UID = 1000
 AGENT_GID = 1000
 
@@ -255,27 +259,32 @@ def _default_security_opt() -> list[str]:
     return opts
 
 
-def _default_tmpfs() -> dict[str, str]:
-    """Writable tmpfs mounts needed for a readonly-rootfs container.
+def _default_tmpfs(uid: int, gid: int) -> dict[str, str]:
+    """Writable tmpfs mounts for a readonly-rootfs container.
 
-    /tmp                        — 64MB, typical scratch space
-    /home/agent/.cache          — 64MB, XDG cache (pip/http/etc.)
-    /home/agent/.config         — 8MB, XDG config (some SDKs write defaults)
-    /home/agent/.pi             — 32MB, Pi backend global config + sessions
-                                  (per-conversation sessions still go to
-                                  /workspace/sessions via bind mount; this
-                                  only holds ~/.pi/agent settings.json +
-                                  in-process runtime state that is
-                                  deliberately ephemeral across restarts).
+    `uid`/`gid` MUST match the UID:GID the container process actually
+    runs as (see the `user` field built in build_container_spec). If
+    they drift apart, Linux owns the tmpfs by `uid:gid` at mount time
+    and the running process hits EACCES on every write — most visibly
+    in Pi's first call to mkdir(~/.pi) and Claude CLI's attempt to
+    write ~/.claude.json. Manual acceptance on 2026-04-21 caught a
+    macOS case where host UID=502 but tmpfs was hardcoded uid=1000;
+    hence the parameterization.
 
-    Discovered during manual acceptance (R4.1) on 2026-04-20: Pi backend
-    errored with `[Errno 30] Read-only file system: '/home/agent/.pi'`
-    on first real invocation under readonly rootfs. If Pi ever moves to
-    a different dir or adds a sibling path, this list needs an update.
+    Contents:
+      /tmp                        — 64MB, typical scratch space
+      /home/agent/.cache          — 64MB, XDG cache (pip/http/etc.)
+      /home/agent/.config         — 8MB,  XDG config (some SDKs write defaults)
+      /home/agent/.pi             — 32MB, Pi backend global config + sessions
+                                    (per-conversation sessions still go to
+                                    /workspace/sessions via bind mount; this
+                                    only holds ~/.pi/agent settings.json +
+                                    in-process runtime state that is
+                                    deliberately ephemeral across restarts).
 
     The real persistent data is on bind mounts (/workspace/*, /home/agent/.claude).
     """
-    _uid_opt = f"uid={AGENT_UID},gid={AGENT_GID}"
+    _uid_opt = f"uid={uid},gid={gid}"
     return {
         "/tmp": "rw,size=64m,mode=1777",
         "/home/agent/.cache": f"rw,size=64m,{_uid_opt},mode=700",
@@ -402,14 +411,32 @@ def build_container_spec(
         )
         env.update(filtered_backend_env)
 
-    # Run as host user so bind-mounted files are accessible.
+    # Resolve runtime UID/GID. The same pair drives both the `user` field
+    # handed to Docker and the tmpfs owner in _default_tmpfs below; they
+    # must never drift apart (see tmpfs docstring).
+    #
+    # Policy:
+    #   * Default (no os.getuid, or orchestrator running as root):
+    #     fall back to AGENT_UID/GID — image-baked user. Root is
+    #     deliberately refused because propagating it into the agent
+    #     container would undo CapDrop/readonly-rootfs for operators
+    #     who did not configure userns-remap at the daemon level.
+    #   * Normal case: run as the host user so bind-mounted host
+    #     directories (sessions, workspace, .claude) retain matching
+    #     UID ownership. HOME is set explicitly — the runtime UID may
+    #     not exist in /etc/passwd, so any SDK that calls
+    #     os.path.expanduser('~') needs an env fallback.
+    run_uid = AGENT_UID
+    run_gid = AGENT_GID
     user: str | None = None
     if hasattr(os, "getuid"):
         host_uid = os.getuid()
         host_gid = os.getgid() if hasattr(os, "getgid") else host_uid
-        if host_uid != 0 and host_uid != 1000:
-            user = f"{host_uid}:{host_gid}"
-            env["HOME"] = "/home/agent"
+        if host_uid != 0:
+            run_uid = host_uid
+            run_gid = host_gid
+        user = f"{run_uid}:{run_gid}"
+        env["HOME"] = "/home/agent"
 
     # Final allowlist filter across the merged env dict. This is defense in
     # depth — anything added via future code paths will hit this gate too.
@@ -448,7 +475,7 @@ def build_container_spec(
         cpu_limit=cpu_limit,
         security_opt=_default_security_opt(),
         readonly_rootfs=True,
-        tmpfs=_default_tmpfs(),
+        tmpfs=_default_tmpfs(run_uid, run_gid),
         pids_limit=CONTAINER_PIDS_LIMIT,
         ulimits=_default_ulimits(),
         network_name=CONTAINER_NETWORK_NAME or None,

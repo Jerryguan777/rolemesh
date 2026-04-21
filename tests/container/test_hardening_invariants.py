@@ -83,34 +83,75 @@ _MOUNT_SETS: list[list[VolumeMount]] = [
 
 _AUTH_MODES = ["api-key", "oauth"]
 
+# Host UID/GID scenarios the orchestrator is actually run under. This
+# dimension is the one that exposed the UID-tmpfs drift bug on 2026-04-21:
+# the previous static fixture always used os.getuid() from the test
+# runner (usually 1000), which meant the "host UID ≠ 1000" downgrade
+# branch in build_container_spec was never exercised.
+#
+#   (1000, 1000) — canonical Linux dev user, matches image AGENT_UID
+#   (0, 0)       — orchestrator running as root; must fall back to
+#                  AGENT_UID inside the container, not propagate root
+#   (501, 20)    — macOS default first user + staff group
+#   (502, 20)    — macOS second user
+#   (42, 42)     — arbitrary non-special UID; catches any "magic number"
+#                  assumption hiding in the resolver
+#   (None, None) — platform has no os.getuid (Windows); resolver must
+#                  still produce a coherent spec
+_HOST_UIDS: list[tuple[int | None, int | None]] = [
+    (1000, 1000),
+    (0, 0),
+    (501, 20),
+    (502, 20),
+    (42, 42),
+    (None, None),
+]
+
 
 # Flatten the matrix up front so pytest reports one failure per combo.
 _CASES: list[tuple[Any, ...]] = [
-    (bc, cw, ms, am)
+    (bc, cw, ms, am, hu)
     for bc in _BACKEND_CONFIGS
     for cw in _COWORKERS
     for ms in _MOUNT_SETS
     for am in _AUTH_MODES
+    for hu in _HOST_UIDS
 ]
 
 
 def _id(case: tuple[Any, ...]) -> str:
-    bc, cw, ms, am = case
+    bc, cw, ms, am, hu = case
     bc_tag = bc.name if bc else "nobc"
     cw_tag = (
         f"cw-{cw.container_config.runtime or 'def'}"
         f"-m{cw.container_config.memory_limit or 'def'}"
         if cw and cw.container_config else "nocw"
     )
-    return f"{bc_tag}.{cw_tag}.m{len(ms)}.{am}"
+    hu_tag = f"h{hu[0]}" if hu[0] is not None else "hNone"
+    return f"{bc_tag}.{cw_tag}.m{len(ms)}.{am}.{hu_tag}"
 
 
 @pytest.fixture(params=_CASES, ids=[_id(c) for c in _CASES])
 def spec(request: pytest.FixtureRequest) -> Any:
     """Build one ContainerSpec per input case and expose it for invariants."""
-    bc, cw, ms, am = request.param
+    bc, cw, ms, am, (host_uid, host_gid) = request.param
+
     with patch("rolemesh.container.runner.detect_auth_mode", return_value=am):
-        return build_container_spec(ms, "c", "j", backend_config=bc, coworker=cw)
+        if host_uid is None:
+            # Simulate a host without os.getuid (Windows). Temporarily
+            # remove the attribute so `hasattr(os, "getuid")` returns False.
+            import os as _os
+            saved = _os.getuid
+            try:
+                del _os.getuid  # type: ignore[attr-defined]
+                return build_container_spec(ms, "c", "j", backend_config=bc, coworker=cw)
+            finally:
+                _os.getuid = saved  # type: ignore[attr-defined]
+        with (
+            patch("rolemesh.container.runner.os.getuid", return_value=host_uid),
+            patch("rolemesh.container.runner.os.getgid", return_value=host_gid),
+        ):
+            return build_container_spec(ms, "c", "j", backend_config=bc, coworker=cw)
 
 
 @pytest.fixture
@@ -186,6 +227,71 @@ def test_inv_env_keys_subset_of_allowlist(spec) -> None:  # type: ignore[no-unty
     allowlist the test still passes; if a backend slips a key PAST the
     allowlist (by bypassing _filter_env_allowlist) the test fails."""
     assert set(spec.env.keys()) <= CONTAINER_ENV_ALLOWLIST
+
+
+def test_inv_tmpfs_uid_gid_matches_user_field(spec) -> None:  # type: ignore[no-untyped-def]
+    """Every tmpfs entry that pins uid= / gid= MUST match the container's
+    User field. Otherwise Linux owns the tmpfs as <tmpfs_uid>:<tmpfs_gid>
+    at mount time, the process runs as <user_uid>:<user_gid>, and every
+    write hits EACCES. macOS 2026-04-21 regression: the old code had
+    User=502:20 from os.getuid() but tmpfs hardcoded uid=1000, making
+    Pi's first mkdir(~/.pi) fail silently.
+
+    Not every tmpfs entry has uid/gid (e.g. /tmp is world-writable via
+    mode=1777) — those lines are skipped."""
+    import re as _re
+    if spec.user is not None:
+        expected_uid, expected_gid = (int(x) for x in spec.user.split(":"))
+    else:
+        # Windows / no-getuid path: tmpfs should use AGENT_UID/GID.
+        from rolemesh.container.runner import AGENT_GID, AGENT_UID
+        expected_uid, expected_gid = AGENT_UID, AGENT_GID
+
+    for path, options in spec.tmpfs.items():
+        uid_match = _re.search(r"\buid=(\d+)", options)
+        gid_match = _re.search(r"\bgid=(\d+)", options)
+        if uid_match is None and gid_match is None:
+            continue  # world-writable tmpfs (e.g. /tmp with mode=1777)
+        assert uid_match is not None, f"tmpfs {path} has gid but no uid: {options}"
+        assert gid_match is not None, f"tmpfs {path} has uid but no gid: {options}"
+        assert int(uid_match.group(1)) == expected_uid, (
+            f"tmpfs {path} uid={uid_match.group(1)} but container runs as uid={expected_uid}"
+        )
+        assert int(gid_match.group(1)) == expected_gid, (
+            f"tmpfs {path} gid={gid_match.group(1)} but container runs as gid={expected_gid}"
+        )
+
+
+def test_inv_container_never_runs_as_root(spec) -> None:  # type: ignore[no-untyped-def]
+    """If the orchestrator itself runs as root (host_uid=0), the agent
+    container must NOT inherit that — CapDrop/readonly-rootfs hardening
+    assumes a non-root UID inside the container. The resolver policy is
+    to fall back to AGENT_UID (image-baked non-root agent) in this case.
+
+    Also covers the platform-has-no-getuid case where we can't look up
+    a runtime UID at all; the spec.user stays None, and Docker uses the
+    image's USER agent (non-root)."""
+    if spec.user is None:
+        # Image USER directive (agent @ uid 1000) takes over. Nothing to assert
+        # on spec level; the baseline invariant (non-root) is enforced by the
+        # Dockerfile and verified by integration tests.
+        return
+    uid, gid = (int(x) for x in spec.user.split(":"))
+    assert uid != 0, "container must not run as uid 0 (root)"
+    # gid 0 is root group; ok to allow in the downgrade-root-to-AGENT_UID
+    # fallback (AGENT_GID is 1000 so this never hits in practice), but
+    # still: block 0:0 specifically so a future regression can't sneak
+    # a full root:root pair through.
+    assert (uid, gid) != (0, 0)
+
+
+def test_inv_home_env_set_when_user_override_present(spec) -> None:  # type: ignore[no-untyped-def]
+    """Whenever we hand Docker a `User=...` value, we also MUST set
+    env[HOME]=/home/agent. A runtime UID that isn't in /etc/passwd has
+    no pwd entry to fall back on, so any SDK calling
+    os.path.expanduser('~') would otherwise break."""
+    if spec.user is not None:
+        assert spec.env.get("HOME") == "/home/agent"
 
 
 def test_inv_metadata_blackhole_always_present(spec) -> None:  # type: ignore[no-untyped-def]

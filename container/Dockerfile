@@ -62,7 +62,15 @@ RUN mkdir -p /workspace/group /workspace/global /workspace/extra
 # otherwise tmpfs mounts will be owned by the wrong UID and produce silent
 # EACCES on agent writes.
 RUN useradd -m -u 1000 -s /bin/bash agent || true
-RUN chown -R agent:agent /workspace && chmod 700 /home/agent
+# 711 (rwx--x--x) rather than 700: the orchestrator may run the agent
+# container as a host UID other than 1000 (macOS 501/502, Linux non-
+# first-user). Those UIDs need `traverse` permission on /home/agent to
+# reach the tmpfs subdirs (.cache/.config/.pi) and the bind-mounted
+# .claude. They don't need `read` on /home/agent itself — the directory
+# has no sensitive content at its top level; all secrets live in
+# children that keep their own stricter modes (tmpfs entries are 700
+# owned by the runtime UID; .claude is per-coworker bind mount).
+RUN chown -R agent:agent /workspace && chmod 711 /home/agent
 
 # Switch to non-root user
 USER agent
