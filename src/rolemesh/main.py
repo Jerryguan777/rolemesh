@@ -14,6 +14,7 @@ import re
 import signal
 import sys
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -23,8 +24,14 @@ if TYPE_CHECKING:
 
     from rolemesh.channels.gateway import ChannelGateway
 
-from rolemesh.agent import BACKEND_CONFIGS, AgentInput, AgentOutput, CLAUDE_CODE_BACKEND, ContainerAgentExecutor, PI_BACKEND
-from rolemesh.core.config import AGENT_BACKEND_DEFAULT
+from rolemesh.agent import (
+    BACKEND_CONFIGS,
+    CLAUDE_CODE_BACKEND,
+    PI_BACKEND,
+    AgentInput,
+    AgentOutput,
+    ContainerAgentExecutor,
+)
 from rolemesh.auth.permissions import AgentPermissions
 from rolemesh.channels.slack_gateway import SlackGateway
 from rolemesh.channels.telegram_gateway import TelegramGateway
@@ -38,6 +45,7 @@ from rolemesh.container.runtime import (
 )
 from rolemesh.container.scheduler import GroupQueue
 from rolemesh.core.config import (
+    AGENT_BACKEND_DEFAULT,
     ASSISTANT_NAME,
     CONTAINER_NETWORK_NAME,
     CREDENTIAL_PROXY_PORT,
@@ -66,7 +74,6 @@ from rolemesh.db.pg import (
     get_all_sessions,
     get_all_tasks,
     get_conversation_by_binding_and_chat,
-    get_conversations_for_coworker as pg_get_conversations_for_coworker,
     get_messages_since,
     get_new_messages_for_conversations,
     get_tenant_by_slug,
@@ -74,6 +81,9 @@ from rolemesh.db.pg import (
     set_session,
     update_conversation_last_invocation,
     update_tenant_message_cursor,
+)
+from rolemesh.db.pg import (
+    get_conversations_for_coworker as pg_get_conversations_for_coworker,
 )
 from rolemesh.db.pg import (
     store_message as db_store_message,
@@ -743,6 +753,54 @@ async def _start_nats_ipc_subscriptions(transport: NatsTransport, deps: _IpcDeps
 
     tasks.append(asyncio.create_task(_handle_tasks()))
 
+    # Safety Framework event ingestion. Container-side SafetyHookHandler
+    # publishes audit events to agent.*.safety_events; the subscriber
+    # performs a trusted-tenant lookup (same pattern as _handle_tasks
+    # above) and forwards validated payloads to SafetyEngine which
+    # writes to safety_decisions. Without this subscription the safety
+    # decisions published by containers are silently lost — a gap that
+    # existed in V1's initial shipment.
+    for consumer_name in ("orch-safety-events",):
+        with contextlib.suppress(Exception):
+            await transport.js.delete_consumer("agent-ipc", consumer_name)
+    safety_events_sub = await transport.js.subscribe(
+        "agent.*.safety_events", durable="orch-safety-events"
+    )
+
+    from rolemesh.safety.engine import SafetyEngine
+    from rolemesh.safety.subscriber import SafetyEventsSubscriber
+
+    class _StateCoworkerLookup:
+        """Adapter: claimed coworker_id -> (tenant_id, id) from _state."""
+
+        def __call__(
+            self, claimed_coworker_id: str
+        ) -> _TrustedCoworkerRec | None:
+            cw = _state.coworkers.get(claimed_coworker_id)
+            if cw is None:
+                return None
+            return _TrustedCoworkerRec(
+                tenant_id=cw.config.tenant_id, id=cw.config.id
+            )
+
+    safety_subscriber = SafetyEventsSubscriber(
+        engine=SafetyEngine(),
+        coworker_lookup=_StateCoworkerLookup(),
+    )
+
+    async def _handle_safety_events() -> None:
+        async for msg in safety_events_sub.messages:
+            try:
+                await safety_subscriber.on_message_bytes(msg.data)
+            except Exception:
+                # Subscriber must not poison its own loop. Individual
+                # malformed/suspicious messages already surface via
+                # structured warnings inside on_message_bytes.
+                logger.exception("Error processing safety_events message")
+            await msg.ack()
+
+    tasks.append(asyncio.create_task(_handle_safety_events()))
+
     logger.info("NATS IPC subscriptions started")
     return tasks
 
@@ -1186,6 +1244,18 @@ class _SchedulerDepsImpl:
         if text:
             cw_state = _state.coworkers.get(coworker_id) if coworker_id else None
             await _send_via_coworker(cw_state, jid, text)
+
+
+@dataclass(frozen=True)
+class _TrustedCoworkerRec:
+    """Minimal trusted view of a coworker exposed to the safety
+    subscriber. Kept tight so SafetyEventsSubscriber has a small,
+    stable contract to depend on (see rolemesh.safety.subscriber's
+    TrustedCoworker Protocol).
+    """
+
+    tenant_id: str
+    id: str
 
 
 class _IpcDepsImpl:

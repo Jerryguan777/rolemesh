@@ -44,11 +44,18 @@ class SafetyEngine:
         return [r.to_snapshot_dict() for r in rules if r.enabled]
 
     async def handle_safety_event(self, payload: dict[str, Any]) -> None:
-        """Persist one decoded safety event.
+        """Persist one already-validated safety event.
 
-        Malformed payloads are dropped with a warning — the container is
-        untrusted input and one bad event must not poison the subscriber
-        loop.
+        Caller (typically ``SafetyEventsSubscriber``) MUST have already
+        replaced the payload's ``tenant_id`` / ``coworker_id`` with
+        authoritative values obtained from an in-memory coworker
+        lookup. This method does not re-validate — it only writes. The
+        trust boundary lives at the subscriber, not here, so unit
+        tests can separate "is the tenant check correct?" from "is
+        the sink write correct?".
+
+        Malformed payloads (missing required keys after validation)
+        are dropped with a warning.
         """
         try:
             event = AuditEvent(

@@ -14,6 +14,7 @@ from .registry import (
     build_orchestrator_registry,
     get_orchestrator_registry,
 )
+from .subscriber import SafetyEventsSubscriber
 from .types import (
     CONTROL_STAGES,
     Action,
@@ -42,6 +43,7 @@ __all__ = [
     "SafetyConfigError",
     "SafetyContext",
     "SafetyEngine",
+    "SafetyEventsSubscriber",
     "Severity",
     "Stage",
     "ToolInfo",

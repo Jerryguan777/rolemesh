@@ -1,27 +1,30 @@
 """End-to-end test for the V1 acceptance scenario (design §5.12).
 
 Exercises the full loop without containers:
-  1. Admin POSTs a rule via REST.
-  2. container_executor loads rule snapshots at job start
-     (simulated: we call ``list_safety_rules_for_coworker`` directly,
-     same code path).
+  1. Admin POSTs a rule via REST (simulated via direct pg.create).
+  2. container_executor loads rule snapshots at job start (simulated:
+     we call ``list_safety_rules_for_coworker`` directly).
   3. Snapshot is serialized into AgentInitData and deserialized back
      to mimic the NATS KV → container hop.
   4. SafetyHookHandler runs against a ToolCallEvent containing SSN,
      returns a block verdict.
-  5. Audit NATS event is picked up by SafetyEngine.handle_safety_event
-     and written to safety_decisions.
+  5. Audit event captured from ToolContext.publish is fed through the
+     orchestrator-side SafetyEventsSubscriber (which performs the
+     trusted-tenant lookup) and then to SafetyEngine → safety_decisions.
   6. Disable the rule → next run passes the same SSN (hot-update at
      job boundary).
 
-Written without testcontainer-level Docker launches because a real
-agent container requires a full NATS+Postgres stack; the unit layers
-already cover the cross-module wiring, and this e2e pins the DB ↔
-AgentInitData ↔ hook handler ↔ audit chain as a single scenario.
+We feed subscriber.on_message_bytes directly rather than standing up
+a real NATS server — the subscriber owns the JSON decode and trust
+check logic, so this integration still exercises the authoritative
+lookup path. The bytes hop in particular matters: a refactor that
+accidentally type-narrowed on_payload away from accepting "bytes-
+first from NATS" would surface here as a JSON decode failure.
 """
 
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -34,6 +37,10 @@ from agent_runner.safety.registry import build_container_registry
 from rolemesh.db import pg
 from rolemesh.ipc.protocol import AgentInitData
 from rolemesh.safety.engine import SafetyEngine
+from rolemesh.safety.subscriber import (
+    SafetyEventsSubscriber,
+    TrustedCoworker,
+)
 
 pytestmark = pytest.mark.usefixtures("test_db")
 
@@ -113,13 +120,33 @@ class TestV1Acceptance:
         assert verdict.reason and "PII.SSN" in verdict.reason
 
         # 5. Audit NATS event surfaces at the orchestrator and lands in
-        #    safety_decisions. In production the orchestrator
-        #    subscriber decodes the NATS message; we call
-        #    handle_safety_event directly with the same dict shape.
+        #    safety_decisions. We feed bytes through the real subscriber
+        #    so the JSON decode + tenant trust-check path is exercised
+        #    end-to-end. Calling engine.handle_safety_event directly
+        #    (as the previous test did) skipped the trust boundary —
+        #    the most security-relevant step.
         assert tool_ctx.events, "hook handler must publish an audit event"
         _, event_payload = tool_ctx.events[0]
+
+        # Orchestrator lookup of a known coworker: return its trusted
+        # identity. Simulates _state.coworkers.get in production.
+        @dataclass(frozen=True)
+        class _TrustedRec:
+            tenant_id: str
+            id: str
+
+        def _lookup(claimed_coworker_id: str) -> TrustedCoworker | None:
+            if claimed_coworker_id == cw.id:
+                return _TrustedRec(tenant_id=tenant.id, id=cw.id)
+            return None
+
         engine = SafetyEngine()
-        await engine.handle_safety_event(event_payload)
+        subscriber = SafetyEventsSubscriber(
+            engine=engine, coworker_lookup=_lookup
+        )
+        await subscriber.on_message_bytes(
+            json.dumps(event_payload).encode()
+        )
 
         decisions = await pg.list_safety_decisions(tenant.id)
         assert len(decisions) == 1
