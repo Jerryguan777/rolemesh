@@ -586,6 +586,137 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         "ON safety_decisions (tenant_id, verdict_action, created_at DESC)"
     )
 
+    # Rule-change audit log. Every INSERT / UPDATE / DELETE on
+    # safety_rules appends one append-only row here via the trigger
+    # below. Compliance scenario: "Jan 3 admin disabled the SSN rule,
+    # leak followed on Jan 4" must be reconstructable without relying
+    # on server logs. rule_id is NOT a FK because the rule itself may
+    # have been hard-deleted — we still need the audit trail.
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS safety_rules_audit (
+            id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            rule_id        UUID NOT NULL,
+            tenant_id      UUID NOT NULL,
+            action         TEXT NOT NULL
+                CHECK (action IN ('created', 'updated', 'deleted')),
+            actor_user_id  UUID REFERENCES users(id) ON DELETE SET NULL,
+            before_state   JSONB,
+            after_state    JSONB,
+            created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+    """)
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_safety_rules_audit_rule "
+        "ON safety_rules_audit (rule_id, created_at DESC)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_safety_rules_audit_tenant "
+        "ON safety_rules_audit (tenant_id, created_at DESC)"
+    )
+
+    # Trigger function: same pattern as approval's. The caller sets
+    # a transaction-local GUC ``safety.actor_user_id`` so the trigger
+    # can attribute the row without a second DML. Missing GUC → NULL
+    # actor (system transition, e.g. bulk migration).
+    await conn.execute("""
+        CREATE OR REPLACE FUNCTION _safety_rules_write_audit_from_trigger()
+        RETURNS TRIGGER AS $$
+        DECLARE
+            v_actor TEXT;
+            v_actor_uuid UUID;
+            v_before JSONB;
+            v_after JSONB;
+        BEGIN
+            BEGIN
+                v_actor := current_setting('safety.actor_user_id', TRUE);
+            EXCEPTION WHEN OTHERS THEN v_actor := NULL; END;
+
+            IF v_actor IS NOT NULL AND v_actor <> '' THEN
+                BEGIN
+                    v_actor_uuid := v_actor::uuid;
+                EXCEPTION WHEN OTHERS THEN v_actor_uuid := NULL; END;
+            ELSE
+                v_actor_uuid := NULL;
+            END IF;
+
+            IF TG_OP = 'INSERT' THEN
+                v_after := jsonb_build_object(
+                    'stage', NEW.stage,
+                    'check_id', NEW.check_id,
+                    'config', NEW.config,
+                    'coworker_id', NEW.coworker_id,
+                    'priority', NEW.priority,
+                    'enabled', NEW.enabled,
+                    'description', NEW.description
+                );
+                INSERT INTO safety_rules_audit
+                    (rule_id, tenant_id, action, actor_user_id,
+                     before_state, after_state)
+                VALUES
+                    (NEW.id, NEW.tenant_id, 'created', v_actor_uuid,
+                     NULL, v_after);
+                RETURN NEW;
+            ELSIF TG_OP = 'UPDATE' THEN
+                v_before := jsonb_build_object(
+                    'stage', OLD.stage,
+                    'check_id', OLD.check_id,
+                    'config', OLD.config,
+                    'coworker_id', OLD.coworker_id,
+                    'priority', OLD.priority,
+                    'enabled', OLD.enabled,
+                    'description', OLD.description
+                );
+                v_after := jsonb_build_object(
+                    'stage', NEW.stage,
+                    'check_id', NEW.check_id,
+                    'config', NEW.config,
+                    'coworker_id', NEW.coworker_id,
+                    'priority', NEW.priority,
+                    'enabled', NEW.enabled,
+                    'description', NEW.description
+                );
+                -- Only log when something semantic changed. updated_at
+                -- moving on a no-op call is noise.
+                IF v_before <> v_after THEN
+                    INSERT INTO safety_rules_audit
+                        (rule_id, tenant_id, action, actor_user_id,
+                         before_state, after_state)
+                    VALUES
+                        (NEW.id, NEW.tenant_id, 'updated',
+                         v_actor_uuid, v_before, v_after);
+                END IF;
+                RETURN NEW;
+            ELSIF TG_OP = 'DELETE' THEN
+                v_before := jsonb_build_object(
+                    'stage', OLD.stage,
+                    'check_id', OLD.check_id,
+                    'config', OLD.config,
+                    'coworker_id', OLD.coworker_id,
+                    'priority', OLD.priority,
+                    'enabled', OLD.enabled,
+                    'description', OLD.description
+                );
+                INSERT INTO safety_rules_audit
+                    (rule_id, tenant_id, action, actor_user_id,
+                     before_state, after_state)
+                VALUES
+                    (OLD.id, OLD.tenant_id, 'deleted',
+                     v_actor_uuid, v_before, NULL);
+                RETURN OLD;
+            END IF;
+            RETURN NULL;
+        END;
+        $$ LANGUAGE plpgsql;
+    """)
+    await conn.execute(
+        "DROP TRIGGER IF EXISTS trg_safety_rules_audit ON safety_rules"
+    )
+    await conn.execute("""
+        CREATE TRIGGER trg_safety_rules_audit
+        AFTER INSERT OR UPDATE OR DELETE ON safety_rules
+        FOR EACH ROW EXECUTE FUNCTION _safety_rules_write_audit_from_trigger();
+    """)
+
     # Idempotent default tenant. OIDCAuthProvider._provision_tenant falls back
     # to slug='default' for single-tenant deployments where the IdP doesn't
     # carry a tenant claim. Without this row, the first OIDC login on a fresh
@@ -615,6 +746,7 @@ async def _init_test_database(database_url: str) -> None:
     async with _pool.acquire() as conn:
         # Drop all tables for a clean slate
         await conn.execute("DROP TABLE IF EXISTS safety_decisions CASCADE")
+        await conn.execute("DROP TABLE IF EXISTS safety_rules_audit CASCADE")
         await conn.execute("DROP TABLE IF EXISTS safety_rules CASCADE")
         await conn.execute("DROP TABLE IF EXISTS approval_audit_log CASCADE")
         await conn.execute("DROP TABLE IF EXISTS approval_requests CASCADE")
@@ -2987,6 +3119,24 @@ def _record_to_safety_rule(row: asyncpg.Record) -> SafetyRule:
     )
 
 
+async def _set_safety_guc(
+    conn: asyncpg.Connection[asyncpg.Record],
+    *,
+    actor_user_id: str | None,
+) -> None:
+    """Set the transaction-local ``safety.actor_user_id`` GUC.
+
+    The audit trigger ``_safety_rules_write_audit_from_trigger``
+    reads this to attribute the audit row it emits. Call inside an
+    open transaction; the ``is_local=true`` flag auto-clears on
+    commit/rollback.
+    """
+    await conn.execute(
+        "SELECT set_config('safety.actor_user_id', $1, true)",
+        actor_user_id or "",
+    )
+
+
 async def create_safety_rule(
     *,
     tenant_id: str,
@@ -2997,10 +3147,17 @@ async def create_safety_rule(
     priority: int = 100,
     enabled: bool = True,
     description: str = "",
+    actor_user_id: str | None = None,
 ) -> SafetyRule:
-    """Insert a new safety rule and return the stored row."""
+    """Insert a new safety rule and return the stored row.
+
+    ``actor_user_id`` is attributed to the audit row written by the
+    trigger. ``None`` is a legitimate value for bulk imports / migration
+    scripts where no user is the actor — the audit row carries NULL.
+    """
     pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
+        await _set_safety_guc(conn, actor_user_id=actor_user_id)
         row = await conn.fetchrow(
             """
             INSERT INTO safety_rules (
@@ -3103,6 +3260,7 @@ async def update_safety_rule(
     priority: int | None = None,
     enabled: bool | None = None,
     description: str | None = None,
+    actor_user_id: str | None = None,
 ) -> SafetyRule | None:
     """Update selected fields on a rule; returns the new row or None.
 
@@ -3111,6 +3269,10 @@ async def update_safety_rule(
     this flag, passing ``coworker_id=None`` is indistinguishable from
     "don't change". This mirrors the three-state Optional convention
     used elsewhere in this module.
+
+    ``actor_user_id`` attributes the audit row. A no-op update (all
+    fields unchanged) skips both the DML and the audit row — the
+    trigger's ``IF v_before <> v_after`` guard does the filtering.
     """
     fields: list[str] = []
     values: list[Any] = []
@@ -3148,21 +3310,83 @@ async def update_safety_rule(
         + f" WHERE id = ${idx}::uuid RETURNING *"
     )
     pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
+        await _set_safety_guc(conn, actor_user_id=actor_user_id)
         row = await conn.fetchrow(sql, *values)
     if row is None:
         return None
     return _record_to_safety_rule(row)
 
 
-async def delete_safety_rule(rule_id: str) -> bool:
-    """Hard-delete a rule. Returns True if a row was removed."""
+async def delete_safety_rule(
+    rule_id: str, *, actor_user_id: str | None = None
+) -> bool:
+    """Hard-delete a rule. Returns True if a row was removed.
+
+    The audit trigger captures the row's pre-delete state in
+    before_state so the deleted rule is reconstructable forever.
+    """
     pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with pool.acquire() as conn, conn.transaction():
+        await _set_safety_guc(conn, actor_user_id=actor_user_id)
         result = await conn.execute(
             "DELETE FROM safety_rules WHERE id = $1::uuid", rule_id
         )
     return result.endswith(" 1")
+
+
+async def list_safety_rules_audit(
+    *,
+    tenant_id: str,
+    rule_id: str | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """List rule-change audit rows, newest first.
+
+    Filtered by tenant_id (never cross-tenant). ``rule_id`` optional
+    to narrow to a specific rule's history. Returns plain dicts; the
+    V2 admin UI will surface this as a timeline. Test fixture uses it
+    to pin actor/action correctness.
+    """
+    pool = _get_pool()
+    clauses = ["tenant_id = $1::uuid"]
+    params: list[Any] = [tenant_id]
+    if rule_id is not None:
+        params.append(rule_id)
+        clauses.append(f"rule_id = ${len(params)}::uuid")
+    params.append(limit)
+    sql = (
+        "SELECT * FROM safety_rules_audit WHERE "
+        + " AND ".join(clauses)
+        + f" ORDER BY created_at DESC LIMIT ${len(params)}"
+    )
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
+    result: list[dict[str, Any]] = []
+    for r in rows:
+        before = r["before_state"]
+        after = r["after_state"]
+        if isinstance(before, str):
+            before = json.loads(before) if before else None
+        if isinstance(after, str):
+            after = json.loads(after) if after else None
+        result.append(
+            {
+                "id": str(r["id"]),
+                "rule_id": str(r["rule_id"]),
+                "tenant_id": str(r["tenant_id"]),
+                "action": r["action"],
+                "actor_user_id": str(r["actor_user_id"])
+                if r["actor_user_id"]
+                else None,
+                "before_state": before,
+                "after_state": after,
+                "created_at": r["created_at"].isoformat()
+                if r["created_at"]
+                else "",
+            }
+        )
+    return result
 
 
 async def insert_safety_decision(

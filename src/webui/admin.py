@@ -966,6 +966,7 @@ async def create_safety_rule_ep(
         priority=body.priority,
         enabled=body.enabled,
         description=body.description,
+        actor_user_id=user.user_id,
     )
     return _safety_rule_to_response(rule)
 
@@ -1031,6 +1032,7 @@ async def update_safety_rule_ep(
         priority=body.priority,
         enabled=body.enabled,
         description=body.description,
+        actor_user_id=user.user_id,
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="Rule not found")
@@ -1045,4 +1047,4 @@ async def delete_safety_rule_ep(
     existing = await pg.get_safety_rule(rule_id)
     if existing is None or existing.tenant_id != user.tenant_id:
         raise HTTPException(status_code=404, detail="Rule not found")
-    await pg.delete_safety_rule(rule_id)
+    await pg.delete_safety_rule(rule_id, actor_user_id=user.user_id)
