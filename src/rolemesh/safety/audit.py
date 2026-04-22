@@ -14,7 +14,10 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 @dataclass(frozen=True)
@@ -62,20 +65,23 @@ class DbAuditSink:
         )
 
 
-def compute_context_digest(payload: dict[str, Any]) -> str:
+def compute_context_digest(payload: Mapping[str, Any]) -> str:
     """Stable SHA-256 of a payload dict.
 
     ``sort_keys=True`` so a dict reordering does not produce a new
     digest. Audit queries key off this value to deduplicate repeated
     identical blocks (e.g. retry loops).
     """
-    data = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode(
+    # json.dumps accepts Mapping; the dict() coerce is only needed on
+    # CPython <=3.12 stubs that over-narrow it. Using dict() keeps
+    # static typers happy without runtime cost.
+    data = json.dumps(dict(payload), sort_keys=True, ensure_ascii=False).encode(
         "utf-8"
     )
     return hashlib.sha256(data).hexdigest()
 
 
-def summarize_context(stage: str, payload: dict[str, Any]) -> str:
+def summarize_context(stage: str, payload: Mapping[str, Any]) -> str:
     """Short human-readable summary. Max ~80 chars to keep the table compact."""
     if stage == "pre_tool_call":
         tool = payload.get("tool_name", "?")

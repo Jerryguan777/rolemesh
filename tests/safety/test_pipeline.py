@@ -199,6 +199,43 @@ class TestRuleFiltering:
         # not fail the turn.
         assert verdict.action == "allow"
 
+    @pytest.mark.asyncio
+    async def test_rule_stage_not_in_check_stages_skipped(
+        self, publisher: CapturePublisher
+    ) -> None:
+        # A check that only advertises PRE_TOOL_CALL. A rule pointing
+        # it at INPUT_PROMPT must be skipped rather than invoked on a
+        # payload shape it cannot interpret. Defends against DB drift
+        # (direct UPDATE) and check upgrades that drop a stage.
+        class _PreToolOnly:
+            id = "stub.pretool"
+            version = "1"
+            stages = frozenset({Stage.PRE_TOOL_CALL})
+            cost_class: CostClass = "cheap"
+            supported_codes = frozenset({"X"})
+
+            async def check(
+                self, ctx: SafetyContext, config: dict[str, Any]
+            ) -> Verdict:
+                # Must not be called; if the guard fails we would
+                # reach here and block, not allow.
+                return Verdict(
+                    action="block", reason="should not be reached"
+                )
+
+        reg = CheckRegistry()
+        reg.register(_PreToolOnly())
+        # Rule says INPUT_PROMPT, ctx is INPUT_PROMPT — but check only
+        # supports PRE_TOOL_CALL → skip.
+        rule = make_rule(check_id="stub.pretool", stage=Stage.INPUT_PROMPT)
+        ctx = make_context(
+            stage=Stage.INPUT_PROMPT,
+            payload={"prompt": "hello"},
+            tool_name="",
+        )
+        verdict = await pipeline_run([rule], reg, ctx, publisher)
+        assert verdict.action == "allow"
+
 
 class TestPriorityOrdering:
     @pytest.mark.asyncio

@@ -8,7 +8,12 @@ in type signatures (REST schemas, DB CRUD, tests).
 from .audit import AuditEvent, AuditSink, DbAuditSink
 from .engine import SafetyEngine
 from .errors import SafetyConfigError, UnknownCheckError
-from .registry import CheckRegistry, build_default_registry
+from .registry import (
+    CheckRegistry,
+    build_container_registry,
+    build_orchestrator_registry,
+    get_orchestrator_registry,
+)
 from .types import (
     CONTROL_STAGES,
     Action,
@@ -42,5 +47,7 @@ __all__ = [
     "ToolInfo",
     "UnknownCheckError",
     "Verdict",
-    "build_default_registry",
+    "build_container_registry",
+    "build_orchestrator_registry",
+    "get_orchestrator_registry",
 ]

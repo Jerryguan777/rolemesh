@@ -92,6 +92,22 @@ class TestSafetyContext:
 
 
 class TestRule:
+    def test_frozen(self) -> None:
+        # Rule is frozen so "rule snapshot taken at container start is
+        # immutable until the next run" is a type-system guarantee
+        # rather than a convention. If a refactor removes frozen=True,
+        # this test surfaces it immediately.
+        r = Rule(
+            id="r1",
+            tenant_id="t",
+            coworker_id=None,
+            stage=Stage.PRE_TOOL_CALL,
+            check_id="pii.regex",
+            config={},
+        )
+        with pytest.raises((AttributeError, Exception)):
+            r.enabled = False  # type: ignore[misc]
+
     def test_snapshot_dict_shape(self) -> None:
         r = Rule(
             id="r1",

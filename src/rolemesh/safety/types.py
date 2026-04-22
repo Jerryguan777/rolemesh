@@ -19,7 +19,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 class Stage(StrEnum):
@@ -92,9 +95,13 @@ class SafetyContext:
     user_id: str
     job_id: str
     conversation_id: str
-    payload: dict[str, Any]
+    # Mapping (read-only protocol) rather than dict so checks cannot
+    # mutate a shared payload between rules in the same turn. Pipeline
+    # constructs a fresh SafetyContext with a new payload for redact
+    # chaining.
+    payload: Mapping[str, Any]
     tool: ToolInfo | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -133,13 +140,17 @@ class Verdict:
     appended_context: str | None = None
 
 
-@dataclass
+@dataclass(frozen=True)
 class Rule:
-    """A single configuration row. Mutable to allow DB writeback.
+    """A single configuration row.
 
     ``coworker_id=None`` means tenant-wide scope. ``priority`` is
     descending (higher runs first). V2 will add ``active_hours`` and
     ``active_days`` for time-window scheduling.
+
+    Frozen so callers use ``dataclasses.replace`` for updates; this
+    makes "rule snapshot taken at container start is immutable until
+    next run" a type-system guarantee rather than a convention.
     """
 
     id: str
@@ -147,7 +158,7 @@ class Rule:
     coworker_id: str | None
     stage: Stage
     check_id: str
-    config: dict[str, Any]
+    config: Mapping[str, Any]
     priority: int = 100
     enabled: bool = True
     description: str = ""

@@ -249,12 +249,12 @@ async def run_query_loop(
     # that do not have rules configured — same convention as approval.
     if init.safety_rules:
         from .safety.hook_handler import SafetyHookHandler
-        from .safety.registry import build_default_registry
+        from .safety.registry import build_container_registry
 
         hook_registry.register(
             SafetyHookHandler(
                 rules=init.safety_rules,
-                registry=build_default_registry(),
+                registry=build_container_registry(),
                 tool_ctx=tool_ctx,
             )
         )

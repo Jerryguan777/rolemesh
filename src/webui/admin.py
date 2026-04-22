@@ -899,10 +899,10 @@ def _validate_safety_rule_body(
         concern once checks publish JSON schemas.
     """
     # Lazy import avoids a WebUI → rolemesh.safety cycle at module load.
-    from rolemesh.safety.registry import build_default_registry
+    from rolemesh.safety.registry import get_orchestrator_registry
     from rolemesh.safety.types import Stage
 
-    registry = build_default_registry()
+    registry = get_orchestrator_registry()
     if not registry.has(check_id):
         raise HTTPException(
             status_code=400,

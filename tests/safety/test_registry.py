@@ -15,7 +15,13 @@ import pytest
 
 from rolemesh.safety.checks.pii_regex import PIIRegexCheck
 from rolemesh.safety.errors import UnknownCheckError
-from rolemesh.safety.registry import CheckRegistry, build_default_registry
+from rolemesh.safety.registry import (
+    CheckRegistry,
+    build_container_registry,
+    build_orchestrator_registry,
+    get_orchestrator_registry,
+    reset_orchestrator_registry,
+)
 from rolemesh.safety.types import CostClass, SafetyContext, Stage, Verdict
 
 
@@ -64,31 +70,49 @@ class TestCheckRegistry:
         assert len(reg) == 1
 
 
-class TestBuildDefaultRegistry:
-    def test_contains_pii_regex(self) -> None:
-        reg = build_default_registry()
+class TestBuilders:
+    def test_container_contains_pii_regex(self) -> None:
+        reg = build_container_registry()
         assert reg.has("pii.regex")
         assert isinstance(reg.get("pii.regex"), PIIRegexCheck)
 
+    def test_orchestrator_contains_pii_regex(self) -> None:
+        reg = build_orchestrator_registry()
+        assert reg.has("pii.regex")
+
     def test_only_default_check_in_v1(self) -> None:
-        reg = build_default_registry()
-        # V1 ships exactly one check. If this breaks because V2 added a
-        # check, update the list — don't make this assertion lax.
-        assert reg.ids() == ["pii.regex"]
+        # V1: both registries ship exactly pii.regex. V2 will diverge
+        # (orchestrator additionally gets slow checks); update here
+        # deliberately — don't make this assertion lax.
+        assert build_container_registry().ids() == ["pii.regex"]
+        assert build_orchestrator_registry().ids() == ["pii.regex"]
+
+
+class TestOrchestratorSingleton:
+    def test_returns_same_instance_across_calls(self) -> None:
+        reset_orchestrator_registry()
+        a = get_orchestrator_registry()
+        b = get_orchestrator_registry()
+        # The singleton guarantees heavy V2 check constructors (spaCy,
+        # HuggingFace etc.) do not re-run per REST request.
+        assert a is b
+
+    def test_reset_forces_rebuild(self) -> None:
+        reset_orchestrator_registry()
+        a = get_orchestrator_registry()
+        reset_orchestrator_registry()
+        b = get_orchestrator_registry()
+        assert a is not b
 
 
 class TestContainerMirror:
-    def test_container_registry_is_same_default(self) -> None:
-        from agent_runner.safety.registry import (
-            build_default_registry as container_build,
-        )
-
-        orchestrator_reg = build_default_registry()
-        container_reg = container_build()
-        # Not object identity (fresh instances), but same check class
-        # sets. A future V2 patch that accidentally wires a different
-        # registry on one side will surface here.
-        assert set(orchestrator_reg.ids()) == set(container_reg.ids())
+    def test_container_registry_equal_ids_to_orchestrator_in_v1(self) -> None:
+        # V1: container and orchestrator share the same check set.
+        # This test MUST be updated (not silently extended) when V2
+        # adds slow checks to orchestrator only.
+        container_reg = build_container_registry()
+        orch_reg = build_orchestrator_registry()
+        assert set(container_reg.ids()) == set(orch_reg.ids())
 
     def test_container_pii_regex_import_same_class(self) -> None:
         # The §5.4 "no drift between sides" test: the container's

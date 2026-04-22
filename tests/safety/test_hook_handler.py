@@ -14,7 +14,7 @@ import pytest
 
 from agent_runner.hooks.events import ToolCallEvent
 from agent_runner.safety.hook_handler import SafetyHookHandler
-from agent_runner.safety.registry import build_default_registry
+from agent_runner.safety.registry import build_container_registry
 
 from .conftest import make_rule
 
@@ -45,7 +45,7 @@ class TestPreToolUse:
         )
         handler = SafetyHookHandler(
             rules=[rule],
-            registry=build_default_registry(),
+            registry=build_container_registry(),
             tool_ctx=tool_ctx,  # type: ignore[arg-type]
         )
         event = ToolCallEvent(
@@ -63,7 +63,7 @@ class TestPreToolUse:
         rule = make_rule(config={"patterns": {"SSN": True}})
         handler = SafetyHookHandler(
             rules=[rule],
-            registry=build_default_registry(),
+            registry=build_container_registry(),
             tool_ctx=tool_ctx,  # type: ignore[arg-type]
         )
         event = ToolCallEvent(
@@ -84,7 +84,7 @@ class TestPreToolUse:
         rule = make_rule(stage=Stage.INPUT_PROMPT)
         handler = SafetyHookHandler(
             rules=[rule],
-            registry=build_default_registry(),
+            registry=build_container_registry(),
             tool_ctx=tool_ctx,  # type: ignore[arg-type]
         )
         event = ToolCallEvent(
@@ -103,7 +103,7 @@ class TestPreToolUse:
         )
         handler = SafetyHookHandler(
             rules=[rule],
-            registry=build_default_registry(),
+            registry=build_container_registry(),
             tool_ctx=tool_ctx,  # type: ignore[arg-type]
         )
         event = ToolCallEvent(
@@ -129,7 +129,7 @@ class TestPreToolUse:
         rule = make_rule(config={"patterns": {"SSN": True}})
         handler = SafetyHookHandler(
             rules=[rule],
-            registry=build_default_registry(),
+            registry=build_container_registry(),
             tool_ctx=tool_ctx,  # type: ignore[arg-type]
         )
         event = ToolCallEvent(

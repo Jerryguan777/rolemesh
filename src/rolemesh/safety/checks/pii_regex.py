@@ -14,9 +14,12 @@ from __future__ import annotations
 
 import re
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..types import CostClass, Finding, SafetyContext, Stage, Verdict
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 class PIICode(StrEnum):
@@ -45,7 +48,7 @@ _PATTERNS: dict[PIICode, re.Pattern[str]] = {
 }
 
 
-def _extract_scannable_text(payload: dict[str, Any]) -> str:
+def _extract_scannable_text(payload: Mapping[str, Any]) -> str:
     """Flatten every string leaf of ``payload`` into a single scan buffer.
 
     We join with newlines so patterns anchored with ``\b`` / ``^`` /

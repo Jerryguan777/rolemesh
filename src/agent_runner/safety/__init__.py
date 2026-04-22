@@ -7,11 +7,11 @@ single source of truth; see ``agent_runner/safety/types.py``.
 
 from .hook_handler import SafetyHookHandler
 from .pipeline import pipeline_run
-from .registry import CheckRegistry, build_default_registry
+from .registry import CheckRegistry, build_container_registry
 
 __all__ = [
     "CheckRegistry",
     "SafetyHookHandler",
-    "build_default_registry",
+    "build_container_registry",
     "pipeline_run",
 ]

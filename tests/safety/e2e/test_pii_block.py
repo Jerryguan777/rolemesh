@@ -30,7 +30,7 @@ import pytest
 
 from agent_runner.hooks.events import ToolCallEvent
 from agent_runner.safety.hook_handler import SafetyHookHandler
-from agent_runner.safety.registry import build_default_registry
+from agent_runner.safety.registry import build_container_registry
 from rolemesh.db import pg
 from rolemesh.ipc.protocol import AgentInitData
 from rolemesh.safety.engine import SafetyEngine
@@ -100,7 +100,7 @@ class TestV1Acceptance:
         )
         handler = SafetyHookHandler(
             rules=decoded.safety_rules,
-            registry=build_default_registry(),
+            registry=build_container_registry(),
             tool_ctx=tool_ctx,  # type: ignore[arg-type]
         )
         verdict = await handler.on_pre_tool_use(

@@ -83,6 +83,23 @@ async def pipeline_run(
             continue
 
         check = registry.get(check_id)
+        # Defensive: REST validates (stage, check_id) compatibility at
+        # creation time, but a rule can become invalid if the check is
+        # upgraded to drop a stage, or if an operator edits the row
+        # directly. Skip rather than hand the check a payload type it
+        # does not know how to interpret.
+        if ctx.stage not in check.stages:
+            _log.error(
+                "safety: rule stage not in check.stages — skipping",
+                extra={
+                    "check_id": check_id,
+                    "rule_id": rule.get("id"),
+                    "stage": ctx.stage.value,
+                    "check_stages": sorted(s.value for s in check.stages),
+                },
+            )
+            continue
+
         rule_config = rule.get("config") or {}
         if not isinstance(rule_config, dict):
             rule_config = {}
