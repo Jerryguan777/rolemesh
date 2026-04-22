@@ -3,24 +3,29 @@
 A single call to ``pipeline_run`` is the only entry point. The hook
 handler builds the ``SafetyContext`` from a ``ToolCallEvent`` and
 forwards it here; everything else — rule filtering, priority ordering,
-short-circuiting on block, redact chaining, audit event publishing —
-happens inside this function.
+short-circuiting on block, audit event publishing — happens inside
+this function.
 
-Semantic guarantees:
+V1 semantics (scope):
 
   1. Rules are filtered by ``stage == ctx.stage`` and ``enabled`` and
      (``coworker_id is None`` or ``coworker_id == ctx.coworker_id``).
   2. Remaining rules are sorted by ``priority`` descending.
-  3. Rules whose ``check_id`` is not in the registry are skipped with a
-     warning — this lets an orchestrator roll back a check without
+  3. Rules whose ``check_id`` is not in the registry are skipped with
+     a warning — this lets an orchestrator roll back a check without
      breaking in-flight snapshots.
-  4. On a ``block`` verdict the pipeline publishes one audit event and
+  4. Rules whose stage is not in ``check.stages`` are skipped with a
+     log ERROR — defence against a check version that drops a stage
+     while old rows still point at it.
+  5. On a ``block`` verdict the pipeline publishes one audit event and
      returns immediately (short-circuit).
-  5. Redact verdicts chain: each successive check sees the modified
-     payload produced by the previous redact. V1 does not exercise this
-     path (config is always block) but the structure is in place so V2
-     can switch ``action`` without rewriting the pipeline.
-  6. Check exceptions are re-raised for control stages (INPUT_PROMPT,
+  6. Non-block / non-allow verdicts are NOT yet supported. Checks MUST
+     only return ``block`` or ``allow`` in V1. Returning ``redact`` /
+     ``warn`` / ``require_approval`` raises at pipeline level (it
+     would otherwise land in the hook handler untranslated). V2
+     re-introduces these actions with proper infrastructure (redact
+     chain, warn context injection, approval bridging).
+  7. Check exceptions are re-raised for control stages (INPUT_PROMPT,
      PRE_TOOL_CALL, MODEL_OUTPUT) — the hook bridge translates that
      into a block verdict for the agent. For observational stages the
      exception is logged and the check is skipped. This mirrors the
@@ -60,6 +65,12 @@ AuditPublisher = Callable[[str, dict[str, Any]], None]
 AUDIT_SUBJECT_TEMPLATE = "agent.{job_id}.safety_events"
 
 
+# Actions the V1 pipeline translates into hook verdicts. Any other
+# action a check returns is a programming error — V2 will widen this
+# set after wiring redact / warn / require_approval infrastructure.
+_V1_ALLOWED_ACTIONS: frozenset[str] = frozenset({"allow", "block"})
+
+
 async def pipeline_run(
     rules: list[dict[str, Any]],
     registry: CheckRegistry,
@@ -70,8 +81,6 @@ async def pipeline_run(
     applicable.sort(key=lambda r: -int(r.get("priority", 100)))
 
     all_findings: list[Finding] = []
-    current_ctx = ctx
-    accumulated_payload: Any = None
 
     for rule in applicable:
         check_id = str(rule.get("check_id", ""))
@@ -105,7 +114,7 @@ async def pipeline_run(
             rule_config = {}
 
         try:
-            verdict = await check.check(current_ctx, rule_config)
+            verdict = await check.check(ctx, rule_config)
         except Exception as exc:
             if ctx.stage in CONTROL_STAGES:
                 # Fail-close: re-raise so the hook bridge converts
@@ -132,29 +141,29 @@ async def pipeline_run(
             )
             continue
 
+        if verdict.action not in _V1_ALLOWED_ACTIONS:
+            # A check that returns redact / warn / require_approval in
+            # V1 is a programming error — the pipeline has no path to
+            # translate these into hook verdicts yet. Fail-close on
+            # control stages (re-raise), skip on observational.
+            msg = (
+                f"check {check_id!r} returned unsupported action "
+                f"{verdict.action!r} in V1 pipeline"
+            )
+            if ctx.stage in CONTROL_STAGES:
+                raise ValueError(msg)
+            _log.error("safety: %s", msg)
+            continue
+
         all_findings.extend(verdict.findings)
 
         if verdict.action == "block":
-            _publish_audit(publisher, current_ctx, rule, verdict)
+            _publish_audit(publisher, ctx, rule, verdict)
             return replace(verdict, findings=list(all_findings))
 
-        if verdict.action == "redact" and verdict.modified_payload is not None:
-            accumulated_payload = verdict.modified_payload
-            # Feed the redacted payload to the next check so a second
-            # rule can scan on the cleaned-up content.
-            if isinstance(accumulated_payload, dict):
-                current_ctx = replace(current_ctx, payload=accumulated_payload)
-            _publish_audit(publisher, ctx, rule, verdict)
-            continue
-
+        # allow — continue evaluating remaining rules.
         _publish_audit(publisher, ctx, rule, verdict)
 
-    if accumulated_payload is not None:
-        return Verdict(
-            action="redact",
-            modified_payload=accumulated_payload,
-            findings=list(all_findings),
-        )
     return Verdict(action="allow", findings=list(all_findings))
 
 

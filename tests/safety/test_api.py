@@ -147,6 +147,62 @@ class TestCreateRule:
             assert r.status_code == 422
 
     @pytest.mark.asyncio
+    async def test_unknown_pattern_key_400(self) -> None:
+        # Previously, {"patterns": {"SNN": true}} was silently ignored
+        # in the container — admins saw "rule created" then no actual
+        # detection. pydantic config_model now rejects at REST time.
+        tid, uid, _ = await _seed()
+        app = _build_app(_authed_user(tid, uid))
+        async with _client(app) as client:
+            r = await client.post(
+                "/api/admin/safety/rules",
+                json={
+                    "stage": "pre_tool_call",
+                    "check_id": "pii.regex",
+                    "config": {"patterns": {"SNN": True}},  # typo
+                },
+            )
+            assert r.status_code == 400
+            assert "Unknown PII pattern" in r.text
+
+    @pytest.mark.asyncio
+    async def test_non_bool_pattern_value_400(self) -> None:
+        # "yes" and "no" are both truthy strings — the previous code
+        # silently accepted them, enabling the pattern regardless of
+        # intent. pydantic config_model now rejects non-bool values.
+        tid, uid, _ = await _seed()
+        app = _build_app(_authed_user(tid, uid))
+        async with _client(app) as client:
+            r = await client.post(
+                "/api/admin/safety/rules",
+                json={
+                    "stage": "pre_tool_call",
+                    "check_id": "pii.regex",
+                    "config": {"patterns": {"SSN": "yes"}},
+                },
+            )
+            assert r.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_extra_config_key_400(self) -> None:
+        # extra="forbid" rejects anything outside PIIRegexConfig.
+        tid, uid, _ = await _seed()
+        app = _build_app(_authed_user(tid, uid))
+        async with _client(app) as client:
+            r = await client.post(
+                "/api/admin/safety/rules",
+                json={
+                    "stage": "pre_tool_call",
+                    "check_id": "pii.regex",
+                    "config": {
+                        "patterns": {"SSN": True},
+                        "extra_field": "should-fail",
+                    },
+                },
+            )
+            assert r.status_code == 400
+
+    @pytest.mark.asyncio
     async def test_stage_outside_check_support_400(self) -> None:
         # pii.regex does not declare PRE_COMPACTION in its stages set.
         tid, uid, _ = await _seed()

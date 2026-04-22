@@ -299,6 +299,68 @@ class TestShortCircuit:
         assert event["findings"] and event["findings"][0]["code"] == "STUB.BLOCKED"
 
 
+class TestUnsupportedActionsV1:
+    """V1 pipeline refuses redact/warn/require_approval.
+
+    V2 will widen the supported set once redact chaining, context
+    injection, and approval bridging are implemented. For V1, a check
+    returning one of these actions is a programming error that must
+    surface loudly rather than silently no-op.
+    """
+
+    @pytest.mark.asyncio
+    async def test_control_stage_redact_raises(
+        self, publisher: CapturePublisher
+    ) -> None:
+        class _RedactCheck:
+            id = "stub.redact"
+            version = "1"
+            stages = frozenset(Stage)
+            cost_class: CostClass = "cheap"
+            supported_codes = frozenset({"X"})
+
+            async def check(
+                self, ctx: SafetyContext, config: dict[str, Any]
+            ) -> Verdict:
+                return Verdict(
+                    action="redact",
+                    modified_payload={"tool_input": {}},
+                )
+
+        reg = CheckRegistry()
+        reg.register(_RedactCheck())
+        rule = make_rule(check_id="stub.redact")
+        with pytest.raises(ValueError, match="unsupported action"):
+            await pipeline_run([rule], reg, make_context(), publisher)
+
+    @pytest.mark.asyncio
+    async def test_observational_stage_redact_skipped(
+        self, publisher: CapturePublisher
+    ) -> None:
+        class _RedactCheck:
+            id = "stub.redact2"
+            version = "1"
+            stages = frozenset(Stage)
+            cost_class: CostClass = "cheap"
+            supported_codes = frozenset({"X"})
+
+            async def check(
+                self, ctx: SafetyContext, config: dict[str, Any]
+            ) -> Verdict:
+                return Verdict(action="warn")
+
+        reg = CheckRegistry()
+        reg.register(_RedactCheck())
+        rule = make_rule(
+            check_id="stub.redact2", stage=Stage.POST_TOOL_RESULT
+        )
+        # Observational stage: fail-safe, rule skipped, pipeline allows.
+        verdict = await pipeline_run(
+            [rule], reg, make_context(stage=Stage.POST_TOOL_RESULT), publisher
+        )
+        assert verdict.action == "allow"
+
+
 class TestFailModes:
     @pytest.mark.asyncio
     async def test_control_stage_exception_propagates(

@@ -193,6 +193,13 @@ class SafetyCheck(Protocol):
     non-backward-compatible code changes. ``supported_codes`` publishes
     the stable Finding.code strings a check may emit — tests enforce
     that nothing outside this set leaks out.
+
+    ``config_model`` is optional; when set, the REST layer uses it to
+    pydantic-validate ``config`` payloads on rule create/update. A
+    missing model means the check tolerates arbitrary dicts (legacy
+    behaviour) — new checks are expected to provide one so that typos
+    like ``{"SSN": "yes"}`` fail loud at REST time rather than acting
+    subtly wrong at run-time.
     """
 
     id: str
@@ -200,6 +207,9 @@ class SafetyCheck(Protocol):
     stages: frozenset[Stage]
     cost_class: CostClass
     supported_codes: frozenset[str]
+    # Type is Any to keep this Protocol importable without pydantic at
+    # module load. Concrete checks declare it as type[BaseModel] | None.
+    config_model: Any
 
     async def check(
         self, ctx: SafetyContext, config: dict[str, Any]

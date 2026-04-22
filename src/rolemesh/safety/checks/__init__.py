@@ -4,6 +4,6 @@ V1 ships ``pii.regex`` only. V2 adds orchestrator-only slow checks
 (``presidio.pii``, ``llm_guard.prompt_injection``, etc.) here as well.
 """
 
-from .pii_regex import PIICode, PIIRegexCheck
+from .pii_regex import PIICode, PIIRegexCheck, PIIRegexConfig
 
-__all__ = ["PIICode", "PIIRegexCheck"]
+__all__ = ["PIICode", "PIIRegexCheck", "PIIRegexConfig"]

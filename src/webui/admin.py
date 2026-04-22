@@ -891,14 +891,15 @@ def _validate_safety_rule_body(
 ) -> None:
     """Raise HTTPException(400) if the rule cannot be satisfied at run-time.
 
-    V1 validation is deliberately minimal:
-      - ``check_id`` must be registered server-side (the container will
-        otherwise silently skip the rule with a warning).
-      - ``stage`` must be in ``check.stages``.
-      - ``config`` must be a dict. Deeper schema validation is a V2
-        concern once checks publish JSON schemas.
+    REST is the strict boundary: misconfigured rules are rejected here
+    before they land in the DB. The container-side pipeline is
+    permissive on stale snapshots (log + skip), but a fresh admin
+    action must fail loud so typos surface immediately rather than
+    subtly acting wrong at run-time.
     """
     # Lazy import avoids a WebUI → rolemesh.safety cycle at module load.
+    from pydantic import ValidationError
+
     from rolemesh.safety.registry import get_orchestrator_registry
     from rolemesh.safety.types import Stage
 
@@ -927,6 +928,19 @@ def _validate_safety_rule_body(
         raise HTTPException(
             status_code=400, detail="config must be a JSON object"
         )
+    # Pydantic validation (unknown keys, wrong types) — the check's
+    # declared config_model is the source of truth. Older checks
+    # without a model are tolerated, matching the permissive run-time
+    # contract.
+    config_model = getattr(check, "config_model", None)
+    if config_model is not None:
+        try:
+            config_model.model_validate(config)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid config for {check_id}: {exc.errors()}",
+            ) from exc
 
 
 @router.post(

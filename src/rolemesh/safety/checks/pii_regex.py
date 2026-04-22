@@ -8,6 +8,14 @@ remains the cheap first line of defense that never leaves the container.
 Stable codes (``supported_codes``) are the adapter discipline required
 by §7.1 of the design doc — downstream audit queries and policy
 dashboards key off these strings, so renames require a ``version`` bump.
+
+Config key discipline: ``patterns`` keys use the short form (``SSN``,
+``EMAIL``) because short names are the human-facing identifier in the
+admin UI. The check emits Finding.code in the prefixed form
+(``PII.SSN``) because audit tables key off prefixed, namespaced codes.
+``_CONFIG_KEY_TO_CODE`` is the single explicit mapping between the two;
+we do not build keys with string concatenation (the previous code did,
+which silently accepted whitespace-padded keys).
 """
 
 from __future__ import annotations
@@ -15,6 +23,8 @@ from __future__ import annotations
 import re
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
+
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
 from ..types import CostClass, Finding, SafetyContext, Stage, Verdict
 
@@ -30,6 +40,50 @@ class PIICode(StrEnum):
     EMAIL = "PII.EMAIL"
     PHONE_US = "PII.PHONE_US"
     IP_ADDRESS = "PII.IP_ADDRESS"
+
+
+# Explicit short-key → stable code mapping. Admin UI / REST API accept
+# the short form on the left; Finding.code uses the prefixed form on
+# the right. Any key not in this map is a typo and SHOULD be rejected
+# at the REST layer via PIIRegexConfig.
+_CONFIG_KEY_TO_CODE: dict[str, PIICode] = {
+    "SSN": PIICode.SSN,
+    "CREDIT_CARD": PIICode.CREDIT_CARD,
+    "EMAIL": PIICode.EMAIL,
+    "PHONE_US": PIICode.PHONE_US,
+    "IP_ADDRESS": PIICode.IP_ADDRESS,
+}
+
+
+class PIIRegexConfig(BaseModel):
+    """Pydantic model validated by the REST layer.
+
+    ``model_config = ConfigDict(extra="forbid")`` turns unknown keys
+    into 422 validation errors, so a typo like ``{"patterns": {"SNN":
+    true}}`` is rejected at admin-time instead of accepted-and-
+    silently-ignored. ``patterns`` values are coerced to bool — so
+    ``"yes"`` stays a string that fails bool validation, rather than
+    sneaking through as truthy.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # StrictBool rejects truthy strings like "yes" / "on" / "1" that
+    # pydantic's default bool coercion silently converts to True. The
+    # admin intent of {"patterns": {"SSN": "yes"}} is ambiguous — we
+    # want them to write `true` / `false` explicitly.
+    patterns: dict[str, StrictBool] = Field(default_factory=dict)
+
+    def model_post_init(self, _ctx: Any) -> None:
+        # Validate each key against the stable mapping at admin time
+        # so the operator's feedback loop is tight. Unknown keys ->
+        # 422 through pydantic's standard error surface.
+        for key in self.patterns:
+            if key not in _CONFIG_KEY_TO_CODE:
+                valid = sorted(_CONFIG_KEY_TO_CODE.keys())
+                raise ValueError(
+                    f"Unknown PII pattern {key!r}; valid keys: {valid}"
+                )
 
 
 # Conservative regex set. CREDIT_CARD uses a loose 13-19-digit window
@@ -51,7 +105,7 @@ _PATTERNS: dict[PIICode, re.Pattern[str]] = {
 def _extract_scannable_text(payload: Mapping[str, Any]) -> str:
     """Flatten every string leaf of ``payload`` into a single scan buffer.
 
-    We join with newlines so patterns anchored with ``\b`` / ``^`` /
+    We join with newlines so patterns anchored with ``\\b`` / ``^`` /
     ``$`` still match at field boundaries. Non-string leaves (bools,
     numbers) are coerced to str so a numeric SSN packed into a dict
     field doesn't escape detection. Unlimited recursion is fine for
@@ -79,7 +133,7 @@ def _extract_scannable_text(payload: Mapping[str, Any]) -> str:
 class PIIRegexCheck:
     """Regex PII detector.
 
-    Config schema::
+    Config schema (validated at REST via ``config_model``)::
 
         {
           "patterns": {
@@ -91,10 +145,13 @@ class PIIRegexCheck:
           }
         }
 
-    Missing / empty ``patterns`` keys are treated as disabled; a
-    completely empty ``patterns`` dict means the check is a no-op and
-    returns allow. V1 always emits ``block`` on any hit; V2 will add
-    an ``action_override`` config key.
+    Empty / missing ``patterns`` = no-op (return allow). V1 always emits
+    ``block`` on any hit; V2 will add an ``action_override`` config key.
+
+    Run-time parsing is permissive (unknown keys skipped with a log)
+    rather than hard-failing, because snapshots loaded into a running
+    container predate any later REST-layer schema change. REST is the
+    strict boundary.
     """
 
     id: str = "pii.regex"
@@ -109,6 +166,7 @@ class PIIRegexCheck:
     )
     cost_class: CostClass = "cheap"
     supported_codes: frozenset[str] = frozenset(c.value for c in PIICode)
+    config_model: type[BaseModel] = PIIRegexConfig
 
     async def check(
         self, ctx: SafetyContext, config: dict[str, Any]
@@ -121,13 +179,14 @@ class PIIRegexCheck:
         for key, flag in raw_patterns.items():
             if not flag:
                 continue
-            try:
-                enabled.add(PIICode(f"PII.{key}") if not str(key).startswith("PII.") else PIICode(key))
-            except ValueError:
-                # Unknown pattern name — silently ignored rather than
-                # failing the rule, so a newer check.version can add
-                # patterns without breaking older configs.
+            code = _CONFIG_KEY_TO_CODE.get(str(key))
+            if code is None:
+                # Unknown key in a persisted snapshot — skip silently
+                # at container run-time (REST already blocked this on
+                # fresh creates). A log line helps operators notice
+                # stale snapshots without failing the agent turn.
                 continue
+            enabled.add(code)
 
         if not enabled:
             return Verdict(action="allow")
@@ -156,4 +215,4 @@ class PIIRegexCheck:
         return Verdict(action="allow")
 
 
-__all__ = ["PIICode", "PIIRegexCheck"]
+__all__ = ["PIICode", "PIIRegexCheck", "PIIRegexConfig"]

@@ -78,12 +78,9 @@ class SafetyHookHandler:
             return ToolCallVerdict(
                 block=True, reason=verdict.reason or "Blocked by safety policy"
             )
-        if verdict.action == "redact" and isinstance(verdict.modified_payload, dict):
-            modified = verdict.modified_payload.get("tool_input")
-            if isinstance(modified, dict):
-                return ToolCallVerdict(block=False, modified_input=modified)
-        # allow / warn / require_approval (V2) all fall through to no-op
-        # at V1 — warn would inject context via a V2-specific field.
+        # allow is the only other V1 outcome — pipeline rejects
+        # redact/warn/require_approval so we never land here with a
+        # verdict the hook bridge cannot translate.
         return None
 
 
