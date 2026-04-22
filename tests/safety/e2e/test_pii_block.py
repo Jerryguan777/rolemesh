@@ -160,9 +160,15 @@ class TestV1Acceptance:
         assert "123-45-6789" not in d["context_summary"]
 
     @pytest.mark.asyncio
-    async def test_disabling_rule_passes_next_job(self) -> None:
+    async def test_disabling_rule_lets_next_job_allow_ssn(self) -> None:
         # §5.12 acceptance: toggling enabled=false must take effect on
-        # the NEXT job load (we do not expect mid-run rule reload).
+        # the NEXT job load. Previous version only asserted that the
+        # snapshot query returned []; that's a necessary but far from
+        # sufficient check — pipeline / hook_handler could still have
+        # bugs that made the handler block despite an empty snapshot.
+        # This version runs the full container flow twice: once with
+        # the rule enabled (asserts block), once with it disabled
+        # (asserts no block on the same tool_input).
         tenant = await pg.create_tenant(
             name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
         )
@@ -176,31 +182,70 @@ class TestV1Acceptance:
             check_id="pii.regex",
             config={"patterns": {"SSN": True}},
         )
-        # Disable the rule (would be PATCH /rules/{id} in prod).
+
+        # Snapshot A: rule enabled, Handler must block.
+        snapshot_a = [
+            r.to_snapshot_dict()
+            for r in await pg.list_safety_rules_for_coworker(
+                tenant.id, cw.id
+            )
+        ]
+        handler_a = SafetyHookHandler(
+            rules=snapshot_a,
+            registry=build_container_registry(),
+            tool_ctx=_FakeToolCtx(
+                tenant_id=tenant.id, coworker_id=cw.id
+            ),  # type: ignore[arg-type]
+        )
+        v_a = await handler_a.on_pre_tool_use(
+            ToolCallEvent(
+                tool_name="github__create_issue",
+                tool_input={"body": "SSN 123-45-6789"},
+            )
+        )
+        assert v_a is not None and v_a.block, (
+            "baseline: enabled rule MUST block SSN"
+        )
+
+        # Admin disables the rule.
         await pg.update_safety_rule(rule.id, enabled=False)
 
-        # Fresh snapshot load — mimics a new container start.
-        rules = await pg.list_safety_rules_for_coworker(tenant.id, cw.id)
-        assert rules == [], "disabled rule must not surface in snapshot"
-
-        # With an empty rule set, AgentInitData.safety_rules would be
-        # None; the zero-cost path is "do not register the handler at
-        # all". The integration point is in agent_runner/main.py, but
-        # we assert the list_for_coworker contract here which drives
-        # that branch.
+        # Snapshot B: disabled rule, fresh Handler, SAME tool_input
+        # must now be allowed through. This is the property the
+        # previous test advertised but did not verify.
+        snapshot_b = [
+            r.to_snapshot_dict()
+            for r in await pg.list_safety_rules_for_coworker(
+                tenant.id, cw.id
+            )
+        ]
+        assert snapshot_b == [], "disabled rule must not surface"
+        handler_b = SafetyHookHandler(
+            rules=snapshot_b,
+            registry=build_container_registry(),
+            tool_ctx=_FakeToolCtx(
+                tenant_id=tenant.id, coworker_id=cw.id
+            ),  # type: ignore[arg-type]
+        )
+        v_b = await handler_b.on_pre_tool_use(
+            ToolCallEvent(
+                tool_name="github__create_issue",
+                tool_input={"body": "SSN 123-45-6789"},
+            )
+        )
+        assert v_b is None, (
+            "after disable + snapshot reload: identical SSN tool_input "
+            "MUST pass through — Handler returns None when nothing "
+            "blocks"
+        )
 
     @pytest.mark.asyncio
-    async def test_zero_rules_means_no_handler(self) -> None:
-        # If no rules exist for the coworker, the orchestrator's
-        # container_executor must pass None in AgentInitData.
-        # Verified by the snapshot return being empty → container_executor
-        # sets safety_rules=None (§5.9).
-        tenant = await pg.create_tenant(
-            name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
-        )
-        cw = await pg.create_coworker(
-            tenant_id=tenant.id, name="cw",
-            folder=f"cw-{uuid.uuid4().hex[:8]}",
-        )
-        rules = await pg.list_safety_rules_for_coworker(tenant.id, cw.id)
-        assert rules == []
+    async def test_zero_rules_path_covered_elsewhere(self) -> None:
+        # Kept as a pointer: the "no rules -> no handler" invariant
+        # is now exercised by test_fail_mode.py::TestRegistrationGuard
+        # which exercises maybe_register_safety_handler directly.
+        # Previous placeholder that only asserted list == [] was too
+        # shallow — that behaviour is already covered by
+        # test_db.py::TestSafetyRules. Leaving this test stub so a
+        # reader grep'ing for "zero rules" lands on the new location.
+        pass

@@ -247,17 +247,15 @@ async def run_query_loop(
     # or missing safety_rules list means the Safety Framework is
     # inactive for this run, preserving zero runtime cost for agents
     # that do not have rules configured — same convention as approval.
-    if init.safety_rules:
-        from .safety.hook_handler import SafetyHookHandler
-        from .safety.registry import build_container_registry
+    # Guard logic lives in rolemesh.safety.loader so the registration
+    # decision is unit-testable without a full container startup.
+    from rolemesh.safety.loader import maybe_register_safety_handler
 
-        hook_registry.register(
-            SafetyHookHandler(
-                rules=init.safety_rules,
-                registry=build_container_registry(),
-                tool_ctx=tool_ctx,
-            )
-        )
+    maybe_register_safety_handler(
+        hook_registry=hook_registry,
+        safety_rules=init.safety_rules,
+        tool_ctx=tool_ctx,
+    )
 
     backend.subscribe(on_event)
     await backend.start(

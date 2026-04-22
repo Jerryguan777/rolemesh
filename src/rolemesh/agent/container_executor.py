@@ -233,36 +233,14 @@ class ContainerAgentExecutor:
         # approval above (SAFETY_FAIL_MODE closed default refuses
         # startup; open logs and starts with no rules). None when no
         # rules exist, so SafetyHookHandler stays off the hook chain
-        # in zero-config deployments.
-        safety_rules_dicts: list[dict[str, object]] | None = None
-        try:
-            from rolemesh.db.pg import list_safety_rules_for_coworker
+        # in zero-config deployments. Implementation lives in
+        # rolemesh.safety.loader so the fail-mode branch is testable
+        # without standing up a Docker container.
+        from rolemesh.safety.loader import load_safety_rules_snapshot
 
-            rules = await list_safety_rules_for_coworker(
-                tenant_id, inp.coworker_id
-            )
-            if rules:
-                safety_rules_dicts = [r.to_snapshot_dict() for r in rules]
-        except Exception as exc:
-            from rolemesh.core.config import SAFETY_FAIL_MODE
-
-            if SAFETY_FAIL_MODE == "open":
-                logger.warning(
-                    "safety: DB unreachable — starting agent without "
-                    "rules (SAFETY_FAIL_MODE=open).",
-                    coworker_id=inp.coworker_id,
-                    error=str(exc),
-                )
-            else:
-                logger.error(
-                    "safety: DB unreachable at job start — refusing "
-                    "to start agent (SAFETY_FAIL_MODE=closed). Set "
-                    "SAFETY_FAIL_MODE=open to permit fail-open "
-                    "startup.",
-                    coworker_id=inp.coworker_id,
-                    error=str(exc),
-                )
-                raise
+        safety_rules_dicts = await load_safety_rules_snapshot(
+            tenant_id, inp.coworker_id
+        )
 
         # Channel 1: Write initial input to KV before starting container
         kv_init = await self._transport.js.key_value("agent-init")
