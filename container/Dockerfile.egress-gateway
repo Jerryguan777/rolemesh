@@ -31,7 +31,8 @@ RUN pip install --no-cache-dir \
     aiohttp>=3.9 \
     structlog>=24.0 \
     dnslib>=0.9 \
-    nats-py>=2.9
+    nats-py>=2.9 \
+    pydantic>=2.0
 
 WORKDIR /app
 
@@ -43,9 +44,22 @@ COPY src/rolemesh/__init__.py                      ./rolemesh/__init__.py
 COPY src/rolemesh/core/                            ./rolemesh/core/
 COPY src/rolemesh/security/credential_proxy.py     ./rolemesh/security/credential_proxy.py
 COPY src/rolemesh/egress/                          ./rolemesh/egress/
+# EC-3: the gateway's safety pipeline lazily imports
+# rolemesh.safety.checks.egress_domain_rule to produce the
+# gateway-adapter callable. Only the types + this one check file
+# are needed at runtime — the broader safety tree (Engine, Subscriber,
+# audit sinks) stays on the orchestrator side. We write stripped-down
+# __init__.py files rather than copying the real ones because the
+# real rolemesh/safety/__init__.py eagerly imports Engine / Subscriber
+# / loader, which would drag asyncpg + the full safety surface into
+# the gateway image.
+COPY src/rolemesh/safety/types.py                  ./rolemesh/safety/types.py
+COPY src/rolemesh/safety/errors.py                 ./rolemesh/safety/errors.py
+COPY src/rolemesh/safety/checks/egress_domain_rule.py ./rolemesh/safety/checks/egress_domain_rule.py
 
-# Create __init__.py files for the empty package layers we just populated.
-RUN touch ./rolemesh/security/__init__.py
+RUN touch ./rolemesh/security/__init__.py \
+    && touch ./rolemesh/safety/__init__.py \
+    && touch ./rolemesh/safety/checks/__init__.py
 
 # Non-root user. 1001 to avoid collision with the agent image's UID 1000
 # — the two containers never share volumes, but keeping UIDs disjoint

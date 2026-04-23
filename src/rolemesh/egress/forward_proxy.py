@@ -164,7 +164,11 @@ class ForwardProxy:
             await _respond(writer, 502, "Bad Gateway")
             return
 
-        await _respond(writer, 200, "Connection Established")
+        # IMPORTANT: do NOT use ``_respond`` here — that helper closes the
+        # writer after flushing, which is right for error paths but
+        # wrong for CONNECT. After a 200 reply the TCP connection MUST
+        # stay open so the pipe can splice client↔upstream bytes.
+        await _write_status_line_only(writer, 200, "Connection Established")
 
         # Bidirectional pipe. Cancelling one leg terminates the other so
         # a dead upstream doesn't keep the client's file descriptor
@@ -344,6 +348,29 @@ def _rewrite_request_line(raw: bytes, method: str, path: str) -> bytes:
     version = original.rsplit(" ", 1)[-1] if " " in original else "HTTP/1.1"
     new_line = f"{method} {path} {version}".encode("ascii")
     return new_line + raw[newline:]
+
+
+async def _write_status_line_only(
+    writer: asyncio.StreamWriter,
+    status: int,
+    reason: str,
+) -> None:
+    """Write the CONNECT success response without closing the socket.
+
+    For 200 Connection Established we must leave the TCP half-open so
+    the pipe can splice bytes through. Content-Length:0 is included so
+    HTTP-aware intermediaries don't keep looking for a body that will
+    never arrive.
+    """
+    lines = [
+        f"HTTP/1.1 {status} {reason}",
+        "Content-Length: 0",
+        "",
+        "",
+    ]
+    writer.write("\r\n".join(lines).encode("ascii"))
+    with contextlib.suppress(ConnectionError, OSError):
+        await writer.drain()
 
 
 async def _respond(
