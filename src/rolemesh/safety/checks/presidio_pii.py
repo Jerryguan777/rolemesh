@@ -159,9 +159,37 @@ class PresidioPIICheck:
 
     def __init__(self) -> None:
         from presidio_analyzer import AnalyzerEngine
+        from presidio_analyzer.nlp_engine import NlpEngineProvider
         from presidio_anonymizer import AnonymizerEngine
 
-        self._analyzer = AnalyzerEngine()
+        # Presidio's default config pins ``en_core_web_lg`` (425 MB).
+        # For RoleMesh's detection needs, the ``sm`` model (~12 MB) is
+        # sufficient — our ``_PRESIDIO_MAPPING`` only uses entities
+        # whose recognition relies on presidio's regex / rule
+        # recognizers (EMAIL_ADDRESS, US_SSN, CREDIT_CARD, …) or on
+        # spaCy NER labels (PERSON, LOCATION, DATE_TIME) that are
+        # available in the small model too. The accuracy difference
+        # on short prompts is negligible in practice and the 35x
+        # disk savings are not.
+        # If an operator actually needs the larger model they can
+        # ``spacy download en_core_web_lg`` and rebuild the registry
+        # with a custom NlpEngineProvider config — this class
+        # deliberately does not expose that as a runtime knob
+        # because it's a deployment choice, not a per-rule one.
+        provider = NlpEngineProvider(
+            nlp_configuration={
+                "nlp_engine_name": "spacy",
+                "models": [
+                    {
+                        "lang_code": "en",
+                        "model_name": "en_core_web_sm",
+                    }
+                ],
+            }
+        )
+        self._analyzer = AnalyzerEngine(
+            nlp_engine=provider.create_engine()
+        )
         self._anonymizer = AnonymizerEngine()
 
     async def check(
