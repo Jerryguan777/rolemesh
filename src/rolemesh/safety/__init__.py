@@ -13,6 +13,12 @@ from .loader import (
     load_safety_rules_snapshot,
     maybe_register_safety_handler,
 )
+from .pipeline_core import (
+    AUDIT_SUBJECT_TEMPLATE,
+    AsyncAuditPublisher,
+    AuditPublisher,
+    pipeline_run,
+)
 from .registry import (
     CheckRegistry,
     build_container_registry,
@@ -35,9 +41,12 @@ from .types import (
 )
 
 __all__ = [
+    "AUDIT_SUBJECT_TEMPLATE",
     "CONTROL_STAGES",
     "Action",
+    "AsyncAuditPublisher",
     "AuditEvent",
+    "AuditPublisher",
     "AuditSink",
     "CheckRegistry",
     "CostClass",
@@ -60,4 +69,5 @@ __all__ = [
     "get_orchestrator_registry",
     "load_safety_rules_snapshot",
     "maybe_register_safety_handler",
+    "pipeline_run",
 ]

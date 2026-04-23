@@ -60,3 +60,16 @@ class ToolContext:
     @property
     def can_schedule(self) -> bool:
         return bool(self.permissions.get("task_schedule"))
+
+    def get_tool_reversibility(self, tool_name: str) -> bool:
+        """Return True iff the tool is known to be reversible.
+
+        P0.1 fail-safe stub: always returns False so the safety
+        pipeline treats every tool as irreversible. P0.4 replaces
+        this with a real lookup against the builtin reversibility
+        table and per-MCP-server overrides. Keeping the method here
+        now lets the hook handler call it unconditionally without
+        a hasattr dance later.
+        """
+        del tool_name
+        return False

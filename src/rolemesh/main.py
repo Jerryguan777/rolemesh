@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from rolemesh.channels.gateway import ChannelGateway
+    from rolemesh.safety.engine import SafetyEngine
 
 from rolemesh.agent import (
     BACKEND_CONFIGS,
@@ -145,6 +146,82 @@ _executors: dict[str, ContainerAgentExecutor] = {}
 # Track texts sent via IPC send_message to deduplicate against results stream
 _ipc_sent_texts: set[str] = set()
 _bg_tasks: set[asyncio.Task[None]] = set()
+
+# SafetyEngine is shared by the NATS safety_events subscriber (ingests
+# container-produced audit events) and the orchestrator-side MODEL_OUTPUT
+# pipeline (see _on_output below). Instantiated when the safety
+# subscriber starts; kept None until then so tests that import this
+# module without full startup don't pay for the default DbAuditSink.
+_safety_engine: SafetyEngine | None = None
+
+
+async def _apply_model_output_safety(
+    *,
+    safety_engine: SafetyEngine | None,
+    tenant_id: str,
+    coworker_id: str,
+    user_id: str,
+    conversation_id: str,
+    text: str,
+) -> str:
+    """Run the MODEL_OUTPUT pipeline and return possibly-replaced text.
+
+    Split out of ``_on_output`` so it is reachable from unit tests
+    without standing up the full conversation / gateway closure. The
+    pipeline itself lives in ``rolemesh.safety.pipeline_core``; this
+    wrapper is purely the "where does the text go on block / exception"
+    policy that the orchestrator hot path applies.
+
+    Behaviour contract:
+
+      - No engine or no text → return ``text`` unchanged (zero-cost path).
+      - Rule load failure → log, fail-open (return ``text``). MODEL_OUTPUT
+        is one of several defense layers, and a transient DB blip
+        breaking every agent reply would magnify the blast radius of
+        the outage without closing an attack vector the container-side
+        pipeline is already watching.
+      - Pipeline internal exception → fail-close (substitute a generic
+        block string). That path indicates a programming error, not an
+        infra blip — suppressing the reply is the conservative choice.
+      - Block verdict → substitute ``verdict.reason`` (or the generic
+        block string when reason is empty).
+      - Allow / any other verdict → return original ``text``.
+    """
+    if not text or safety_engine is None:
+        return text
+    try:
+        rules = await safety_engine.load_rules_for_coworker(
+            tenant_id, coworker_id
+        )
+    except Exception:
+        logger.exception(
+            "safety: MODEL_OUTPUT rule load failed — skipping pipeline"
+        )
+        return text
+    if not rules:
+        return text
+
+    from rolemesh.safety.types import SafetyContext, Stage
+
+    ctx = SafetyContext(
+        stage=Stage.MODEL_OUTPUT,
+        tenant_id=tenant_id,
+        coworker_id=coworker_id,
+        user_id=user_id,
+        job_id="",
+        conversation_id=conversation_id,
+        payload={"text": text},
+    )
+    try:
+        verdict = await safety_engine.run_orchestrator_pipeline(ctx, rules)
+    except Exception:
+        logger.exception(
+            "safety: MODEL_OUTPUT pipeline raised — failing closed"
+        )
+        return "[Response blocked by safety policy]"
+    if verdict.action == "block":
+        return verdict.reason or "[Response blocked by safety policy]"
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -459,6 +536,18 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
             raw = result.result
             text = re.sub(r"<internal>[\s\S]*?</internal>", "", raw).strip()
             logger.info("Agent output", coworker=config.name, chars=len(raw))
+
+            # V2 P0.1: orchestrator-side MODEL_OUTPUT safety pipeline.
+            # Runs on the user-visible text (internal tags already stripped).
+            text = await _apply_model_output_safety(
+                safety_engine=_safety_engine,
+                tenant_id=config.tenant_id,
+                coworker_id=config.id,
+                user_id=conv.user_id or "",
+                conversation_id=conv.id,
+                text=text,
+            )
+
             if text and binding:
                 # Skip if this exact text was already sent via IPC send_message
                 if text in _ipc_sent_texts:
@@ -783,8 +872,10 @@ async def _start_nats_ipc_subscriptions(transport: NatsTransport, deps: _IpcDeps
                 tenant_id=cw.config.tenant_id, id=cw.config.id
             )
 
+    global _safety_engine
+    _safety_engine = SafetyEngine()
     safety_subscriber = SafetyEventsSubscriber(
-        engine=SafetyEngine(),
+        engine=_safety_engine,
         coworker_lookup=_StateCoworkerLookup(),
     )
 

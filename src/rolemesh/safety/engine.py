@@ -1,7 +1,6 @@
 """Orchestrator-side SafetyEngine.
 
-Thin façade that the WebUI admin REST layer and the NATS
-``safety_events`` subscriber both depend on:
+Thin façade shared by three call sites:
 
   - ``load_rules_for_coworker`` — snapshot the ``safety_rules`` rows
     for admin-side / API inspection. Raises on DB failure so callers
@@ -10,23 +9,32 @@ Thin façade that the WebUI admin REST layer and the NATS
     ``rolemesh.safety.loader.load_safety_rules_snapshot``, which
     layers ``SAFETY_FAIL_MODE`` dispatch on top of the same query.
   - ``handle_safety_event`` — decode a NATS payload into an
-    ``AuditEvent`` and forward it to the configured sink.
+    ``AuditEvent`` and forward it to the configured sink. Caller is
+    responsible for trust checking (see ``SafetyEventsSubscriber``).
+  - ``run_orchestrator_pipeline`` — execute the shared pipeline for
+    stages the orchestrator itself produces (V2 P0.1: MODEL_OUTPUT).
+    Bypasses NATS since the tenant identity comes from server-side
+    state; audit rows are written directly to the sink.
 
 Both rule-reading paths share ``fetch_safety_rule_snapshots`` in
 loader.py so the query + serialization live in one place; only the
 error handling differs.
 
 The engine deliberately holds no state; rule reloads are just fresh
-queries. V2 adds ``handle_rpc_request`` for slow-check RPC.
+queries. V2 adds RPC support via a separate ``SafetyRpcServer`` class
+rather than bolting it onto this façade.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from rolemesh.core.logger import get_logger
 
 from .audit import AuditEvent, AuditSink, DbAuditSink
+
+if TYPE_CHECKING:
+    from .types import SafetyContext, Verdict
 
 logger = get_logger()
 
@@ -100,6 +108,72 @@ class SafetyEngine:
                 verdict=event.verdict_action,
                 error=str(exc),
             )
+
+    async def run_orchestrator_pipeline(
+        self,
+        ctx: SafetyContext,
+        rules: list[dict[str, Any]],
+    ) -> Verdict:
+        """Execute the shared pipeline for orchestrator-produced input.
+
+        Used for stages the server itself drives — currently only
+        MODEL_OUTPUT. The tenant identity in ``ctx`` comes from the
+        orchestrator's in-memory coworker state, so no NATS round-trip
+        or trust check is needed; audit rows are written directly to
+        the sink via an async publisher that the pipeline awaits.
+
+        Zero-rule calls short-circuit before touching the registry or
+        sink, preserving the "no rules → zero overhead" invariant for
+        the hot path every turn goes through.
+
+        Returns the final ``Verdict``. The orchestrator caller is
+        responsible for translating block / redact into a modified
+        ``AgentOutput`` — this method does not mutate anything outside
+        the audit sink.
+        """
+        from .pipeline_core import pipeline_run
+        from .registry import get_orchestrator_registry
+        from .types import Verdict
+
+        if not rules:
+            return Verdict(action="allow")
+
+        sink = self._sink
+
+        async def _direct_publisher(
+            _subject: str, event: dict[str, Any]
+        ) -> None:
+            # Orchestrator-side events bypass NATS — the subject is
+            # ignored. Tenant/coworker values in the event came from
+            # the SafetyContext we built server-side, so they are
+            # already trusted; no second validation pass needed.
+            audit = AuditEvent(
+                tenant_id=str(event["tenant_id"]),
+                coworker_id=event.get("coworker_id"),
+                conversation_id=event.get("conversation_id"),
+                job_id=event.get("job_id"),
+                stage=str(event["stage"]),
+                verdict_action=str(event["verdict_action"]),
+                triggered_rule_ids=list(event.get("triggered_rule_ids") or []),
+                findings=list(event.get("findings") or []),
+                context_digest=str(event.get("context_digest", "")),
+                context_summary=str(event.get("context_summary", "")),
+            )
+            try:
+                await sink.write(audit)
+            except Exception as exc:  # noqa: BLE001 — audit must not break pipeline
+                logger.error(
+                    "safety: orchestrator audit write failed",
+                    component="safety",
+                    tenant_id=audit.tenant_id,
+                    stage=audit.stage,
+                    verdict=audit.verdict_action,
+                    error=str(exc),
+                )
+
+        return await pipeline_run(
+            rules, get_orchestrator_registry(), ctx, _direct_publisher
+        )
 
 
 __all__ = ["SafetyEngine"]

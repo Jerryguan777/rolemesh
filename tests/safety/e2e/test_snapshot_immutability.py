@@ -52,6 +52,9 @@ class _FakeToolCtx:
     def publish(self, subject: str, data: dict[str, Any]) -> None:
         self.events.append((subject, dict(data)))
 
+    def get_tool_reversibility(self, _tool_name: str) -> bool:
+        return False
+
 
 async def _seed(patterns: dict[str, bool] | None = None) -> tuple[str, str, str]:
     tenant = await pg.create_tenant(
