@@ -1379,6 +1379,18 @@ async def main() -> None:
 
     ipc_tasks = await _start_nats_ipc_subscriptions(_transport, ipc_deps)
 
+    # EC-2: serve the egress gateway's snapshot RPCs. The gateway asks
+    # for a rule snapshot at startup and the identity map on demand;
+    # without these responders the gateway fails closed (blocks every
+    # request) and agents on the internal bridge lose egress.
+    from rolemesh.egress.orch_glue import fetch_all_egress_rules, start_responders
+
+    egress_responder_subs = await start_responders(
+        _transport.nc,
+        state=_state,
+        rules_fetcher=fetch_all_egress_rules,
+    )
+
     _queue.set_process_messages_fn(_process_conversation_messages)
     _queue.set_on_queued(_emit_queued_status)
     _queue.set_on_container_starting(_emit_container_starting_status)
@@ -1391,6 +1403,10 @@ async def main() -> None:
         t.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await t
+
+    for sub in egress_responder_subs:
+        with contextlib.suppress(Exception):
+            await sub.unsubscribe()  # type: ignore[union-attr]
 
     approval_maintenance_stop.set()
     safety_maintenance_stop.set()

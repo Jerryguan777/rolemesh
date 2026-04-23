@@ -86,12 +86,20 @@ async def launch_egress_gateway(
         # looks by default (Path.cwd() / ".env"). Read-only to avoid
         # surprise writes.
         "Binds": _optional_env_bind(),
+        # CAP_NET_BIND_SERVICE lets the non-root gateway user bind
+        # UDP/53 for the authoritative DNS resolver. The image itself
+        # drops every other privilege (no USER root, no other caps),
+        # so this is the minimum grant needed for EC-2's DNS surface.
+        # EC-1 did not need the cap because the gateway only bound
+        # port 3001.
+        "CapAdd": ["NET_BIND_SERVICE"],
     }
 
     config: dict[str, Any] = {
         "Image": image,
         "HostConfig": host_config,
         "Labels": {"io.rolemesh.owner": "orchestrator", "io.rolemesh.role": "egress-gateway"},
+        "Env": _gateway_env(),
         "AttachStdout": False,
         "AttachStderr": False,
     }
@@ -181,3 +189,23 @@ def _optional_env_bind() -> list[str]:
         project_root=str(PROJECT_ROOT),
     )
     return []
+
+
+def _gateway_env() -> list[str]:
+    """Build the Env block for the gateway container.
+
+    The gateway reads NATS_URL from its environment; EC-2 also exposes
+    EGRESS_UPSTREAM_DNS so operators can point the authoritative
+    resolver at a locked-down DNS server. Every variable is passed
+    through explicitly rather than inheriting the orchestrator's
+    environment — keeps the gateway's attack surface auditable.
+    """
+    import os as _os  # local import to avoid polluting module namespace
+
+    from rolemesh.core.config import NATS_URL as _NATS_URL
+
+    env_pairs: list[str] = [f"NATS_URL={_NATS_URL}"]
+    upstream = _os.environ.get("EGRESS_UPSTREAM_DNS")
+    if upstream:
+        env_pairs.append(f"EGRESS_UPSTREAM_DNS={upstream}")
+    return env_pairs

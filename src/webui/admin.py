@@ -1054,6 +1054,7 @@ async def create_safety_rule_ep(
         description=body.description,
         actor_user_id=user.user_id,
     )
+    await _publish_rule_changed("created", rule)
     return _safety_rule_to_response(rule)
 
 
@@ -1128,6 +1129,7 @@ async def update_safety_rule_ep(
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="Rule not found")
+    await _publish_rule_changed("updated", updated)
     return _safety_rule_to_response(updated)
 
 
@@ -1140,6 +1142,33 @@ async def delete_safety_rule_ep(
     if existing is None or existing.tenant_id != user.tenant_id:
         raise HTTPException(status_code=404, detail="Rule not found")
     await pg.delete_safety_rule(rule_id, actor_user_id=user.user_id)
+    await _publish_rule_changed("deleted", existing)
+
+
+async def _publish_rule_changed(
+    action: str, rule: SafetyRule
+) -> None:
+    """Publish a ``safety.rule.changed`` event to the egress gateway.
+
+    Best-effort — a NATS outage here must NOT fail the REST call. The
+    caller's DB row is already committed; the gateway recovers on its
+    next full snapshot.
+    """
+    # EC-2: egress gateway subscribes to this subject for hot-reload
+    # of its in-memory policy cache. Import lazily so a webui process
+    # without the egress extras still works (it just doesn't publish).
+    try:
+        from rolemesh.egress.orch_glue import publish_rule_changed
+        from webui import main as webui_main
+    except ImportError:
+        return
+    nc = getattr(webui_main, "_nc", None)
+    if nc is None:
+        return
+    import contextlib
+
+    with contextlib.suppress(Exception):
+        await publish_rule_changed(nc, action=action, rule=rule.to_snapshot_dict())
 
 
 # ---------------------------------------------------------------------------

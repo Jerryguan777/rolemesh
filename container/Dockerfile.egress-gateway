@@ -21,12 +21,17 @@
 
 FROM python:3.12-slim
 
-# aiohttp and structlog are the only runtime deps for the EC-1 surface.
-# PR-2 adds dnslib + nats-py; add them in the same RUN layer so the image
-# history stays compact.
+# Runtime deps (EC-2):
+#   aiohttp        — reverse proxy (credential injection for LLM/MCP)
+#   structlog      — structured logging
+#   dnslib         — pure-Python DNS wire format; EC-2 authoritative resolver
+#   nats-py        — rule.changed subscription, lifecycle events,
+#                    safety_events publish, identity-snapshot RPC
 RUN pip install --no-cache-dir \
     aiohttp>=3.9 \
-    structlog>=24.0
+    structlog>=24.0 \
+    dnslib>=0.9 \
+    nats-py>=2.9
 
 WORKDIR /app
 
