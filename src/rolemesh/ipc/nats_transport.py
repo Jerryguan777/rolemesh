@@ -77,6 +77,13 @@ class NatsTransport:
                 "agent.*.interrupt",
                 "agent.*.messages",
                 "agent.*.tasks",
+                # Safety Framework audit events — fire-and-forget
+                # publishes from container; orchestrator-side subscriber
+                # writes them to safety_decisions after a trusted-tenant
+                # lookup. Lives on the same stream as other agent.*.*
+                # subjects because its retention profile matches (short
+                # buffer, consumer-driven drain).
+                "agent.*.safety_events",
             ],
             max_age=_STREAM_MAX_AGE_S,
         )

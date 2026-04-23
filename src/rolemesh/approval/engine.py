@@ -298,6 +298,7 @@ class ApprovalEngine:
     ) -> None:
         self._publisher = publisher
         self._channel = channel_sender
+        self._resolver = resolver
         self._builder = ApprovalRequestBuilder(
             channel_sender=channel_sender, resolver=resolver
         )
@@ -526,6 +527,137 @@ class ApprovalEngine:
             policy=policy,
             approvers=approvers,
         )
+
+    # -- Safety framework bridge (V2 P1.1) -------------------------------
+
+    async def create_from_safety(
+        self,
+        *,
+        tenant_id: str,
+        coworker_id: str,
+        conversation_id: str | None,
+        job_id: str,
+        user_id: str,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        mcp_server_name: str,
+    ) -> ApprovalRequest | None:
+        """Create an approval request driven by a safety require_approval
+        verdict. Returns the request or None when no approvers resolve
+        (the event is logged and skipped — operators see the audit row
+        in safety_decisions and can configure tenant owners).
+
+        No policy is associated with this request (``policy_id`` stays
+        NULL) because the decision came from a safety rule, not an
+        approval policy. Expiry defaults to the module-wide
+        ``_DEFAULT_EXPIRE_MINUTES``; approvers fall back to tenant
+        owners which matches the chain tail in ``_resolve_approvers``.
+
+        ``user_id`` is required (approval_requests.user_id is NOT NULL
+        FK): it identifies the user whose turn triggered the safety
+        gate. If the safety event lacks a user_id, we fall back to
+        the first tenant owner (approver) — better to attribute the
+        request to *some* real user than to 23502 on the insert.
+        Callers that want to skip creation when user_id is missing
+        can pre-check and short-circuit before calling.
+        """
+        approvers = await _tenant_owner_ids(tenant_id)
+        if not approvers:
+            logger.warning(
+                "approval: safety require_approval — no tenant owners; "
+                "skipping approval creation",
+                tenant_id=tenant_id,
+                coworker_id=coworker_id,
+            )
+            return None
+
+        # NOT NULL FK means empty string is a hard error at INSERT
+        # time. Fall back to the first approver so the row still
+        # lands — the attribution is slightly off but the operator
+        # can always see actions/approvers to understand context.
+        # V2 P2 review fix: log WARN when fallback fires so operators
+        # know approval_requests.user_id != the real requester.
+        if user_id:
+            requester_id = user_id
+        else:
+            requester_id = approvers[0]
+            logger.warning(
+                "approval: safety require_approval without user_id — "
+                "attributing to first approver as fallback",
+                tenant_id=tenant_id,
+                coworker_id=coworker_id,
+                fallback_requester=requester_id,
+            )
+
+        action = {
+            "mcp_server": mcp_server_name,
+            "tool_name": tool_name,
+            "params": tool_input,
+        }
+        action_hash = compute_action_hash(tool_name, tool_input)
+
+        # V2 P1 review fix: dedup same as auto-intercept path. An agent
+        # in a retry loop can bang the same blocked tool_input back at
+        # the pipeline many times per second; without this check we'd
+        # spawn one pending approval_request per retry. 5-minute window
+        # matches _DEDUP_WINDOW_MINUTES so the two paths behave
+        # consistently to operators reading the audit log.
+        existing = await pg.find_pending_request_by_action_hash(
+            tenant_id, action_hash, within_minutes=_DEDUP_WINDOW_MINUTES
+        )
+        if existing is not None:
+            logger.info(
+                "approval: safety require_approval deduped",
+                existing_id=existing.id,
+                action_hash=action_hash,
+                tenant_id=tenant_id,
+            )
+            return existing
+
+        req = await pg.create_approval_request(
+            tenant_id=tenant_id,
+            coworker_id=coworker_id,
+            conversation_id=conversation_id,
+            policy_id=None,
+            user_id=requester_id,
+            job_id=job_id,
+            mcp_server_name=mcp_server_name,
+            actions=[action],
+            action_hashes=[action_hash],
+            rationale=None,
+            source="safety_require_approval",
+            status="pending",
+            resolved_approvers=approvers,
+            expires_at=_expiry(None),
+            post_exec_mode="report",
+            actor_user_id=None,
+        )
+        # Notification: reuse the approver-request template. Without
+        # a policy, we construct a minimal notification that names
+        # the tool + coworker. ``resolve_for_safety_approvers`` is
+        # the typed surface; previously we reached through a private
+        # attribute and caught AttributeError, which also swallowed
+        # real bugs inside the resolver.
+        note_ctx = await self._resolver.resolve_for_safety_approvers(
+            request=req, approver_user_ids=approvers
+        )
+        if note_ctx.target_conversation_ids:
+            message = (
+                f"Safety policy requires approval for "
+                f"{tool_name or 'tool call'}."
+            )
+            for conv_id in note_ctx.target_conversation_ids:
+                try:
+                    await self._channel.send_to_conversation(
+                        conv_id, message
+                    )
+                except Exception as exc:  # noqa: BLE001 — notification best-effort
+                    logger.warning(
+                        "approval: safety notify failed",
+                        conversation_id=conv_id,
+                        error=str(exc),
+                    )
+        return req
 
     # -- Decision path ----------------------------------------------------
 

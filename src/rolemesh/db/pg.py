@@ -6,6 +6,9 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
 import asyncpg
 
 from rolemesh.auth.permissions import AgentPermissions
@@ -32,6 +35,7 @@ if TYPE_CHECKING:
         ApprovalPolicy,
         ApprovalRequest,
     )
+    from rolemesh.safety.types import Rule as SafetyRule
 
 logger = get_logger()
 
@@ -376,7 +380,8 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             action_hashes      TEXT[] NOT NULL,
             rationale          TEXT,
             source             TEXT NOT NULL
-                CHECK (source IN ('proposal', 'auto_intercept')),
+                CHECK (source IN ('proposal', 'auto_intercept',
+                                  'safety_require_approval')),
             status             TEXT NOT NULL DEFAULT 'pending'
                 CHECK (status IN (
                     'pending', 'approved', 'rejected', 'expired', 'cancelled',
@@ -394,6 +399,19 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     # Migrate existing deployments: drop the NOT NULL if present.
     await conn.execute(
         "ALTER TABLE approval_requests ALTER COLUMN policy_id DROP NOT NULL"
+    )
+    # V2 P1.1: widen the source CHECK to include safety-driven
+    # approval requests. Old deployments have the two-value CHECK;
+    # drop-then-add so the rollout is a single migration.
+    await conn.execute(
+        "ALTER TABLE approval_requests "
+        "DROP CONSTRAINT IF EXISTS approval_requests_source_check"
+    )
+    await conn.execute(
+        "ALTER TABLE approval_requests ADD CONSTRAINT "
+        "approval_requests_source_check CHECK ("
+        "source IN ('proposal', 'auto_intercept', "
+        "'safety_require_approval'))"
     )
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_approval_requests_tenant_status "
@@ -528,6 +546,205 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         FOR EACH ROW EXECUTE FUNCTION _approval_write_audit_from_trigger();
     """)
 
+    # --- Safety Framework tables ---
+    # Admin-managed rules that the container loads as a snapshot at job
+    # start. ``coworker_id`` IS NULL means tenant-wide scope.
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS safety_rules (
+            id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            tenant_id       UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            coworker_id     UUID REFERENCES coworkers(id) ON DELETE CASCADE,
+            stage           TEXT NOT NULL,
+            check_id        TEXT NOT NULL,
+            config          JSONB NOT NULL DEFAULT '{}'::jsonb,
+            priority        INTEGER NOT NULL DEFAULT 100,
+            enabled         BOOLEAN NOT NULL DEFAULT TRUE,
+            description     TEXT NOT NULL DEFAULT '',
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+    """)
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_safety_rules_lookup "
+        "ON safety_rules (tenant_id, stage, enabled)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_safety_rules_coworker "
+        "ON safety_rules (coworker_id) WHERE coworker_id IS NOT NULL"
+    )
+
+    # Per-decision audit rows. We store only a SHA-256 digest of the
+    # payload + a short human summary (tool name, prompt prefix) — not
+    # the original text — so the audit table cannot double as a PII
+    # leak vector. Full-text reconstitution, when needed, comes from
+    # the conversation transcripts.
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS safety_decisions (
+            id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            tenant_id             UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            coworker_id           UUID REFERENCES coworkers(id) ON DELETE SET NULL,
+            conversation_id       TEXT,
+            job_id                TEXT,
+            stage                 TEXT NOT NULL,
+            verdict_action        TEXT NOT NULL,
+            triggered_rule_ids    UUID[] NOT NULL DEFAULT '{}',
+            findings              JSONB NOT NULL DEFAULT '[]'::jsonb,
+            context_digest        TEXT NOT NULL DEFAULT '',
+            context_summary       TEXT NOT NULL DEFAULT '',
+            created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+    """)
+    # V2 P1.1: require_approval verdicts need the original tool_name
+    # + tool_input so the approval UI can render a decision surface.
+    # This column is the ONLY place the full tool_input is retained
+    # (context_digest + context_summary deliberately truncate) — it is
+    # live for 24 h after the approval resolves, then zeroed by a
+    # cleanup task. Other verdict_actions (block, allow, warn, redact)
+    # leave this column NULL.
+    await conn.execute(
+        "ALTER TABLE safety_decisions "
+        "ADD COLUMN IF NOT EXISTS approval_context JSONB"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_safety_decisions_tenant_time "
+        "ON safety_decisions (tenant_id, created_at DESC)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_safety_decisions_verdict "
+        "ON safety_decisions (tenant_id, verdict_action, created_at DESC)"
+    )
+
+    # Rule-change audit log. Every INSERT / UPDATE / DELETE on
+    # safety_rules appends one append-only row here via the trigger
+    # below. Compliance scenario: "Jan 3 admin disabled the SSN rule,
+    # leak followed on Jan 4" must be reconstructable without relying
+    # on server logs. rule_id is NOT a FK because the rule itself may
+    # have been hard-deleted — we still need the audit trail.
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS safety_rules_audit (
+            id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            rule_id        UUID NOT NULL,
+            tenant_id      UUID NOT NULL,
+            action         TEXT NOT NULL
+                CHECK (action IN ('created', 'updated', 'deleted')),
+            actor_user_id  UUID REFERENCES users(id) ON DELETE SET NULL,
+            before_state   JSONB,
+            after_state    JSONB,
+            created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+    """)
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_safety_rules_audit_rule "
+        "ON safety_rules_audit (rule_id, created_at DESC)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_safety_rules_audit_tenant "
+        "ON safety_rules_audit (tenant_id, created_at DESC)"
+    )
+
+    # Trigger function: same pattern as approval's. The caller sets
+    # a transaction-local GUC ``safety.actor_user_id`` so the trigger
+    # can attribute the row without a second DML. Missing GUC → NULL
+    # actor (system transition, e.g. bulk migration).
+    await conn.execute("""
+        CREATE OR REPLACE FUNCTION _safety_rules_write_audit_from_trigger()
+        RETURNS TRIGGER AS $$
+        DECLARE
+            v_actor TEXT;
+            v_actor_uuid UUID;
+            v_before JSONB;
+            v_after JSONB;
+        BEGIN
+            BEGIN
+                v_actor := current_setting('safety.actor_user_id', TRUE);
+            EXCEPTION WHEN OTHERS THEN v_actor := NULL; END;
+
+            IF v_actor IS NOT NULL AND v_actor <> '' THEN
+                BEGIN
+                    v_actor_uuid := v_actor::uuid;
+                EXCEPTION WHEN OTHERS THEN v_actor_uuid := NULL; END;
+            ELSE
+                v_actor_uuid := NULL;
+            END IF;
+
+            IF TG_OP = 'INSERT' THEN
+                v_after := jsonb_build_object(
+                    'stage', NEW.stage,
+                    'check_id', NEW.check_id,
+                    'config', NEW.config,
+                    'coworker_id', NEW.coworker_id,
+                    'priority', NEW.priority,
+                    'enabled', NEW.enabled,
+                    'description', NEW.description
+                );
+                INSERT INTO safety_rules_audit
+                    (rule_id, tenant_id, action, actor_user_id,
+                     before_state, after_state)
+                VALUES
+                    (NEW.id, NEW.tenant_id, 'created', v_actor_uuid,
+                     NULL, v_after);
+                RETURN NEW;
+            ELSIF TG_OP = 'UPDATE' THEN
+                v_before := jsonb_build_object(
+                    'stage', OLD.stage,
+                    'check_id', OLD.check_id,
+                    'config', OLD.config,
+                    'coworker_id', OLD.coworker_id,
+                    'priority', OLD.priority,
+                    'enabled', OLD.enabled,
+                    'description', OLD.description
+                );
+                v_after := jsonb_build_object(
+                    'stage', NEW.stage,
+                    'check_id', NEW.check_id,
+                    'config', NEW.config,
+                    'coworker_id', NEW.coworker_id,
+                    'priority', NEW.priority,
+                    'enabled', NEW.enabled,
+                    'description', NEW.description
+                );
+                -- Only log when something semantic changed. updated_at
+                -- moving on a no-op call is noise.
+                IF v_before <> v_after THEN
+                    INSERT INTO safety_rules_audit
+                        (rule_id, tenant_id, action, actor_user_id,
+                         before_state, after_state)
+                    VALUES
+                        (NEW.id, NEW.tenant_id, 'updated',
+                         v_actor_uuid, v_before, v_after);
+                END IF;
+                RETURN NEW;
+            ELSIF TG_OP = 'DELETE' THEN
+                v_before := jsonb_build_object(
+                    'stage', OLD.stage,
+                    'check_id', OLD.check_id,
+                    'config', OLD.config,
+                    'coworker_id', OLD.coworker_id,
+                    'priority', OLD.priority,
+                    'enabled', OLD.enabled,
+                    'description', OLD.description
+                );
+                INSERT INTO safety_rules_audit
+                    (rule_id, tenant_id, action, actor_user_id,
+                     before_state, after_state)
+                VALUES
+                    (OLD.id, OLD.tenant_id, 'deleted',
+                     v_actor_uuid, v_before, NULL);
+                RETURN OLD;
+            END IF;
+            RETURN NULL;
+        END;
+        $$ LANGUAGE plpgsql;
+    """)
+    await conn.execute(
+        "DROP TRIGGER IF EXISTS trg_safety_rules_audit ON safety_rules"
+    )
+    await conn.execute("""
+        CREATE TRIGGER trg_safety_rules_audit
+        AFTER INSERT OR UPDATE OR DELETE ON safety_rules
+        FOR EACH ROW EXECUTE FUNCTION _safety_rules_write_audit_from_trigger();
+    """)
+
     # Idempotent default tenant. OIDCAuthProvider._provision_tenant falls back
     # to slug='default' for single-tenant deployments where the IdP doesn't
     # carry a tenant claim. Without this row, the first OIDC login on a fresh
@@ -556,6 +773,9 @@ async def _init_test_database(database_url: str) -> None:
     _pool = await asyncpg.create_pool(database_url, min_size=2, max_size=10)
     async with _pool.acquire() as conn:
         # Drop all tables for a clean slate
+        await conn.execute("DROP TABLE IF EXISTS safety_decisions CASCADE")
+        await conn.execute("DROP TABLE IF EXISTS safety_rules_audit CASCADE")
+        await conn.execute("DROP TABLE IF EXISTS safety_rules CASCADE")
         await conn.execute("DROP TABLE IF EXISTS approval_audit_log CASCADE")
         await conn.execute("DROP TABLE IF EXISTS approval_requests CASCADE")
         await conn.execute("DROP TABLE IF EXISTS approval_policies CASCADE")
@@ -1079,7 +1299,14 @@ async def create_coworker(
             system_prompt,
             json.dumps(
                 [
-                    {"name": t.name, "type": t.type, "url": t.url, "headers": t.headers, "auth_mode": t.auth_mode}
+                    {
+                        "name": t.name,
+                        "type": t.type,
+                        "url": t.url,
+                        "headers": t.headers,
+                        "auth_mode": t.auth_mode,
+                        "tool_reversibility": dict(t.tool_reversibility),
+                    }
                     for t in tools
                 ]
                 if tools
@@ -1108,6 +1335,7 @@ def _record_to_coworker(row: asyncpg.Record) -> Coworker:
             auth_mode = item.get("auth_mode") or "user"
             if auth_mode not in ("user", "service", "both"):
                 auth_mode = "user"
+            raw_rev = item.get("tool_reversibility")
             tools.append(
                 McpServerConfig(
                     name=item["name"],
@@ -1115,6 +1343,9 @@ def _record_to_coworker(row: asyncpg.Record) -> Coworker:
                     url=item.get("url", ""),
                     headers=raw_headers if isinstance(raw_headers, dict) else {},
                     auth_mode=auth_mode,
+                    tool_reversibility=(
+                        dict(raw_rev) if isinstance(raw_rev, dict) else {}
+                    ),
                 )
             )
         # Skip legacy string entries silently
@@ -1220,7 +1451,14 @@ async def update_coworker(
         values.append(
             json.dumps(
                 [
-                    {"name": t.name, "type": t.type, "url": t.url, "headers": t.headers, "auth_mode": t.auth_mode}
+                    {
+                        "name": t.name,
+                        "type": t.type,
+                        "url": t.url,
+                        "headers": t.headers,
+                        "auth_mode": t.auth_mode,
+                        "tool_reversibility": dict(t.tool_reversibility),
+                    }
                     for t in tools
                 ]
             )
@@ -2177,7 +2415,7 @@ async def get_users_for_agent(coworker_id: str) -> list[User]:
 # ---------------------------------------------------------------------------
 
 
-def _record_to_approval_policy(row: asyncpg.Record) -> "ApprovalPolicy":
+def _record_to_approval_policy(row: asyncpg.Record) -> ApprovalPolicy:
     from rolemesh.approval.types import ApprovalPolicy
 
     cond = row["condition_expr"]
@@ -2217,7 +2455,7 @@ async def create_approval_policy(
     post_exec_mode: str = "report",
     enabled: bool = True,
     priority: int = 0,
-) -> "ApprovalPolicy":
+) -> ApprovalPolicy:
     """Insert a new approval policy and return the stored row."""
     pool = _get_pool()
     approvers = approver_user_ids or []
@@ -2252,7 +2490,7 @@ async def create_approval_policy(
     return _record_to_approval_policy(row)
 
 
-async def get_approval_policy(policy_id: str) -> "ApprovalPolicy | None":
+async def get_approval_policy(policy_id: str) -> ApprovalPolicy | None:
     pool = _get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -2268,7 +2506,7 @@ async def list_approval_policies(
     *,
     coworker_id: str | None = None,
     enabled: bool | None = None,
-) -> list["ApprovalPolicy"]:
+) -> list[ApprovalPolicy]:
     """List policies for a tenant, optionally filtered by coworker and state."""
     pool = _get_pool()
     clauses = ["tenant_id = $1::uuid"]
@@ -2291,7 +2529,7 @@ async def list_approval_policies(
 
 async def get_enabled_policies_for_coworker(
     tenant_id: str, coworker_id: str
-) -> list["ApprovalPolicy"]:
+) -> list[ApprovalPolicy]:
     """Policies applicable to a specific coworker.
 
     Includes both coworker-scoped policies (coworker_id matches) and
@@ -2327,7 +2565,7 @@ async def update_approval_policy(
     post_exec_mode: str | None = None,
     enabled: bool | None = None,
     priority: int | None = None,
-) -> "ApprovalPolicy | None":
+) -> ApprovalPolicy | None:
     """Update selected fields on a policy; returns the new row or None."""
     fields: list[str] = []
     values: list[Any] = []
@@ -2391,7 +2629,7 @@ async def delete_approval_policy(policy_id: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _record_to_approval_request(row: asyncpg.Record) -> "ApprovalRequest":
+def _record_to_approval_request(row: asyncpg.Record) -> ApprovalRequest:
     from rolemesh.approval.types import ApprovalRequest
 
     actions = row["actions"]
@@ -2467,7 +2705,7 @@ async def create_approval_request(
     expires_at: datetime,
     post_exec_mode: str = "report",
     actor_user_id: str | None = None,
-) -> "ApprovalRequest":
+) -> ApprovalRequest:
     """Insert a new approval request row.
 
     ``actor_user_id`` is recorded by the audit trigger on the 'created'
@@ -2514,7 +2752,7 @@ async def create_approval_request(
     return _record_to_approval_request(row)
 
 
-async def get_approval_request(request_id: str) -> "ApprovalRequest | None":
+async def get_approval_request(request_id: str) -> ApprovalRequest | None:
     pool = _get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -2531,7 +2769,7 @@ async def list_approval_requests(
     status: str | None = None,
     coworker_id: str | None = None,
     limit: int = 100,
-) -> list["ApprovalRequest"]:
+) -> list[ApprovalRequest]:
     pool = _get_pool()
     clauses = ["tenant_id = $1::uuid"]
     params: list[Any] = [tenant_id]
@@ -2554,7 +2792,7 @@ async def list_approval_requests(
 
 async def find_pending_request_by_action_hash(
     tenant_id: str, action_hash: str, within_minutes: int = 5
-) -> "ApprovalRequest | None":
+) -> ApprovalRequest | None:
     """Dedup key for auto-intercept: return the most recent pending
     request whose action_hashes array contains ``action_hash`` and was
     created within the last ``within_minutes``.
@@ -2592,12 +2830,12 @@ class DecisionOutcome:
       forbidden  — the request is pending but the caller is not an approver.
     """
 
-    __slots__ = ("kind", "request", "current_status")
+    __slots__ = ("current_status", "kind", "request")
 
     def __init__(
         self,
         kind: str,
-        request: "ApprovalRequest | None" = None,
+        request: ApprovalRequest | None = None,
         current_status: str | None = None,
     ) -> None:
         self.kind = kind  # "updated" | "conflict" | "forbidden" | "missing"
@@ -2673,7 +2911,7 @@ async def decide_approval_request_full(
     return DecisionOutcome(kind="forbidden", current_status=before_status)
 
 
-async def claim_approval_for_execution(request_id: str) -> "ApprovalRequest | None":
+async def claim_approval_for_execution(request_id: str) -> ApprovalRequest | None:
     """Atomic claim: approved → executing.
 
     The Worker uses this to take exclusive ownership before hitting the
@@ -2711,7 +2949,7 @@ async def set_approval_status(
     actor_user_id: str | None = None,
     note: str | None = None,
     metadata: dict[str, Any] | None = None,
-) -> "ApprovalRequest | None":
+) -> ApprovalRequest | None:
     """Unconditional status update. Used for system transitions that do
     not race (e.g. executing → executed by the Worker that already
     holds the claim).
@@ -2762,7 +3000,7 @@ async def cancel_pending_approvals_for_job(job_id: str) -> list[str]:
     return [str(r["id"]) for r in rows]
 
 
-async def list_expired_pending_approvals() -> list["ApprovalRequest"]:
+async def list_expired_pending_approvals() -> list[ApprovalRequest]:
     pool = _get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -2777,7 +3015,7 @@ async def list_expired_pending_approvals() -> list["ApprovalRequest"]:
 
 async def list_stuck_approved_approvals(
     older_than_seconds: int = 60,
-) -> list["ApprovalRequest"]:
+) -> list[ApprovalRequest]:
     """Approved rows that have been sitting for a while without being
     claimed by a Worker — either the Worker missed the NATS publish or
     the orchestrator restarted mid-flight. The reconciler republishes
@@ -2798,7 +3036,7 @@ async def list_stuck_approved_approvals(
 
 async def list_stuck_executing_approvals(
     older_than_seconds: int = 300,
-) -> list["ApprovalRequest"]:
+) -> list[ApprovalRequest]:
     """Executing rows that never transitioned — a Worker probably crashed
     after claiming but before writing the terminal status. The reconciler
     marks them execution_stale rather than retrying, because we cannot
@@ -2822,7 +3060,7 @@ async def list_stuck_executing_approvals(
 # ---------------------------------------------------------------------------
 
 
-def _record_to_audit_entry(row: asyncpg.Record) -> "ApprovalAuditEntry":
+def _record_to_audit_entry(row: asyncpg.Record) -> ApprovalAuditEntry:
     from rolemesh.approval.types import ApprovalAuditEntry
 
     meta = row["metadata"]
@@ -2846,7 +3084,7 @@ async def write_approval_audit(
     actor_user_id: str | None = None,
     note: str | None = None,
     metadata: dict[str, Any] | None = None,
-) -> "ApprovalAuditEntry":
+) -> ApprovalAuditEntry:
     """Append a single audit row. There is deliberately no update or
     delete counterpart — the whole point of the audit table is that
     rows are immutable once written."""
@@ -2868,7 +3106,7 @@ async def write_approval_audit(
     return _record_to_audit_entry(row)
 
 
-async def list_approval_audit(request_id: str) -> list["ApprovalAuditEntry"]:
+async def list_approval_audit(request_id: str) -> list[ApprovalAuditEntry]:
     pool = _get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
@@ -2879,7 +3117,7 @@ async def list_approval_audit(request_id: str) -> list["ApprovalAuditEntry"]:
     return [_record_to_audit_entry(r) for r in rows]
 
 
-async def expire_approval_if_pending(request_id: str) -> "ApprovalRequest | None":
+async def expire_approval_if_pending(request_id: str) -> ApprovalRequest | None:
     """Atomic pending → expired with the CAS guard kept in one place.
 
     Separate from set_approval_status because the maintenance loop
@@ -2899,3 +3137,659 @@ async def expire_approval_if_pending(request_id: str) -> "ApprovalRequest | None
     if row is None:
         return None
     return _record_to_approval_request(row)
+
+
+# ---------------------------------------------------------------------------
+# Safety Framework CRUD
+# ---------------------------------------------------------------------------
+
+
+def _record_to_safety_rule(row: asyncpg.Record) -> SafetyRule:
+    from rolemesh.safety.types import Rule, Stage
+
+    cfg = row["config"]
+    if isinstance(cfg, str):
+        cfg = json.loads(cfg) if cfg else {}
+    return Rule(
+        id=str(row["id"]),
+        tenant_id=str(row["tenant_id"]),
+        coworker_id=str(row["coworker_id"]) if row["coworker_id"] else None,
+        stage=Stage(row["stage"]),
+        check_id=row["check_id"],
+        config=cfg if isinstance(cfg, dict) else {},
+        priority=int(row["priority"]),
+        enabled=bool(row["enabled"]),
+        description=row["description"] or "",
+        created_at=row["created_at"].isoformat() if row["created_at"] else "",
+        updated_at=row["updated_at"].isoformat() if row["updated_at"] else "",
+    )
+
+
+async def _set_safety_guc(
+    conn: asyncpg.Connection[asyncpg.Record],
+    *,
+    actor_user_id: str | None,
+) -> None:
+    """Set the transaction-local ``safety.actor_user_id`` GUC.
+
+    The audit trigger ``_safety_rules_write_audit_from_trigger``
+    reads this to attribute the audit row it emits. Call inside an
+    open transaction; the ``is_local=true`` flag auto-clears on
+    commit/rollback.
+    """
+    await conn.execute(
+        "SELECT set_config('safety.actor_user_id', $1, true)",
+        actor_user_id or "",
+    )
+
+
+async def create_safety_rule(
+    *,
+    tenant_id: str,
+    stage: str,
+    check_id: str,
+    config: dict[str, Any],
+    coworker_id: str | None = None,
+    priority: int = 100,
+    enabled: bool = True,
+    description: str = "",
+    actor_user_id: str | None = None,
+) -> SafetyRule:
+    """Insert a new safety rule and return the stored row.
+
+    ``actor_user_id`` is attributed to the audit row written by the
+    trigger. ``None`` is a legitimate value for bulk imports / migration
+    scripts where no user is the actor — the audit row carries NULL.
+    """
+    pool = _get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        await _set_safety_guc(conn, actor_user_id=actor_user_id)
+        row = await conn.fetchrow(
+            """
+            INSERT INTO safety_rules (
+                tenant_id, coworker_id, stage, check_id,
+                config, priority, enabled, description
+            )
+            VALUES (
+                $1::uuid, $2::uuid, $3, $4,
+                $5::jsonb, $6, $7, $8
+            )
+            RETURNING *
+            """,
+            tenant_id,
+            coworker_id,
+            stage,
+            check_id,
+            json.dumps(config),
+            priority,
+            enabled,
+            description,
+        )
+    assert row is not None
+    return _record_to_safety_rule(row)
+
+
+async def get_safety_rule(rule_id: str) -> SafetyRule | None:
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM safety_rules WHERE id = $1::uuid", rule_id
+        )
+    if row is None:
+        return None
+    return _record_to_safety_rule(row)
+
+
+async def list_safety_rules(
+    tenant_id: str,
+    *,
+    coworker_id: str | None = None,
+    stage: str | None = None,
+    enabled: bool | None = None,
+) -> list[SafetyRule]:
+    """List rules for a tenant, optionally filtered."""
+    pool = _get_pool()
+    clauses = ["tenant_id = $1::uuid"]
+    params: list[Any] = [tenant_id]
+    if coworker_id is not None:
+        params.append(coworker_id)
+        clauses.append(f"coworker_id = ${len(params)}::uuid")
+    if stage is not None:
+        params.append(stage)
+        clauses.append(f"stage = ${len(params)}")
+    if enabled is not None:
+        params.append(enabled)
+        clauses.append(f"enabled = ${len(params)}")
+    sql = (
+        "SELECT * FROM safety_rules WHERE "
+        + " AND ".join(clauses)
+        + " ORDER BY priority DESC, updated_at DESC"
+    )
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
+    return [_record_to_safety_rule(r) for r in rows]
+
+
+async def list_safety_rules_for_coworker(
+    tenant_id: str, coworker_id: str
+) -> list[SafetyRule]:
+    """Rules applicable to a specific coworker (coworker-scoped OR tenant-wide).
+
+    Mirrors ``get_enabled_policies_for_coworker`` in the approval module:
+    only enabled rows are returned, and a NULL ``coworker_id`` means the
+    rule applies to every coworker in the tenant.
+    """
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT * FROM safety_rules
+            WHERE tenant_id = $1::uuid
+              AND enabled = TRUE
+              AND (coworker_id IS NULL OR coworker_id = $2::uuid)
+            ORDER BY priority DESC, updated_at DESC
+            """,
+            tenant_id,
+            coworker_id,
+        )
+    return [_record_to_safety_rule(r) for r in rows]
+
+
+async def update_safety_rule(
+    rule_id: str,
+    *,
+    stage: str | None = None,
+    check_id: str | None = None,
+    config: dict[str, Any] | None = None,
+    coworker_id: str | None = None,
+    coworker_id_set: bool = False,
+    priority: int | None = None,
+    enabled: bool | None = None,
+    description: str | None = None,
+    actor_user_id: str | None = None,
+) -> SafetyRule | None:
+    """Update selected fields on a rule; returns the new row or None.
+
+    ``coworker_id_set=True`` is required to explicitly set coworker_id
+    (including setting it to NULL for a tenant-wide scope); without
+    this flag, passing ``coworker_id=None`` is indistinguishable from
+    "don't change". This mirrors the three-state Optional convention
+    used elsewhere in this module.
+
+    ``actor_user_id`` attributes the audit row. A no-op update (all
+    fields unchanged) skips both the DML and the audit row — the
+    trigger's ``IF v_before <> v_after`` guard does the filtering.
+    """
+    fields: list[str] = []
+    values: list[Any] = []
+    idx = 1
+
+    def _push(expr: str, value: Any) -> None:
+        nonlocal idx
+        fields.append(expr.format(i=idx))
+        values.append(value)
+        idx += 1
+
+    if stage is not None:
+        _push("stage = ${i}", stage)
+    if check_id is not None:
+        _push("check_id = ${i}", check_id)
+    if config is not None:
+        _push("config = ${i}::jsonb", json.dumps(config))
+    if coworker_id_set:
+        _push("coworker_id = ${i}::uuid", coworker_id)
+    if priority is not None:
+        _push("priority = ${i}", priority)
+    if enabled is not None:
+        _push("enabled = ${i}", enabled)
+    if description is not None:
+        _push("description = ${i}", description)
+
+    if not fields:
+        return await get_safety_rule(rule_id)
+
+    fields.append("updated_at = now()")
+    values.append(rule_id)
+    sql = (
+        "UPDATE safety_rules SET "
+        + ", ".join(fields)
+        + f" WHERE id = ${idx}::uuid RETURNING *"
+    )
+    pool = _get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        await _set_safety_guc(conn, actor_user_id=actor_user_id)
+        row = await conn.fetchrow(sql, *values)
+    if row is None:
+        return None
+    return _record_to_safety_rule(row)
+
+
+async def delete_safety_rule(
+    rule_id: str, *, actor_user_id: str | None = None
+) -> bool:
+    """Hard-delete a rule. Returns True if a row was removed.
+
+    The audit trigger captures the row's pre-delete state in
+    before_state so the deleted rule is reconstructable forever.
+    """
+    pool = _get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        await _set_safety_guc(conn, actor_user_id=actor_user_id)
+        result = await conn.execute(
+            "DELETE FROM safety_rules WHERE id = $1::uuid", rule_id
+        )
+    return result.endswith(" 1")
+
+
+async def list_safety_rules_audit(
+    *,
+    tenant_id: str,
+    rule_id: str | None = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """List rule-change audit rows, newest first.
+
+    Filtered by tenant_id (never cross-tenant). ``rule_id`` optional
+    to narrow to a specific rule's history. Returns plain dicts; the
+    V2 admin UI will surface this as a timeline. Test fixture uses it
+    to pin actor/action correctness.
+    """
+    pool = _get_pool()
+    clauses = ["tenant_id = $1::uuid"]
+    params: list[Any] = [tenant_id]
+    if rule_id is not None:
+        params.append(rule_id)
+        clauses.append(f"rule_id = ${len(params)}::uuid")
+    params.append(limit)
+    sql = (
+        "SELECT * FROM safety_rules_audit WHERE "
+        + " AND ".join(clauses)
+        + f" ORDER BY created_at DESC LIMIT ${len(params)}"
+    )
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
+    result: list[dict[str, Any]] = []
+    for r in rows:
+        before = r["before_state"]
+        after = r["after_state"]
+        if isinstance(before, str):
+            before = json.loads(before) if before else None
+        if isinstance(after, str):
+            after = json.loads(after) if after else None
+        result.append(
+            {
+                "id": str(r["id"]),
+                "rule_id": str(r["rule_id"]),
+                "tenant_id": str(r["tenant_id"]),
+                "action": r["action"],
+                "actor_user_id": str(r["actor_user_id"])
+                if r["actor_user_id"]
+                else None,
+                "before_state": before,
+                "after_state": after,
+                "created_at": r["created_at"].isoformat()
+                if r["created_at"]
+                else "",
+            }
+        )
+    return result
+
+
+async def insert_safety_decision(
+    *,
+    tenant_id: str,
+    stage: str,
+    verdict_action: str,
+    triggered_rule_ids: list[str],
+    findings: list[dict[str, Any]],
+    context_digest: str,
+    context_summary: str,
+    coworker_id: str | None = None,
+    conversation_id: str | None = None,
+    job_id: str | None = None,
+    approval_context: dict[str, Any] | None = None,
+) -> str:
+    """Write one audit row; return its id.
+
+    Called by the safety_events subscriber for every decision the
+    container publishes. Never raises on per-row validation — malformed
+    inputs should be filtered upstream in ``SafetyEngine.handle_safety_event``.
+
+    ``approval_context`` is retained only for rows with
+    ``verdict_action='require_approval'``; for other actions the
+    caller passes None and the column stays NULL. See the 24-hour
+    cleanup task note in the ``safety_decisions`` schema block.
+    """
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO safety_decisions (
+                tenant_id, coworker_id, conversation_id, job_id,
+                stage, verdict_action, triggered_rule_ids,
+                findings, context_digest, context_summary,
+                approval_context
+            )
+            VALUES (
+                $1::uuid, $2::uuid, $3, $4,
+                $5, $6, $7::uuid[],
+                $8::jsonb, $9, $10, $11::jsonb
+            )
+            RETURNING id
+            """,
+            tenant_id,
+            coworker_id,
+            conversation_id,
+            job_id,
+            stage,
+            verdict_action,
+            triggered_rule_ids,
+            json.dumps(findings),
+            context_digest,
+            context_summary,
+            json.dumps(approval_context) if approval_context else None,
+        )
+    assert row is not None
+    return str(row["id"])
+
+
+async def stream_safety_decisions(
+    tenant_id: str,
+    *,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+    verdict_action: str | None = None,
+    coworker_id: str | None = None,
+    stage: str | None = None,
+    chunk_size: int = 1000,
+) -> AsyncIterator[list[dict[str, Any]]]:
+    """Yield rows in ``chunk_size`` batches for streaming CSV export.
+
+    Uses an asyncpg cursor inside a transaction so 100k-row exports
+    don't pull the entire result set into memory. Each chunk is a
+    flat list of dicts with the same shape as ``list_safety_decisions``
+    (caller picks which fields to put on the CSV row).
+
+    ``from_ts`` / ``to_ts`` are ISO-8601 strings coerced to
+    ``timestamptz`` inside the query so operators can write
+    ``"2026-04-01"`` or ``"2026-04-01T00:00:00+00:00"`` interchangeably.
+    Malformed timestamps raise at query time (psycopg surface) which
+    the REST layer turns into 422.
+    """
+    pool = _get_pool()
+    clauses = ["tenant_id = $1::uuid"]
+    params: list[Any] = [tenant_id]
+    if from_ts is not None:
+        params.append(from_ts)
+        clauses.append(f"created_at >= ${len(params)}::timestamptz")
+    if to_ts is not None:
+        params.append(to_ts)
+        clauses.append(f"created_at <= ${len(params)}::timestamptz")
+    if verdict_action is not None:
+        params.append(verdict_action)
+        clauses.append(f"verdict_action = ${len(params)}")
+    if coworker_id is not None:
+        params.append(coworker_id)
+        clauses.append(f"coworker_id = ${len(params)}::uuid")
+    if stage is not None:
+        params.append(stage)
+        clauses.append(f"stage = ${len(params)}")
+    sql = (
+        "SELECT id, created_at, tenant_id, coworker_id, "
+        "conversation_id, job_id, stage, verdict_action, "
+        "triggered_rule_ids, findings, context_summary "
+        "FROM safety_decisions WHERE "
+        + " AND ".join(clauses)
+        + " ORDER BY created_at DESC"
+    )
+    async with pool.acquire() as conn, conn.transaction():
+        cur = await conn.cursor(sql, *params)
+        while True:
+            rows = await cur.fetch(chunk_size)
+            if not rows:
+                return
+            chunk: list[dict[str, Any]] = []
+            for r in rows:
+                findings = r["findings"]
+                if isinstance(findings, str):
+                    findings = json.loads(findings) if findings else []
+                chunk.append(
+                    {
+                        "id": str(r["id"]),
+                        "created_at": (
+                            r["created_at"].isoformat()
+                            if r["created_at"]
+                            else ""
+                        ),
+                        "tenant_id": str(r["tenant_id"]),
+                        "coworker_id": (
+                            str(r["coworker_id"])
+                            if r["coworker_id"]
+                            else None
+                        ),
+                        "conversation_id": r["conversation_id"],
+                        "job_id": r["job_id"],
+                        "stage": r["stage"],
+                        "verdict_action": r["verdict_action"],
+                        "triggered_rule_ids": [
+                            str(u) for u in (r["triggered_rule_ids"] or [])
+                        ],
+                        "findings": (
+                            findings if isinstance(findings, list) else []
+                        ),
+                        "context_summary": r["context_summary"],
+                    }
+                )
+            yield chunk
+
+
+async def cleanup_old_safety_approval_contexts(
+    *,
+    retention_hours: int = 24,
+) -> int:
+    """Zero the ``approval_context`` column on decisions older than
+    ``retention_hours``. Returns the number of rows updated.
+
+    V2 P1.1 retention policy: ``approval_context`` is the one place the
+    full ``tool_input`` lives after the turn (all other audit fields
+    carry only a digest + short summary). Keeping it forever would
+    turn the audit table into a long-term PII sink. 24h is enough for
+    the approval decision to play out (auto-expire is 60 min by
+    default) and for operators to inspect via the admin UI; after
+    that we redact.
+
+    Uses ``created_at`` rather than the linked approval row's
+    resolution time. Simpler (no join), and the approval row has its
+    own history via ``approval_audit_log``, so nothing is lost by
+    clearing the safety-side copy.
+    """
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchval(
+            """
+            WITH cleared AS (
+                UPDATE safety_decisions
+                   SET approval_context = NULL
+                 WHERE verdict_action = 'require_approval'
+                   AND approval_context IS NOT NULL
+                   AND created_at < (now() - make_interval(hours => $1))
+                 RETURNING 1
+            )
+            SELECT COUNT(*) FROM cleared
+            """,
+            retention_hours,
+        )
+    return int(row or 0)
+
+
+async def get_safety_decision(
+    decision_id: str, tenant_id: str
+) -> dict[str, Any] | None:
+    """Fetch a single safety_decisions row, scoped to ``tenant_id``.
+
+    Tenant scoping is on the query (not a post-fetch check) so a leak
+    path like "admin from tenant B fetches tenant A's row via a guessed
+    UUID" returns None from the DB itself. The REST layer then maps
+    None to 404 — indistinguishable from "doesn't exist" so we don't
+    leak UUID existence across tenants.
+    """
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM safety_decisions WHERE id = $1::uuid "
+            "AND tenant_id = $2::uuid",
+            decision_id,
+            tenant_id,
+        )
+    if row is None:
+        return None
+    findings = row["findings"]
+    if isinstance(findings, str):
+        findings = json.loads(findings) if findings else []
+    # asyncpg Record supports dict-like .get() via key access + default.
+    # Use getattr-like fallback to handle both pre-migration rows (no
+    # column) and post-migration rows uniformly.
+    try:
+        approval_ctx = row["approval_context"]
+    except KeyError:
+        approval_ctx = None
+    if isinstance(approval_ctx, str):
+        approval_ctx = json.loads(approval_ctx) if approval_ctx else None
+    return {
+        "id": str(row["id"]),
+        "tenant_id": str(row["tenant_id"]),
+        "coworker_id": str(row["coworker_id"]) if row["coworker_id"] else None,
+        "conversation_id": row["conversation_id"],
+        "job_id": row["job_id"],
+        "stage": row["stage"],
+        "verdict_action": row["verdict_action"],
+        "triggered_rule_ids": [str(u) for u in (row["triggered_rule_ids"] or [])],
+        "findings": findings if isinstance(findings, list) else [],
+        "context_digest": row["context_digest"],
+        "context_summary": row["context_summary"],
+        "approval_context": approval_ctx,
+        "created_at": row["created_at"].isoformat() if row["created_at"] else "",
+    }
+
+
+def _safety_decision_where_clauses(
+    tenant_id: str,
+    *,
+    verdict_action: str | None,
+    coworker_id: str | None,
+    stage: str | None,
+    from_ts: str | None,
+    to_ts: str | None,
+) -> tuple[str, list[Any]]:
+    """Shared WHERE-clause builder for list + count calls."""
+    clauses = ["tenant_id = $1::uuid"]
+    params: list[Any] = [tenant_id]
+    if verdict_action is not None:
+        params.append(verdict_action)
+        clauses.append(f"verdict_action = ${len(params)}")
+    if coworker_id is not None:
+        params.append(coworker_id)
+        clauses.append(f"coworker_id = ${len(params)}::uuid")
+    if stage is not None:
+        params.append(stage)
+        clauses.append(f"stage = ${len(params)}")
+    if from_ts is not None:
+        params.append(from_ts)
+        clauses.append(f"created_at >= ${len(params)}::timestamptz")
+    if to_ts is not None:
+        params.append(to_ts)
+        clauses.append(f"created_at <= ${len(params)}::timestamptz")
+    return " AND ".join(clauses), params
+
+
+async def count_safety_decisions(
+    tenant_id: str,
+    *,
+    verdict_action: str | None = None,
+    coworker_id: str | None = None,
+    stage: str | None = None,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+) -> int:
+    """Total count for a matching filter set.
+
+    Split from ``list_safety_decisions`` so the REST pagination path
+    can make two parallel calls (count + page) without paying for the
+    count on internal read-the-latest-N call sites. Matches the filter
+    arg set of the list function so drift is a local concern.
+    """
+    where, params = _safety_decision_where_clauses(
+        tenant_id,
+        verdict_action=verdict_action,
+        coworker_id=coworker_id,
+        stage=stage,
+        from_ts=from_ts,
+        to_ts=to_ts,
+    )
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchval(
+            f"SELECT COUNT(*) FROM safety_decisions WHERE {where}",
+            *params,
+        )
+    return int(row or 0)
+
+
+async def list_safety_decisions(
+    tenant_id: str,
+    *,
+    verdict_action: str | None = None,
+    coworker_id: str | None = None,
+    stage: str | None = None,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+    limit: int = 200,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """Read safety decisions for a tenant, newest first.
+
+    Pagination via ``limit`` + ``offset``. Callers that need a total
+    count for UI pagination pair this with ``count_safety_decisions``
+    using the same filter args. The two-call surface keeps internal
+    "read the latest N" callers from paying for a count scan.
+    """
+    where, params = _safety_decision_where_clauses(
+        tenant_id,
+        verdict_action=verdict_action,
+        coworker_id=coworker_id,
+        stage=stage,
+        from_ts=from_ts,
+        to_ts=to_ts,
+    )
+    params.append(limit)
+    params.append(offset)
+    sql = (
+        f"SELECT * FROM safety_decisions WHERE {where} "
+        f"ORDER BY created_at DESC LIMIT ${len(params) - 1} "
+        f"OFFSET ${len(params)}"
+    )
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(sql, *params)
+    result: list[dict[str, Any]] = []
+    for r in rows:
+        findings = r["findings"]
+        if isinstance(findings, str):
+            findings = json.loads(findings) if findings else []
+        result.append(
+            {
+                "id": str(r["id"]),
+                "tenant_id": str(r["tenant_id"]),
+                "coworker_id": str(r["coworker_id"]) if r["coworker_id"] else None,
+                "conversation_id": r["conversation_id"],
+                "job_id": r["job_id"],
+                "stage": r["stage"],
+                "verdict_action": r["verdict_action"],
+                "triggered_rule_ids": [str(u) for u in (r["triggered_rule_ids"] or [])],
+                "findings": findings if isinstance(findings, list) else [],
+                "context_digest": r["context_digest"],
+                "context_summary": r["context_summary"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else "",
+            }
+        )
+    return result

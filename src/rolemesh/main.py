@@ -14,6 +14,7 @@ import re
 import signal
 import sys
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -22,9 +23,16 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from rolemesh.channels.gateway import ChannelGateway
+    from rolemesh.safety.engine import SafetyEngine
 
-from rolemesh.agent import BACKEND_CONFIGS, AgentInput, AgentOutput, CLAUDE_CODE_BACKEND, ContainerAgentExecutor, PI_BACKEND
-from rolemesh.core.config import AGENT_BACKEND_DEFAULT
+from rolemesh.agent import (
+    BACKEND_CONFIGS,
+    CLAUDE_CODE_BACKEND,
+    PI_BACKEND,
+    AgentInput,
+    AgentOutput,
+    ContainerAgentExecutor,
+)
 from rolemesh.auth.permissions import AgentPermissions
 from rolemesh.channels.slack_gateway import SlackGateway
 from rolemesh.channels.telegram_gateway import TelegramGateway
@@ -38,6 +46,7 @@ from rolemesh.container.runtime import (
 )
 from rolemesh.container.scheduler import GroupQueue
 from rolemesh.core.config import (
+    AGENT_BACKEND_DEFAULT,
     ASSISTANT_NAME,
     CONTAINER_NETWORK_NAME,
     CREDENTIAL_PROXY_PORT,
@@ -66,7 +75,6 @@ from rolemesh.db.pg import (
     get_all_sessions,
     get_all_tasks,
     get_conversation_by_binding_and_chat,
-    get_conversations_for_coworker as pg_get_conversations_for_coworker,
     get_messages_since,
     get_new_messages_for_conversations,
     get_tenant_by_slug,
@@ -74,6 +82,9 @@ from rolemesh.db.pg import (
     set_session,
     update_conversation_last_invocation,
     update_tenant_message_cursor,
+)
+from rolemesh.db.pg import (
+    get_conversations_for_coworker as pg_get_conversations_for_coworker,
 )
 from rolemesh.db.pg import (
     store_message as db_store_message,
@@ -135,6 +146,112 @@ _executors: dict[str, ContainerAgentExecutor] = {}
 # Track texts sent via IPC send_message to deduplicate against results stream
 _ipc_sent_texts: set[str] = set()
 _bg_tasks: set[asyncio.Task[None]] = set()
+
+# SafetyEngine is shared by the NATS safety_events subscriber (ingests
+# container-produced audit events) and the orchestrator-side MODEL_OUTPUT
+# pipeline (see _on_output below). Instantiated when the safety
+# subscriber starts; kept None until then so tests that import this
+# module without full startup don't pay for the default DbAuditSink.
+_safety_engine: SafetyEngine | None = None
+
+# V2 P0.3: orchestrator-side slow-check RPC. Thread pool caps concurrent
+# sync check invocations so a heavy ML model can't starve the event
+# loop. RPC server is started alongside the subscribers; both are kept
+# at module scope so shutdown can tear them down cleanly.
+_safety_rpc_server: object | None = None
+_safety_thread_pool: object | None = None
+
+
+async def _apply_model_output_safety(
+    *,
+    safety_engine: SafetyEngine | None,
+    tenant_id: str,
+    coworker_id: str,
+    user_id: str,
+    conversation_id: str,
+    text: str,
+) -> str:
+    """Run the MODEL_OUTPUT pipeline and return possibly-replaced text.
+
+    Split out of ``_on_output`` so it is reachable from unit tests
+    without standing up the full conversation / gateway closure. The
+    pipeline itself lives in ``rolemesh.safety.pipeline_core``; this
+    wrapper is purely the "where does the text go on block / exception"
+    policy that the orchestrator hot path applies.
+
+    Behaviour contract:
+
+      - No engine or no text → return ``text`` unchanged (zero-cost path).
+      - Rule load failure → log, fail-open (return ``text``). MODEL_OUTPUT
+        is one of several defense layers, and a transient DB blip
+        breaking every agent reply would magnify the blast radius of
+        the outage without closing an attack vector the container-side
+        pipeline is already watching.
+      - Pipeline internal exception → fail-close (substitute a generic
+        block string). That path indicates a programming error, not an
+        infra blip — suppressing the reply is the conservative choice.
+      - Block / require_approval verdict → substitute ``verdict.reason``
+        (or a generic block string when reason is empty). On MODEL_OUTPUT
+        require_approval is treated like block for the user-facing reply;
+        the orchestrator's audit ingestion path owns approval-request
+        creation in P1.1.
+      - Redact verdict → substitute the cleaned text from
+        ``verdict.modified_payload["text"]``. Unlike the container hooks,
+        MODEL_OUTPUT can actually replace the user-facing content, so
+        redact takes effect here rather than downgrading.
+      - Warn verdict → return the original text unchanged. MODEL_OUTPUT
+        has no place to inject a warning (it is the final reply), so
+        warn is purely an audit event on this stage.
+      - Allow → return original ``text``.
+    """
+    if not text or safety_engine is None:
+        return text
+    try:
+        rules = await safety_engine.load_rules_for_coworker(
+            tenant_id, coworker_id
+        )
+    except Exception:
+        logger.exception(
+            "safety: MODEL_OUTPUT rule load failed — skipping pipeline"
+        )
+        return text
+    if not rules:
+        return text
+
+    from rolemesh.safety.types import SafetyContext, Stage
+
+    ctx = SafetyContext(
+        stage=Stage.MODEL_OUTPUT,
+        tenant_id=tenant_id,
+        coworker_id=coworker_id,
+        user_id=user_id,
+        job_id="",
+        conversation_id=conversation_id,
+        payload={"text": text},
+    )
+    try:
+        verdict = await safety_engine.run_orchestrator_pipeline(ctx, rules)
+    except Exception:
+        logger.exception(
+            "safety: MODEL_OUTPUT pipeline raised — failing closed"
+        )
+        return "[Response blocked by safety policy]"
+    if verdict.action in ("block", "require_approval"):
+        return verdict.reason or "[Response blocked by safety policy]"
+    if verdict.action == "redact":
+        modified = verdict.modified_payload or {}
+        cleaned = (
+            modified.get("text") if isinstance(modified, dict) else None
+        )
+        if isinstance(cleaned, str):
+            return cleaned
+        logger.warning(
+            "safety: MODEL_OUTPUT redact without 'text' in modified_payload "
+            "— falling back to original text",
+            coworker_id=coworker_id,
+        )
+        return text
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +566,18 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
             raw = result.result
             text = re.sub(r"<internal>[\s\S]*?</internal>", "", raw).strip()
             logger.info("Agent output", coworker=config.name, chars=len(raw))
+
+            # V2 P0.1: orchestrator-side MODEL_OUTPUT safety pipeline.
+            # Runs on the user-visible text (internal tags already stripped).
+            text = await _apply_model_output_safety(
+                safety_engine=_safety_engine,
+                tenant_id=config.tenant_id,
+                coworker_id=config.id,
+                user_id=conv.user_id or "",
+                conversation_id=conv.id,
+                text=text,
+            )
+
             if text and binding:
                 # Skip if this exact text was already sent via IPC send_message
                 if text in _ipc_sent_texts:
@@ -742,6 +871,87 @@ async def _start_nats_ipc_subscriptions(transport: NatsTransport, deps: _IpcDeps
                 await msg.ack()
 
     tasks.append(asyncio.create_task(_handle_tasks()))
+
+    # Safety Framework event ingestion. Container-side SafetyHookHandler
+    # publishes audit events to agent.*.safety_events; the subscriber
+    # performs a trusted-tenant lookup (same pattern as _handle_tasks
+    # above) and forwards validated payloads to SafetyEngine which
+    # writes to safety_decisions. Without this subscription the safety
+    # decisions published by containers are silently lost — a gap that
+    # existed in V1's initial shipment.
+    for consumer_name in ("orch-safety-events",):
+        with contextlib.suppress(Exception):
+            await transport.js.delete_consumer("agent-ipc", consumer_name)
+    safety_events_sub = await transport.js.subscribe(
+        "agent.*.safety_events", durable="orch-safety-events"
+    )
+
+    from rolemesh.safety.engine import SafetyEngine
+    from rolemesh.safety.subscriber import SafetyEventsSubscriber
+
+    class _StateCoworkerLookup:
+        """Adapter: claimed coworker_id -> (tenant_id, id) from _state."""
+
+        def __call__(
+            self, claimed_coworker_id: str
+        ) -> _TrustedCoworkerRec | None:
+            cw = _state.coworkers.get(claimed_coworker_id)
+            if cw is None:
+                return None
+            return _TrustedCoworkerRec(
+                tenant_id=cw.config.tenant_id, id=cw.config.id
+            )
+
+    global _safety_engine
+    _safety_engine = SafetyEngine()
+    safety_subscriber = SafetyEventsSubscriber(
+        engine=_safety_engine,
+        coworker_lookup=_StateCoworkerLookup(),
+    )
+
+    async def _handle_safety_events() -> None:
+        async for msg in safety_events_sub.messages:
+            try:
+                await safety_subscriber.on_message_bytes(msg.data)
+            except Exception:
+                # Subscriber must not poison its own loop. Individual
+                # malformed/suspicious messages already surface via
+                # structured warnings inside on_message_bytes.
+                logger.exception("Error processing safety_events message")
+            await msg.ack()
+
+    tasks.append(asyncio.create_task(_handle_safety_events()))
+
+    # V2 P0.3: Slow-check RPC server (agent.*.safety.detect). Uses core
+    # NATS request-reply rather than JetStream — slow checks are
+    # synchronous from the container's perspective, so a missed reply
+    # should surface as a timeout + fail-open on the caller, not be
+    # persisted and re-delivered. A shared ThreadPoolExecutor absorbs
+    # sync ML libraries so they can't stall the orchestrator loop.
+    from concurrent.futures import ThreadPoolExecutor
+    from os import cpu_count
+
+    from rolemesh.safety.registry import get_orchestrator_registry
+    from rolemesh.safety.rpc_server import SafetyRpcServer
+
+    max_workers = max(4, int((cpu_count() or 4) * 1.5))
+
+    global _safety_thread_pool, _safety_rpc_server
+    _safety_thread_pool = ThreadPoolExecutor(
+        max_workers=max_workers, thread_name_prefix="safety-rpc"
+    )
+    _safety_rpc_server = SafetyRpcServer(
+        nats_client=transport.nc,
+        registry=get_orchestrator_registry(),
+        thread_pool=_safety_thread_pool,
+        coworker_lookup=_StateCoworkerLookup(),
+    )
+    await _safety_rpc_server.start()
+    logger.info(
+        "safety RPC server started",
+        component="safety",
+        max_workers=max_workers,
+    )
 
     logger.info("NATS IPC subscriptions started")
     return tasks
@@ -1059,6 +1269,16 @@ async def main() -> None:
     )
     ipc_deps.set_approval_engine(approval_engine)
 
+    # V2 P1.1: thread the approval engine through to SafetyEngine so
+    # require_approval verdicts actually produce human-in-the-loop
+    # decision surfaces instead of just landing in the audit table.
+    # The safety engine was instantiated earlier in start_subscribers
+    # (without the approval dep because that module isn't constructed
+    # yet at that point); patching the attribute post-hoc keeps
+    # ordering minimal and avoids re-threading construction.
+    if _safety_engine is not None:
+        _safety_engine._approval_handler = approval_engine  # type: ignore[attr-defined]
+
     from rolemesh.approval.executor import ApprovalWorker
     from rolemesh.approval.expiry import run_approval_maintenance_loop
 
@@ -1067,6 +1287,16 @@ async def main() -> None:
         channel_sender=_OrchestratorChannelSender(),
     )
     await approval_worker.start()
+
+    # V2 P1.1: 24-hour TTL on safety_decisions.approval_context.
+    # Runs alongside approval maintenance — separate loops because the
+    # two touch different tables and should fail independently.
+    from rolemesh.safety.maintenance import run_safety_maintenance_loop
+
+    safety_maintenance_stop = asyncio.Event()
+    safety_maintenance_task = asyncio.create_task(
+        run_safety_maintenance_loop(stop_event=safety_maintenance_stop)
+    )
 
     approval_maintenance_stop = asyncio.Event()
     approval_maintenance_task = asyncio.create_task(
@@ -1119,12 +1349,25 @@ async def main() -> None:
             await t
 
     approval_maintenance_stop.set()
+    safety_maintenance_stop.set()
     with contextlib.suppress(Exception):
         await cancel_sub.unsubscribe()
     approval_maintenance_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await approval_maintenance_task
+    safety_maintenance_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await safety_maintenance_task
     await approval_worker.stop()
+    # V2 P0.3: shut down the safety RPC server and its thread pool so
+    # nats-py can tear down the subscription cleanly and in-flight
+    # sync checks do not block process exit.
+    if _safety_rpc_server is not None:
+        with contextlib.suppress(Exception):
+            await _safety_rpc_server.stop()  # type: ignore[attr-defined]
+    if _safety_thread_pool is not None:
+        with contextlib.suppress(Exception):
+            _safety_thread_pool.shutdown(wait=False)  # type: ignore[attr-defined]
     await proxy_runner.cleanup()
     await _queue.shutdown(10000)
     for gw in _gateways.values():
@@ -1186,6 +1429,18 @@ class _SchedulerDepsImpl:
         if text:
             cw_state = _state.coworkers.get(coworker_id) if coworker_id else None
             await _send_via_coworker(cw_state, jid, text)
+
+
+@dataclass(frozen=True)
+class _TrustedCoworkerRec:
+    """Minimal trusted view of a coworker exposed to the safety
+    subscriber. Kept tight so SafetyEventsSubscriber has a small,
+    stable contract to depend on (see rolemesh.safety.subscriber's
+    TrustedCoworker Protocol).
+    """
+
+    tenant_id: str
+    id: str
 
 
 class _IpcDepsImpl:

@@ -6,6 +6,8 @@ import './components/message-item.js';
 import './components/message-editor.js';
 import './components/sidebar.js';
 import './components/login-page.js';
+import './components/safety-rules-page.js';
+import './components/safety-decisions-page.js';
 import {
   fetchAuthConfig,
   getStoredToken,
@@ -15,6 +17,15 @@ import {
 } from './services/oidc-auth.js';
 
 type AuthState = 'loading' | 'login' | 'authenticated';
+type Route = 'chat' | 'admin-safety-rules' | 'admin-safety-decisions';
+
+// Map from location.hash to Route. Hash-based routing so the Vite dev
+// server + static FastAPI serve work without a history-API fallback.
+function routeFromHash(hash: string): Route {
+  if (hash === '#/admin/safety/rules') return 'admin-safety-rules';
+  if (hash === '#/admin/safety/decisions') return 'admin-safety-decisions';
+  return 'chat';
+}
 
 @customElement('rm-app')
 export class RmApp extends LitElement {
@@ -23,6 +34,7 @@ export class RmApp extends LitElement {
   }
 
   @state() private authState: AuthState = 'loading';
+  @state() private route: Route = routeFromHash(location.hash);
 
   override async connectedCallback() {
     super.connectedCallback();
@@ -32,8 +44,18 @@ export class RmApp extends LitElement {
     window.addEventListener('rm-auth-failed', () => {
       this.authState = 'login';
     });
+    window.addEventListener('hashchange', this.onHashChange);
     await this.resolveAuth();
   }
+
+  override disconnectedCallback() {
+    super.disconnectedCallback();
+    window.removeEventListener('hashchange', this.onHashChange);
+  }
+
+  private onHashChange = (): void => {
+    this.route = routeFromHash(location.hash);
+  };
 
   private async resolveAuth() {
     const params = new URLSearchParams(location.search);
@@ -85,6 +107,47 @@ export class RmApp extends LitElement {
     });
   }
 
+  private navTo(route: Route): void {
+    const map: Record<Route, string> = {
+      'chat': '',
+      'admin-safety-rules': '#/admin/safety/rules',
+      'admin-safety-decisions': '#/admin/safety/decisions',
+    };
+    location.hash = map[route];
+  }
+
+  private renderTopNav() {
+    const item = (r: Route, label: string) => {
+      const active = this.route === r;
+      const cls = active
+        ? 'px-3 py-1 border-b-2 border-blue-500 text-sm font-medium'
+        : 'px-3 py-1 text-sm text-gray-600 hover:text-gray-900 dark:hover:text-gray-100';
+      return html`
+        <button class=${cls} @click=${() => this.navTo(r)}>${label}</button>
+      `;
+    };
+    return html`
+      <nav
+        class="flex gap-2 border-b px-4 py-2 bg-surface-0 dark:bg-d-surface-0"
+      >
+        ${item('chat', 'Chat')}
+        ${item('admin-safety-rules', 'Safety rules')}
+        ${item('admin-safety-decisions', 'Safety decisions')}
+      </nav>
+    `;
+  }
+
+  private renderRouted() {
+    switch (this.route) {
+      case 'admin-safety-rules':
+        return html`<rm-safety-rules-page></rm-safety-rules-page>`;
+      case 'admin-safety-decisions':
+        return html`<rm-safety-decisions-page></rm-safety-decisions-page>`;
+      default:
+        return html`<rm-chat-panel class="flex-1 min-h-0"></rm-chat-panel>`;
+    }
+  }
+
   override render() {
     if (this.authState === 'loading') {
       return html`<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#666;">Loading...</div>`;
@@ -94,7 +157,8 @@ export class RmApp extends LitElement {
     }
     return html`
       <div class="h-full flex flex-col bg-surface-0 dark:bg-d-surface-0">
-        <rm-chat-panel class="flex-1 min-h-0"></rm-chat-panel>
+        ${this.renderTopNav()}
+        <div class="flex-1 min-h-0 overflow-auto">${this.renderRouted()}</div>
       </div>
     `;
   }

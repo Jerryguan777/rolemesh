@@ -288,3 +288,50 @@ class ApprovalDecisionRequest(BaseModel):
     # control characters at the REST boundary (see admin.decide_approval_ep)
     # to reduce the surface for unintentional formatting injection.
     note: str | None = Field(None, max_length=1000)
+
+
+# ---------------------------------------------------------------------------
+# Safety rules
+# ---------------------------------------------------------------------------
+
+
+# V1 stages exposed through REST. Rule POST accepts any of these, but
+# the server additionally checks the stage is within the selected
+# check's ``stages`` set before writing to the DB.
+_SAFETY_STAGE_PATTERN = (
+    r"^(input_prompt|pre_tool_call|post_tool_result|"
+    r"model_output|pre_compaction)$"
+)
+
+
+class SafetyRuleResponse(BaseModel):
+    id: str
+    tenant_id: str
+    coworker_id: str | None = None
+    stage: str
+    check_id: str
+    config: dict[str, object] = Field(default_factory=dict)
+    priority: int
+    enabled: bool
+    description: str
+    created_at: str
+    updated_at: str
+
+
+class SafetyRuleCreate(BaseModel):
+    stage: str = Field(..., pattern=_SAFETY_STAGE_PATTERN)
+    check_id: str = Field(..., min_length=1, max_length=128)
+    config: dict[str, object] = Field(default_factory=dict)
+    coworker_id: str | None = None
+    priority: int = Field(100, ge=-1000, le=1000)
+    enabled: bool = True
+    description: str = Field("", max_length=500)
+
+
+class SafetyRuleUpdate(BaseModel):
+    stage: str | None = Field(None, pattern=_SAFETY_STAGE_PATTERN)
+    check_id: str | None = Field(None, min_length=1, max_length=128)
+    config: dict[str, object] | None = None
+    priority: int | None = Field(None, ge=-1000, le=1000)
+    enabled: bool | None = None
+    description: str | None = Field(None, max_length=500)

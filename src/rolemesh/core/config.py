@@ -127,6 +127,14 @@ ROLEMESH_TOKEN_SECRET: str = os.environ.get("ROLEMESH_TOKEN_SECRET", "")
 #              approval better than no agent" for availability reasons.
 APPROVAL_FAIL_MODE: str = os.environ.get("APPROVAL_FAIL_MODE", "closed")
 
+# SAFETY_FAIL_MODE mirrors APPROVAL_FAIL_MODE for the Safety Framework:
+# on DB unreachable at container start, "closed" (default) refuses the
+# job; "open" runs the agent without safety rules and logs ERROR. The
+# safety hook itself is already fail-closed at runtime (check
+# exceptions propagate to a block) — this flag only governs the
+# boot-time rule snapshot load.
+SAFETY_FAIL_MODE: str = os.environ.get("SAFETY_FAIL_MODE", "closed")
+
 # Timezone for scheduled tasks — needs IANA name (e.g. "America/New_York"), not abbreviation ("EST").
 TIMEZONE: str = os.environ.get("TZ", "")
 

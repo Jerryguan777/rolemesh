@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated
 
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 
 from rolemesh.approval.engine import ApprovalEngine, ConflictError, ForbiddenError
 from rolemesh.auth.permissions import AgentPermissions
@@ -38,6 +40,9 @@ from webui.schemas import (
     BindingUpdate,
     ConversationCreate,
     ConversationResponse,
+    SafetyRuleCreate,
+    SafetyRuleResponse,
+    SafetyRuleUpdate,
     TaskResponse,
     TenantResponse,
     TenantUpdate,
@@ -48,8 +53,11 @@ from webui.schemas import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from rolemesh.approval.types import ApprovalAuditEntry, ApprovalPolicy, ApprovalRequest
     from rolemesh.core.types import ChannelBinding, Conversation, Coworker, ScheduledTask, Tenant, User
+    from rolemesh.safety.types import Rule as SafetyRule
 
 # Annotated dependency types (avoids B008 lint warnings)
 OwnerUser = Annotated[AuthenticatedUser, Depends(require_manage_tenant)]
@@ -859,3 +867,548 @@ async def decide_approval_ep(
             detail=f"Request already {exc.current_status}",
         ) from exc
     return _request_to_response(updated)
+
+
+# ---------------------------------------------------------------------------
+# Safety: rules (admin+)
+# ---------------------------------------------------------------------------
+
+
+def _safety_rule_to_response(r: SafetyRule) -> SafetyRuleResponse:
+    return SafetyRuleResponse(
+        id=r.id,
+        tenant_id=r.tenant_id,
+        coworker_id=r.coworker_id,
+        stage=r.stage.value,
+        check_id=r.check_id,
+        config=r.config,
+        priority=r.priority,
+        enabled=r.enabled,
+        description=r.description,
+        created_at=r.created_at,
+        updated_at=r.updated_at,
+    )
+
+
+async def _validate_safety_rule_body(
+    check_id: str,
+    stage: str,
+    config: dict[str, object],
+    *,
+    tenant_id: str,
+    coworker_id: str | None,
+) -> None:
+    """Raise HTTPException(400) if the rule cannot be satisfied at run-time.
+
+    REST is the strict boundary: misconfigured rules are rejected here
+    before they land in the DB. The container-side pipeline is
+    permissive on stale snapshots (log + skip), but a fresh admin
+    action must fail loud so typos surface immediately rather than
+    subtly acting wrong at run-time.
+
+    Extra V2 P0.4 check: if the check is ``cost_class=slow`` AND the
+    stage is PRE_TOOL_CALL, we verify the rule's scope does not include
+    any reversible tool. Reversible tools have a 100 ms budget at
+    PRE_TOOL_CALL that slow checks can't meet; the runtime guard
+    (pipeline_core) will skip the rule when it fires, but admin-time
+    rejection gives operators the feedback immediately instead of
+    silent skips at runtime.
+
+    V2 P1.1: ``action_override`` is validated against the closed set
+    {block, warn, require_approval}. ``redact`` is refused because an
+    override cannot synthesize a modified_payload.
+    """
+    # Lazy import avoids a WebUI → rolemesh.safety cycle at module load.
+    from pydantic import ValidationError
+
+    from rolemesh.safety.registry import get_orchestrator_registry
+    from rolemesh.safety.tool_reversibility import get_tool_reversibility
+    from rolemesh.safety.types import Stage
+
+    registry = get_orchestrator_registry()
+    if not registry.has(check_id):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown safety check_id: {check_id}",
+        )
+    check = registry.get(check_id)
+    try:
+        stage_enum = Stage(stage)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"Unknown stage: {stage}"
+        ) from exc
+    if stage_enum not in check.stages:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Check {check_id} does not support stage {stage}; "
+                f"valid stages: {sorted(s.value for s in check.stages)}"
+            ),
+        )
+    if not isinstance(config, dict):
+        raise HTTPException(
+            status_code=400, detail="config must be a JSON object"
+        )
+    # Pydantic validation (unknown keys, wrong types) — the check's
+    # declared config_model is the source of truth. Older checks
+    # without a model are tolerated, matching the permissive run-time
+    # contract.
+    config_model = getattr(check, "config_model", None)
+    if config_model is not None:
+        try:
+            config_model.model_validate(config)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid config for {check_id}: {exc.errors()}",
+            ) from exc
+
+    # V2 P1.1: action_override whitelist. redact is explicitly refused
+    # because the check did not produce a modified_payload.
+    override = config.get("action_override") if isinstance(config, dict) else None
+    if override is not None:
+        valid = {"block", "warn", "require_approval"}
+        if override not in valid:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Invalid action_override {override!r}; "
+                    f"must be one of {sorted(valid)} "
+                    f"(redact cannot be synthesized via override)"
+                ),
+            )
+
+    # V2 P0.4: reversibility guard at admin time. Only runs when the
+    # check is slow AND the stage is PRE_TOOL_CALL — other combinations
+    # have no budget conflict. Scope expansion:
+    #   coworker_id is None → tenant-wide rule → union of every
+    #     coworker's tools
+    #   coworker_id is set  → single coworker's tools
+    if (
+        getattr(check, "cost_class", "cheap") == "slow"
+        and stage_enum == Stage.PRE_TOOL_CALL
+    ):
+        coworkers: list[object] = []
+        if coworker_id is not None:
+            cw = await pg.get_coworker(coworker_id)
+            if cw is not None and cw.tenant_id == tenant_id:
+                coworkers.append(cw)
+        else:
+            coworkers.extend(await pg.get_coworkers_for_tenant(tenant_id))
+        for cw_any in coworkers:
+            tools = getattr(cw_any, "tools", None) or []
+            for mcp in tools:
+                overrides = getattr(mcp, "tool_reversibility", {}) or {}
+                # Builtins win — operator can't flip a stock tool's
+                # reversibility via MCP override. The helper does that
+                # layering for us; we just scan the declared bare
+                # names per MCP server.
+                for bare_name in overrides:
+                    if get_tool_reversibility(bare_name, overrides):
+                        name = getattr(cw_any, "name", "?")
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"Rule with slow check {check_id!r} at "
+                                f"PRE_TOOL_CALL is blocked: coworker "
+                                f"{name!r} configures reversible tool "
+                                f"{bare_name!r} which exceeds the "
+                                "100 ms budget. Narrow the rule scope "
+                                "or use a different stage."
+                            ),
+                        )
+
+
+@router.post(
+    "/safety/rules",
+    response_model=SafetyRuleResponse,
+    status_code=201,
+)
+async def create_safety_rule_ep(
+    body: SafetyRuleCreate,
+    user: AdminUser,
+) -> SafetyRuleResponse:
+    if body.coworker_id is not None:
+        # Guard against cross-tenant rule creation: a tenant admin MUST
+        # NOT be able to attach a rule to a coworker they don't own.
+        await _get_agent_or_404(body.coworker_id, user.tenant_id)
+    # Run tenant-scoped validation after the coworker cross-tenant
+    # guard so a cross-tenant coworker_id surfaces as 404 rather than
+    # leaking through the scope-expansion query.
+    await _validate_safety_rule_body(
+        body.check_id,
+        body.stage,
+        dict(body.config),
+        tenant_id=user.tenant_id,
+        coworker_id=body.coworker_id,
+    )
+    rule = await pg.create_safety_rule(
+        tenant_id=user.tenant_id,
+        coworker_id=body.coworker_id,
+        stage=body.stage,
+        check_id=body.check_id,
+        config=body.config,
+        priority=body.priority,
+        enabled=body.enabled,
+        description=body.description,
+        actor_user_id=user.user_id,
+    )
+    return _safety_rule_to_response(rule)
+
+
+@router.get(
+    "/safety/rules", response_model=list[SafetyRuleResponse]
+)
+async def list_safety_rules_ep(
+    user: AdminUser,
+    coworker_id: str | None = None,
+    stage: str | None = None,
+    enabled: bool | None = None,
+) -> list[SafetyRuleResponse]:
+    rows = await pg.list_safety_rules(
+        user.tenant_id,
+        coworker_id=coworker_id,
+        stage=stage,
+        enabled=enabled,
+    )
+    return [_safety_rule_to_response(r) for r in rows]
+
+
+@router.get(
+    "/safety/rules/{rule_id}", response_model=SafetyRuleResponse
+)
+async def get_safety_rule_ep(
+    rule_id: str,
+    user: AdminUser,
+) -> SafetyRuleResponse:
+    r = await pg.get_safety_rule(rule_id)
+    if r is None or r.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    return _safety_rule_to_response(r)
+
+
+@router.patch(
+    "/safety/rules/{rule_id}", response_model=SafetyRuleResponse
+)
+async def update_safety_rule_ep(
+    rule_id: str,
+    body: SafetyRuleUpdate,
+    user: AdminUser,
+) -> SafetyRuleResponse:
+    existing = await pg.get_safety_rule(rule_id)
+    if existing is None or existing.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="Rule not found")
+
+    # Re-validate when either check_id or stage changes: the stage must
+    # remain valid for the (possibly new) check_id.
+    eff_check = body.check_id if body.check_id is not None else existing.check_id
+    eff_stage = body.stage if body.stage is not None else existing.stage.value
+    eff_config = (
+        body.config if body.config is not None else existing.config
+    )
+    if body.check_id is not None or body.stage is not None or body.config is not None:
+        await _validate_safety_rule_body(
+            eff_check,
+            eff_stage,
+            dict(eff_config),
+            tenant_id=user.tenant_id,
+            coworker_id=existing.coworker_id,
+        )
+
+    updated = await pg.update_safety_rule(
+        rule_id,
+        stage=body.stage,
+        check_id=body.check_id,
+        config=body.config,
+        priority=body.priority,
+        enabled=body.enabled,
+        description=body.description,
+        actor_user_id=user.user_id,
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    return _safety_rule_to_response(updated)
+
+
+@router.delete("/safety/rules/{rule_id}", status_code=204)
+async def delete_safety_rule_ep(
+    rule_id: str,
+    user: AdminUser,
+) -> None:
+    existing = await pg.get_safety_rule(rule_id)
+    if existing is None or existing.tenant_id != user.tenant_id:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    await pg.delete_safety_rule(rule_id, actor_user_id=user.user_id)
+
+
+# ---------------------------------------------------------------------------
+# V2 P1.5: check discovery and decisions read endpoints.
+# The admin UI (deferred) will consume these. Exposing them as REST now
+# lets operators build dashboards or curl-driven introspection without
+# waiting on the UI work.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/safety/checks")
+async def list_safety_checks_ep(_user: AdminUser) -> list[dict[str, object]]:
+    """Return metadata for every check registered on the orchestrator.
+
+    Includes the pydantic JSON schema so clients (admin UI, API
+    explorers) can render a config form without a second call. Checks
+    without a config_model report ``None`` — legacy checks that accept
+    arbitrary dicts (new checks are expected to declare a model).
+
+    Ordering is stable-alphabetical on check_id so dashboards that
+    cache results don't see phantom ordering changes.
+    """
+    from rolemesh.safety.registry import get_orchestrator_registry
+
+    checks = sorted(
+        get_orchestrator_registry().all(), key=lambda c: c.id
+    )
+    out: list[dict[str, object]] = []
+    for c in checks:
+        model = c.config_model
+        schema: object | None = (
+            model.model_json_schema()
+            if model is not None and hasattr(model, "model_json_schema")
+            else None
+        )
+        out.append(
+            {
+                "id": c.id,
+                "version": c.version,
+                "stages": sorted(s.value for s in c.stages),
+                "cost_class": c.cost_class,
+                "supported_codes": sorted(c.supported_codes),
+                "config_schema": schema,
+            }
+        )
+    return out
+
+
+@router.get("/tenants/{tid}/safety/decisions")
+async def list_safety_decisions_ep(
+    tid: str,
+    user: AdminUser,
+    verdict_action: str | None = None,
+    coworker_id: str | None = None,
+    stage: str | None = None,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, object]:
+    """Paginated decisions list.
+
+    ``limit`` is capped at 200 so a misbehaving client can't scan the
+    whole table in one call — CSV export exists for bulk retrieval.
+    Returns ``{total, items}`` so the UI can render pagination without
+    a second call.
+    """
+    if tid != user.tenant_id:
+        raise HTTPException(status_code=403, detail="tenant scope mismatch")
+    capped = max(1, min(int(limit), 200))
+    safe_offset = max(0, int(offset))
+    total = await pg.count_safety_decisions(
+        tid,
+        verdict_action=verdict_action,
+        coworker_id=coworker_id,
+        stage=stage,
+        from_ts=from_ts,
+        to_ts=to_ts,
+    )
+    items = await pg.list_safety_decisions(
+        tid,
+        verdict_action=verdict_action,
+        coworker_id=coworker_id,
+        stage=stage,
+        from_ts=from_ts,
+        to_ts=to_ts,
+        limit=capped,
+        offset=safe_offset,
+    )
+    return {"total": total, "items": items}
+
+
+@router.get("/tenants/{tid}/safety/decisions/{decision_id}")
+async def get_safety_decision_ep(
+    tid: str,
+    decision_id: str,
+    user: AdminUser,
+) -> dict[str, object]:
+    """Full decision detail including approval_context when present.
+
+    Returns 404 for cross-tenant lookup (not 403) — we don't leak UUID
+    existence across tenants.
+    """
+    if tid != user.tenant_id:
+        raise HTTPException(status_code=404, detail="decision not found")
+    row = await pg.get_safety_decision(decision_id, tid)
+    if row is None:
+        raise HTTPException(status_code=404, detail="decision not found")
+    return row
+
+
+@router.get("/tenants/{tid}/safety/rules/{rule_id}/audit")
+async def list_safety_rule_audit_ep(
+    tid: str,
+    rule_id: str,
+    user: AdminUser,
+    limit: int = 200,
+) -> list[dict[str, object]]:
+    """Rule-change timeline for the admin UI.
+
+    Shows who changed what and when for one rule — the data source for
+    compliance questions like "when was the SSN rule disabled?". The
+    underlying ``safety_rules_audit`` table is append-only, written by
+    the DB trigger; this endpoint is pure read.
+    """
+    if tid != user.tenant_id:
+        raise HTTPException(status_code=403, detail="tenant scope mismatch")
+    capped = max(1, min(int(limit), 500))
+    return await pg.list_safety_rules_audit(
+        tenant_id=tid, rule_id=rule_id, limit=capped
+    )
+
+
+# ---------------------------------------------------------------------------
+# V2 P2.3: streaming CSV export of safety decisions.
+# ---------------------------------------------------------------------------
+
+
+# Compact, operator-friendly column set. Deliberately NOT the full
+# audit row — ``findings`` is flattened to parallel code/severity
+# lists so the CSV is a pivot table, not a nested JSON blob per
+# cell. Operators who want the full row hit ``GET /safety/decisions/{id}``.
+_CSV_COLUMNS: tuple[str, ...] = (
+    "id",
+    "created_at",
+    "tenant_id",
+    "coworker_id",
+    "conversation_id",
+    "job_id",
+    "stage",
+    "verdict_action",
+    "triggered_rule_ids",
+    "finding_codes",
+    "finding_severities",
+    "context_summary",
+)
+
+
+_FORMULA_PREFIXES: tuple[str, ...] = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_escape(value: object) -> str:
+    """RFC 4180 quoting + CSV-formula-injection guard.
+
+    Two jobs:
+
+    1. **RFC 4180** — wrap fields containing comma / quote / newline
+       in double quotes, doubling interior quotes.
+    2. **Formula injection** — Excel and Google Sheets interpret a
+       cell whose text starts with ``=``, ``+``, ``-``, ``@``, tab
+       or CR as a formula (including network-fetching functions like
+       ``HYPERLINK`` / ``WEBSERVICE``). The audit data we export
+       contains operator-influenced or agent-influenced text
+       (``context_summary`` includes ``tool=<name>`` where name
+       originated in a tool call). Without this guard, an agent
+       that was tricked into calling a tool named
+       ``=HYPERLINK("evil.com","click")`` would produce a CSV that
+       phishes anyone opening it in Excel. Prefix those characters
+       with a single-quote so the cell renders as literal text.
+
+    Writing this inline beats pulling in csv.writer because we're
+    streaming strings, not writing to a file.
+    """
+    if value is None:
+        return ""
+    s = str(value)
+    if s and s[0] in _FORMULA_PREFIXES:
+        s = "'" + s
+    if any(c in s for c in (",", '"', "\n", "\r")):
+        return '"' + s.replace('"', '""') + '"'
+    return s
+
+
+def _format_row(row: dict[str, object]) -> str:
+    triggered = row.get("triggered_rule_ids") or []
+    findings = row.get("findings") or []
+    # Flatten parallel arrays: codes joined with ``|`` so a single
+    # audit row stays a single CSV row, and operators can still split.
+    codes = "|".join(
+        str(f.get("code", ""))
+        for f in findings
+        if isinstance(f, dict)
+    )
+    sevs = "|".join(
+        str(f.get("severity", ""))
+        for f in findings
+        if isinstance(f, dict)
+    )
+    triggered_flat = "|".join(str(t) for t in triggered)
+    fields = [
+        _csv_escape(row.get("id")),
+        _csv_escape(row.get("created_at")),
+        _csv_escape(row.get("tenant_id")),
+        _csv_escape(row.get("coworker_id")),
+        _csv_escape(row.get("conversation_id")),
+        _csv_escape(row.get("job_id")),
+        _csv_escape(row.get("stage")),
+        _csv_escape(row.get("verdict_action")),
+        _csv_escape(triggered_flat),
+        _csv_escape(codes),
+        _csv_escape(sevs),
+        _csv_escape(row.get("context_summary")),
+    ]
+    return ",".join(fields) + "\n"
+
+
+@router.get("/tenants/{tid}/safety/decisions.csv")
+async def export_safety_decisions_csv(
+    tid: str,
+    user: AdminUser,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+    verdict_action: str | None = None,
+    coworker_id: str | None = None,
+    stage: str | None = None,
+) -> StreamingResponse:
+    """Stream safety_decisions as CSV.
+
+    Cross-tenant access → 403. Uses a Postgres cursor so a 100k-row
+    export stays in constant memory; the response starts flowing to
+    the client as soon as the first chunk is ready, without waiting
+    for the full query.
+
+    Columns are the flat view defined in ``_CSV_COLUMNS``; full JSON
+    for any row is available via ``GET /safety/decisions/{id}``
+    (not yet implemented, planned for P1.5 admin UI).
+    """
+    if tid != user.tenant_id:
+        raise HTTPException(status_code=403, detail="tenant scope mismatch")
+
+    async def _generate() -> AsyncIterator[bytes]:
+        yield (",".join(_CSV_COLUMNS) + "\n").encode("utf-8")
+        async for chunk in pg.stream_safety_decisions(
+            tid,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            verdict_action=verdict_action,
+            coworker_id=coworker_id,
+            stage=stage,
+        ):
+            for row in chunk:
+                yield _format_row(row).encode("utf-8")
+
+    today = datetime.now(UTC).strftime("%Y%m%d")
+    filename = f"safety-decisions-{tid}-{today}.csv"
+    return StreamingResponse(
+        _generate(),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )

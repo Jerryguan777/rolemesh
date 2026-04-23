@@ -66,7 +66,12 @@ def rewrite_mcp_url_for_container(
     parsed = urlparse(mcp_config.url)
     original_path = parsed.path
     proxy_url = f"http://{proxy_host}:{proxy_port}/{proxy_prefix}/{mcp_config.name}{original_path}"
-    return McpServerSpec(name=mcp_config.name, type=mcp_config.type, url=proxy_url)
+    return McpServerSpec(
+        name=mcp_config.name,
+        type=mcp_config.type,
+        url=proxy_url,
+        tool_reversibility=dict(mcp_config.tool_reversibility),
+    )
 
 
 def _parse_container_output(raw: dict[str, object]) -> AgentOutput:
@@ -229,6 +234,48 @@ class ContainerAgentExecutor:
                 )
                 raise
 
+        # Load per-coworker safety rules. Same fail-mode contract as
+        # approval above (SAFETY_FAIL_MODE closed default refuses
+        # startup; open logs and starts with no rules). None when no
+        # rules exist, so SafetyHookHandler stays off the hook chain
+        # in zero-config deployments. Implementation lives in
+        # rolemesh.safety.loader so the fail-mode branch is testable
+        # without standing up a Docker container.
+        from rolemesh.safety.loader import load_safety_rules_snapshot
+
+        safety_rules_dicts = await load_safety_rules_snapshot(
+            tenant_id, inp.coworker_id
+        )
+
+        # V2 P0.3: ship slow-check metadata so the container can
+        # register RemoteCheck proxies for them. Only emit specs when
+        # safety rules are also present — a deployment with rules
+        # pointing only at cheap checks would receive a non-empty spec
+        # list it couldn't use, wasting memory and printing warnings
+        # when the pipeline sees unknown check_ids. The "slow specs
+        # only when rules exist" discipline keeps zero-rule deployments
+        # bit-identical to pre-V2.
+        slow_check_specs: list[dict[str, object]] | None = None
+        if safety_rules_dicts:
+            from rolemesh.safety.registry import get_orchestrator_registry
+
+            reg = get_orchestrator_registry()
+            specs: list[dict[str, object]] = []
+            for check in reg.all():
+                if getattr(check, "cost_class", "cheap") != "slow":
+                    continue
+                specs.append(
+                    {
+                        "check_id": check.id,
+                        "version": check.version,
+                        "stages": sorted(s.value for s in check.stages),
+                        "cost_class": check.cost_class,
+                        "supported_codes": sorted(check.supported_codes),
+                    }
+                )
+            if specs:
+                slow_check_specs = specs
+
         # Channel 1: Write initial input to KV before starting container
         kv_init = await self._transport.js.key_value("agent-init")
         agent_init = AgentInitData(
@@ -247,6 +294,8 @@ class ContainerAgentExecutor:
             role_config=inp.role_config,
             mcp_servers=mcp_specs,
             approval_policies=approval_policies_dicts,
+            safety_rules=safety_rules_dicts,
+            slow_check_specs=slow_check_specs,
         )
         await kv_init.put(job_id, agent_init.serialize())
 
