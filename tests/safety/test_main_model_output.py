@@ -268,6 +268,141 @@ class TestAllowPassesThrough:
         assert out == "clean response"
 
 
+class TestRedactVerdict:
+    """MODEL_OUTPUT is one of the few stages where redact can actually
+    take effect — the orchestrator replaces the user-facing reply with
+    the cleaned text. This pins that contract.
+    """
+
+    @pytest.mark.asyncio
+    async def test_redact_substitutes_modified_text(self) -> None:
+        rule = {
+            "id": "r-r",
+            "tenant_id": "t",
+            "coworker_id": None,
+            "stage": "model_output",
+            "check_id": "pii.regex",
+            "config": {},
+            "priority": 100,
+            "enabled": True,
+        }
+        engine = _RaisingEngine(
+            rules=[rule],
+            pipeline_verdict=Verdict(
+                action="redact",
+                modified_payload={"text": "cleaned reply"},
+            ),
+        )
+        out = await _apply_model_output_safety(
+            safety_engine=engine,  # type: ignore[arg-type]
+            tenant_id="t",
+            coworker_id="c",
+            user_id="u",
+            conversation_id="conv",
+            text="original with SSN 123-45-6789",
+        )
+        assert out == "cleaned reply"
+
+    @pytest.mark.asyncio
+    async def test_redact_without_text_falls_back_to_original(self) -> None:
+        """Defensive — a misbehaving check returning redact with a
+        non-string text must not crash the reply path. Fall back to
+        original text and log."""
+        rule = {
+            "id": "r-r",
+            "tenant_id": "t",
+            "coworker_id": None,
+            "stage": "model_output",
+            "check_id": "pii.regex",
+            "config": {},
+            "priority": 100,
+            "enabled": True,
+        }
+        engine = _RaisingEngine(
+            rules=[rule],
+            pipeline_verdict=Verdict(
+                action="redact",
+                modified_payload={"not_text": 42},
+            ),
+        )
+        out = await _apply_model_output_safety(
+            safety_engine=engine,  # type: ignore[arg-type]
+            tenant_id="t",
+            coworker_id="c",
+            user_id="u",
+            conversation_id="conv",
+            text="untouched",
+        )
+        assert out == "untouched"
+
+
+class TestWarnVerdict:
+    @pytest.mark.asyncio
+    async def test_warn_returns_original_text(self) -> None:
+        # MODEL_OUTPUT has no context-injection surface; warn is pure
+        # audit at this stage.
+        rule = {
+            "id": "r-w",
+            "tenant_id": "t",
+            "coworker_id": None,
+            "stage": "model_output",
+            "check_id": "pii.regex",
+            "config": {},
+            "priority": 100,
+            "enabled": True,
+        }
+        engine = _RaisingEngine(
+            rules=[rule],
+            pipeline_verdict=Verdict(
+                action="warn", appended_context="heads up"
+            ),
+        )
+        out = await _apply_model_output_safety(
+            safety_engine=engine,  # type: ignore[arg-type]
+            tenant_id="t",
+            coworker_id="c",
+            user_id="u",
+            conversation_id="conv",
+            text="original reply",
+        )
+        assert out == "original reply"
+
+
+class TestRequireApprovalVerdict:
+    @pytest.mark.asyncio
+    async def test_require_approval_treated_like_block(self) -> None:
+        # P1.1 will handle the actual approval-request creation via
+        # the audit ingestion path. From the user's perspective on
+        # MODEL_OUTPUT, the reply is suppressed with the verdict's
+        # reason (or the generic placeholder).
+        rule = {
+            "id": "r-ap",
+            "tenant_id": "t",
+            "coworker_id": None,
+            "stage": "model_output",
+            "check_id": "pii.regex",
+            "config": {},
+            "priority": 100,
+            "enabled": True,
+        }
+        engine = _RaisingEngine(
+            rules=[rule],
+            pipeline_verdict=Verdict(
+                action="require_approval",
+                reason="needs human review",
+            ),
+        )
+        out = await _apply_model_output_safety(
+            safety_engine=engine,  # type: ignore[arg-type]
+            tenant_id="t",
+            coworker_id="c",
+            user_id="u",
+            conversation_id="conv",
+            text="sensitive answer",
+        )
+        assert out == "needs human review"
+
+
 class TestWithRealEngineAndPiiRegex:
     """End-to-end using the real SafetyEngine + pii.regex check so a
     refactor that drops MODEL_OUTPUT from pii.regex's stages or

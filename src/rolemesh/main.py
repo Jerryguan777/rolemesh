@@ -183,9 +183,19 @@ async def _apply_model_output_safety(
       - Pipeline internal exception → fail-close (substitute a generic
         block string). That path indicates a programming error, not an
         infra blip — suppressing the reply is the conservative choice.
-      - Block verdict → substitute ``verdict.reason`` (or the generic
-        block string when reason is empty).
-      - Allow / any other verdict → return original ``text``.
+      - Block / require_approval verdict → substitute ``verdict.reason``
+        (or a generic block string when reason is empty). On MODEL_OUTPUT
+        require_approval is treated like block for the user-facing reply;
+        the orchestrator's audit ingestion path owns approval-request
+        creation in P1.1.
+      - Redact verdict → substitute the cleaned text from
+        ``verdict.modified_payload["text"]``. Unlike the container hooks,
+        MODEL_OUTPUT can actually replace the user-facing content, so
+        redact takes effect here rather than downgrading.
+      - Warn verdict → return the original text unchanged. MODEL_OUTPUT
+        has no place to inject a warning (it is the final reply), so
+        warn is purely an audit event on this stage.
+      - Allow → return original ``text``.
     """
     if not text or safety_engine is None:
         return text
@@ -219,8 +229,21 @@ async def _apply_model_output_safety(
             "safety: MODEL_OUTPUT pipeline raised — failing closed"
         )
         return "[Response blocked by safety policy]"
-    if verdict.action == "block":
+    if verdict.action in ("block", "require_approval"):
         return verdict.reason or "[Response blocked by safety policy]"
+    if verdict.action == "redact":
+        modified = verdict.modified_payload or {}
+        cleaned = (
+            modified.get("text") if isinstance(modified, dict) else None
+        )
+        if isinstance(cleaned, str):
+            return cleaned
+        logger.warning(
+            "safety: MODEL_OUTPUT redact without 'text' in modified_payload "
+            "— falling back to original text",
+            coworker_id=coworker_id,
+        )
+        return text
     return text
 
 

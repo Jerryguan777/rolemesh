@@ -299,66 +299,423 @@ class TestShortCircuit:
         assert event["findings"] and event["findings"][0]["code"] == "STUB.BLOCKED"
 
 
-class TestUnsupportedActionsV1:
-    """V1 pipeline refuses redact/warn/require_approval.
+class TestUnknownAction:
+    """V2 P0.2 pipeline accepts allow/block/redact/warn/require_approval.
 
-    V2 will widen the supported set once redact chaining, context
-    injection, and approval bridging are implemented. For V1, a check
-    returning one of these actions is a programming error that must
-    surface loudly rather than silently no-op.
+    Any other value from a check is a programming error — control stages
+    fail-close (re-raise), observational stages skip + ERROR log. This
+    pins the rejection behaviour for actions outside the allowed set.
     """
 
     @pytest.mark.asyncio
-    async def test_control_stage_redact_raises(
+    async def test_control_stage_unknown_action_raises(
         self, publisher: CapturePublisher
     ) -> None:
-        class _RedactCheck:
-            id = "stub.redact"
+        class _Bogus:
+            id = "stub.bogus"
             version = "1"
             stages = frozenset(Stage)
             cost_class: CostClass = "cheap"
             supported_codes = frozenset({"X"})
 
             async def check(
-                self, ctx: SafetyContext, config: dict[str, Any]
+                self, _ctx: SafetyContext, _config: dict[str, Any]
             ) -> Verdict:
-                return Verdict(
-                    action="redact",
-                    modified_payload={"tool_input": {}},
-                )
+                return Verdict(action="teleport")  # type: ignore[arg-type]
 
         reg = CheckRegistry()
-        reg.register(_RedactCheck())
-        rule = make_rule(check_id="stub.redact")
+        reg.register(_Bogus())
+        rule = make_rule(check_id="stub.bogus")
         with pytest.raises(ValueError, match="unsupported action"):
             await pipeline_run([rule], reg, make_context(), publisher)
 
     @pytest.mark.asyncio
-    async def test_observational_stage_redact_skipped(
+    async def test_observational_stage_unknown_action_skipped(
         self, publisher: CapturePublisher
     ) -> None:
-        class _RedactCheck:
-            id = "stub.redact2"
+        class _Bogus:
+            id = "stub.bogus2"
             version = "1"
             stages = frozenset(Stage)
             cost_class: CostClass = "cheap"
             supported_codes = frozenset({"X"})
 
             async def check(
-                self, ctx: SafetyContext, config: dict[str, Any]
+                self, _ctx: SafetyContext, _config: dict[str, Any]
             ) -> Verdict:
-                return Verdict(action="warn")
+                return Verdict(action="yeet")  # type: ignore[arg-type]
 
         reg = CheckRegistry()
-        reg.register(_RedactCheck())
-        rule = make_rule(
-            check_id="stub.redact2", stage=Stage.POST_TOOL_RESULT
-        )
-        # Observational stage: fail-safe, rule skipped, pipeline allows.
+        reg.register(_Bogus())
+        rule = make_rule(check_id="stub.bogus2", stage=Stage.POST_TOOL_RESULT)
         verdict = await pipeline_run(
-            [rule], reg, make_context(stage=Stage.POST_TOOL_RESULT), publisher
+            [rule], reg, make_context(stage=Stage.POST_TOOL_RESULT),
+            publisher,
         )
+        # Pipeline should skip this rule. No other rules → tail allow.
         assert verdict.action == "allow"
+
+    @pytest.mark.asyncio
+    async def test_control_stage_redact_without_modified_payload_raises(
+        self, publisher: CapturePublisher
+    ) -> None:
+        class _BadRedact:
+            id = "stub.badredact"
+            version = "1"
+            stages = frozenset(Stage)
+            cost_class: CostClass = "cheap"
+            supported_codes = frozenset({"X"})
+
+            async def check(
+                self, _ctx: SafetyContext, _config: dict[str, Any]
+            ) -> Verdict:
+                return Verdict(action="redact", modified_payload=None)
+
+        reg = CheckRegistry()
+        reg.register(_BadRedact())
+        rule = make_rule(check_id="stub.badredact")
+        with pytest.raises(
+            ValueError, match="redact without modified_payload"
+        ):
+            await pipeline_run([rule], reg, make_context(), publisher)
+
+
+class TestRedactChain:
+    """V2 P0.2 redact chain — each redact verdict replaces the payload
+    the NEXT rule sees. Regression here would either (a) let later
+    rules see the original unredacted payload (safety leak in the
+    redact layer), or (b) fail to propagate the final modified payload
+    back to the caller (redact has no user-visible effect).
+    """
+
+    @pytest.mark.asyncio
+    async def test_redact_modifies_payload_for_downstream_rules(
+        self, publisher: CapturePublisher
+    ) -> None:
+        class _RedactFirst:
+            """Returns redact that strips the ``secret`` key."""
+
+            id = "stub.redact.first"
+            version = "1"
+            stages = frozenset(Stage)
+            cost_class: CostClass = "cheap"
+            supported_codes = frozenset({"X"})
+
+            async def check(self, ctx, config):  # type: ignore[no-untyped-def]
+                new_payload = dict(ctx.payload)
+                new_payload.pop("secret", None)
+                return Verdict(
+                    action="redact",
+                    modified_payload=new_payload,
+                    findings=[Finding(
+                        code="X", severity="low", message="stripped"
+                    )],
+                )
+
+        class _InspectAfter:
+            """Blocks if payload still contains ``secret`` — i.e., the
+            chain did not actually replace the ctx."""
+
+            id = "stub.inspect.after"
+            version = "1"
+            stages = frozenset(Stage)
+            cost_class: CostClass = "cheap"
+            supported_codes = frozenset({"Y"})
+
+            async def check(self, ctx, config):  # type: ignore[no-untyped-def]
+                if "secret" in ctx.payload:
+                    return Verdict(
+                        action="block",
+                        reason="downstream saw unredacted payload",
+                    )
+                return Verdict(action="allow")
+
+        reg = CheckRegistry()
+        reg.register(_RedactFirst())
+        reg.register(_InspectAfter())
+        rules = [
+            make_rule(
+                rule_id="r1",
+                check_id="stub.redact.first",
+                priority=99,
+            ),
+            make_rule(
+                rule_id="r2",
+                check_id="stub.inspect.after",
+                priority=10,
+            ),
+        ]
+        ctx = make_context(payload={"tool_name": "x", "secret": "s"})
+        verdict = await pipeline_run(rules, reg, ctx, publisher)
+        # If redact chaining is broken, _InspectAfter would emit block
+        # and pipeline returns block. With correct chaining it sees the
+        # stripped payload and returns allow → pipeline tails out as
+        # "redact" (the accumulated chain state).
+        assert verdict.action == "redact"
+        assert verdict.modified_payload is not None
+        assert "secret" not in verdict.modified_payload
+
+    @pytest.mark.asyncio
+    async def test_multiple_redacts_compose(
+        self, publisher: CapturePublisher
+    ) -> None:
+        class _StripKey:
+            def __init__(self, key: str) -> None:
+                self.id = f"stub.strip.{key}"
+                self.version = "1"
+                self.stages: frozenset[Stage] = frozenset(Stage)
+                self.cost_class: CostClass = "cheap"
+                self.supported_codes: frozenset[str] = frozenset({"X"})
+                self._key = key
+
+            async def check(self, ctx, config):  # type: ignore[no-untyped-def]
+                new_payload = dict(ctx.payload)
+                new_payload.pop(self._key, None)
+                return Verdict(
+                    action="redact", modified_payload=new_payload
+                )
+
+        reg = CheckRegistry()
+        reg.register(_StripKey("a"))
+        reg.register(_StripKey("b"))
+        rules = [
+            make_rule(
+                rule_id="r1", check_id="stub.strip.a", priority=99
+            ),
+            make_rule(
+                rule_id="r2", check_id="stub.strip.b", priority=50
+            ),
+        ]
+        ctx = make_context(payload={"a": 1, "b": 2, "c": 3})
+        verdict = await pipeline_run(rules, reg, ctx, publisher)
+        assert verdict.action == "redact"
+        assert verdict.modified_payload == {"c": 3}
+
+    @pytest.mark.asyncio
+    async def test_block_after_redact_returns_block_not_redact(
+        self, publisher: CapturePublisher
+    ) -> None:
+        """A rule that blocks after a redact chain must short-circuit
+        into a block verdict — the caller should NOT act on
+        modified_payload when the final action is block.
+        """
+
+        class _Redact:
+            id = "stub.redact.x"
+            version = "1"
+            stages = frozenset(Stage)
+            cost_class: CostClass = "cheap"
+            supported_codes = frozenset({"X"})
+
+            async def check(self, ctx, config):  # type: ignore[no-untyped-def]
+                return Verdict(
+                    action="redact",
+                    modified_payload={"text": "REDACTED"},
+                )
+
+        class _Block:
+            id = "stub.blocker"
+            version = "1"
+            stages = frozenset(Stage)
+            cost_class: CostClass = "cheap"
+            supported_codes = frozenset({"Y"})
+
+            async def check(self, ctx, config):  # type: ignore[no-untyped-def]
+                return Verdict(action="block", reason="nope")
+
+        reg = CheckRegistry()
+        reg.register(_Redact())
+        reg.register(_Block())
+        rules = [
+            make_rule(
+                rule_id="r1", check_id="stub.redact.x", priority=99
+            ),
+            make_rule(rule_id="r2", check_id="stub.blocker", priority=10),
+        ]
+        verdict = await pipeline_run(
+            rules, reg, make_context(), publisher
+        )
+        assert verdict.action == "block"
+        # Block path does not need modified_payload — the hook
+        # translator will substitute the verdict.reason directly.
+
+
+class TestWarnChain:
+    """Warn is purely additive: no short-circuit, multiple warns are
+    joined with ``\\n\\n``. A regression that turned warn into a
+    short-circuit would prevent downstream detectors from running.
+    """
+
+    @pytest.mark.asyncio
+    async def test_warn_does_not_short_circuit_downstream(
+        self, publisher: CapturePublisher
+    ) -> None:
+        order: list[str] = []
+
+        class _Warn:
+            id = "stub.warn"
+            version = "1"
+            stages = frozenset(Stage)
+            cost_class: CostClass = "cheap"
+            supported_codes = frozenset({"X"})
+
+            async def check(self, ctx, config):  # type: ignore[no-untyped-def]
+                order.append("warn")
+                return Verdict(
+                    action="warn", appended_context="first warning"
+                )
+
+        class _Allow:
+            id = "stub.allow.after"
+            version = "1"
+            stages = frozenset(Stage)
+            cost_class: CostClass = "cheap"
+            supported_codes = frozenset({"Y"})
+
+            async def check(self, ctx, config):  # type: ignore[no-untyped-def]
+                order.append("allow")
+                return Verdict(action="allow")
+
+        reg = CheckRegistry()
+        reg.register(_Warn())
+        reg.register(_Allow())
+        rules = [
+            make_rule(rule_id="r1", check_id="stub.warn", priority=99),
+            make_rule(
+                rule_id="r2", check_id="stub.allow.after", priority=10
+            ),
+        ]
+        verdict = await pipeline_run(
+            rules, reg, make_context(), publisher
+        )
+        # Both checks ran (warn did not short-circuit).
+        assert order == ["warn", "allow"]
+        # Final verdict is warn with the context accumulated.
+        assert verdict.action == "warn"
+        assert verdict.appended_context == "first warning"
+
+    @pytest.mark.asyncio
+    async def test_multiple_warns_join_with_double_newline(
+        self, publisher: CapturePublisher
+    ) -> None:
+        class _WarnA:
+            id = "stub.warn.a"
+            version = "1"
+            stages = frozenset(Stage)
+            cost_class: CostClass = "cheap"
+            supported_codes = frozenset({"X"})
+
+            async def check(self, ctx, config):  # type: ignore[no-untyped-def]
+                return Verdict(action="warn", appended_context="A")
+
+        class _WarnB:
+            id = "stub.warn.b"
+            version = "1"
+            stages = frozenset(Stage)
+            cost_class: CostClass = "cheap"
+            supported_codes = frozenset({"Y"})
+
+            async def check(self, ctx, config):  # type: ignore[no-untyped-def]
+                return Verdict(action="warn", appended_context="B")
+
+        reg = CheckRegistry()
+        reg.register(_WarnA())
+        reg.register(_WarnB())
+        rules = [
+            make_rule(
+                rule_id="r1", check_id="stub.warn.a", priority=99
+            ),
+            make_rule(
+                rule_id="r2", check_id="stub.warn.b", priority=50
+            ),
+        ]
+        verdict = await pipeline_run(
+            rules, reg, make_context(), publisher
+        )
+        assert verdict.action == "warn"
+        assert verdict.appended_context == "A\n\nB"
+
+
+class TestRequireApproval:
+    """require_approval short-circuits like block but carries the
+    distinct action string so orchestrator audit ingestion (P1.1)
+    can create an approval request out-of-band.
+    """
+
+    @pytest.mark.asyncio
+    async def test_require_approval_short_circuits_with_same_action(
+        self, publisher: CapturePublisher
+    ) -> None:
+        ledger: list[str] = []
+
+        class _Approve:
+            id = "stub.approve"
+            version = "1"
+            stages = frozenset(Stage)
+            cost_class: CostClass = "cheap"
+            supported_codes = frozenset({"X"})
+
+            async def check(self, ctx, config):  # type: ignore[no-untyped-def]
+                ledger.append("approve")
+                return Verdict(
+                    action="require_approval", reason="needs human"
+                )
+
+        class _NotReached:
+            id = "stub.not.reached"
+            version = "1"
+            stages = frozenset(Stage)
+            cost_class: CostClass = "cheap"
+            supported_codes = frozenset({"Y"})
+
+            async def check(self, ctx, config):  # type: ignore[no-untyped-def]
+                ledger.append("not_reached")
+                return Verdict(action="allow")
+
+        reg = CheckRegistry()
+        reg.register(_Approve())
+        reg.register(_NotReached())
+        rules = [
+            make_rule(
+                rule_id="r1", check_id="stub.approve", priority=99
+            ),
+            make_rule(
+                rule_id="r2", check_id="stub.not.reached", priority=10
+            ),
+        ]
+        verdict = await pipeline_run(
+            rules, reg, make_context(), publisher
+        )
+        # Short-circuited; second rule not invoked.
+        assert ledger == ["approve"]
+        # Distinct action so P1.1 can dispatch.
+        assert verdict.action == "require_approval"
+        assert verdict.reason == "needs human"
+
+    @pytest.mark.asyncio
+    async def test_audit_event_carries_require_approval_string(
+        self, publisher: CapturePublisher
+    ) -> None:
+        class _Approve:
+            id = "stub.approve2"
+            version = "1"
+            stages = frozenset(Stage)
+            cost_class: CostClass = "cheap"
+            supported_codes = frozenset({"X"})
+
+            async def check(self, ctx, config):  # type: ignore[no-untyped-def]
+                return Verdict(action="require_approval")
+
+        reg = CheckRegistry()
+        reg.register(_Approve())
+        rule = make_rule(rule_id="r-appr", check_id="stub.approve2")
+        await pipeline_run([rule], reg, make_context(), publisher)
+        assert publisher.events
+        _, ev = publisher.events[0]
+        # Orchestrator-side audit ingestion dispatches on this exact
+        # string — a typo or rename here breaks P1.1.
+        assert ev["verdict_action"] == "require_approval"
+        assert ev["triggered_rule_ids"] == ["r-appr"]
 
 
 class TestFailModes:

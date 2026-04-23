@@ -4,10 +4,10 @@ Registered in ``agent_runner.main`` only when ``init.safety_rules`` is
 non-empty — zero rules means zero runtime cost, mirroring the
 ApprovalHookHandler convention.
 
-Stage coverage (V2 P0.1):
+Stage coverage:
 
   - on_user_prompt_submit  → Stage.INPUT_PROMPT      (control)
-  - on_pre_tool_use        → Stage.PRE_TOOL_CALL     (control, V1)
+  - on_pre_tool_use        → Stage.PRE_TOOL_CALL     (control)
   - on_post_tool_use       → Stage.POST_TOOL_RESULT  (observational)
   - on_pre_compact         → Stage.PRE_COMPACTION    (observational)
 
@@ -16,10 +16,30 @@ MODEL_OUTPUT is handled on the orchestrator side (see
 not in the container — so we don't bounce server-produced text through
 another round-trip.
 
-V1 only translated ``block``. P0.1 keeps that constraint: the pipeline
-still rejects redact / warn / require_approval, so this handler only
-needs to map block into each backend verdict. P0.2 extends to warn /
-redact / require_approval once the pipeline allows those actions.
+Verdict translation (V2 P0.2):
+
+  - block              → backend block verdict (UserPromptVerdict.block
+                         or ToolCallVerdict.block). On POST_TOOL_RESULT,
+                         where the hook protocol deliberately does not
+                         expose a replace-result channel, the handler
+                         emits ``appended_context`` with a withhold
+                         notice instead.
+  - require_approval   → container side treats as block for this turn;
+                         the orchestrator's audit ingestion (P1.1) sees
+                         ``verdict_action=require_approval`` and creates
+                         the approval request out-of-band.
+  - redact             → PRE_TOOL_CALL replaces ``tool_input``.
+                         POST_TOOL_RESULT falls back to appended_context
+                         because the hook protocol cannot replace the
+                         tool result (see hooks/events.py module
+                         docstring).
+                         INPUT_PROMPT downgrades to block — the SDK
+                         hook has no payload mutation surface there.
+  - warn               → ``appended_context`` on the backends that
+                         carry one (INPUT_PROMPT, POST_TOOL_RESULT).
+                         PRE_TOOL_CALL has no context channel so warn
+                         is a pure audit event.
+  - allow              → None (no handler verdict).
 """
 
 from __future__ import annotations
@@ -88,7 +108,7 @@ class SafetyHookHandler:
             tool=tool,
         )
 
-    # -- PRE_TOOL_CALL (V1) --------------------------------------------
+    # -- PRE_TOOL_CALL --------------------------------------------------
 
     async def on_pre_tool_use(
         self, event: ToolCallEvent
@@ -118,17 +138,41 @@ class SafetyHookHandler:
             publisher=self._tool_ctx.publish,
         )
 
-        if verdict.action == "block":
-            return ToolCallVerdict(
-                block=True,
-                reason=verdict.reason or "Blocked by safety policy",
+        if verdict.action in ("block", "require_approval"):
+            # require_approval is a container-side block (the actual
+            # approval request creation happens orchestrator-side in
+            # P1.1 via the audit ingestion path). The agent sees a
+            # block either way.
+            reason = verdict.reason or (
+                "Awaiting approval"
+                if verdict.action == "require_approval"
+                else "Blocked by safety policy"
             )
-        # allow is the only other V1 outcome — pipeline rejects
-        # redact/warn/require_approval so we never land here with a
-        # verdict the hook bridge cannot translate.
+            return ToolCallVerdict(block=True, reason=reason)
+
+        if verdict.action == "redact":
+            # Redact chain produced a modified payload; swap the
+            # tool_input. The tool_name is taken from the original
+            # event; if a check tried to rewrite tool_name that's out
+            # of scope for this stage and silently ignored here.
+            modified = verdict.modified_payload or {}
+            new_input = modified.get("tool_input") if isinstance(modified, dict) else None
+            if isinstance(new_input, dict):
+                return ToolCallVerdict(
+                    block=False, modified_input=new_input
+                )
+            _log.error(
+                "safety: redact on pre_tool_use but modified_payload has "
+                "no tool_input key — ignoring"
+            )
+            return None
+
+        # warn verdicts on PRE_TOOL_CALL carry no channel (ToolCallVerdict
+        # has no appended_context). The audit event has already been
+        # published; nothing more for the agent here.
         return None
 
-    # -- INPUT_PROMPT (P0.1) -------------------------------------------
+    # -- INPUT_PROMPT ---------------------------------------------------
 
     async def on_user_prompt_submit(
         self, event: UserPromptEvent
@@ -145,14 +189,45 @@ class SafetyHookHandler:
             ctx,
             publisher=self._tool_ctx.publish,
         )
-        if verdict.action == "block":
+        if verdict.action in ("block", "require_approval"):
+            reason = verdict.reason or (
+                "Awaiting approval"
+                if verdict.action == "require_approval"
+                else "Blocked by safety policy"
+            )
+            return UserPromptVerdict(block=True, reason=reason)
+
+        if verdict.action == "redact":
+            # Claude SDK's UserPromptSubmit hook exposes block or
+            # appended_context — there is no prompt-replacement channel.
+            # Downgrade to block + surface a SAFETY.REDACT_UNSUPPORTED_ON_STAGE
+            # warning so operators notice their rule had no real effect
+            # (they should move the rule to MODEL_OUTPUT or switch to a
+            # block-style check on INPUT_PROMPT).
+            _log.warning(
+                "safety: SAFETY.REDACT_UNSUPPORTED_ON_STAGE — redact "
+                "requested on INPUT_PROMPT; downgrading to block",
+                extra={
+                    "tenant_id": self._tool_ctx.tenant_id,
+                    "coworker_id": self._tool_ctx.coworker_id,
+                },
+            )
             return UserPromptVerdict(
                 block=True,
-                reason=verdict.reason or "Blocked by safety policy",
+                reason=(
+                    verdict.reason
+                    or "Blocked: prompt matched redact rule on a stage "
+                    "that does not support redaction"
+                ),
+            )
+
+        if verdict.action == "warn" and verdict.appended_context:
+            return UserPromptVerdict(
+                appended_context=verdict.appended_context
             )
         return None
 
-    # -- POST_TOOL_RESULT (P0.1) ---------------------------------------
+    # -- POST_TOOL_RESULT -----------------------------------------------
 
     async def on_post_tool_use(
         self, event: ToolResultEvent
@@ -180,19 +255,45 @@ class SafetyHookHandler:
             ctx,
             publisher=self._tool_ctx.publish,
         )
-        # POST_TOOL_RESULT is observational for the pipeline, but the
-        # hook contract only exposes ``appended_context`` (see
-        # agent_runner/hooks/events.py docstring — replace-result is
-        # intentionally unsupported). A ``block`` verdict here means
-        # "withhold the result from the agent" — the side effect has
-        # already happened, so we turn it into a context annotation so
-        # the agent is informed rather than silently misled.
-        if verdict.action == "block":
+        # POST_TOOL_RESULT hook only exposes appended_context. Block,
+        # require_approval, and redact all funnel through that same
+        # channel with distinct user-facing messages.
+        if verdict.action in ("block", "require_approval"):
+            verb = (
+                "Awaiting approval"
+                if verdict.action == "require_approval"
+                else "withheld by safety policy"
+            )
             return ToolResultVerdict(
                 appended_context=(
-                    "[Tool result withheld by safety policy: "
+                    f"[Tool result {verb}: "
                     f"{verdict.reason or 'policy match'}]"
                 )
+            )
+        if verdict.action == "redact":
+            # Redact can't actually replace the tool result on this hook
+            # (protocol limitation — see hooks/events.py docstring). Emit
+            # the modified text as appended_context so the agent sees
+            # the cleaned view; the original result still reaches the
+            # transcript unredacted, but the agent is now aware.
+            modified = verdict.modified_payload or {}
+            cleaned = (
+                modified.get("tool_result")
+                if isinstance(modified, dict)
+                else None
+            )
+            msg = (
+                f"[Tool result redacted by safety policy: {cleaned}]"
+                if isinstance(cleaned, str)
+                else (
+                    "[Tool result flagged for redaction by safety "
+                    "policy but could not be replaced on this hook]"
+                )
+            )
+            return ToolResultVerdict(appended_context=msg)
+        if verdict.action == "warn" and verdict.appended_context:
+            return ToolResultVerdict(
+                appended_context=verdict.appended_context
             )
         return None
 

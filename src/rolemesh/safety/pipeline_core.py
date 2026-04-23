@@ -7,7 +7,7 @@ point — ``pipeline_run`` — keeps the semantic contract (priority,
 short-circuit on block, fail-close on control stages, fail-safe on
 observational stages) identical across both call sites.
 
-V1 semantics (scope):
+Semantics (V2 P0.2):
 
   1. Rules are filtered by ``stage == ctx.stage`` and ``enabled`` and
      (``coworker_id is None`` or ``coworker_id == ctx.coworker_id``).
@@ -18,14 +18,23 @@ V1 semantics (scope):
   4. Rules whose stage is not in ``check.stages`` are skipped with a
      log ERROR — defence against a check version that drops a stage
      while old rows still point at it.
-  5. On a ``block`` verdict the pipeline publishes one audit event and
-     returns immediately (short-circuit).
-  6. Non-block / non-allow verdicts are NOT yet supported. Checks MUST
-     only return ``block`` or ``allow`` in V1. Returning ``redact`` /
-     ``warn`` / ``require_approval`` raises at pipeline level (it
-     would otherwise land in the hook handler untranslated). V2
-     re-introduces these actions with proper infrastructure (redact
-     chain, warn context injection, approval bridging).
+  5. Action handling:
+       - ``block``            → short-circuit with a block verdict
+       - ``require_approval`` → short-circuit; container hook treats
+                                 as block for this turn, orchestrator
+                                 audit sees ``verdict_action=require_approval``
+                                 so P1.1 can create an approval request
+       - ``redact``           → replace ``ctx.payload`` with the
+                                 ``modified_payload`` from the verdict
+                                 and continue; final result is a
+                                 ``redact`` verdict carrying the
+                                 last-applied payload and a merged
+                                 ``appended_context``
+       - ``warn``             → accumulate ``appended_context``;
+                                 continue without short-circuit
+       - ``allow``            → continue
+  6. Unknown action from a check is a programming error — fail-close
+     on control stages (re-raise), skip on observational.
   7. Check exceptions are re-raised for control stages (INPUT_PROMPT,
      PRE_TOOL_CALL, MODEL_OUTPUT) — the hook bridge translates that
      into a block verdict for the agent. For observational stages the
@@ -80,10 +89,18 @@ AsyncAuditPublisher = Callable[[str, dict[str, Any]], Awaitable[None]]
 AUDIT_SUBJECT_TEMPLATE = "agent.{job_id}.safety_events"
 
 
-# Actions the V1 pipeline translates into hook verdicts. Any other
-# action a check returns is a programming error — V2 will widen this
-# set after wiring redact / warn / require_approval infrastructure.
-_V1_ALLOWED_ACTIONS: frozenset[str] = frozenset({"allow", "block"})
+# Actions the pipeline can translate into hook verdicts. A check that
+# returns anything outside this set is a programming error — fail-close
+# on control stages (re-raise), skip on observational.
+_V2_ALLOWED_ACTIONS: frozenset[str] = frozenset(
+    {"allow", "block", "redact", "warn", "require_approval"}
+)
+
+# Actions that short-circuit the pipeline (no later rule runs). Redact
+# and warn deliberately do NOT short-circuit — a downstream rule may
+# still turn into a block on the already-modified payload, and warn is
+# purely additive.
+_SHORT_CIRCUIT_ACTIONS: frozenset[str] = frozenset({"block", "require_approval"})
 
 
 async def pipeline_run(
@@ -96,6 +113,15 @@ async def pipeline_run(
     applicable.sort(key=lambda r: -int(r.get("priority", 100)))
 
     all_findings: list[Finding] = []
+    # Redact chain state. ``current_ctx`` is what the NEXT rule will see
+    # — every redact verdict replaces its payload. ``redact_happened``
+    # captures whether any rule actually redacted so the final tail
+    # verdict can correctly encode the chained modifications.
+    current_ctx = ctx
+    redact_happened = False
+    # Warn accumulator — joined with \n\n at the tail so the hook sees
+    # one combined context string rather than a list.
+    warn_contexts: list[str] = []
 
     for rule in applicable:
         check_id = str(rule.get("check_id", ""))
@@ -112,13 +138,13 @@ async def pipeline_run(
         # upgraded to drop a stage, or if an operator edits the row
         # directly. Skip rather than hand the check a payload type it
         # does not know how to interpret.
-        if ctx.stage not in check.stages:
+        if current_ctx.stage not in check.stages:
             _log.error(
                 "safety: rule stage not in check.stages — skipping",
                 extra={
                     "check_id": check_id,
                     "rule_id": rule.get("id"),
-                    "stage": ctx.stage.value,
+                    "stage": current_ctx.stage.value,
                     "check_stages": sorted(s.value for s in check.stages),
                 },
             )
@@ -129,9 +155,9 @@ async def pipeline_run(
             rule_config = {}
 
         try:
-            verdict = await check.check(ctx, rule_config)
+            verdict = await check.check(current_ctx, rule_config)
         except Exception as exc:
-            if ctx.stage in CONTROL_STAGES:
+            if current_ctx.stage in CONTROL_STAGES:
                 # Fail-close: re-raise so the hook bridge converts
                 # the exception into a block verdict for the agent.
                 _log.warning(
@@ -139,7 +165,7 @@ async def pipeline_run(
                     extra={
                         "check_id": check_id,
                         "rule_id": rule.get("id"),
-                        "stage": ctx.stage.value,
+                        "stage": current_ctx.stage.value,
                         "error": str(exc),
                     },
                 )
@@ -150,35 +176,92 @@ async def pipeline_run(
                 extra={
                     "check_id": check_id,
                     "rule_id": rule.get("id"),
-                    "stage": ctx.stage.value,
+                    "stage": current_ctx.stage.value,
                     "error": str(exc),
                 },
             )
             continue
 
-        if verdict.action not in _V1_ALLOWED_ACTIONS:
-            # A check that returns redact / warn / require_approval in
-            # V1 is a programming error — the pipeline has no path to
-            # translate these into hook verdicts yet. Fail-close on
-            # control stages (re-raise), skip on observational.
+        if verdict.action not in _V2_ALLOWED_ACTIONS:
             msg = (
                 f"check {check_id!r} returned unsupported action "
-                f"{verdict.action!r} in V1 pipeline"
+                f"{verdict.action!r}"
             )
-            if ctx.stage in CONTROL_STAGES:
+            if current_ctx.stage in CONTROL_STAGES:
                 raise ValueError(msg)
             _log.error("safety: %s", msg)
             continue
 
         all_findings.extend(verdict.findings)
 
-        if verdict.action == "block":
-            await _publish_audit(publisher, ctx, rule, verdict)
+        # Redact MUST carry a modified_payload. A check that returns
+        # redact without one is a programming error — there is no way
+        # to continue the chain without the replacement payload. Treat
+        # the same as any unsupported action: fail-close on control,
+        # skip on observational.
+        if verdict.action == "redact" and verdict.modified_payload is None:
+            msg = (
+                f"check {check_id!r} returned redact without "
+                f"modified_payload"
+            )
+            if current_ctx.stage in CONTROL_STAGES:
+                raise ValueError(msg)
+            _log.error("safety: %s", msg)
+            continue
+
+        await _publish_audit(publisher, current_ctx, rule, verdict)
+
+        if verdict.action in _SHORT_CIRCUIT_ACTIONS:
+            # block + require_approval both exit the loop. The caller
+            # (hook or orch) distinguishes between them via
+            # verdict.action: block → refuse; require_approval → emit
+            # approval request (handled on the orch side in P1.1) and
+            # also refuse on the container side for this turn.
             return replace(verdict, findings=list(all_findings))
 
-        # allow — continue evaluating remaining rules.
-        await _publish_audit(publisher, ctx, rule, verdict)
+        if verdict.action == "redact":
+            # Swap the ctx payload so the next rule sees the modified
+            # view. Frozen dataclass → use replace() to build a new one.
+            modified = verdict.modified_payload
+            if not isinstance(modified, dict):
+                # Defensive: checks MUST return a dict shaped for the
+                # stage. Skip on mismatch rather than crash.
+                _log.error(
+                    "safety: check %r returned non-dict modified_payload",
+                    check_id,
+                )
+                continue
+            current_ctx = replace(current_ctx, payload=dict(modified))
+            redact_happened = True
+            if verdict.appended_context:
+                warn_contexts.append(verdict.appended_context)
+            continue
 
+        if verdict.action == "warn":
+            if verdict.appended_context:
+                warn_contexts.append(verdict.appended_context)
+            continue
+
+        # allow — continue evaluating remaining rules.
+
+    # End of rule chain — synthesize the final verdict from accumulated
+    # state. redact beats warn beats allow in terms of "which action
+    # the hook sees", but findings and appended_context are preserved
+    # across all outcomes.
+    combined_context = "\n\n".join(warn_contexts) if warn_contexts else None
+    if redact_happened:
+        return Verdict(
+            action="redact",
+            modified_payload=dict(current_ctx.payload),
+            findings=list(all_findings),
+            appended_context=combined_context,
+        )
+    if combined_context is not None:
+        return Verdict(
+            action="warn",
+            findings=list(all_findings),
+            appended_context=combined_context,
+        )
     return Verdict(action="allow", findings=list(all_findings))
 
 

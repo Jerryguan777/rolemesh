@@ -390,6 +390,296 @@ class TestPostToolUse:
         assert verdict is None
 
 
+class TestActionTranslationP02:
+    """V2 P0.2 adds redact / warn / require_approval to the pipeline.
+    These tests pin the per-stage translation contract described in
+    the hook_handler module docstring.
+    """
+
+    def _registry_with(
+        self, check_id: str, stage_set: frozenset[Stage], verdict_factory: Any
+    ) -> CheckRegistry:
+        from rolemesh.safety.registry import CheckRegistry
+
+        class _Stub:
+            id = check_id
+            version = "1"
+            stages = stage_set
+            cost_class = "cheap"
+            supported_codes: frozenset[str] = frozenset({"STUB"})
+            config_model = None
+
+            async def check(self, ctx, config):  # type: ignore[no-untyped-def]
+                return verdict_factory(ctx)
+
+        reg = CheckRegistry()
+        reg.register(_Stub())
+        return reg
+
+    # -- PRE_TOOL_CALL --------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_pretool_redact_rewrites_tool_input(self) -> None:
+        from rolemesh.safety.types import Verdict
+
+        tool_ctx = _FakeToolCtx()
+        reg = self._registry_with(
+            "stub.redact.pt",
+            frozenset({Stage.PRE_TOOL_CALL}),
+            lambda _ctx: Verdict(
+                action="redact",
+                modified_payload={
+                    "tool_name": "github__create_issue",
+                    "tool_input": {"body": "CLEANED"},
+                },
+            ),
+        )
+        rule = make_rule(
+            check_id="stub.redact.pt",
+            stage=Stage.PRE_TOOL_CALL,
+            config={},
+        )
+        handler = SafetyHookHandler(
+            rules=[rule], registry=reg,
+            tool_ctx=tool_ctx,  # type: ignore[arg-type]
+        )
+        verdict = await handler.on_pre_tool_use(
+            ToolCallEvent(
+                tool_name="github__create_issue",
+                tool_input={"body": "SSN 123-45-6789"},
+            )
+        )
+        assert verdict is not None
+        assert verdict.block is False
+        assert verdict.modified_input == {"body": "CLEANED"}
+
+    @pytest.mark.asyncio
+    async def test_pretool_require_approval_blocks_with_approval_reason(
+        self,
+    ) -> None:
+        from rolemesh.safety.types import Verdict
+
+        tool_ctx = _FakeToolCtx()
+        reg = self._registry_with(
+            "stub.appr.pt",
+            frozenset({Stage.PRE_TOOL_CALL}),
+            lambda _ctx: Verdict(action="require_approval"),
+        )
+        rule = make_rule(
+            check_id="stub.appr.pt",
+            stage=Stage.PRE_TOOL_CALL,
+            config={},
+        )
+        handler = SafetyHookHandler(
+            rules=[rule], registry=reg,
+            tool_ctx=tool_ctx,  # type: ignore[arg-type]
+        )
+        verdict = await handler.on_pre_tool_use(
+            ToolCallEvent(
+                tool_name="github__create_issue",
+                tool_input={"body": "risky"},
+            )
+        )
+        assert verdict is not None
+        assert verdict.block is True
+        assert verdict.reason == "Awaiting approval"
+
+    @pytest.mark.asyncio
+    async def test_pretool_warn_returns_none_but_audits(self) -> None:
+        # PRE_TOOL_CALL has no appended_context channel in ToolCallVerdict,
+        # so warn is pure audit. The verdict must be None so the tool
+        # call proceeds normally.
+        from rolemesh.safety.types import Verdict
+
+        tool_ctx = _FakeToolCtx()
+        reg = self._registry_with(
+            "stub.warn.pt",
+            frozenset({Stage.PRE_TOOL_CALL}),
+            lambda _ctx: Verdict(
+                action="warn", appended_context="noisy tool"
+            ),
+        )
+        rule = make_rule(
+            check_id="stub.warn.pt",
+            stage=Stage.PRE_TOOL_CALL,
+            config={},
+        )
+        handler = SafetyHookHandler(
+            rules=[rule], registry=reg,
+            tool_ctx=tool_ctx,  # type: ignore[arg-type]
+        )
+        verdict = await handler.on_pre_tool_use(
+            ToolCallEvent(tool_name="x", tool_input={})
+        )
+        assert verdict is None
+        await asyncio.sleep(0)
+        assert tool_ctx.events
+        _, ev = tool_ctx.events[0]
+        assert ev["verdict_action"] == "warn"
+
+    # -- INPUT_PROMPT ---------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_input_prompt_redact_downgrades_to_block(self) -> None:
+        """INPUT_PROMPT has no prompt-replacement channel in the SDK
+        hook. A redact verdict must downgrade to block (failing closed)
+        rather than silently producing a no-op — otherwise an operator
+        who wrote a redact rule would see zero effect in production.
+        """
+        from rolemesh.safety.types import Verdict
+
+        tool_ctx = _FakeToolCtx()
+        reg = self._registry_with(
+            "stub.redact.inp",
+            frozenset({Stage.INPUT_PROMPT}),
+            lambda _ctx: Verdict(
+                action="redact",
+                modified_payload={"prompt": "CLEANED"},
+            ),
+        )
+        rule = make_rule(
+            check_id="stub.redact.inp",
+            stage=Stage.INPUT_PROMPT,
+            config={},
+        )
+        handler = SafetyHookHandler(
+            rules=[rule], registry=reg,
+            tool_ctx=tool_ctx,  # type: ignore[arg-type]
+        )
+        verdict = await handler.on_user_prompt_submit(
+            UserPromptEvent(prompt="leaked SSN")
+        )
+        assert verdict is not None
+        assert verdict.block is True
+        # Reason mentions the downgrade so operators can trace it.
+        assert verdict.reason and "redact" in verdict.reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_input_prompt_warn_returns_appended_context(self) -> None:
+        from rolemesh.safety.types import Verdict
+
+        tool_ctx = _FakeToolCtx()
+        reg = self._registry_with(
+            "stub.warn.inp",
+            frozenset({Stage.INPUT_PROMPT}),
+            lambda _ctx: Verdict(
+                action="warn", appended_context="be careful!"
+            ),
+        )
+        rule = make_rule(
+            check_id="stub.warn.inp",
+            stage=Stage.INPUT_PROMPT,
+            config={},
+        )
+        handler = SafetyHookHandler(
+            rules=[rule], registry=reg,
+            tool_ctx=tool_ctx,  # type: ignore[arg-type]
+        )
+        verdict = await handler.on_user_prompt_submit(
+            UserPromptEvent(prompt="anything")
+        )
+        assert verdict is not None
+        assert verdict.block is False
+        assert verdict.appended_context == "be careful!"
+
+    @pytest.mark.asyncio
+    async def test_input_prompt_require_approval_blocks(self) -> None:
+        from rolemesh.safety.types import Verdict
+
+        tool_ctx = _FakeToolCtx()
+        reg = self._registry_with(
+            "stub.appr.inp",
+            frozenset({Stage.INPUT_PROMPT}),
+            lambda _ctx: Verdict(action="require_approval"),
+        )
+        rule = make_rule(
+            check_id="stub.appr.inp",
+            stage=Stage.INPUT_PROMPT,
+            config={},
+        )
+        handler = SafetyHookHandler(
+            rules=[rule], registry=reg,
+            tool_ctx=tool_ctx,  # type: ignore[arg-type]
+        )
+        verdict = await handler.on_user_prompt_submit(
+            UserPromptEvent(prompt="risky")
+        )
+        assert verdict is not None
+        assert verdict.block is True
+        assert verdict.reason == "Awaiting approval"
+
+    # -- POST_TOOL_RESULT -----------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_post_tool_redact_emits_appended_context(self) -> None:
+        # Hook protocol limitation: PostToolUse cannot actually replace
+        # the tool result (see hooks/events.py docstring). Redact must
+        # degrade to appended_context with the cleaned content, so the
+        # agent sees the safe view even if the raw result still hits
+        # the transcript.
+        from rolemesh.safety.types import Verdict
+
+        tool_ctx = _FakeToolCtx()
+        reg = self._registry_with(
+            "stub.redact.post",
+            frozenset({Stage.POST_TOOL_RESULT}),
+            lambda _ctx: Verdict(
+                action="redact",
+                modified_payload={
+                    "tool_name": "x", "tool_input": {},
+                    "tool_result": "CLEANED OUTPUT",
+                    "is_error": False,
+                },
+            ),
+        )
+        rule = make_rule(
+            check_id="stub.redact.post",
+            stage=Stage.POST_TOOL_RESULT,
+            config={},
+        )
+        handler = SafetyHookHandler(
+            rules=[rule], registry=reg,
+            tool_ctx=tool_ctx,  # type: ignore[arg-type]
+        )
+        verdict = await handler.on_post_tool_use(
+            ToolResultEvent(
+                tool_name="x", tool_input={}, tool_result="SSN 123-45-6789"
+            )
+        )
+        assert verdict is not None
+        assert verdict.appended_context is not None
+        assert "CLEANED OUTPUT" in verdict.appended_context
+
+    @pytest.mark.asyncio
+    async def test_post_tool_warn_emits_warn_context(self) -> None:
+        from rolemesh.safety.types import Verdict
+
+        tool_ctx = _FakeToolCtx()
+        reg = self._registry_with(
+            "stub.warn.post",
+            frozenset({Stage.POST_TOOL_RESULT}),
+            lambda _ctx: Verdict(
+                action="warn", appended_context="secrets detected"
+            ),
+        )
+        rule = make_rule(
+            check_id="stub.warn.post",
+            stage=Stage.POST_TOOL_RESULT,
+            config={},
+        )
+        handler = SafetyHookHandler(
+            rules=[rule], registry=reg,
+            tool_ctx=tool_ctx,  # type: ignore[arg-type]
+        )
+        verdict = await handler.on_post_tool_use(
+            ToolResultEvent(
+                tool_name="x", tool_input={}, tool_result="something"
+            )
+        )
+        assert verdict is not None
+        assert verdict.appended_context == "secrets detected"
+
+
 class TestPreCompact:
     """V1's only check (pii.regex) does not advertise PRE_COMPACTION,
     so these tests use a stub check that does. The point is to pin
