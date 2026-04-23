@@ -105,6 +105,15 @@ def build_orchestrator_registry() -> CheckRegistry:
 
     reg = build_container_registry()
 
+    # EC-3: egress.domain_rule is orchestrator-only — the check never
+    # runs inside an agent container (agents don't see EGRESS_REQUEST
+    # events), so it stays out of build_container_registry. Registered
+    # here so the REST admin layer can validate rule.config payloads
+    # at create/update time.
+    from .checks.egress_domain_rule import EgressDomainRuleCheck
+
+    reg.register(EgressDomainRuleCheck())
+
     with contextlib.suppress(ImportError):
         from .checks.llm_guard_prompt_injection import (
             LLMGuardPromptInjectionCheck,

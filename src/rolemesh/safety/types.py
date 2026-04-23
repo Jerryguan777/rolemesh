@@ -32,6 +32,8 @@ class Stage(StrEnum):
       - INPUT_PROMPT
       - PRE_TOOL_CALL
       - MODEL_OUTPUT
+      - EGRESS_REQUEST   — EC-3; evaluated by the egress gateway on
+                           every outbound TCP/DNS attempt.
 
     Observational stages (fail-safe on handler exceptions):
       - POST_TOOL_RESULT
@@ -47,12 +49,22 @@ class Stage(StrEnum):
     POST_TOOL_RESULT = "post_tool_result"
     MODEL_OUTPUT = "model_output"
     PRE_COMPACTION = "pre_compaction"
+    EGRESS_REQUEST = "egress_request"
 
 
 # Stages whose handler exceptions must fail-close (propagate). Pipeline
-# and hook bridge both consult this set.
+# and hook bridge both consult this set. EGRESS_REQUEST is listed even
+# though the container pipeline never sees it — the enum wins-over-
+# convention rule means a future refactor that accidentally feeds an
+# EGRESS_REQUEST context to the container pipeline will fail-close
+# rather than fail-open.
 CONTROL_STAGES: frozenset[Stage] = frozenset(
-    {Stage.INPUT_PROMPT, Stage.PRE_TOOL_CALL, Stage.MODEL_OUTPUT}
+    {
+        Stage.INPUT_PROMPT,
+        Stage.PRE_TOOL_CALL,
+        Stage.MODEL_OUTPUT,
+        Stage.EGRESS_REQUEST,
+    }
 )
 
 
