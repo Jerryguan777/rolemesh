@@ -127,6 +127,9 @@ def maybe_register_safety_handler(
     hook_registry: HookRegistry,
     safety_rules: list[dict[str, Any]] | None,
     tool_ctx: ToolContext,
+    *,
+    slow_check_specs: list[dict[str, Any]] | None = None,
+    nats_client: Any = None,
 ) -> bool:
     """Register a SafetyHookHandler iff rules are present.
 
@@ -140,6 +143,14 @@ def maybe_register_safety_handler(
     registration); the REST layer never produces empty lists, but
     a misbehaving snapshot producer could, and zero-rule should
     mean zero-handler in either case.
+
+    When ``slow_check_specs`` is non-empty AND ``nats_client`` is
+    provided, the container registry is extended with one
+    ``RemoteCheck`` per spec. Both arguments are optional because
+    deployments without any slow check (the common pre-P1.x case)
+    still use this function to wire the cheap-only registry — adding
+    two required arguments would force callers to pass ``None`` / a
+    live NATS client just to say "no slow checks please".
     """
     if not safety_rules:
         return False
@@ -152,10 +163,29 @@ def maybe_register_safety_handler(
     from agent_runner.safety.hook_handler import SafetyHookHandler
     from agent_runner.safety.registry import build_container_registry
 
+    registry = build_container_registry()
+    if slow_check_specs and nats_client is not None:
+        # Import RemoteCheck only on the slow-check path. A deployment
+        # with cheap checks only pays zero cost for the transport
+        # proxy module — same early-return discipline as the outer
+        # zero-rule guard above.
+        from agent_runner.safety.remote import RemoteCheck
+
+        for spec in slow_check_specs:
+            try:
+                registry.register(RemoteCheck.from_spec(spec, nats_client))
+            except (KeyError, ValueError) as exc:
+                logger.warning(
+                    "safety: malformed slow_check_spec — skipping",
+                    component="safety",
+                    check_id=spec.get("check_id", "?"),
+                    error=str(exc),
+                )
+
     hook_registry.register(
         SafetyHookHandler(
             rules=safety_rules,
-            registry=build_container_registry(),
+            registry=registry,
             tool_ctx=tool_ctx,
         )
     )

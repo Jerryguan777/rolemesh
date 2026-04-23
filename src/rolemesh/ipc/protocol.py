@@ -52,6 +52,14 @@ class AgentInitData:
     # that case. Shape is the dict form produced by
     # ``rolemesh.safety.types.Rule.to_snapshot_dict``.
     safety_rules: list[dict[str, object]] | None = None
+    # Metadata for slow safety checks the orchestrator hosts. The
+    # container registers a RemoteCheck proxy per spec so the pipeline
+    # can reference slow-check ids by name. None means "no slow checks
+    # available" — the container will skip any rule pointing at an
+    # id it doesn't have locally and log a warning (existing unknown-
+    # check behaviour). Each spec carries {check_id, version, stages,
+    # cost_class, supported_codes, default_timeout_ms}.
+    slow_check_specs: list[dict[str, object]] | None = None
 
     def serialize(self) -> bytes:
         return json.dumps(asdict(self)).encode()
@@ -88,4 +96,5 @@ class AgentInitData:
             mcp_servers=mcp_servers,
             approval_policies=raw.get("approval_policies"),
             safety_rules=raw.get("safety_rules"),
+            slow_check_specs=raw.get("slow_check_specs"),
         )

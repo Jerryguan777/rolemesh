@@ -255,6 +255,8 @@ async def run_query_loop(
         hook_registry=hook_registry,
         safety_rules=init.safety_rules,
         tool_ctx=tool_ctx,
+        slow_check_specs=init.slow_check_specs,
+        nats_client=nc,
     )
 
     backend.subscribe(on_event)

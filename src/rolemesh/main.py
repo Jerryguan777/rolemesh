@@ -154,6 +154,13 @@ _bg_tasks: set[asyncio.Task[None]] = set()
 # module without full startup don't pay for the default DbAuditSink.
 _safety_engine: SafetyEngine | None = None
 
+# V2 P0.3: orchestrator-side slow-check RPC. Thread pool caps concurrent
+# sync check invocations so a heavy ML model can't starve the event
+# loop. RPC server is started alongside the subscribers; both are kept
+# at module scope so shutdown can tear them down cleanly.
+_safety_rpc_server: object | None = None
+_safety_thread_pool: object | None = None
+
 
 async def _apply_model_output_safety(
     *,
@@ -915,6 +922,37 @@ async def _start_nats_ipc_subscriptions(transport: NatsTransport, deps: _IpcDeps
 
     tasks.append(asyncio.create_task(_handle_safety_events()))
 
+    # V2 P0.3: Slow-check RPC server (agent.*.safety.detect). Uses core
+    # NATS request-reply rather than JetStream — slow checks are
+    # synchronous from the container's perspective, so a missed reply
+    # should surface as a timeout + fail-open on the caller, not be
+    # persisted and re-delivered. A shared ThreadPoolExecutor absorbs
+    # sync ML libraries so they can't stall the orchestrator loop.
+    from concurrent.futures import ThreadPoolExecutor
+    from os import cpu_count
+
+    from rolemesh.safety.registry import get_orchestrator_registry
+    from rolemesh.safety.rpc_server import SafetyRpcServer
+
+    max_workers = max(4, int((cpu_count() or 4) * 1.5))
+
+    global _safety_thread_pool, _safety_rpc_server
+    _safety_thread_pool = ThreadPoolExecutor(
+        max_workers=max_workers, thread_name_prefix="safety-rpc"
+    )
+    _safety_rpc_server = SafetyRpcServer(
+        nats_client=transport.nc,
+        registry=get_orchestrator_registry(),
+        thread_pool=_safety_thread_pool,
+        coworker_lookup=_StateCoworkerLookup(),
+    )
+    await _safety_rpc_server.start()
+    logger.info(
+        "safety RPC server started",
+        component="safety",
+        max_workers=max_workers,
+    )
+
     logger.info("NATS IPC subscriptions started")
     return tasks
 
@@ -1297,6 +1335,15 @@ async def main() -> None:
     with contextlib.suppress(asyncio.CancelledError):
         await approval_maintenance_task
     await approval_worker.stop()
+    # V2 P0.3: shut down the safety RPC server and its thread pool so
+    # nats-py can tear down the subscription cleanly and in-flight
+    # sync checks do not block process exit.
+    if _safety_rpc_server is not None:
+        with contextlib.suppress(Exception):
+            await _safety_rpc_server.stop()  # type: ignore[attr-defined]
+    if _safety_thread_pool is not None:
+        with contextlib.suppress(Exception):
+            _safety_thread_pool.shutdown(wait=False)  # type: ignore[attr-defined]
     await proxy_runner.cleanup()
     await _queue.shutdown(10000)
     for gw in _gateways.values():
