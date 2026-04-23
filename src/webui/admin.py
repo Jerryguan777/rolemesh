@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated
 
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 
 from rolemesh.approval.engine import ApprovalEngine, ConflictError, ForbiddenError
 from rolemesh.auth.permissions import AgentPermissions
@@ -51,6 +53,8 @@ from webui.schemas import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from rolemesh.approval.types import ApprovalAuditEntry, ApprovalPolicy, ApprovalRequest
     from rolemesh.core.types import ChannelBinding, Conversation, Coworker, ScheduledTask, Tenant, User
     from rolemesh.safety.types import Rule as SafetyRule
@@ -1048,3 +1052,124 @@ async def delete_safety_rule_ep(
     if existing is None or existing.tenant_id != user.tenant_id:
         raise HTTPException(status_code=404, detail="Rule not found")
     await pg.delete_safety_rule(rule_id, actor_user_id=user.user_id)
+
+
+# ---------------------------------------------------------------------------
+# V2 P2.3: streaming CSV export of safety decisions.
+# ---------------------------------------------------------------------------
+
+
+# Compact, operator-friendly column set. Deliberately NOT the full
+# audit row — ``findings`` is flattened to parallel code/severity
+# lists so the CSV is a pivot table, not a nested JSON blob per
+# cell. Operators who want the full row hit ``GET /safety/decisions/{id}``.
+_CSV_COLUMNS: tuple[str, ...] = (
+    "id",
+    "created_at",
+    "tenant_id",
+    "coworker_id",
+    "conversation_id",
+    "job_id",
+    "stage",
+    "verdict_action",
+    "triggered_rule_ids",
+    "finding_codes",
+    "finding_severities",
+    "context_summary",
+)
+
+
+def _csv_escape(value: object) -> str:
+    """Minimal RFC 4180-ish escaping.
+
+    Wraps fields containing comma / quote / newline in double quotes
+    and doubles interior quotes. Writing this inline beats pulling in
+    csv.writer because we're streaming strings, not writing to a file.
+    """
+    if value is None:
+        return ""
+    s = str(value)
+    if any(c in s for c in (",", '"', "\n", "\r")):
+        return '"' + s.replace('"', '""') + '"'
+    return s
+
+
+def _format_row(row: dict[str, object]) -> str:
+    triggered = row.get("triggered_rule_ids") or []
+    findings = row.get("findings") or []
+    # Flatten parallel arrays: codes joined with ``|`` so a single
+    # audit row stays a single CSV row, and operators can still split.
+    codes = "|".join(
+        str(f.get("code", ""))
+        for f in findings
+        if isinstance(f, dict)
+    )
+    sevs = "|".join(
+        str(f.get("severity", ""))
+        for f in findings
+        if isinstance(f, dict)
+    )
+    triggered_flat = "|".join(str(t) for t in triggered)
+    fields = [
+        _csv_escape(row.get("id")),
+        _csv_escape(row.get("created_at")),
+        _csv_escape(row.get("tenant_id")),
+        _csv_escape(row.get("coworker_id")),
+        _csv_escape(row.get("conversation_id")),
+        _csv_escape(row.get("job_id")),
+        _csv_escape(row.get("stage")),
+        _csv_escape(row.get("verdict_action")),
+        _csv_escape(triggered_flat),
+        _csv_escape(codes),
+        _csv_escape(sevs),
+        _csv_escape(row.get("context_summary")),
+    ]
+    return ",".join(fields) + "\n"
+
+
+@router.get("/tenants/{tid}/safety/decisions.csv")
+async def export_safety_decisions_csv(
+    tid: str,
+    user: AdminUser,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+    verdict_action: str | None = None,
+    coworker_id: str | None = None,
+    stage: str | None = None,
+) -> StreamingResponse:
+    """Stream safety_decisions as CSV.
+
+    Cross-tenant access → 403. Uses a Postgres cursor so a 100k-row
+    export stays in constant memory; the response starts flowing to
+    the client as soon as the first chunk is ready, without waiting
+    for the full query.
+
+    Columns are the flat view defined in ``_CSV_COLUMNS``; full JSON
+    for any row is available via ``GET /safety/decisions/{id}``
+    (not yet implemented, planned for P1.5 admin UI).
+    """
+    if tid != user.tenant_id:
+        raise HTTPException(status_code=403, detail="tenant scope mismatch")
+
+    async def _generate() -> AsyncIterator[bytes]:
+        yield (",".join(_CSV_COLUMNS) + "\n").encode("utf-8")
+        async for chunk in pg.stream_safety_decisions(
+            tid,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            verdict_action=verdict_action,
+            coworker_id=coworker_id,
+            stage=stage,
+        ):
+            for row in chunk:
+                yield _format_row(row).encode("utf-8")
+
+    today = datetime.now(UTC).strftime("%Y%m%d")
+    filename = f"safety-decisions-{tid}-{today}.csv"
+    return StreamingResponse(
+        _generate(),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+        },
+    )

@@ -6,6 +6,9 @@ import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
 import asyncpg
 
 from rolemesh.auth.permissions import AgentPermissions
@@ -3470,6 +3473,96 @@ async def insert_safety_decision(
         )
     assert row is not None
     return str(row["id"])
+
+
+async def stream_safety_decisions(
+    tenant_id: str,
+    *,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+    verdict_action: str | None = None,
+    coworker_id: str | None = None,
+    stage: str | None = None,
+    chunk_size: int = 1000,
+) -> AsyncIterator[list[dict[str, Any]]]:
+    """Yield rows in ``chunk_size`` batches for streaming CSV export.
+
+    Uses an asyncpg cursor inside a transaction so 100k-row exports
+    don't pull the entire result set into memory. Each chunk is a
+    flat list of dicts with the same shape as ``list_safety_decisions``
+    (caller picks which fields to put on the CSV row).
+
+    ``from_ts`` / ``to_ts`` are ISO-8601 strings coerced to
+    ``timestamptz`` inside the query so operators can write
+    ``"2026-04-01"`` or ``"2026-04-01T00:00:00+00:00"`` interchangeably.
+    Malformed timestamps raise at query time (psycopg surface) which
+    the REST layer turns into 422.
+    """
+    pool = _get_pool()
+    clauses = ["tenant_id = $1::uuid"]
+    params: list[Any] = [tenant_id]
+    if from_ts is not None:
+        params.append(from_ts)
+        clauses.append(f"created_at >= ${len(params)}::timestamptz")
+    if to_ts is not None:
+        params.append(to_ts)
+        clauses.append(f"created_at <= ${len(params)}::timestamptz")
+    if verdict_action is not None:
+        params.append(verdict_action)
+        clauses.append(f"verdict_action = ${len(params)}")
+    if coworker_id is not None:
+        params.append(coworker_id)
+        clauses.append(f"coworker_id = ${len(params)}::uuid")
+    if stage is not None:
+        params.append(stage)
+        clauses.append(f"stage = ${len(params)}")
+    sql = (
+        "SELECT id, created_at, tenant_id, coworker_id, "
+        "conversation_id, job_id, stage, verdict_action, "
+        "triggered_rule_ids, findings, context_summary "
+        "FROM safety_decisions WHERE "
+        + " AND ".join(clauses)
+        + " ORDER BY created_at DESC"
+    )
+    async with pool.acquire() as conn, conn.transaction():
+        cur = await conn.cursor(sql, *params)
+        while True:
+            rows = await cur.fetch(chunk_size)
+            if not rows:
+                return
+            chunk: list[dict[str, Any]] = []
+            for r in rows:
+                findings = r["findings"]
+                if isinstance(findings, str):
+                    findings = json.loads(findings) if findings else []
+                chunk.append(
+                    {
+                        "id": str(r["id"]),
+                        "created_at": (
+                            r["created_at"].isoformat()
+                            if r["created_at"]
+                            else ""
+                        ),
+                        "tenant_id": str(r["tenant_id"]),
+                        "coworker_id": (
+                            str(r["coworker_id"])
+                            if r["coworker_id"]
+                            else None
+                        ),
+                        "conversation_id": r["conversation_id"],
+                        "job_id": r["job_id"],
+                        "stage": r["stage"],
+                        "verdict_action": r["verdict_action"],
+                        "triggered_rule_ids": [
+                            str(u) for u in (r["triggered_rule_ids"] or [])
+                        ],
+                        "findings": (
+                            findings if isinstance(findings, list) else []
+                        ),
+                        "context_summary": r["context_summary"],
+                    }
+                )
+            yield chunk
 
 
 async def list_safety_decisions(
