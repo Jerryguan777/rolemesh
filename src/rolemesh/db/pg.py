@@ -1299,7 +1299,14 @@ async def create_coworker(
             system_prompt,
             json.dumps(
                 [
-                    {"name": t.name, "type": t.type, "url": t.url, "headers": t.headers, "auth_mode": t.auth_mode}
+                    {
+                        "name": t.name,
+                        "type": t.type,
+                        "url": t.url,
+                        "headers": t.headers,
+                        "auth_mode": t.auth_mode,
+                        "tool_reversibility": dict(t.tool_reversibility),
+                    }
                     for t in tools
                 ]
                 if tools
@@ -1328,6 +1335,7 @@ def _record_to_coworker(row: asyncpg.Record) -> Coworker:
             auth_mode = item.get("auth_mode") or "user"
             if auth_mode not in ("user", "service", "both"):
                 auth_mode = "user"
+            raw_rev = item.get("tool_reversibility")
             tools.append(
                 McpServerConfig(
                     name=item["name"],
@@ -1335,6 +1343,9 @@ def _record_to_coworker(row: asyncpg.Record) -> Coworker:
                     url=item.get("url", ""),
                     headers=raw_headers if isinstance(raw_headers, dict) else {},
                     auth_mode=auth_mode,
+                    tool_reversibility=(
+                        dict(raw_rev) if isinstance(raw_rev, dict) else {}
+                    ),
                 )
             )
         # Skip legacy string entries silently
@@ -1440,7 +1451,14 @@ async def update_coworker(
         values.append(
             json.dumps(
                 [
-                    {"name": t.name, "type": t.type, "url": t.url, "headers": t.headers, "auth_mode": t.auth_mode}
+                    {
+                        "name": t.name,
+                        "type": t.type,
+                        "url": t.url,
+                        "headers": t.headers,
+                        "auth_mode": t.auth_mode,
+                        "tool_reversibility": dict(t.tool_reversibility),
+                    }
                     for t in tools
                 ]
             )
@@ -3563,6 +3581,45 @@ async def stream_safety_decisions(
                     }
                 )
             yield chunk
+
+
+async def cleanup_old_safety_approval_contexts(
+    *,
+    retention_hours: int = 24,
+) -> int:
+    """Zero the ``approval_context`` column on decisions older than
+    ``retention_hours``. Returns the number of rows updated.
+
+    V2 P1.1 retention policy: ``approval_context`` is the one place the
+    full ``tool_input`` lives after the turn (all other audit fields
+    carry only a digest + short summary). Keeping it forever would
+    turn the audit table into a long-term PII sink. 24h is enough for
+    the approval decision to play out (auto-expire is 60 min by
+    default) and for operators to inspect via the admin UI; after
+    that we redact.
+
+    Uses ``created_at`` rather than the linked approval row's
+    resolution time. Simpler (no join), and the approval row has its
+    own history via ``approval_audit_log``, so nothing is lost by
+    clearing the safety-side copy.
+    """
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchval(
+            """
+            WITH cleared AS (
+                UPDATE safety_decisions
+                   SET approval_context = NULL
+                 WHERE verdict_action = 'require_approval'
+                   AND approval_context IS NOT NULL
+                   AND created_at < (now() - make_interval(hours => $1))
+                 RETURNING 1
+            )
+            SELECT COUNT(*) FROM cleared
+            """,
+            retention_hours,
+        )
+    return int(row or 0)
 
 
 async def get_safety_decision(

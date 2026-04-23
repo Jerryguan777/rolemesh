@@ -1288,6 +1288,16 @@ async def main() -> None:
     )
     await approval_worker.start()
 
+    # V2 P1.1: 24-hour TTL on safety_decisions.approval_context.
+    # Runs alongside approval maintenance — separate loops because the
+    # two touch different tables and should fail independently.
+    from rolemesh.safety.maintenance import run_safety_maintenance_loop
+
+    safety_maintenance_stop = asyncio.Event()
+    safety_maintenance_task = asyncio.create_task(
+        run_safety_maintenance_loop(stop_event=safety_maintenance_stop)
+    )
+
     approval_maintenance_stop = asyncio.Event()
     approval_maintenance_task = asyncio.create_task(
         run_approval_maintenance_loop(
@@ -1339,11 +1349,15 @@ async def main() -> None:
             await t
 
     approval_maintenance_stop.set()
+    safety_maintenance_stop.set()
     with contextlib.suppress(Exception):
         await cancel_sub.unsubscribe()
     approval_maintenance_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await approval_maintenance_task
+    safety_maintenance_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await safety_maintenance_task
     await approval_worker.stop()
     # V2 P0.3: shut down the safety RPC server and its thread pool so
     # nats-py can tear down the subscription cleanly and in-flight

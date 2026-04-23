@@ -64,6 +64,11 @@ class PIIRegexConfig(BaseModel):
     silently-ignored. ``patterns`` values are coerced to bool — so
     ``"yes"`` stays a string that fails bool validation, rather than
     sneaking through as truthy.
+
+    ``action_override`` is V2 P1.1 — declared here so the REST
+    layer's ``extra='forbid'`` does not reject the override field at
+    admin time. Values are whitelisted in
+    ``_validate_safety_rule_body`` (block / warn / require_approval).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -73,6 +78,7 @@ class PIIRegexConfig(BaseModel):
     # admin intent of {"patterns": {"SSN": "yes"}} is ambiguous — we
     # want them to write `true` / `false` explicitly.
     patterns: dict[str, StrictBool] = Field(default_factory=dict)
+    action_override: str | None = None
 
     def model_post_init(self, _ctx: Any) -> None:
         # Validate each key against the stable mapping at admin time

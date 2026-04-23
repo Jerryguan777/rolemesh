@@ -890,8 +890,13 @@ def _safety_rule_to_response(r: SafetyRule) -> SafetyRuleResponse:
     )
 
 
-def _validate_safety_rule_body(
-    check_id: str, stage: str, config: dict[str, object]
+async def _validate_safety_rule_body(
+    check_id: str,
+    stage: str,
+    config: dict[str, object],
+    *,
+    tenant_id: str,
+    coworker_id: str | None,
 ) -> None:
     """Raise HTTPException(400) if the rule cannot be satisfied at run-time.
 
@@ -900,11 +905,24 @@ def _validate_safety_rule_body(
     permissive on stale snapshots (log + skip), but a fresh admin
     action must fail loud so typos surface immediately rather than
     subtly acting wrong at run-time.
+
+    Extra V2 P0.4 check: if the check is ``cost_class=slow`` AND the
+    stage is PRE_TOOL_CALL, we verify the rule's scope does not include
+    any reversible tool. Reversible tools have a 100 ms budget at
+    PRE_TOOL_CALL that slow checks can't meet; the runtime guard
+    (pipeline_core) will skip the rule when it fires, but admin-time
+    rejection gives operators the feedback immediately instead of
+    silent skips at runtime.
+
+    V2 P1.1: ``action_override`` is validated against the closed set
+    {block, warn, require_approval}. ``redact`` is refused because an
+    override cannot synthesize a modified_payload.
     """
     # Lazy import avoids a WebUI → rolemesh.safety cycle at module load.
     from pydantic import ValidationError
 
     from rolemesh.safety.registry import get_orchestrator_registry
+    from rolemesh.safety.tool_reversibility import get_tool_reversibility
     from rolemesh.safety.types import Stage
 
     registry = get_orchestrator_registry()
@@ -946,6 +964,61 @@ def _validate_safety_rule_body(
                 detail=f"Invalid config for {check_id}: {exc.errors()}",
             ) from exc
 
+    # V2 P1.1: action_override whitelist. redact is explicitly refused
+    # because the check did not produce a modified_payload.
+    override = config.get("action_override") if isinstance(config, dict) else None
+    if override is not None:
+        valid = {"block", "warn", "require_approval"}
+        if override not in valid:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Invalid action_override {override!r}; "
+                    f"must be one of {sorted(valid)} "
+                    f"(redact cannot be synthesized via override)"
+                ),
+            )
+
+    # V2 P0.4: reversibility guard at admin time. Only runs when the
+    # check is slow AND the stage is PRE_TOOL_CALL — other combinations
+    # have no budget conflict. Scope expansion:
+    #   coworker_id is None → tenant-wide rule → union of every
+    #     coworker's tools
+    #   coworker_id is set  → single coworker's tools
+    if (
+        getattr(check, "cost_class", "cheap") == "slow"
+        and stage_enum == Stage.PRE_TOOL_CALL
+    ):
+        coworkers: list[object] = []
+        if coworker_id is not None:
+            cw = await pg.get_coworker(coworker_id)
+            if cw is not None and cw.tenant_id == tenant_id:
+                coworkers.append(cw)
+        else:
+            coworkers.extend(await pg.get_coworkers_for_tenant(tenant_id))
+        for cw_any in coworkers:
+            tools = getattr(cw_any, "tools", None) or []
+            for mcp in tools:
+                overrides = getattr(mcp, "tool_reversibility", {}) or {}
+                # Builtins win — operator can't flip a stock tool's
+                # reversibility via MCP override. The helper does that
+                # layering for us; we just scan the declared bare
+                # names per MCP server.
+                for bare_name in overrides:
+                    if get_tool_reversibility(bare_name, overrides):
+                        name = getattr(cw_any, "name", "?")
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"Rule with slow check {check_id!r} at "
+                                f"PRE_TOOL_CALL is blocked: coworker "
+                                f"{name!r} configures reversible tool "
+                                f"{bare_name!r} which exceeds the "
+                                "100 ms budget. Narrow the rule scope "
+                                "or use a different stage."
+                            ),
+                        )
+
 
 @router.post(
     "/safety/rules",
@@ -956,11 +1029,20 @@ async def create_safety_rule_ep(
     body: SafetyRuleCreate,
     user: AdminUser,
 ) -> SafetyRuleResponse:
-    _validate_safety_rule_body(body.check_id, body.stage, body.config)
     if body.coworker_id is not None:
         # Guard against cross-tenant rule creation: a tenant admin MUST
         # NOT be able to attach a rule to a coworker they don't own.
         await _get_agent_or_404(body.coworker_id, user.tenant_id)
+    # Run tenant-scoped validation after the coworker cross-tenant
+    # guard so a cross-tenant coworker_id surfaces as 404 rather than
+    # leaking through the scope-expansion query.
+    await _validate_safety_rule_body(
+        body.check_id,
+        body.stage,
+        dict(body.config),
+        tenant_id=user.tenant_id,
+        coworker_id=body.coworker_id,
+    )
     rule = await pg.create_safety_rule(
         tenant_id=user.tenant_id,
         coworker_id=body.coworker_id,
@@ -1025,8 +1107,14 @@ async def update_safety_rule_ep(
     eff_config = (
         body.config if body.config is not None else existing.config
     )
-    if body.check_id is not None or body.stage is not None:
-        _validate_safety_rule_body(eff_check, eff_stage, eff_config)
+    if body.check_id is not None or body.stage is not None or body.config is not None:
+        await _validate_safety_rule_body(
+            eff_check,
+            eff_stage,
+            dict(eff_config),
+            tenant_id=user.tenant_id,
+            coworker_id=existing.coworker_id,
+        )
 
     updated = await pg.update_safety_rule(
         rule_id,
