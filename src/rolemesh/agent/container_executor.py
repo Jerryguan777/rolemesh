@@ -66,7 +66,12 @@ def rewrite_mcp_url_for_container(
     parsed = urlparse(mcp_config.url)
     original_path = parsed.path
     proxy_url = f"http://{proxy_host}:{proxy_port}/{proxy_prefix}/{mcp_config.name}{original_path}"
-    return McpServerSpec(name=mcp_config.name, type=mcp_config.type, url=proxy_url)
+    return McpServerSpec(
+        name=mcp_config.name,
+        type=mcp_config.type,
+        url=proxy_url,
+        tool_reversibility=dict(mcp_config.tool_reversibility),
+    )
 
 
 def _parse_container_output(raw: dict[str, object]) -> AgentOutput:

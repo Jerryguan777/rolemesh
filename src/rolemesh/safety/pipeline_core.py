@@ -150,6 +150,31 @@ async def pipeline_run(
             )
             continue
 
+        # V2 P0.4: reversibility matrix — slow checks on reversible
+        # tools at PRE_TOOL_CALL exceed the 100 ms budget for no
+        # safety benefit (the tool has no lasting side effect). Skip
+        # with a log ERROR so a misconfigured rule is visible, but
+        # keep the rest of the pipeline running: other rules at this
+        # stage may still be valid. We only apply the guard when the
+        # tool's reversibility is known (``ctx.tool.reversible``);
+        # POST_TOOL_RESULT and other stages have their own budgets.
+        if (
+            current_ctx.stage.value == "pre_tool_call"
+            and getattr(check, "cost_class", "cheap") == "slow"
+            and current_ctx.tool is not None
+            and current_ctx.tool.reversible
+        ):
+            _log.error(
+                "safety: slow check on reversible tool at "
+                "PRE_TOOL_CALL — skipping",
+                extra={
+                    "check_id": check_id,
+                    "rule_id": rule.get("id"),
+                    "tool": current_ctx.tool.name,
+                },
+            )
+            continue
+
         rule_config = rule.get("config") or {}
         if not isinstance(rule_config, dict):
             rule_config = {}

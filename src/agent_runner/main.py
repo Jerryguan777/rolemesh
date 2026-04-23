@@ -147,6 +147,15 @@ async def run_query_loop(
     """Main query loop: start backend, run prompts, handle follow-ups."""
 
     # Build tool context
+    # V2 P0.4: flatten per-MCP-server reversibility tables so the hook
+    # handler can resolve ``get_tool_reversibility`` in O(1) without
+    # reconstructing the mapping on each call.
+    mcp_tool_reversibility: dict[str, dict[str, bool]] = {}
+    for spec in init.mcp_servers or []:
+        rev = getattr(spec, "tool_reversibility", None) or {}
+        if rev:
+            mcp_tool_reversibility[spec.name] = dict(rev)
+
     tool_ctx = ToolContext(
         js=js,
         job_id=job_id,
@@ -157,6 +166,7 @@ async def run_query_loop(
         coworker_id=init.coworker_id,
         conversation_id=init.conversation_id,
         user_id=init.user_id,
+        mcp_tool_reversibility=mcp_tool_reversibility,
     )
 
     # Create and initialize backend

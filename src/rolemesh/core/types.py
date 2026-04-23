@@ -85,6 +85,13 @@ class McpServerConfig:
     url: str  # actual MCP server URL, e.g. "http://localhost:9100/mcp/"
     headers: dict[str, str] = field(default_factory=dict)  # auth headers injected by proxy
     auth_mode: str = "user"  # "user" | "service" | "both"
+    # V2 P0.4: per-tool reversibility override. Keys are the bare tool
+    # name as advertised by the MCP server (without the ``mcp__<name>__``
+    # wrapper the SDK adds at call time). True → tool has no lasting
+    # side effects (read-only query / search). False → tool mutates
+    # state (file write, PR create, etc.). Missing entries fall back to
+    # the builtin table and ultimately to False (fail-safe irreversible).
+    tool_reversibility: dict[str, bool] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------

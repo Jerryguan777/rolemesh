@@ -19,6 +19,12 @@ class McpServerSpec:
     name: str  # registered name, e.g. "my-mcp-server"
     type: str  # "sse" or "http"
     url: str  # proxy URL, e.g. "http://host.docker.internal:3001/mcp-proxy/my-mcp-server/"
+    # V2 P0.4: per-tool reversibility override. Forwarded from
+    # ``McpServerConfig.tool_reversibility`` via the orchestrator so
+    # the container's ToolContext can answer
+    # ``get_tool_reversibility(tool_name)`` at hook time without a
+    # DB round-trip.
+    tool_reversibility: dict[str, bool] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
