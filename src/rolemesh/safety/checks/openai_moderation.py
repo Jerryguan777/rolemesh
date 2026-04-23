@@ -28,7 +28,13 @@ from typing import TYPE_CHECKING, Any
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..types import CostClass, Finding, Stage, Verdict
+from ..types import (
+    CostClass,
+    Finding,
+    SafetyObservabilityCode,
+    Stage,
+    Verdict,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -132,7 +138,7 @@ class OpenAIModerationCheck:
         api_key = os.environ.get(api_key_env, "")
         if not api_key:
             return _fail_open(
-                "MODERATION_CONFIG_ERROR",
+                SafetyObservabilityCode.CONFIG_ERROR,
                 f"{api_key_env} not set — moderation check skipped",
             )
         timeout_s = float(int(config.get("timeout_ms") or 2000)) / 1000.0
@@ -155,19 +161,19 @@ class OpenAIModerationCheck:
                 )
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             return _fail_open(
-                "MODERATION_TRANSPORT_ERROR",
+                SafetyObservabilityCode.TRANSPORT_ERROR,
                 f"OpenAI moderation call failed: {exc}",
             )
         if response.status_code >= 400:
             return _fail_open(
-                "MODERATION_HTTP_ERROR",
+                SafetyObservabilityCode.HTTP_ERROR,
                 f"OpenAI moderation returned {response.status_code}",
             )
         try:
             data = response.json()
         except Exception as exc:  # noqa: BLE001 — ill-formed JSON is fail-open
             return _fail_open(
-                "MODERATION_PARSE_ERROR",
+                SafetyObservabilityCode.PARSE_ERROR,
                 f"OpenAI moderation returned non-JSON: {exc}",
             )
 
@@ -252,11 +258,23 @@ class OpenAIModerationCheck:
         )
 
 
-def _fail_open(code: str, message: str) -> Verdict:
+def _fail_open(
+    code: SafetyObservabilityCode | str, message: str
+) -> Verdict:
+    """Emit an allow verdict carrying a single SAFETY.* critical
+    finding. The pipeline-level observability namespace is
+    deliberately separate from the check's ``supported_codes`` so
+    dashboards can pivot ``SAFETY.%`` codes as infrastructure events
+    rather than detection events.
+    """
     return Verdict(
         action="allow",
         findings=[
-            Finding(code=code, severity="critical", message=message)
+            Finding(
+                code=str(code),
+                severity="critical",
+                message=message,
+            )
         ],
     )
 

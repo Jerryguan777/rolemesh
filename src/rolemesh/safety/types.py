@@ -61,6 +61,31 @@ Action = Literal["allow", "block", "redact", "warn", "require_approval"]
 CostClass = Literal["cheap", "slow"]
 
 
+class SafetyObservabilityCode(StrEnum):
+    """Pipeline-level observability codes emitted on fail-open paths.
+
+    These are **not** check-specific codes — they're published when a
+    check couldn't run to completion (RPC timeout, HTTP transport
+    error, missing config). Dashboards that aggregate by
+    ``Finding.code`` pivot across the whole safety system should
+    filter on ``SAFETY.*`` to see outages independently of
+    detection-code counts.
+
+    Convention: every code here starts with ``SAFETY.`` so operators
+    can ``WHERE code LIKE 'SAFETY.%'`` to isolate infrastructure
+    events vs detection events. Individual check ``supported_codes``
+    sets MUST NOT include ``SAFETY.*`` values — keeping the
+    namespace separate is the whole point.
+    """
+
+    RPC_TIMEOUT = "SAFETY.RPC_TIMEOUT"
+    RPC_ERROR = "SAFETY.RPC_ERROR"
+    CONFIG_ERROR = "SAFETY.CONFIG_ERROR"
+    TRANSPORT_ERROR = "SAFETY.TRANSPORT_ERROR"
+    HTTP_ERROR = "SAFETY.HTTP_ERROR"
+    PARSE_ERROR = "SAFETY.PARSE_ERROR"
+
+
 @dataclass(frozen=True)
 class ToolInfo:
     """Tool metadata visible to PRE_TOOL_CALL / POST_TOOL_RESULT checks.
@@ -224,6 +249,7 @@ __all__ = [
     "Rule",
     "SafetyCheck",
     "SafetyContext",
+    "SafetyObservabilityCode",
     "Severity",
     "Stage",
     "ToolInfo",

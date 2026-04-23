@@ -150,23 +150,32 @@ class SecretScannerCheck:
         # to a tempfile. Using a tempfile rather than piping through
         # a named-pipe keeps the plugin code unchanged and avoids
         # cross-platform quirks. The file is unlinked in finally.
+        #
+        # Permissions: opened with 0o600 via ``mkstemp`` so other
+        # local users on a shared orchestrator host cannot read the
+        # scanned content during the (short) scan window. The
+        # content under scan is exactly the text being checked for
+        # credentials — if a secret IS present, it would otherwise
+        # be briefly world-readable.
         from detect_secrets.settings import default_settings
 
         tmp_path: str | None = None
+        fd, tmp_path = tempfile.mkstemp(prefix="safety-", suffix=".txt")
         try:
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".txt", delete=False
-            ) as fh:
+            # ``mkstemp`` already opens with 0o600 on POSIX; the
+            # explicit chmod is defensive for platforms where the
+            # default differs and a no-op on most systems.
+            with contextlib.suppress(OSError):
+                os.chmod(tmp_path, 0o600)
+            with os.fdopen(fd, "w") as fh:
                 fh.write(text)
-                tmp_path = fh.name
             with default_settings():
                 sc = self._collection_cls()
                 sc.scan_file(tmp_path)
                 hits = list(sc)
         finally:
-            if tmp_path is not None:
-                with contextlib.suppress(OSError):
-                    os.unlink(tmp_path)
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path)
 
         findings: list[Finding] = []
         seen_codes: set[SecretCode] = set()

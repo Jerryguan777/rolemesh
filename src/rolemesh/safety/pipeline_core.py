@@ -251,22 +251,27 @@ async def pipeline_run(
         if override is not None and verdict.action != "allow":
             verdict = replace(verdict, action=override)
 
-        all_findings.extend(verdict.findings)
-
-        # Redact MUST carry a modified_payload. A check that returns
-        # redact without one is a programming error — there is no way
-        # to continue the chain without the replacement payload. Treat
-        # the same as any unsupported action: fail-close on control,
-        # skip on observational.
-        if verdict.action == "redact" and verdict.modified_payload is None:
+        # Redact MUST carry a dict-shaped modified_payload. Both
+        # ``None`` and a non-dict are programming errors — treat them
+        # identically so the audit is consistent with what actually
+        # happens (either "row + effect" or "no row + no effect",
+        # never "row says redact but nothing was replaced"). Before
+        # the review fix, None short-circuited here but non-dict
+        # slipped through the audit publish below.
+        if verdict.action == "redact" and not isinstance(
+            verdict.modified_payload, dict
+        ):
             msg = (
-                f"check {check_id!r} returned redact without "
-                f"modified_payload"
+                f"check {check_id!r} returned redact with "
+                f"{type(verdict.modified_payload).__name__} "
+                f"modified_payload (expected dict)"
             )
             if current_ctx.stage in CONTROL_STAGES:
                 raise ValueError(msg)
             _log.error("safety: %s", msg)
             continue
+
+        all_findings.extend(verdict.findings)
 
         await _publish_audit(publisher, current_ctx, rule, verdict)
 
@@ -279,17 +284,11 @@ async def pipeline_run(
             return replace(verdict, findings=list(all_findings))
 
         if verdict.action == "redact":
-            # Swap the ctx payload so the next rule sees the modified
-            # view. Frozen dataclass → use replace() to build a new one.
+            # Shape already validated above. Swap the ctx payload so
+            # the next rule sees the modified view. Frozen dataclass →
+            # use replace() to build a new one.
             modified = verdict.modified_payload
-            if not isinstance(modified, dict):
-                # Defensive: checks MUST return a dict shaped for the
-                # stage. Skip on mismatch rather than crash.
-                _log.error(
-                    "safety: check %r returned non-dict modified_payload",
-                    check_id,
-                )
-                continue
+            assert isinstance(modified, dict)  # for mypy
             current_ctx = replace(current_ctx, payload=dict(modified))
             redact_happened = True
             if verdict.appended_context:

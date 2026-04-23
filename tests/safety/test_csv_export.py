@@ -279,6 +279,118 @@ class TestCsvEscaping:
         assert rows[0]["finding_severities"] == "high|medium"
 
 
+class TestFormulaInjectionGuard:
+    """Review fix P2-5: cell text starting with =/+/-/@/tab/CR must
+    NOT execute as a formula when the CSV is opened in Excel or
+    Google Sheets. The attack vector: an agent tricked into calling
+    a tool whose name is ``=HYPERLINK("evil.com","click")``
+    produces a ``context_summary`` field that would be a clickable
+    phishing link unless the escaper neutralizes it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_equals_prefix_neutralized_with_leading_quote(
+        self,
+    ) -> None:
+        tenant = await create_tenant(
+            name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
+        )
+        cw = await create_coworker(
+            tenant_id=tenant.id, name="cw",
+            folder=f"cw-{uuid.uuid4().hex[:8]}",
+        )
+        await insert_safety_decision(
+            tenant_id=tenant.id,
+            coworker_id=cw.id,
+            stage="pre_tool_call",
+            verdict_action="block",
+            triggered_rule_ids=[],
+            findings=[],
+            context_digest="",
+            context_summary='=HYPERLINK("evil.com","click")',
+        )
+        app = _build_app(_user(tenant.id))
+        async with _client(app) as client:
+            r = await client.get(
+                f"/api/admin/tenants/{tenant.id}/safety/decisions.csv"
+            )
+        _, rows = _parse_csv(r.text)
+        # csv.DictReader preserves the escape prefix exactly. The
+        # leading single-quote is what Excel/Sheets strips while
+        # displaying the cell as literal text — so the parser sees
+        # it but a formula engine wouldn't evaluate.
+        assert rows[0]["context_summary"].startswith("'=HYPERLINK")
+        # Raw bytes: the quoted line must NOT start the field with
+        # a bare ``=`` (which would be interpreted as a formula).
+        # The field is quoted because of commas, so look for
+        # ``,"'=`` or similar.
+        assert ',"\'=' in r.text or ",'=" in r.text
+
+    @pytest.mark.asyncio
+    async def test_all_formula_prefixes_neutralized(self) -> None:
+        tenant = await create_tenant(
+            name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
+        )
+        cw = await create_coworker(
+            tenant_id=tenant.id, name="cw",
+            folder=f"cw-{uuid.uuid4().hex[:8]}",
+        )
+        for prefix in ("=", "+", "-", "@", "\t"):
+            await insert_safety_decision(
+                tenant_id=tenant.id,
+                coworker_id=cw.id,
+                stage="pre_tool_call",
+                verdict_action="block",
+                triggered_rule_ids=[],
+                findings=[],
+                context_digest="",
+                context_summary=f"{prefix}SUM(A1)",
+            )
+        app = _build_app(_user(tenant.id))
+        async with _client(app) as client:
+            r = await client.get(
+                f"/api/admin/tenants/{tenant.id}/safety/decisions.csv"
+            )
+        _, rows = _parse_csv(r.text)
+        # Every row's context_summary must start with ``'`` — never
+        # with a raw formula prefix.
+        for row in rows:
+            s = row["context_summary"]
+            assert s.startswith("'"), (
+                f"formula prefix not neutralized: {s!r}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_normal_text_unmodified(self) -> None:
+        """Only cells whose first char is a formula prefix are
+        altered. Regular text passes through unchanged.
+        """
+        tenant = await create_tenant(
+            name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
+        )
+        cw = await create_coworker(
+            tenant_id=tenant.id, name="cw",
+            folder=f"cw-{uuid.uuid4().hex[:8]}",
+        )
+        await insert_safety_decision(
+            tenant_id=tenant.id,
+            coworker_id=cw.id,
+            stage="pre_tool_call",
+            verdict_action="block",
+            triggered_rule_ids=[],
+            findings=[],
+            context_digest="",
+            context_summary="tool=github.create_pr",
+        )
+        app = _build_app(_user(tenant.id))
+        async with _client(app) as client:
+            r = await client.get(
+                f"/api/admin/tenants/{tenant.id}/safety/decisions.csv"
+            )
+        _, rows = _parse_csv(r.text)
+        assert rows[0]["context_summary"] == "tool=github.create_pr"
+
+
 class TestEmptyResult:
     @pytest.mark.asyncio
     async def test_header_only_when_no_rows_match(self) -> None:

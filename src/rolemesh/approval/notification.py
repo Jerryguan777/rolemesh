@@ -135,6 +135,51 @@ class NotificationTargetResolver:
             targets.append(request.conversation_id)
         return NotificationContext(target_conversation_ids=targets, approval_url=None)
 
+    async def resolve_for_safety_approvers(
+        self,
+        *,
+        request: ApprovalRequest,
+        approver_user_ids: list[str],
+    ) -> NotificationContext:
+        """Notification targets for a safety-driven approval request.
+
+        Safety requests don't have a policy (policy_id is NULL), so
+        the normal policy-override path in ``resolve_for_approvers``
+        does not apply. This method walks the approver users' active
+        conversations with the target coworker (same "each approver's
+        most recent conversation" logic as the approver path), then
+        falls back to the originating conversation. The approver set
+        typically matches ``_tenant_owner_ids`` upstream, so
+        operators receive the notification in whatever
+        conversation they last used with this coworker.
+
+        Returns an empty ``target_conversation_ids`` when no
+        approver has any recent conversation — the caller logs +
+        skips notification but keeps the approval_request so the
+        admin UI can still surface it.
+        """
+        candidates: list[str] = []
+        for approver_id in approver_user_ids:
+            convs = await self._get_conversations_for_user_and_coworker(
+                approver_id, request.coworker_id
+            )
+            for conv_id in convs:
+                if conv_id and conv_id not in candidates:
+                    candidates.append(conv_id)
+        if (
+            request.conversation_id
+            and request.conversation_id not in candidates
+        ):
+            candidates.append(request.conversation_id)
+        url = (
+            f"{self._webui_base_url}/approvals/{request.id}"
+            if self._webui_base_url
+            else None
+        )
+        return NotificationContext(
+            target_conversation_ids=candidates, approval_url=url
+        )
+
     async def _conv_exists(self, conversation_id: str) -> bool:
         conv = await self._get_conversation(conversation_id)
         return conv is not None

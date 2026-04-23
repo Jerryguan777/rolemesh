@@ -39,7 +39,13 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 from rolemesh.safety.rpc_codec import deserialize_verdict, serialize_context
-from rolemesh.safety.types import CostClass, Finding, Stage, Verdict
+from rolemesh.safety.types import (
+    CostClass,
+    Finding,
+    SafetyObservabilityCode,
+    Stage,
+    Verdict,
+)
 
 if TYPE_CHECKING:
     from rolemesh.safety.types import SafetyContext
@@ -135,12 +141,12 @@ class RemoteCheck:
             )
         except TimeoutError:
             return self._fail_open(
-                "SAFETY.RPC_TIMEOUT",
+                SafetyObservabilityCode.RPC_TIMEOUT,
                 f"{self.id} timeout after {timeout_ms}ms",
             )
         except Exception as exc:  # noqa: BLE001 — transport class is too narrow
             return self._fail_open(
-                "SAFETY.RPC_ERROR",
+                SafetyObservabilityCode.RPC_ERROR,
                 f"{self.id} transport error: {exc}",
             )
 
@@ -148,38 +154,44 @@ class RemoteCheck:
             reply = json.loads(msg.data)
         except (json.JSONDecodeError, ValueError) as exc:
             return self._fail_open(
-                "SAFETY.RPC_ERROR",
+                SafetyObservabilityCode.RPC_ERROR,
                 f"{self.id} malformed reply: {exc}",
             )
         if not isinstance(reply, dict):
             return self._fail_open(
-                "SAFETY.RPC_ERROR",
+                SafetyObservabilityCode.RPC_ERROR,
                 f"{self.id} non-dict reply: {type(reply).__name__}",
             )
         if reply.get("error"):
             return self._fail_open(
-                "SAFETY.RPC_ERROR",
+                SafetyObservabilityCode.RPC_ERROR,
                 f"{self.id} remote error: {reply['error']}",
             )
         verdict_data = reply.get("verdict")
         if not isinstance(verdict_data, dict):
             return self._fail_open(
-                "SAFETY.RPC_ERROR",
+                SafetyObservabilityCode.RPC_ERROR,
                 f"{self.id} reply missing verdict",
             )
         return deserialize_verdict(verdict_data)
 
     @staticmethod
-    def _fail_open(code: str, message: str) -> Verdict:
-        """Shape: allow verdict carrying a critical finding so the
-        pipeline does not change the decision but the audit trail
-        captures the outage loudly.
+    def _fail_open(
+        code: SafetyObservabilityCode | str, message: str
+    ) -> Verdict:
+        """Shape: allow verdict carrying a single SAFETY.* critical
+        finding. Accepts the enum or a raw string (``str(enum)``
+        already resolves to the ``SAFETY.*`` value) so call sites
+        can use the enum while tests that assert on strings stay
+        readable.
         """
         return Verdict(
             action="allow",
             findings=[
                 Finding(
-                    code=code, severity="critical", message=message
+                    code=str(code),
+                    severity="critical",
+                    message=message,
                 )
             ],
         )

@@ -1298,16 +1298,36 @@ _CSV_COLUMNS: tuple[str, ...] = (
 )
 
 
-def _csv_escape(value: object) -> str:
-    """Minimal RFC 4180-ish escaping.
+_FORMULA_PREFIXES: tuple[str, ...] = ("=", "+", "-", "@", "\t", "\r")
 
-    Wraps fields containing comma / quote / newline in double quotes
-    and doubles interior quotes. Writing this inline beats pulling in
-    csv.writer because we're streaming strings, not writing to a file.
+
+def _csv_escape(value: object) -> str:
+    """RFC 4180 quoting + CSV-formula-injection guard.
+
+    Two jobs:
+
+    1. **RFC 4180** — wrap fields containing comma / quote / newline
+       in double quotes, doubling interior quotes.
+    2. **Formula injection** — Excel and Google Sheets interpret a
+       cell whose text starts with ``=``, ``+``, ``-``, ``@``, tab
+       or CR as a formula (including network-fetching functions like
+       ``HYPERLINK`` / ``WEBSERVICE``). The audit data we export
+       contains operator-influenced or agent-influenced text
+       (``context_summary`` includes ``tool=<name>`` where name
+       originated in a tool call). Without this guard, an agent
+       that was tricked into calling a tool named
+       ``=HYPERLINK("evil.com","click")`` would produce a CSV that
+       phishes anyone opening it in Excel. Prefix those characters
+       with a single-quote so the cell renders as literal text.
+
+    Writing this inline beats pulling in csv.writer because we're
+    streaming strings, not writing to a file.
     """
     if value is None:
         return ""
     s = str(value)
+    if s and s[0] in _FORMULA_PREFIXES:
+        s = "'" + s
     if any(c in s for c in (",", '"', "\n", "\r")):
         return '"' + s.replace('"', '""') + '"'
     return s

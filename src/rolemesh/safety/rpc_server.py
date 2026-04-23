@@ -96,7 +96,31 @@ class SafetyRpcServer:
         returning, otherwise the container's ``RemoteCheck`` waits
         until its deadline and surfaces a RPC_TIMEOUT finding even
         though the server processed the request synchronously.
+
+        Backstop try/except at the outermost layer so unexpected
+        exceptions (RecursionError on pathological payloads,
+        MemoryError under pressure, a bug in ``_lookup``) still
+        produce an error reply instead of silently letting the
+        client burn its deadline budget.
         """
+        try:
+            await self._handle_request_inner(msg)
+        except Exception as exc:  # noqa: BLE001 — backstop, always respond
+            logger.warning(
+                "safety.rpc: unhandled error in handler — returning error reply",
+                component="safety",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            request_id = _best_effort_request_id(msg)
+            await _respond(
+                msg,
+                _error_reply(
+                    request_id, f"internal error: {type(exc).__name__}"
+                ),
+            )
+
+    async def _handle_request_inner(self, msg: Any) -> None:
         try:
             request = json.loads(msg.data)
         except (json.JSONDecodeError, ValueError) as exc:
@@ -169,8 +193,43 @@ class SafetyRpcServer:
         if not isinstance(config, dict):
             config = {}
 
+        # V2 P0.3 server-side deadline: client ships ``deadline_ms`` on
+        # every request. Without this timeout a hung check (broken
+        # HTTP retry in openai_moderation, llm-guard stuck on a
+        # pathological input) stalls the event loop / thread pool
+        # slot indefinitely — the client already fails open on its
+        # own timeout, but the server keeps running → cross-tenant
+        # latency under saturation. ``asyncio.wait_for`` cancels the
+        # outer task; for ``_sync=True`` checks the underlying
+        # thread-pool future cannot be forcibly aborted (Python
+        # limitation), but the event-loop slot is released so the
+        # server remains responsive.
         try:
-            verdict = await self._run_check(check, ctx, config)
+            deadline_ms = int(request.get("deadline_ms") or 2000)
+        except (TypeError, ValueError):
+            deadline_ms = 2000
+        deadline_ms = max(100, min(deadline_ms, 30_000))
+
+        try:
+            verdict = await asyncio.wait_for(
+                self._run_check(check, ctx, config),
+                timeout=deadline_ms / 1000.0,
+            )
+        except TimeoutError:
+            logger.warning(
+                "safety.rpc: check deadline exceeded — returning error reply",
+                component="safety",
+                check_id=check_id,
+                deadline_ms=deadline_ms,
+            )
+            await _respond(
+                msg,
+                _error_reply(
+                    request_id,
+                    f"check timeout after {deadline_ms}ms",
+                ),
+            )
+            return
         except Exception as exc:  # noqa: BLE001 — any check error is user-facing
             logger.warning(
                 "safety.rpc: check raised — returning error reply",
@@ -235,6 +294,21 @@ def _run_async_in_thread(
 
 def _error_reply(request_id: str, error: str) -> dict[str, Any]:
     return {"request_id": request_id, "verdict": None, "error": error}
+
+
+def _best_effort_request_id(msg: Any) -> str:
+    """Extract request_id from a message payload for the backstop
+    error-reply path. Wrapped in try/except because we're already
+    recovering from an unexpected error — the last thing we want is
+    the recovery code itself raising.
+    """
+    try:
+        data = json.loads(msg.data)
+        if isinstance(data, dict):
+            return str(data.get("request_id") or "")
+    except Exception:  # noqa: BLE001 — the whole point is to never raise here
+        pass
+    return ""
 
 
 async def _respond(msg: Any, payload: dict[str, Any]) -> None:

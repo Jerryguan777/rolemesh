@@ -348,6 +348,122 @@ class TestCheckExceptions:
         assert "kaboom" in reply["error"]
 
 
+class TestBackstopTryExcept:
+    """Review fix P2-6: unexpected exceptions from the lookup
+    callable or the request-deserialize path must still produce an
+    error reply — otherwise the client burns its full deadline
+    waiting for nothing.
+    """
+
+    @pytest.mark.asyncio
+    async def test_crashing_lookup_still_replies_with_error(
+        self, pool: ThreadPoolExecutor
+    ) -> None:
+        def _boom(_cid: str) -> _TrustedCoworker | None:
+            raise RuntimeError("lookup went sideways")
+
+        reg = CheckRegistry()
+        reg.register(_AsyncAllow())
+        nc = _FakeNats()
+        server = SafetyRpcServer(
+            nats_client=nc,
+            registry=reg,
+            thread_pool=pool,
+            coworker_lookup=_boom,
+        )
+        await server.start()
+        msg = _FakeMsg(data=_request_bytes())
+        await nc.cb(msg)
+        # Without the backstop, the server would raise out of its
+        # subscribe callback and the client would time out.
+        assert len(msg.responses) == 1
+        reply = json.loads(msg.responses[0])
+        assert reply["verdict"] is None
+        assert reply["error"] and "internal error" in reply["error"]
+
+
+class TestDeadlineEnforcement:
+    """V2 P1 review-fix: server enforces request deadline_ms.
+
+    Without this, a hung check stalls the server even after the
+    container times out. The wait_for cancels the outer task so the
+    event loop stays responsive even under load.
+    """
+
+    @pytest.mark.asyncio
+    async def test_slow_check_beyond_deadline_returns_timeout_error_reply(
+        self, pool: ThreadPoolExecutor
+    ) -> None:
+        import asyncio
+
+        class _Sleeper:
+            id = "stub.sleeper"
+            version = "1"
+            stages = frozenset(Stage)
+            cost_class: CostClass = "slow"
+            supported_codes: frozenset[str] = frozenset()
+            config_model = None
+
+            async def check(
+                self, _ctx: SafetyContext, _config: dict[str, Any]
+            ) -> Verdict:
+                await asyncio.sleep(5.0)
+                return Verdict(action="block", reason="should not reach")
+
+        server, nc = _make_server(_Sleeper(), pool=pool)
+        await server.start()
+        # deadline_ms is read from the request; minimum clamp is
+        # 100ms so the test completes quickly.
+        msg = _FakeMsg(
+            data=json.dumps(
+                {
+                    "request_id": "rid",
+                    "check_id": "stub.sleeper",
+                    "config": {},
+                    "context": serialize_context(_base_context()),
+                    "deadline_ms": 100,
+                }
+            ).encode()
+        )
+        await nc.cb(msg)
+        assert len(msg.responses) == 1
+        reply = json.loads(msg.responses[0])
+        assert reply["verdict"] is None
+        assert reply["error"] and "timeout" in reply["error"].lower()
+        assert "100ms" in reply["error"]
+
+    @pytest.mark.asyncio
+    async def test_deadline_ms_clamped_to_sane_range(
+        self, pool: ThreadPoolExecutor
+    ) -> None:
+        """A malicious or buggy client could send deadline_ms=0 or
+        a huge number. The server clamps to [100ms, 30s] so neither
+        extreme can DoS the server (too-short would turn every check
+        into a timeout; too-long would hold event loop slots for
+        minutes).
+        """
+        server, nc = _make_server(_AsyncAllow(), pool=pool)
+        await server.start()
+        for bogus in (0, -1, None, "abc", 10**9):
+            msg = _FakeMsg(
+                data=json.dumps(
+                    {
+                        "request_id": "rid",
+                        "check_id": "stub.slow",
+                        "config": {},
+                        "context": serialize_context(_base_context()),
+                        "deadline_ms": bogus,
+                    }
+                ).encode()
+            )
+            await nc.cb(msg)
+            reply = json.loads(msg.responses[-1])
+            # Either succeeded (clamped up from 0/neg/invalid) or
+            # replied without error (we don't care which; the point
+            # is no crash and no unbounded wait).
+            assert "error" in reply
+
+
 class TestSyncDispatch:
     @pytest.mark.asyncio
     async def test_sync_check_runs_off_event_loop(

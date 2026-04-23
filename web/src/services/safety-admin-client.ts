@@ -152,6 +152,20 @@ function buildQuery(params: Record<string, string | number | undefined | null>):
 
 let _cachedTenantId: string | null = null;
 
+// Invalidate the cache when auth dies (exhausted refresh, session
+// expired, explicit logout). Without this, the next sign-in in the
+// same tab would see the previous user's tenant_id from module state
+// — a silent cross-tenant leak in the admin UI. ``rm-auth-failed`` is
+// emitted from the OIDC helper on unrecoverable auth errors (see
+// app.ts listener). Safe to wire at module scope: this file is
+// imported once per page load, and ``window.addEventListener`` is
+// idempotent across HMR.
+if (typeof window !== 'undefined') {
+  window.addEventListener('rm-auth-failed', () => {
+    _cachedTenantId = null;
+  });
+}
+
 /** Returns the current admin's tenant_id. Cached for the session. */
 export async function getTenantId(): Promise<string> {
   if (_cachedTenantId) return _cachedTenantId;
@@ -160,6 +174,11 @@ export async function getTenantId(): Promise<string> {
   const body = (await res.json()) as { id: string };
   _cachedTenantId = body.id;
   return body.id;
+}
+
+/** Exported so tests + explicit logout flows can wipe the cache. */
+export function clearTenantIdCache(): void {
+  _cachedTenantId = null;
 }
 
 export async function listChecks(): Promise<SafetyCheckMeta[]> {

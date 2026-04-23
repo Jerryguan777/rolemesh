@@ -375,9 +375,83 @@ class TestUnknownAction:
         reg.register(_BadRedact())
         rule = make_rule(check_id="stub.badredact")
         with pytest.raises(
-            ValueError, match="redact without modified_payload"
+            ValueError, match="redact with NoneType modified_payload"
         ):
             await pipeline_run([rule], reg, make_context(), publisher)
+
+    @pytest.mark.asyncio
+    async def test_control_stage_redact_with_non_dict_payload_raises(
+        self, publisher: CapturePublisher
+    ) -> None:
+        """Review fix P1-3: the non-dict path (e.g. check returns
+        ``modified_payload="CLEANED"`` by mistake) used to slip
+        through the audit publish and then silently skip the ctx
+        swap — producing an audit row that said "redact happened"
+        when nothing was actually redacted. Now both None and
+        non-dict fail-close on control stages, with no audit row.
+        """
+
+        class _BadRedactShape:
+            id = "stub.bad.redact.shape"
+            version = "1"
+            stages = frozenset(Stage)
+            cost_class: CostClass = "cheap"
+            supported_codes = frozenset({"X"})
+
+            async def check(
+                self, _ctx: SafetyContext, _config: dict[str, Any]
+            ) -> Verdict:
+                # Non-dict modified_payload is a programmer bug.
+                return Verdict(
+                    action="redact", modified_payload="CLEANED"
+                )
+
+        reg = CheckRegistry()
+        reg.register(_BadRedactShape())
+        rule = make_rule(check_id="stub.bad.redact.shape")
+        with pytest.raises(
+            ValueError, match="redact with str modified_payload"
+        ):
+            await pipeline_run([rule], reg, make_context(), publisher)
+        # No audit row — the rule never got past the shape check.
+        assert publisher.events == []
+
+    @pytest.mark.asyncio
+    async def test_observational_stage_redact_non_dict_skipped_no_audit(
+        self, publisher: CapturePublisher
+    ) -> None:
+        """Observational counterpart: same bug, same fix-up. Rule is
+        skipped, nothing published — matches the None path's behavior.
+        """
+
+        class _BadRedactShape:
+            id = "stub.bad.redact.shape2"
+            version = "1"
+            stages = frozenset(Stage)
+            cost_class: CostClass = "cheap"
+            supported_codes = frozenset({"X"})
+
+            async def check(
+                self, _ctx: SafetyContext, _config: dict[str, Any]
+            ) -> Verdict:
+                return Verdict(
+                    action="redact", modified_payload=["wrong", "type"]
+                )
+
+        reg = CheckRegistry()
+        reg.register(_BadRedactShape())
+        rule = make_rule(
+            check_id="stub.bad.redact.shape2",
+            stage=Stage.POST_TOOL_RESULT,
+        )
+        verdict = await pipeline_run(
+            [rule], reg,
+            make_context(stage=Stage.POST_TOOL_RESULT),
+            publisher,
+        )
+        # Rule skipped → pipeline tails out as allow, no audit.
+        assert verdict.action == "allow"
+        assert publisher.events == []
 
 
 class TestRedactChain:

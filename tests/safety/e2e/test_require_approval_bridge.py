@@ -289,6 +289,94 @@ class TestRequireApprovalFullLoop:
         assert channel.messages == []
 
     @pytest.mark.asyncio
+    async def test_dedup_window_prevents_duplicate_approval_requests(
+        self,
+    ) -> None:
+        """Review fix P1-2: an agent retry loop must NOT flood
+        approval_requests with duplicates for the same action_hash
+        within the 5-minute dedup window.
+        """
+        tenant = await pg.create_tenant(
+            name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
+        )
+        owner = await pg.create_user(
+            tenant_id=tenant.id,
+            name="Owner",
+            email=f"owner-{uuid.uuid4().hex[:6]}@example.com",
+            role="owner",
+        )
+        cw = await pg.create_coworker(
+            tenant_id=tenant.id,
+            name="cw",
+            folder=f"cw-{uuid.uuid4().hex[:8]}",
+        )
+        await pg.create_safety_rule(
+            tenant_id=tenant.id,
+            stage="pre_tool_call",
+            check_id="pii.regex",
+            config={
+                "patterns": {"SSN": True},
+                "action_override": "require_approval",
+            },
+        )
+        rules = await pg.list_safety_rules_for_coworker(tenant.id, cw.id)
+        snapshot = [r.to_snapshot_dict() for r in rules]
+
+        tool_ctx = _FakeToolCtx(
+            tenant_id=tenant.id, coworker_id=cw.id, user_id=owner.id
+        )
+        handler = SafetyHookHandler(
+            rules=snapshot,
+            registry=build_container_registry(),
+            tool_ctx=tool_ctx,  # type: ignore[arg-type]
+        )
+        # Simulate the same blocked tool call firing three times —
+        # agent retry loop.
+        for _ in range(3):
+            await handler.on_pre_tool_use(
+                ToolCallEvent(
+                    tool_name="mcp__github__create_issue",
+                    tool_input={"title": "breach", "body": "SSN 123-45-6789"},
+                )
+            )
+        assert len(tool_ctx.events) == 3, "three audit events expected"
+
+        approval_engine, _ = _build_approval_engine()
+        safety_engine = SafetyEngine(approval_handler=approval_engine)
+
+        def _lookup(cid: str) -> TrustedCoworker | None:
+            if cid == cw.id:
+                return _TrustedRec(tenant_id=tenant.id, id=cw.id)
+            return None
+
+        subscriber = SafetyEventsSubscriber(
+            engine=safety_engine, coworker_lookup=_lookup
+        )
+        for _, payload in tool_ctx.events:
+            await subscriber.on_message_bytes(
+                json.dumps(payload).encode()
+            )
+
+        # Three audit rows — one per container-side evaluation — OK.
+        decisions = await pg.list_safety_decisions(tenant.id)
+        assert len(decisions) == 3
+
+        # But ONLY ONE approval_request row — the dedup window should
+        # have collapsed the other two into no-ops. Without the fix
+        # we'd see 3 pending rows here.
+        pool = pg._get_pool()  # type: ignore[attr-defined]
+        async with pool.acquire() as conn:
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM approval_requests "
+                "WHERE tenant_id = $1::uuid",
+                tenant.id,
+            )
+        assert count == 1, (
+            f"dedup must collapse retry-loop duplicates; got {count} "
+            "approval rows"
+        )
+
+    @pytest.mark.asyncio
     async def test_no_tenant_owner_logs_and_skips_without_crash(
         self,
     ) -> None:

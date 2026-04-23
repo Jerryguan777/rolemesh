@@ -100,6 +100,18 @@ class SafetyEventsSubscriber:
         # record. Mirrors _tenant_matches in approval/engine.py — a
         # buggy or malicious container must NOT be able to write audit
         # rows against another tenant.
+        #
+        # Note on ``claimed_tenant and ...`` — if the event omits
+        # tenant_id entirely (empty string), this branch is skipped
+        # and line below just overwrites with the trusted value.
+        # That IS intentional: the ``coworker_id`` lookup above is
+        # the real gate — once the coworker maps to a tenant in our
+        # in-memory state, no cross-tenant leak is possible
+        # regardless of what the claimed tenant says. The
+        # non-empty-claim mismatch check is a defence-in-depth /
+        # observability hook so a buggy container claiming the
+        # wrong tenant leaves a breadcrumb in logs instead of
+        # being silently "corrected".
         if claimed_tenant and claimed_tenant != trusted.tenant_id:
             logger.warning(
                 "safety: dropping event — tenant_id mismatch",
