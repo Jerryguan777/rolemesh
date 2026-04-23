@@ -117,13 +117,18 @@ class TestOrchestratorSingleton:
 
 
 class TestContainerMirror:
-    def test_container_registry_equal_ids_to_orchestrator_in_v1(self) -> None:
-        # V1: container and orchestrator share the same check set.
-        # This test MUST be updated (not silently extended) when V2
-        # adds slow checks to orchestrator only.
-        container_reg = build_container_registry()
-        orch_reg = build_orchestrator_registry()
-        assert set(container_reg.ids()) == set(orch_reg.ids())
+    def test_orchestrator_is_superset_of_container(self) -> None:
+        # V2: container ships cheap checks only; orchestrator
+        # additionally registers slow checks (presidio.pii,
+        # llm_guard.*, secret_scanner, openai_moderation) when their
+        # optional deps are installed. The container set MUST stay a
+        # subset — any container-only check would leak slow deps
+        # into the agent image.
+        container_ids = set(build_container_registry().ids())
+        orch_ids = set(build_orchestrator_registry().ids())
+        assert container_ids.issubset(orch_ids)
+        # Guard against accidental removal of a cheap check.
+        assert {"pii.regex", "domain_allowlist"}.issubset(container_ids)
 
     def test_container_pii_regex_import_same_class(self) -> None:
         # The §5.4 "no drift between sides" test: the container's

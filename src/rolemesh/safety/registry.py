@@ -19,6 +19,7 @@ seconds.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 from .errors import UnknownCheckError
@@ -89,14 +90,58 @@ def build_orchestrator_registry() -> CheckRegistry:
 
     Cheap checks come from ``build_container_registry`` so the two
     registries cannot drift on that set. Slow checks (presidio.pii,
-    llm_guard.prompt_injection, openai_moderation, etc.) are added
-    here only — they gate on optional dependencies and would break
-    container imports.
+    llm_guard.*, secret_scanner, openai_moderation) are registered
+    behind ``contextlib.suppress(ImportError)`` so deployments
+    without the ``[safety-ml]`` extra keep the cheap-only surface
+    without a hard failure at startup.
+
+    Each slow check's ``__init__`` eagerly loads its model (spaCy
+    pipeline, ONNX classifier, …). Loading once at registry-build
+    time — which is orchestrator startup — is the point of the
+    singleton in ``get_orchestrator_registry``: a REST handler or
+    RPC server invocation must not pay the model-load cost.
     """
+    import contextlib
+
     reg = build_container_registry()
-    # P1.2+: slow checks land here behind ``with contextlib.suppress(ImportError)``
-    # once their dependencies are wired. Cheap-only deployments keep
-    # the same registry as the container side.
+
+    with contextlib.suppress(ImportError):
+        from .checks.llm_guard_prompt_injection import (
+            LLMGuardPromptInjectionCheck,
+        )
+
+        reg.register(LLMGuardPromptInjectionCheck())
+
+    with contextlib.suppress(ImportError):
+        from .checks.llm_guard_jailbreak import LLMGuardJailbreakCheck
+
+        reg.register(LLMGuardJailbreakCheck())
+
+    with contextlib.suppress(ImportError):
+        from .checks.llm_guard_toxicity import LLMGuardToxicityCheck
+
+        reg.register(LLMGuardToxicityCheck())
+
+    with contextlib.suppress(ImportError):
+        from .checks.presidio_pii import PresidioPIICheck
+
+        reg.register(PresidioPIICheck())
+
+    with contextlib.suppress(ImportError):
+        from .checks.secret_scanner import SecretScannerCheck
+
+        reg.register(SecretScannerCheck())
+
+    # OpenAI moderation is imported unconditionally because ``httpx``
+    # is always present; registration gates on OPENAI_API_KEY being
+    # set so zero-key deployments don't advertise a check that will
+    # only ever fail-open with a transport error.
+    if os.environ.get("OPENAI_API_KEY"):
+        with contextlib.suppress(ImportError):
+            from .checks.openai_moderation import OpenAIModerationCheck
+
+            reg.register(OpenAIModerationCheck())
+
     return reg
 
 
