@@ -527,6 +527,98 @@ class ApprovalEngine:
             approvers=approvers,
         )
 
+    # -- Safety framework bridge (V2 P1.1) -------------------------------
+
+    async def create_from_safety(
+        self,
+        *,
+        tenant_id: str,
+        coworker_id: str,
+        conversation_id: str | None,
+        job_id: str,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        mcp_server_name: str,
+    ) -> ApprovalRequest | None:
+        """Create an approval request driven by a safety require_approval
+        verdict. Returns the request or None when no approvers resolve
+        (the event is logged and skipped — operators see the audit row
+        in safety_decisions and can configure tenant owners).
+
+        No policy is associated with this request (``policy_id`` stays
+        NULL) because the decision came from a safety rule, not an
+        approval policy. Expiry defaults to the module-wide
+        ``_DEFAULT_EXPIRE_MINUTES``; approvers fall back to tenant
+        owners which matches the chain tail in ``_resolve_approvers``.
+        """
+        approvers = await _tenant_owner_ids(tenant_id)
+        if not approvers:
+            logger.warning(
+                "approval: safety require_approval — no tenant owners; "
+                "skipping approval creation",
+                tenant_id=tenant_id,
+                coworker_id=coworker_id,
+            )
+            return None
+
+        action = {
+            "mcp_server": mcp_server_name,
+            "tool_name": tool_name,
+            "params": tool_input,
+        }
+        action_hash = compute_action_hash(tool_name, tool_input)
+        req = await pg.create_approval_request(
+            tenant_id=tenant_id,
+            coworker_id=coworker_id,
+            conversation_id=conversation_id,
+            policy_id=None,
+            user_id="",
+            job_id=job_id,
+            mcp_server_name=mcp_server_name,
+            actions=[action],
+            action_hashes=[action_hash],
+            rationale=None,
+            source="safety_require_approval",
+            status="pending",
+            resolved_approvers=approvers,
+            expires_at=_expiry(None),
+            post_exec_mode="report",
+            actor_user_id=None,
+        )
+        # Notification: reuse the approver-request template. Without a
+        # policy, we construct a minimal notification that names the
+        # tool + coworker. Per-approver routing uses the resolver's
+        # fallback (user DMs). Using a synthesized ``ApprovalPolicy``
+        # would be misleading (no persisted row), so we notify
+        # approvers directly via a fallback message.
+        try:
+            note_target = await self._builder._resolver.resolve_for_safety_approvers(  # type: ignore[attr-defined]
+                request=req, approver_user_ids=approvers
+            )
+        except AttributeError:
+            # Notification resolver predates the safety path — skip
+            # notification but keep the request so the UI can still
+            # pick it up. Operators can wire a resolver method in a
+            # follow-up PR.
+            note_target = None
+        if note_target is not None:
+            message = (
+                f"Safety policy requires approval for "
+                f"{tool_name or 'tool call'}."
+            )
+            for conv_id in note_target:
+                try:
+                    await self._channel.send_to_conversation(
+                        conv_id, message
+                    )
+                except Exception as exc:  # noqa: BLE001 — notification best-effort
+                    logger.warning(
+                        "approval: safety notify failed",
+                        conversation_id=conv_id,
+                        error=str(exc),
+                    )
+        return req
+
     # -- Decision path ----------------------------------------------------
 
     async def handle_decision(

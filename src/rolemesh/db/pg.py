@@ -377,7 +377,8 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             action_hashes      TEXT[] NOT NULL,
             rationale          TEXT,
             source             TEXT NOT NULL
-                CHECK (source IN ('proposal', 'auto_intercept')),
+                CHECK (source IN ('proposal', 'auto_intercept',
+                                  'safety_require_approval')),
             status             TEXT NOT NULL DEFAULT 'pending'
                 CHECK (status IN (
                     'pending', 'approved', 'rejected', 'expired', 'cancelled',
@@ -395,6 +396,19 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     # Migrate existing deployments: drop the NOT NULL if present.
     await conn.execute(
         "ALTER TABLE approval_requests ALTER COLUMN policy_id DROP NOT NULL"
+    )
+    # V2 P1.1: widen the source CHECK to include safety-driven
+    # approval requests. Old deployments have the two-value CHECK;
+    # drop-then-add so the rollout is a single migration.
+    await conn.execute(
+        "ALTER TABLE approval_requests "
+        "DROP CONSTRAINT IF EXISTS approval_requests_source_check"
+    )
+    await conn.execute(
+        "ALTER TABLE approval_requests ADD CONSTRAINT "
+        "approval_requests_source_check CHECK ("
+        "source IN ('proposal', 'auto_intercept', "
+        "'safety_require_approval'))"
     )
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_approval_requests_tenant_status "
@@ -577,6 +591,17 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
         )
     """)
+    # V2 P1.1: require_approval verdicts need the original tool_name
+    # + tool_input so the approval UI can render a decision surface.
+    # This column is the ONLY place the full tool_input is retained
+    # (context_digest + context_summary deliberately truncate) — it is
+    # live for 24 h after the approval resolves, then zeroed by a
+    # cleanup task. Other verdict_actions (block, allow, warn, redact)
+    # leave this column NULL.
+    await conn.execute(
+        "ALTER TABLE safety_decisions "
+        "ADD COLUMN IF NOT EXISTS approval_context JSONB"
+    )
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_safety_decisions_tenant_time "
         "ON safety_decisions (tenant_id, created_at DESC)"
@@ -3401,12 +3426,18 @@ async def insert_safety_decision(
     coworker_id: str | None = None,
     conversation_id: str | None = None,
     job_id: str | None = None,
+    approval_context: dict[str, Any] | None = None,
 ) -> str:
     """Write one audit row; return its id.
 
     Called by the safety_events subscriber for every decision the
     container publishes. Never raises on per-row validation — malformed
     inputs should be filtered upstream in ``SafetyEngine.handle_safety_event``.
+
+    ``approval_context`` is retained only for rows with
+    ``verdict_action='require_approval'``; for other actions the
+    caller passes None and the column stays NULL. See the 24-hour
+    cleanup task note in the ``safety_decisions`` schema block.
     """
     pool = _get_pool()
     async with pool.acquire() as conn:
@@ -3415,12 +3446,13 @@ async def insert_safety_decision(
             INSERT INTO safety_decisions (
                 tenant_id, coworker_id, conversation_id, job_id,
                 stage, verdict_action, triggered_rule_ids,
-                findings, context_digest, context_summary
+                findings, context_digest, context_summary,
+                approval_context
             )
             VALUES (
                 $1::uuid, $2::uuid, $3, $4,
                 $5, $6, $7::uuid[],
-                $8::jsonb, $9, $10
+                $8::jsonb, $9, $10, $11::jsonb
             )
             RETURNING id
             """,
@@ -3434,6 +3466,7 @@ async def insert_safety_decision(
             json.dumps(findings),
             context_digest,
             context_summary,
+            json.dumps(approval_context) if approval_context else None,
         )
     assert row is not None
     return str(row["id"])

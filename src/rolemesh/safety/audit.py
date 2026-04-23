@@ -27,6 +27,13 @@ class AuditEvent:
     ``triggered_rule_ids`` lists the rules whose verdict materially
     shaped the final decision — for a single-rule block, that's one id;
     for a redact chain, all rules that produced modifications.
+
+    ``approval_context`` is retained only for ``verdict_action='require_approval'``
+    rows at the PRE_TOOL_CALL stage. Deliberately the ONLY place the
+    full tool_input lives after the turn — the rest of the audit
+    table keeps only a digest + short summary to avoid becoming a PII
+    sink. See the ``safety_decisions`` schema note about the 24h
+    cleanup policy for this column.
     """
 
     tenant_id: str
@@ -39,6 +46,7 @@ class AuditEvent:
     findings: list[dict[str, Any]]
     context_digest: str
     context_summary: str
+    approval_context: dict[str, Any] | None = None
 
 
 class AuditSink(Protocol):
@@ -62,6 +70,7 @@ class DbAuditSink:
             findings=event.findings,
             context_digest=event.context_digest,
             context_summary=event.context_summary,
+            approval_context=event.approval_context,
         )
 
 

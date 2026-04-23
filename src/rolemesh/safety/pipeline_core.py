@@ -179,6 +179,33 @@ async def pipeline_run(
         if not isinstance(rule_config, dict):
             rule_config = {}
 
+        # V2 P1.1: ``action_override`` on the rule config lets an
+        # operator up/down-grade the check's natural verdict — e.g.
+        # turning an SSN block into an approval request without
+        # writing a new check. ``redact`` is forbidden as an override
+        # because it requires the check to have produced a
+        # ``modified_payload``; REST validation rejects it there, but
+        # defensive runtime handling catches a rogue direct INSERT.
+        override = rule_config.get("action_override")
+        if override is not None and override not in (
+            "block",
+            "warn",
+            "require_approval",
+        ):
+            # Unknown override value — REST should have rejected it,
+            # but if a direct-to-DB rule slips through we refuse to
+            # apply an unsupported action rather than silently ignoring
+            # it. Skip the rule so its misconfiguration is visible.
+            _log.error(
+                "safety: rule has invalid action_override — skipping",
+                extra={
+                    "rule_id": rule.get("id"),
+                    "check_id": check_id,
+                    "override": str(override),
+                },
+            )
+            continue
+
         try:
             verdict = await check.check(current_ctx, rule_config)
         except Exception as exc:
@@ -216,6 +243,13 @@ async def pipeline_run(
                 raise ValueError(msg)
             _log.error("safety: %s", msg)
             continue
+
+        # Apply the override only when the check's natural verdict
+        # was non-allow — overriding an allow to block/approval would
+        # make every evaluation a gate regardless of whether the
+        # check actually detected anything.
+        if override is not None and verdict.action != "allow":
+            verdict = replace(verdict, action=override)
 
         all_findings.extend(verdict.findings)
 
@@ -328,6 +362,32 @@ async def _publish_audit(
         "context_digest": compute_context_digest(ctx.payload),
         "context_summary": summarize_context(ctx.stage.value, ctx.payload),
     }
+    # V2 P1.1: attach approval_context so the orch audit handler can
+    # create an approval_request without re-deriving the tool_input.
+    # Only on PRE_TOOL_CALL — the other stages don't map onto the
+    # approval module's {mcp_server, tool_name, params} schema.
+    if (
+        verdict.action == "require_approval"
+        and ctx.stage.value == "pre_tool_call"
+    ):
+        tool_name = str(ctx.payload.get("tool_name", ""))
+        tool_input_raw = ctx.payload.get("tool_input") or {}
+        tool_input = (
+            dict(tool_input_raw)
+            if isinstance(tool_input_raw, dict)
+            else {}
+        )
+        # mcp_server_name parsed from ``mcp__{server}__{tool}``; empty
+        # for stock Claude tools (which never round-trip through the
+        # MCP proxy anyway).
+        mcp_server_name = ""
+        if tool_name.startswith("mcp__") and tool_name.count("__") >= 2:
+            mcp_server_name = tool_name.split("__", 2)[1]
+        event["approval_context"] = {
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "mcp_server_name": mcp_server_name,
+        }
     subject = AUDIT_SUBJECT_TEMPLATE.format(job_id=ctx.job_id or "unknown")
     try:
         result = publisher(subject, event)

@@ -40,8 +40,20 @@ logger = get_logger()
 
 
 class SafetyEngine:
-    def __init__(self, *, audit_sink: AuditSink | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        audit_sink: AuditSink | None = None,
+        approval_handler: Any = None,
+    ) -> None:
         self._sink: AuditSink = audit_sink or DbAuditSink()
+        # V2 P1.1: optional dependency so a deployment without the
+        # approval module still works. ``approval_handler`` is any
+        # callable/object with an async ``create_from_safety`` method
+        # (see ``rolemesh.approval.engine.ApprovalEngine.create_from_safety``).
+        # Typed as Any to keep this module importable without the
+        # approval package at cold start.
+        self._approval_handler = approval_handler
 
     async def load_rules_for_coworker(
         self, tenant_id: str, coworker_id: str
@@ -77,6 +89,7 @@ class SafetyEngine:
         are dropped with a warning.
         """
         try:
+            approval_ctx = payload.get("approval_context")
             event = AuditEvent(
                 tenant_id=str(payload["tenant_id"]),
                 coworker_id=payload.get("coworker_id"),
@@ -88,6 +101,11 @@ class SafetyEngine:
                 findings=list(payload.get("findings") or []),
                 context_digest=str(payload.get("context_digest", "")),
                 context_summary=str(payload.get("context_summary", "")),
+                approval_context=(
+                    dict(approval_ctx)
+                    if isinstance(approval_ctx, dict)
+                    else None
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             logger.warning(
@@ -106,6 +124,61 @@ class SafetyEngine:
                 tenant_id=event.tenant_id,
                 stage=event.stage,
                 verdict=event.verdict_action,
+                error=str(exc),
+            )
+
+        # V2 P1.1: bridge require_approval verdicts into the approval
+        # module. The check ran on the container, the audit already
+        # landed; this step creates a human-in-the-loop decision
+        # surface (WebUI / Slack notification) tied to the same
+        # tenant/coworker/conversation. Engine-less deployments (no
+        # approval module) log and skip — the audit row alone is
+        # still valuable for operators.
+        if (
+            event.verdict_action == "require_approval"
+            and event.approval_context is not None
+        ):
+            await self._dispatch_require_approval(event)
+
+    async def _dispatch_require_approval(
+        self, event: AuditEvent
+    ) -> None:
+        """Create an approval_request from a safety require_approval audit.
+
+        Audit-first / approval-second ordering is deliberate: the audit
+        row is the compliance record ("at time T, rule X decided this
+        required approval"). The approval request is a consumer of
+        that record for human UI. If approval creation fails (module
+        down, DB hiccup), the audit still stands, and operators can
+        see the backlog via safety_decisions filters.
+        """
+        if self._approval_handler is None:
+            logger.warning(
+                "safety: require_approval event has no approval handler "
+                "— audit row written but no approval request created",
+                component="safety",
+                tenant_id=event.tenant_id,
+                coworker_id=event.coworker_id,
+                job_id=event.job_id,
+            )
+            return
+        ctx = event.approval_context or {}
+        try:
+            await self._approval_handler.create_from_safety(
+                tenant_id=event.tenant_id,
+                coworker_id=event.coworker_id or "",
+                conversation_id=event.conversation_id,
+                job_id=event.job_id or "",
+                tool_name=str(ctx.get("tool_name") or ""),
+                tool_input=dict(ctx.get("tool_input") or {}),
+                mcp_server_name=str(ctx.get("mcp_server_name") or ""),
+            )
+        except Exception as exc:  # noqa: BLE001 — approval creation must not cascade
+            logger.error(
+                "safety: approval creation from require_approval failed",
+                component="safety",
+                tenant_id=event.tenant_id,
+                coworker_id=event.coworker_id,
                 error=str(exc),
             )
 

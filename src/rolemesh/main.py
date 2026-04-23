@@ -1269,6 +1269,16 @@ async def main() -> None:
     )
     ipc_deps.set_approval_engine(approval_engine)
 
+    # V2 P1.1: thread the approval engine through to SafetyEngine so
+    # require_approval verdicts actually produce human-in-the-loop
+    # decision surfaces instead of just landing in the audit table.
+    # The safety engine was instantiated earlier in start_subscribers
+    # (without the approval dep because that module isn't constructed
+    # yet at that point); patching the attribute post-hoc keeps
+    # ordering minimal and avoids re-threading construction.
+    if _safety_engine is not None:
+        _safety_engine._approval_handler = approval_engine  # type: ignore[attr-defined]
+
     from rolemesh.approval.executor import ApprovalWorker
     from rolemesh.approval.expiry import run_approval_maintenance_loop
 
