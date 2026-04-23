@@ -536,6 +536,7 @@ class ApprovalEngine:
         coworker_id: str,
         conversation_id: str | None,
         job_id: str,
+        user_id: str,
         tool_name: str,
         tool_input: dict[str, Any],
         mcp_server_name: str,
@@ -550,6 +551,14 @@ class ApprovalEngine:
         approval policy. Expiry defaults to the module-wide
         ``_DEFAULT_EXPIRE_MINUTES``; approvers fall back to tenant
         owners which matches the chain tail in ``_resolve_approvers``.
+
+        ``user_id`` is required (approval_requests.user_id is NOT NULL
+        FK): it identifies the user whose turn triggered the safety
+        gate. If the safety event lacks a user_id, we fall back to
+        the first tenant owner (approver) — better to attribute the
+        request to *some* real user than to 23502 on the insert.
+        Callers that want to skip creation when user_id is missing
+        can pre-check and short-circuit before calling.
         """
         approvers = await _tenant_owner_ids(tenant_id)
         if not approvers:
@@ -560,6 +569,12 @@ class ApprovalEngine:
                 coworker_id=coworker_id,
             )
             return None
+
+        # NOT NULL FK means empty string is a hard error at INSERT
+        # time. Fall back to the first approver so the row still
+        # lands — the attribution is slightly off but the operator
+        # can always see actions/approvers to understand context.
+        requester_id = user_id or approvers[0]
 
         action = {
             "mcp_server": mcp_server_name,
@@ -572,7 +587,7 @@ class ApprovalEngine:
             coworker_id=coworker_id,
             conversation_id=conversation_id,
             policy_id=None,
-            user_id="",
+            user_id=requester_id,
             job_id=job_id,
             mcp_server_name=mcp_server_name,
             actions=[action],

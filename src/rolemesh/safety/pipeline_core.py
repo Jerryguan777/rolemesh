@@ -347,6 +347,13 @@ async def _publish_audit(
         "coworker_id": ctx.coworker_id or None,
         "conversation_id": ctx.conversation_id or None,
         "job_id": ctx.job_id or None,
+        # V2 P1.1: user_id threads through so the approval bridge
+        # (SafetyEngine._dispatch_require_approval →
+        # ApprovalEngine.create_from_safety) can attribute the
+        # request to the user whose turn triggered the gate.
+        # AuditEvent stays the source of truth for this field across
+        # the subscriber → engine → approval fan-out.
+        "user_id": ctx.user_id or None,
         "stage": ctx.stage.value,
         "verdict_action": verdict.action,
         "triggered_rule_ids": [rule_id],

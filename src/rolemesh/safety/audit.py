@@ -40,6 +40,12 @@ class AuditEvent:
     coworker_id: str | None
     conversation_id: str | None
     job_id: str | None
+    # V2 P1.1: carried so the require_approval bridge can attribute
+    # the approval_request.user_id to the user whose turn triggered
+    # the safety gate. Not persisted in safety_decisions (would
+    # duplicate data the audit table doesn't need) — this field is
+    # in-flight metadata only.
+    user_id: str | None
     stage: str
     verdict_action: str
     triggered_rule_ids: list[str]
