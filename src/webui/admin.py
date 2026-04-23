@@ -1055,6 +1055,137 @@ async def delete_safety_rule_ep(
 
 
 # ---------------------------------------------------------------------------
+# V2 P1.5: check discovery and decisions read endpoints.
+# The admin UI (deferred) will consume these. Exposing them as REST now
+# lets operators build dashboards or curl-driven introspection without
+# waiting on the UI work.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/safety/checks")
+async def list_safety_checks_ep(_user: AdminUser) -> list[dict[str, object]]:
+    """Return metadata for every check registered on the orchestrator.
+
+    Includes the pydantic JSON schema so clients (admin UI, API
+    explorers) can render a config form without a second call. Checks
+    without a config_model report ``None`` — legacy checks that accept
+    arbitrary dicts (new checks are expected to declare a model).
+
+    Ordering is stable-alphabetical on check_id so dashboards that
+    cache results don't see phantom ordering changes.
+    """
+    from rolemesh.safety.registry import get_orchestrator_registry
+
+    checks = sorted(
+        get_orchestrator_registry().all(), key=lambda c: c.id
+    )
+    out: list[dict[str, object]] = []
+    for c in checks:
+        model = c.config_model
+        schema: object | None = (
+            model.model_json_schema()
+            if model is not None and hasattr(model, "model_json_schema")
+            else None
+        )
+        out.append(
+            {
+                "id": c.id,
+                "version": c.version,
+                "stages": sorted(s.value for s in c.stages),
+                "cost_class": c.cost_class,
+                "supported_codes": sorted(c.supported_codes),
+                "config_schema": schema,
+            }
+        )
+    return out
+
+
+@router.get("/tenants/{tid}/safety/decisions")
+async def list_safety_decisions_ep(
+    tid: str,
+    user: AdminUser,
+    verdict_action: str | None = None,
+    coworker_id: str | None = None,
+    stage: str | None = None,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict[str, object]:
+    """Paginated decisions list.
+
+    ``limit`` is capped at 200 so a misbehaving client can't scan the
+    whole table in one call — CSV export exists for bulk retrieval.
+    Returns ``{total, items}`` so the UI can render pagination without
+    a second call.
+    """
+    if tid != user.tenant_id:
+        raise HTTPException(status_code=403, detail="tenant scope mismatch")
+    capped = max(1, min(int(limit), 200))
+    safe_offset = max(0, int(offset))
+    total = await pg.count_safety_decisions(
+        tid,
+        verdict_action=verdict_action,
+        coworker_id=coworker_id,
+        stage=stage,
+        from_ts=from_ts,
+        to_ts=to_ts,
+    )
+    items = await pg.list_safety_decisions(
+        tid,
+        verdict_action=verdict_action,
+        coworker_id=coworker_id,
+        stage=stage,
+        from_ts=from_ts,
+        to_ts=to_ts,
+        limit=capped,
+        offset=safe_offset,
+    )
+    return {"total": total, "items": items}
+
+
+@router.get("/tenants/{tid}/safety/decisions/{decision_id}")
+async def get_safety_decision_ep(
+    tid: str,
+    decision_id: str,
+    user: AdminUser,
+) -> dict[str, object]:
+    """Full decision detail including approval_context when present.
+
+    Returns 404 for cross-tenant lookup (not 403) — we don't leak UUID
+    existence across tenants.
+    """
+    if tid != user.tenant_id:
+        raise HTTPException(status_code=404, detail="decision not found")
+    row = await pg.get_safety_decision(decision_id, tid)
+    if row is None:
+        raise HTTPException(status_code=404, detail="decision not found")
+    return row
+
+
+@router.get("/tenants/{tid}/safety/rules/{rule_id}/audit")
+async def list_safety_rule_audit_ep(
+    tid: str,
+    rule_id: str,
+    user: AdminUser,
+    limit: int = 200,
+) -> list[dict[str, object]]:
+    """Rule-change timeline for the admin UI.
+
+    Shows who changed what and when for one rule — the data source for
+    compliance questions like "when was the SSN rule disabled?". The
+    underlying ``safety_rules_audit`` table is append-only, written by
+    the DB trigger; this endpoint is pure read.
+    """
+    if tid != user.tenant_id:
+        raise HTTPException(status_code=403, detail="tenant scope mismatch")
+    capped = max(1, min(int(limit), 500))
+    return await pg.list_safety_rules_audit(
+        tenant_id=tid, rule_id=rule_id, limit=capped
+    )
+
+
+# ---------------------------------------------------------------------------
 # V2 P2.3: streaming CSV export of safety decisions.
 # ---------------------------------------------------------------------------
 

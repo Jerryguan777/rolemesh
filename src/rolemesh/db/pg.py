@@ -3565,20 +3565,66 @@ async def stream_safety_decisions(
             yield chunk
 
 
-async def list_safety_decisions(
-    tenant_id: str,
-    *,
-    verdict_action: str | None = None,
-    coworker_id: str | None = None,
-    limit: int = 200,
-) -> list[dict[str, Any]]:
-    """Read recent safety decisions for a tenant.
+async def get_safety_decision(
+    decision_id: str, tenant_id: str
+) -> dict[str, Any] | None:
+    """Fetch a single safety_decisions row, scoped to ``tenant_id``.
 
-    Returns plain dicts (not a dataclass) because V1 does not expose
-    these via REST — the shape is internal to tests and V2's audit UI.
-    Newest-first ordering; ``limit`` caps the result set.
+    Tenant scoping is on the query (not a post-fetch check) so a leak
+    path like "admin from tenant B fetches tenant A's row via a guessed
+    UUID" returns None from the DB itself. The REST layer then maps
+    None to 404 — indistinguishable from "doesn't exist" so we don't
+    leak UUID existence across tenants.
     """
     pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM safety_decisions WHERE id = $1::uuid "
+            "AND tenant_id = $2::uuid",
+            decision_id,
+            tenant_id,
+        )
+    if row is None:
+        return None
+    findings = row["findings"]
+    if isinstance(findings, str):
+        findings = json.loads(findings) if findings else []
+    # asyncpg Record supports dict-like .get() via key access + default.
+    # Use getattr-like fallback to handle both pre-migration rows (no
+    # column) and post-migration rows uniformly.
+    try:
+        approval_ctx = row["approval_context"]
+    except KeyError:
+        approval_ctx = None
+    if isinstance(approval_ctx, str):
+        approval_ctx = json.loads(approval_ctx) if approval_ctx else None
+    return {
+        "id": str(row["id"]),
+        "tenant_id": str(row["tenant_id"]),
+        "coworker_id": str(row["coworker_id"]) if row["coworker_id"] else None,
+        "conversation_id": row["conversation_id"],
+        "job_id": row["job_id"],
+        "stage": row["stage"],
+        "verdict_action": row["verdict_action"],
+        "triggered_rule_ids": [str(u) for u in (row["triggered_rule_ids"] or [])],
+        "findings": findings if isinstance(findings, list) else [],
+        "context_digest": row["context_digest"],
+        "context_summary": row["context_summary"],
+        "approval_context": approval_ctx,
+        "created_at": row["created_at"].isoformat() if row["created_at"] else "",
+    }
+
+
+def _safety_decision_where_clauses(
+    tenant_id: str,
+    *,
+    verdict_action: str | None,
+    coworker_id: str | None,
+    stage: str | None,
+    from_ts: str | None,
+    to_ts: str | None,
+) -> tuple[str, list[Any]]:
+    """Shared WHERE-clause builder for list + count calls."""
     clauses = ["tenant_id = $1::uuid"]
     params: list[Any] = [tenant_id]
     if verdict_action is not None:
@@ -3587,12 +3633,85 @@ async def list_safety_decisions(
     if coworker_id is not None:
         params.append(coworker_id)
         clauses.append(f"coworker_id = ${len(params)}::uuid")
-    params.append(limit)
-    sql = (
-        "SELECT * FROM safety_decisions WHERE "
-        + " AND ".join(clauses)
-        + f" ORDER BY created_at DESC LIMIT ${len(params)}"
+    if stage is not None:
+        params.append(stage)
+        clauses.append(f"stage = ${len(params)}")
+    if from_ts is not None:
+        params.append(from_ts)
+        clauses.append(f"created_at >= ${len(params)}::timestamptz")
+    if to_ts is not None:
+        params.append(to_ts)
+        clauses.append(f"created_at <= ${len(params)}::timestamptz")
+    return " AND ".join(clauses), params
+
+
+async def count_safety_decisions(
+    tenant_id: str,
+    *,
+    verdict_action: str | None = None,
+    coworker_id: str | None = None,
+    stage: str | None = None,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+) -> int:
+    """Total count for a matching filter set.
+
+    Split from ``list_safety_decisions`` so the REST pagination path
+    can make two parallel calls (count + page) without paying for the
+    count on internal read-the-latest-N call sites. Matches the filter
+    arg set of the list function so drift is a local concern.
+    """
+    where, params = _safety_decision_where_clauses(
+        tenant_id,
+        verdict_action=verdict_action,
+        coworker_id=coworker_id,
+        stage=stage,
+        from_ts=from_ts,
+        to_ts=to_ts,
     )
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchval(
+            f"SELECT COUNT(*) FROM safety_decisions WHERE {where}",
+            *params,
+        )
+    return int(row or 0)
+
+
+async def list_safety_decisions(
+    tenant_id: str,
+    *,
+    verdict_action: str | None = None,
+    coworker_id: str | None = None,
+    stage: str | None = None,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+    limit: int = 200,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """Read safety decisions for a tenant, newest first.
+
+    Pagination via ``limit`` + ``offset``. Callers that need a total
+    count for UI pagination pair this with ``count_safety_decisions``
+    using the same filter args. The two-call surface keeps internal
+    "read the latest N" callers from paying for a count scan.
+    """
+    where, params = _safety_decision_where_clauses(
+        tenant_id,
+        verdict_action=verdict_action,
+        coworker_id=coworker_id,
+        stage=stage,
+        from_ts=from_ts,
+        to_ts=to_ts,
+    )
+    params.append(limit)
+    params.append(offset)
+    sql = (
+        f"SELECT * FROM safety_decisions WHERE {where} "
+        f"ORDER BY created_at DESC LIMIT ${len(params) - 1} "
+        f"OFFSET ${len(params)}"
+    )
+    pool = _get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(sql, *params)
     result: list[dict[str, Any]] = []
