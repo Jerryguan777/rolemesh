@@ -283,10 +283,25 @@ class DockerRuntime:
 
         await ensure_agent_network(self._ensure_client(), network_name)
 
-    async def verify_proxy_reachable(self, network_name: str, proxy_port: int) -> None:
-        from rolemesh.container.network import verify_proxy_reachable
+    async def ensure_egress_network(self, network_name: str) -> None:
+        from rolemesh.container.network import ensure_egress_network
 
-        await verify_proxy_reachable(self._ensure_client(), network_name, proxy_port)
+        await ensure_egress_network(self._ensure_client(), network_name)
+
+    async def verify_egress_gateway_reachable(
+        self,
+        network_name: str,
+        gateway_service_name: str,
+        reverse_proxy_port: int,
+    ) -> None:
+        from rolemesh.container.network import verify_egress_gateway_reachable
+
+        await verify_egress_gateway_reachable(
+            self._ensure_client(),
+            network_name,
+            gateway_service_name,
+            reverse_proxy_port,
+        )
 
     @staticmethod
     def _spec_to_config(spec: ContainerSpec) -> dict[str, Any]:

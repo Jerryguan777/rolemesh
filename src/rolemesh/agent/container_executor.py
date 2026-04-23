@@ -23,12 +23,12 @@ from rolemesh.container.runner import (
     build_container_spec,
     build_volume_mounts,
 )
-from rolemesh.container.runtime import CONTAINER_HOST_GATEWAY
 from rolemesh.core.config import (
     CONTAINER_MAX_OUTPUT_SIZE,
     CONTAINER_TIMEOUT,
     CREDENTIAL_PROXY_PORT,
     DATA_DIR,
+    EGRESS_GATEWAY_CONTAINER_NAME,
     IDLE_TIMEOUT,
     MCP_PROXY_PREFIX,
 )
@@ -172,7 +172,7 @@ class ContainerAgentExecutor:
             mcp_specs = [
                 rewrite_mcp_url_for_container(
                     tool_cfg,
-                    proxy_host=CONTAINER_HOST_GATEWAY,
+                    proxy_host=EGRESS_GATEWAY_CONTAINER_NAME,
                     proxy_port=CREDENTIAL_PROXY_PORT,
                     proxy_prefix=MCP_PROXY_PREFIX,
                 )

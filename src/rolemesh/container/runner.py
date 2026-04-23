@@ -16,10 +16,8 @@ from typing import TYPE_CHECKING
 from rolemesh.auth.permissions import AgentPermissions
 from rolemesh.container.docker_runtime import _parse_memory
 from rolemesh.container.runtime import (
-    CONTAINER_HOST_GATEWAY,
     ContainerSpec,
     VolumeMount,
-    get_host_gateway_extra_hosts,
 )
 from rolemesh.core.config import (
     CONTAINER_CPU_LIMIT,
@@ -33,6 +31,8 @@ from rolemesh.core.config import (
     CONTAINER_PIDS_LIMIT,
     CREDENTIAL_PROXY_PORT,
     DATA_DIR,
+    EGRESS_GATEWAY_CONTAINER_NAME,
+    EGRESS_GATEWAY_FORWARD_PORT,
     NATS_URL,
     PROJECT_ROOT,
     TIMEZONE,
@@ -311,10 +311,18 @@ _METADATA_BLACKHOLE: dict[str, str] = {
 
 
 def _build_extra_hosts() -> dict[str, str]:
-    """Merge host-gateway (Linux) with metadata blackhole entries."""
-    hosts = dict(get_host_gateway_extra_hosts())
-    hosts.update(_METADATA_BLACKHOLE)
-    return hosts
+    """Return /etc/hosts entries for the agent container.
+
+    EC-1 removed the ``host.docker.internal:host-gateway`` entry: on an
+    ``Internal=true`` bridge there is no route to the host-gateway IP
+    anyway, and the gateway container is now reachable by its service
+    name via Docker's embedded DNS on the agent bridge.
+
+    Only the metadata-service blackhole entries remain — those resolve
+    IMDS hostnames to 127.0.0.1 so a compromised agent cannot exfil IAM
+    credentials via SSRF-style metadata access.
+    """
+    return dict(_METADATA_BLACKHOLE)
 
 
 def _clamp_memory(value: str, max_value: str, *, coworker_name: str) -> str:
@@ -374,9 +382,28 @@ def build_container_spec(
     Merge order for resource limits: global default ← coworker override ← clamp to max.
     """
     image = backend_config.image if backend_config else CONTAINER_IMAGE
-    nats_url = NATS_URL.replace("localhost", CONTAINER_HOST_GATEWAY)
 
-    proxy_base = f"http://{CONTAINER_HOST_GATEWAY}:{CREDENTIAL_PROXY_PORT}"
+    # NATS URL passed through as-is. The localhost→host-gateway
+    # substitution the pre-EC-1 orchestrator applied is no longer valid:
+    # the agent bridge is Internal=true, so a URL that only resolves on
+    # the host would hit EHOSTUNREACH. Operators must ensure NATS is
+    # reachable ON the agent bridge — typically by attaching the NATS
+    # container to rolemesh-agent-net and setting NATS_URL to the
+    # container's service name (docs/egress/deployment.md).
+    nats_url = NATS_URL
+
+    # Reverse-proxy base URL. Agents reach the gateway by its service
+    # name ``egress-gateway`` (resolved via Docker embedded DNS on the
+    # agent bridge) rather than the old host-gateway escape hatch.
+    proxy_base = f"http://{EGRESS_GATEWAY_CONTAINER_NAME}:{CREDENTIAL_PROXY_PORT}"
+    # Forward-proxy URL for arbitrary HTTP(S) egress. Agents inherit
+    # this via HTTP_PROXY / HTTPS_PROXY and every stdlib / third-party
+    # HTTP client routes through the CONNECT listener automatically.
+    # EC-1 ships the variables even though the CONNECT listener only
+    # goes live in EC-2 — the envelope is then already in place.
+    forward_proxy_url = (
+        f"http://{EGRESS_GATEWAY_CONTAINER_NAME}:{EGRESS_GATEWAY_FORWARD_PORT}"
+    )
 
     env: dict[str, str] = {
         "TZ": TIMEZONE,
@@ -386,6 +413,15 @@ def build_container_spec(
         "ANTHROPIC_BASE_URL": proxy_base,
         # Multi-provider proxy URLs for Pi backend (each SDK reads its own env var)
         "OPENAI_BASE_URL": f"{proxy_base}/proxy/openai",
+        # EC-1: standard HTTP proxy env. Both upper-case keys set — some
+        # libraries (requests) check HTTPS_PROXY, others (urllib) also
+        # honour HTTP_PROXY for plain-HTTP URLs. NO_PROXY carves out the
+        # gateway's own service name (so reverse-proxy calls bypass the
+        # forward-proxy) and loopback (so in-process services that
+        # spawn do not go out and back in).
+        "HTTP_PROXY": forward_proxy_url,
+        "HTTPS_PROXY": forward_proxy_url,
+        "NO_PROXY": f"{EGRESS_GATEWAY_CONTAINER_NAME},localhost,127.0.0.1",
         # Redirect Claude Code CLI's .claude.json writes into the per-coworker
         # writable bind mount at /home/agent/.claude. Without this, the CLI
         # tries to write /home/agent/.claude.json on the readonly rootfs and

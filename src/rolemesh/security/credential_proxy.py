@@ -323,9 +323,20 @@ async def start_credential_proxy(port: int, host: str = "127.0.0.1") -> web.AppR
             logger.error("Credential proxy upstream error", url=str(request.url), error=str(exc))
             return web.Response(status=502, text="Bad Gateway")
 
+    # -- Health probe (EC-1) --
+    # Registered BEFORE the legacy Anthropic catch-all so it doesn't get
+    # forwarded upstream. The egress gateway launcher uses this to verify
+    # the container is up and serving HTTP; a real probe against an
+    # Anthropic endpoint would leak network traffic on every orchestrator
+    # startup.
+
+    async def handle_healthz(_request: web.Request) -> web.Response:
+        return web.Response(status=200, text="ok")
+
     # -- Route registration (order matters: specific before wildcard) --
 
     app = web.Application()
+    app.router.add_get("/healthz", handle_healthz)
     app.router.add_route("*", "/proxy/{provider_name}/{path_info:.*}", handle_provider_proxy)
     app.router.add_route("*", "/mcp-proxy/{server_name}/{path_info:.*}", handle_mcp_proxy)
     app.router.add_route("*", "/{path_info:.*}", handle_legacy_anthropic)

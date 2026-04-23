@@ -154,10 +154,51 @@ class TestBuildContainerSpec:
         assert "CLAUDE_CODE_OAUTH_TOKEN" in spec.env
 
     def test_spec_env_has_nats_url(self) -> None:
+        """EC-1 removed the localhost→host-gateway substitution. NATS_URL
+        is passed through as-is; operators set it to the right value for
+        the Internal=true agent bridge (typically attaching NATS to the
+        bridge and using its service name).
+        """
         with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
             spec = build_container_spec([], "c", "j")
         assert "NATS_URL" in spec.env
-        assert "host.docker.internal" in spec.env["NATS_URL"]
+
+    def test_spec_env_routes_llm_through_egress_gateway(self) -> None:
+        """EC-1: ANTHROPIC_BASE_URL / OPENAI_BASE_URL point at the gateway
+        by service name, never at host.docker.internal."""
+        with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
+            spec = build_container_spec([], "c", "j")
+        assert "egress-gateway" in spec.env["ANTHROPIC_BASE_URL"]
+        assert "egress-gateway" in spec.env["OPENAI_BASE_URL"]
+        # Regression: the old host.docker.internal escape hatch is gone.
+        assert "host.docker.internal" not in spec.env["ANTHROPIC_BASE_URL"]
+
+    def test_spec_env_injects_http_proxy(self) -> None:
+        """EC-1: standard proxy env is set on every agent container so
+        any HTTP client library routes through the gateway without
+        per-library configuration."""
+        with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
+            spec = build_container_spec([], "c", "j")
+        assert spec.env["HTTP_PROXY"].startswith("http://egress-gateway:")
+        assert spec.env["HTTPS_PROXY"].startswith("http://egress-gateway:")
+        # NO_PROXY must carve out the gateway service name itself so
+        # calls to the reverse-proxy (/proxy/anthropic/...) do not
+        # double-proxy through the forward proxy.
+        no_proxy = spec.env["NO_PROXY"].split(",")
+        assert "egress-gateway" in no_proxy
+        assert "127.0.0.1" in no_proxy
+
+    def test_spec_extra_hosts_drops_host_gateway(self) -> None:
+        """EC-1 red line: host-gateway is the old escape path. With the
+        agent bridge Internal=true, keeping it wouldn't work anyway, but
+        removing it makes accidental re-adds visible in code review."""
+        with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
+            spec = build_container_spec([], "c", "j")
+        assert "host.docker.internal" not in spec.extra_hosts
+        # Metadata blackhole entries are orthogonal — keep asserting
+        # those so we don't accidentally drop them together.
+        assert spec.extra_hosts["169.254.169.254"] == "127.0.0.1"
+        assert spec.extra_hosts["metadata.google.internal"] == "127.0.0.1"
 
 
 class TestBackwardCompatAliases:

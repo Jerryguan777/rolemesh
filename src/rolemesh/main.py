@@ -48,8 +48,10 @@ from rolemesh.container.scheduler import GroupQueue
 from rolemesh.core.config import (
     AGENT_BACKEND_DEFAULT,
     ASSISTANT_NAME,
+    CONTAINER_EGRESS_NETWORK_NAME,
     CONTAINER_NETWORK_NAME,
     CREDENTIAL_PROXY_PORT,
+    EGRESS_GATEWAY_CONTAINER_NAME,
     GLOBAL_MAX_CONTAINERS,
     IDLE_TIMEOUT,
     NATS_URL,
@@ -1096,23 +1098,58 @@ async def _recover_pending_messages() -> None:
 async def _ensure_container_system_running() -> None:
     """Ensure the container runtime is running and clean up orphans.
 
-    Order matters:
+    Order matters (EC-1):
       1. get_runtime() + ensure_available() — dockerd version gate runs here
-      2. ensure_agent_network() — creates/verifies the isolated bridge with
-         icc=false. Must happen BEFORE the credential proxy starts so the
-         proxy's reachability probe has a network to attach to.
-      3. cleanup_orphans() — must run after the network exists; otherwise
-         orphan-removal logs cannot tell us anything useful about state.
+      2. ensure_agent_network() — creates the agent bridge with
+         ``Internal=true``; physically removes the default route.
+      3. ensure_egress_network() — creates the outbound bridge.
+      4. launch_egress_gateway() — starts the gateway container attached
+         to both bridges. Fails fast when the image is not built, since
+         every agent turn depends on the gateway.
+      5. verify_egress_gateway_reachable() (with retry budget) — a
+         throwaway probe on the agent bridge confirms the gateway
+         answers /healthz by service name. Without this, agent startup
+         would fail later in a much harder-to-diagnose way.
+      6. cleanup_orphans() — must run after the networks and gateway
+         exist; ranks can interpret "leaked container" logs against a
+         stable topology.
 
-    The post-proxy connectivity probe (verify_proxy_reachable) is called
-    separately from the main() startup sequence, not here — this function
-    runs before the credential proxy exists.
+    Fail-closed throughout: any step raising makes the orchestrator
+    refuse to enter the ready state.
     """
     global _runtime
     _runtime = get_runtime()
     await _runtime.ensure_available()
     if hasattr(_runtime, "ensure_agent_network"):
         await _runtime.ensure_agent_network(CONTAINER_NETWORK_NAME)
+    if hasattr(_runtime, "ensure_egress_network"):
+        await _runtime.ensure_egress_network(CONTAINER_EGRESS_NETWORK_NAME)
+
+    # Gateway launch + readiness probe are gated behind both the agent
+    # and egress networks existing. The hasattr() is forward-looking:
+    # the k8s runtime (not yet implemented) will grow its own gateway
+    # pod primitive and should not use this path.
+    if (
+        hasattr(_runtime, "ensure_egress_network")
+        and hasattr(_runtime, "verify_egress_gateway_reachable")
+    ):
+        from rolemesh.egress.launcher import launch_egress_gateway, wait_for_gateway_ready
+
+        # Access the aiodocker client directly via the Docker runtime's
+        # adapter surface. For the k8s backend we'll wrap this differently.
+        docker_client = _runtime._ensure_client()  # type: ignore[attr-defined]
+        await launch_egress_gateway(
+            docker_client,
+            agent_network=CONTAINER_NETWORK_NAME,
+            egress_network=CONTAINER_EGRESS_NETWORK_NAME,
+        )
+        await wait_for_gateway_ready(
+            docker_client,
+            agent_network=CONTAINER_NETWORK_NAME,
+            gateway_service_name=EGRESS_GATEWAY_CONTAINER_NAME,
+            reverse_proxy_port=CREDENTIAL_PROXY_PORT,
+        )
+
     await _runtime.cleanup_orphans("rolemesh-")
 
 
@@ -1163,14 +1200,21 @@ async def main() -> None:
 
     _queue = GroupQueue(transport=_transport, runtime=_runtime, orchestrator_state=_state)
 
+    # Host-side credential proxy: kept running for backward compatibility
+    # with operator tooling and so the `register_mcp_server` /
+    # `set_token_vault` wiring below has a sink to write to. Agents no
+    # longer reach this listener (the EC-1 agent bridge is Internal=true
+    # and agents resolve ``egress-gateway`` via Docker DNS instead), but
+    # the in-process dicts are still authoritative state that EC-2 will
+    # propagate into the gateway container. Leaving the host-side
+    # listener bound is the simplest compatibility shim during the PR-1
+    # → PR-2 transition; EC-2 removes this line entirely.
     proxy_runner = await start_credential_proxy(CREDENTIAL_PROXY_PORT, PROXY_BIND_HOST)
 
-    # R5.1-2: Connectivity self-check. If containers on the custom bridge
-    # cannot TCP-reach host.docker.internal:<PROXY_PORT> and get an HTTP
-    # response back, agents will silently fail all credentialed traffic.
-    # Fail closed — abort orchestrator startup.
-    if hasattr(_runtime, "verify_proxy_reachable"):
-        await _runtime.verify_proxy_reachable(CONTAINER_NETWORK_NAME, CREDENTIAL_PROXY_PORT)
+    # Gateway reachability is already enforced in
+    # _ensure_container_system_running() via wait_for_gateway_ready. No
+    # second probe is needed at this point — keeping one here would
+    # double the startup latency for no diagnostic gain.
 
     # Initialize TokenVault for per-user MCP token forwarding (OIDC mode only).
     # Note: this only sets the vault in THIS process. The WebUI runs in a
