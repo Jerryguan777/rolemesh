@@ -8,7 +8,11 @@ in type signatures (REST schemas, DB CRUD, tests).
 from .audit import AuditEvent, AuditSink, DbAuditSink
 from .engine import SafetyEngine
 from .errors import SafetyConfigError, UnknownCheckError
-from .loader import load_safety_rules_snapshot, maybe_register_safety_handler
+from .loader import (
+    fetch_safety_rule_snapshots,
+    load_safety_rules_snapshot,
+    maybe_register_safety_handler,
+)
 from .registry import (
     CheckRegistry,
     build_container_registry,
@@ -52,6 +56,7 @@ __all__ = [
     "Verdict",
     "build_container_registry",
     "build_orchestrator_registry",
+    "fetch_safety_rule_snapshots",
     "get_orchestrator_registry",
     "load_safety_rules_snapshot",
     "maybe_register_safety_handler",

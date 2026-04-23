@@ -17,7 +17,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import asyncpg
+
 from rolemesh.core.logger import get_logger
+from rolemesh.db.pg import list_safety_rules_for_coworker
 
 if TYPE_CHECKING:
     from agent_runner.hooks.registry import HookRegistry
@@ -25,6 +28,42 @@ if TYPE_CHECKING:
 
 
 logger = get_logger()
+
+
+# Exceptions the loader considers "DB unreachable at job start" — i.e.
+# the fail-mode dispatch actually applies. Anything else (ImportError,
+# AssertionError from _get_pool before init_database, programmer
+# errors in to_snapshot_dict) propagates normally so it surfaces as a
+# real bug, not as a misleading "SAFETY_FAIL_MODE=closed" log line.
+#
+# Python's stdlib makes TimeoutError a subclass of OSError since 3.11,
+# but we list it explicitly for readability — reviewers should be able
+# to see the intent without consulting the hierarchy.
+_DB_UNREACHABLE_EXCEPTIONS = (
+    asyncpg.PostgresError,
+    ConnectionError,
+    OSError,
+    TimeoutError,
+)
+
+
+async def fetch_safety_rule_snapshots(
+    tenant_id: str, coworker_id: str
+) -> list[dict[str, Any]]:
+    """Query + serialize. Raises on any DB failure; caller decides.
+
+    Shared by ``load_safety_rules_snapshot`` (wraps with fail-mode
+    for container startup) and ``SafetyEngine.load_rules_for_coworker``
+    (admin-side path that wants the DB error to surface). Putting the
+    single query + snapshot_dict conversion in one place prevents the
+    two paths from drifting on things like the duplicate-enabled
+    filter that the original engine path carried.
+
+    ``list_safety_rules_for_coworker`` already filters ``enabled=TRUE``
+    in SQL, so no application-side filter is needed here.
+    """
+    rules = await list_safety_rules_for_coworker(tenant_id, coworker_id)
+    return [r.to_snapshot_dict() for r in rules]
 
 
 async def load_safety_rules_snapshot(
@@ -40,7 +79,7 @@ async def load_safety_rules_snapshot(
         NOT silently let every tool call run unsupervised.
 
       - ``open``  — DB unreachable returns None, agent starts without
-        rules but a loud ERROR log surfaces to operators. Acceptable
+        rules but a loud WARNING log surfaces to operators. Acceptable
         for self-hosted deployments that prefer agent availability
         over safety coverage during an incident.
 
@@ -48,19 +87,18 @@ async def load_safety_rules_snapshot(
     genuinely no rules configured, OR fail-open fallback after a DB
     error. Distinguishing those in callers is never useful — both
     mean "run the agent without the safety hook".
+
+    Only catches exceptions consistent with "DB unreachable" (see
+    ``_DB_UNREACHABLE_EXCEPTIONS``); programmer errors propagate so
+    they surface as real bugs rather than being masked as outages.
     """
     try:
-        from rolemesh.db.pg import list_safety_rules_for_coworker
-
-        rules = await list_safety_rules_for_coworker(
-            tenant_id, coworker_id
-        )
-        if not rules:
-            return None
-        return [r.to_snapshot_dict() for r in rules]
-    except Exception as exc:
-        # Import here so test monkeypatch on the env var lands on the
-        # same symbol the code reads.
+        snapshots = await fetch_safety_rule_snapshots(tenant_id, coworker_id)
+    except _DB_UNREACHABLE_EXCEPTIONS as exc:
+        # Import SAFETY_FAIL_MODE inside the except so test monkeypatch
+        # on the module attribute lands on the same symbol the code
+        # reads. The hoisted top-level import of pg / asyncpg does not
+        # have this concern — they are not test surfaces.
         from rolemesh.core.config import SAFETY_FAIL_MODE
 
         if SAFETY_FAIL_MODE == "open":
@@ -79,6 +117,10 @@ async def load_safety_rules_snapshot(
             error=str(exc),
         )
         raise
+
+    if not snapshots:
+        return None
+    return snapshots
 
 
 def maybe_register_safety_handler(
@@ -102,9 +144,11 @@ def maybe_register_safety_handler(
     if not safety_rules:
         return False
 
-    # Lazy import keeps this module importable when agent_runner is
-    # vendored without its SDK deps — the tests exercise this branch
-    # with a minimal HookRegistry so the import path has to resolve.
+    # Lazy import preserves the zero-overhead contract: when no rules
+    # apply, we never pay the agent_runner.safety.* import cost at
+    # agent startup. That's the entire value of the early-return
+    # above; keeping these imports inside the function body makes the
+    # contract physically true rather than just aspirational.
     from agent_runner.safety.hook_handler import SafetyHookHandler
     from agent_runner.safety.registry import build_container_registry
 
@@ -118,4 +162,8 @@ def maybe_register_safety_handler(
     return True
 
 
-__all__ = ["load_safety_rules_snapshot", "maybe_register_safety_handler"]
+__all__ = [
+    "fetch_safety_rule_snapshots",
+    "load_safety_rules_snapshot",
+    "maybe_register_safety_handler",
+]

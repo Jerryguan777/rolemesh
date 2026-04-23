@@ -4,10 +4,17 @@ Thin façade that the WebUI admin REST layer and the NATS
 ``safety_events`` subscriber both depend on:
 
   - ``load_rules_for_coworker`` — snapshot the ``safety_rules`` rows
-    the container will evaluate for a given coworker; called by
-    ``container_executor`` at job start and by unit tests.
+    for admin-side / API inspection. Raises on DB failure so callers
+    see the error rather than silently receiving an empty list.
+    Container startup does NOT use this path — it uses
+    ``rolemesh.safety.loader.load_safety_rules_snapshot``, which
+    layers ``SAFETY_FAIL_MODE`` dispatch on top of the same query.
   - ``handle_safety_event`` — decode a NATS payload into an
     ``AuditEvent`` and forward it to the configured sink.
+
+Both rule-reading paths share ``fetch_safety_rule_snapshots`` in
+loader.py so the query + serialization live in one place; only the
+error handling differs.
 
 The engine deliberately holds no state; rule reloads are just fresh
 queries. V2 adds ``handle_rpc_request`` for slow-check RPC.
@@ -33,15 +40,19 @@ class SafetyEngine:
     ) -> list[dict[str, Any]]:
         """Return the enabled rules for a coworker as container-ready dicts.
 
-        Raises ``Exception`` on DB failure — callers decide between
-        fail-open and fail-close. Matches the contract that
-        ``get_enabled_policies_for_coworker`` exposes to the approval
-        module.
-        """
-        from rolemesh.db.pg import list_safety_rules_for_coworker
+        Raises on DB failure — this path is for admin / API callers
+        that NEED to see the error (e.g. a 500 back to the UI), not
+        for container startup. Container startup uses
+        ``load_safety_rules_snapshot`` which applies ``SAFETY_FAIL_MODE``.
 
-        rules = await list_safety_rules_for_coworker(tenant_id, coworker_id)
-        return [r.to_snapshot_dict() for r in rules if r.enabled]
+        Thin wrapper around ``fetch_safety_rule_snapshots`` — the
+        shared helper makes the two paths share a query body so they
+        cannot drift on things like field selection, enabled-filter
+        semantics, or dict shape.
+        """
+        from .loader import fetch_safety_rule_snapshots
+
+        return await fetch_safety_rule_snapshots(tenant_id, coworker_id)
 
     async def handle_safety_event(self, payload: dict[str, Any]) -> None:
         """Persist one already-validated safety event.

@@ -36,6 +36,7 @@ import pytest
 
 from agent_runner.hooks.registry import HookRegistry
 from rolemesh.db import pg
+from rolemesh.safety import loader as loader_mod
 from rolemesh.safety.loader import (
     load_safety_rules_snapshot,
     maybe_register_safety_handler,
@@ -89,15 +90,27 @@ class TestFailModeStartup:
     async def test_fail_closed_raises_on_db_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # ConnectionError is in _DB_UNREACHABLE_EXCEPTIONS; the test
+        # used to raise RuntimeError but that class is now (correctly)
+        # NOT in the catch tuple — programmer errors should not be
+        # masked as DB outages. Use a class the fail-mode dispatch
+        # actually handles.
         async def _explode(*_a: Any, **_kw: Any) -> Any:
-            raise RuntimeError("simulated DB outage")
+            raise ConnectionError("simulated DB outage")
 
-        monkeypatch.setattr(pg, "list_safety_rules_for_coworker", _explode)
+        # Patch the name the loader's function body reads. The loader
+        # imports ``list_safety_rules_for_coworker`` at module top and
+        # binds it locally, so monkeypatching pg.list_safety_rules_for_
+        # coworker only is not picked up. This is the correct Python
+        # idiom for stubbing dependencies in the caller's namespace.
+        monkeypatch.setattr(
+            loader_mod, "list_safety_rules_for_coworker", _explode
+        )
         monkeypatch.setattr(
             "rolemesh.core.config.SAFETY_FAIL_MODE", "closed"
         )
 
-        with pytest.raises(RuntimeError, match="simulated DB outage"):
+        with pytest.raises(ConnectionError, match="simulated DB outage"):
             await load_safety_rules_snapshot("tenant-x", "cw-y")
 
     @pytest.mark.asyncio
@@ -107,7 +120,11 @@ class TestFailModeStartup:
         async def _explode(*_a: Any, **_kw: Any) -> Any:
             raise ConnectionError("no connection to postgres")
 
-        monkeypatch.setattr(pg, "list_safety_rules_for_coworker", _explode)
+        # See test_fail_closed_raises_on_db_error for why we patch the
+        # name on loader_mod rather than pg.
+        monkeypatch.setattr(
+            loader_mod, "list_safety_rules_for_coworker", _explode
+        )
         monkeypatch.setattr(
             "rolemesh.core.config.SAFETY_FAIL_MODE", "open"
         )
@@ -116,8 +133,6 @@ class TestFailModeStartup:
         # behaviour makes stderr capture flaky under pytest, and
         # asserting at the log-call boundary is a tighter contract
         # anyway (tests the intent, not the formatting).
-        from rolemesh.safety import loader as loader_mod
-
         warnings: list[tuple[str, dict[str, Any]]] = []
         monkeypatch.setattr(
             loader_mod.logger,
@@ -144,14 +159,14 @@ class TestFailModeStartup:
         # reason at ERROR first so the operator can correlate the
         # "agent not responding" symptom with the DB outage cause.
         async def _explode(*_a: Any, **_kw: Any) -> Any:
-            raise RuntimeError("simulated DB outage for closed path")
+            raise ConnectionError("simulated DB outage for closed path")
 
-        monkeypatch.setattr(pg, "list_safety_rules_for_coworker", _explode)
+        monkeypatch.setattr(
+            loader_mod, "list_safety_rules_for_coworker", _explode
+        )
         monkeypatch.setattr(
             "rolemesh.core.config.SAFETY_FAIL_MODE", "closed"
         )
-
-        from rolemesh.safety import loader as loader_mod
 
         errors: list[tuple[str, dict[str, Any]]] = []
         monkeypatch.setattr(
@@ -160,13 +175,40 @@ class TestFailModeStartup:
             lambda msg, **kw: errors.append((msg, kw)),
         )
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(ConnectionError):
             await load_safety_rules_snapshot("tenant-x", "cw-y")
 
         assert errors, "fail-closed must log the reason before raising"
         msg, kwargs = errors[0]
         assert "SAFETY_FAIL_MODE=closed" in msg or "refusing" in msg
         assert kwargs.get("coworker_id") == "cw-y"
+
+    @pytest.mark.asyncio
+    async def test_non_db_errors_bypass_fail_mode(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The fail-mode dispatch MUST NOT catch programmer errors
+        # (assert failures, typos surfacing as AttributeError, etc.)
+        # and mislabel them as "DB unreachable". The except is narrowed
+        # to _DB_UNREACHABLE_EXCEPTIONS specifically to surface such
+        # bugs as themselves rather than degrading into silent
+        # fail-open / noisy fail-close.
+        async def _programmer_error(*_a: Any, **_kw: Any) -> Any:
+            raise AssertionError("db pool used before init_database()")
+
+        monkeypatch.setattr(
+            loader_mod, "list_safety_rules_for_coworker",
+            _programmer_error,
+        )
+        # Even under fail-open, a programmer error must propagate —
+        # otherwise the module silently degrades for reasons that are
+        # not DB outages at all.
+        monkeypatch.setattr(
+            "rolemesh.core.config.SAFETY_FAIL_MODE", "open"
+        )
+
+        with pytest.raises(AssertionError, match="pool used before"):
+            await load_safety_rules_snapshot("tenant-x", "cw-y")
 
     @pytest.mark.asyncio
     async def test_happy_path_returns_snapshot_dicts(self) -> None:
