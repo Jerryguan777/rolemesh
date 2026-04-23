@@ -67,31 +67,36 @@ class CheckRegistry:
 def build_container_registry() -> CheckRegistry:
     """Cheap-class checks available inside the agent container.
 
-    V1 = {pii.regex}. V2 extends with RemoteCheck proxies (one per
-    slow check) that translate ``check()`` calls to NATS RPC requests
-    to the orchestrator. The container MUST NOT import slow-check
-    implementations — they may pull spaCy, llm-guard, transformers
-    etc. that are not installed in the agent image.
+    V2 roster: {pii.regex, domain_allowlist}. RemoteCheck proxies
+    (one per slow check) are registered on top of this by
+    ``maybe_register_safety_handler`` when AgentInitData.slow_check_specs
+    is present — they translate ``check()`` calls to NATS RPC
+    requests. The container MUST NOT import slow-check implementations
+    directly — they may pull spaCy, llm-guard, transformers etc. that
+    are not installed in the agent image.
     """
+    from .checks.domain_allowlist import DomainAllowlistCheck
     from .checks.pii_regex import PIIRegexCheck
 
     reg = CheckRegistry()
     reg.register(PIIRegexCheck())
+    reg.register(DomainAllowlistCheck())
     return reg
 
 
 def build_orchestrator_registry() -> CheckRegistry:
     """All checks available to the orchestrator.
 
-    V1 only has cheap checks, so orchestrator and container registries
-    contain the same entries. V2 diverges: orchestrator additionally
-    registers presidio.pii, llm_guard.prompt_injection, rate_limit,
-    and other slow-class checks.
+    Cheap checks come from ``build_container_registry`` so the two
+    registries cannot drift on that set. Slow checks (presidio.pii,
+    llm_guard.prompt_injection, openai_moderation, etc.) are added
+    here only — they gate on optional dependencies and would break
+    container imports.
     """
-    from .checks.pii_regex import PIIRegexCheck
-
-    reg = CheckRegistry()
-    reg.register(PIIRegexCheck())
+    reg = build_container_registry()
+    # P1.2+: slow checks land here behind ``with contextlib.suppress(ImportError)``
+    # once their dependencies are wired. Cheap-only deployments keep
+    # the same registry as the container side.
     return reg
 
 

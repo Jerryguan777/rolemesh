@@ -80,12 +80,23 @@ class TestBuilders:
         reg = build_orchestrator_registry()
         assert reg.has("pii.regex")
 
-    def test_only_default_check_in_v1(self) -> None:
-        # V1: both registries ship exactly pii.regex. V2 will diverge
-        # (orchestrator additionally gets slow checks); update here
-        # deliberately — don't make this assertion lax.
-        assert build_container_registry().ids() == ["pii.regex"]
-        assert build_orchestrator_registry().ids() == ["pii.regex"]
+    def test_default_cheap_checks_are_pii_regex_and_domain_allowlist(
+        self,
+    ) -> None:
+        # Both registries ship the cheap-check set {pii.regex,
+        # domain_allowlist}. Slow checks land in the orchestrator
+        # registry as their optional deps get wired (P1.2+); keep
+        # THIS assertion tight on the cheap-only surface so an
+        # accidental drift (double registration, silent removal)
+        # is caught.
+        assert set(build_container_registry().ids()) == {
+            "pii.regex",
+            "domain_allowlist",
+        }
+        orch_ids = set(build_orchestrator_registry().ids())
+        # Orchestrator is a superset of the container — never a
+        # subset — because slow checks only live here.
+        assert {"pii.regex", "domain_allowlist"}.issubset(orch_ids)
 
 
 class TestOrchestratorSingleton:
