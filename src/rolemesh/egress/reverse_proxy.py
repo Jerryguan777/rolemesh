@@ -37,7 +37,6 @@ from urllib.parse import urlparse
 
 from aiohttp import ClientSession, web
 
-from rolemesh.core.env import read_env_file
 from rolemesh.core.logger import get_logger
 
 from .safety_call import EgressRequest
@@ -220,16 +219,27 @@ async def start_credential_proxy(
     deployment (both set). The host-side legacy path leaves them at
     their defaults and gets the pre-EC-2 behaviour.
     """
-    secrets = read_env_file(
-        [
-            "ANTHROPIC_API_KEY",
-            "CLAUDE_CODE_OAUTH_TOKEN",
-            "ANTHROPIC_AUTH_TOKEN",
-            "ANTHROPIC_BASE_URL",
-            "PI_OPENAI_API_KEY",
-            "PI_GOOGLE_API_KEY",
-        ]
-    )
+    # .env is loaded into os.environ by rolemesh.bootstrap at
+    # process entry; host-side callers (orchestrator) and the gateway
+    # container (env vars forwarded explicitly in launcher._gateway_env)
+    # both reach this via os.environ.
+    import os as _os
+
+    secrets: dict[str, str] = {
+        k: v
+        for k, v in (
+            (k, _os.environ.get(k, ""))
+            for k in (
+                "ANTHROPIC_API_KEY",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "ANTHROPIC_AUTH_TOKEN",
+                "ANTHROPIC_BASE_URL",
+                "PI_OPENAI_API_KEY",
+                "PI_GOOGLE_API_KEY",
+            )
+        )
+        if v
+    }
 
     auth_mode: AuthMode = "api-key" if secrets.get("ANTHROPIC_API_KEY") else "oauth"
     oauth_token = secrets.get("CLAUDE_CODE_OAUTH_TOKEN") or secrets.get("ANTHROPIC_AUTH_TOKEN", "")
@@ -451,8 +461,9 @@ async def start_credential_proxy(
 
 def detect_auth_mode() -> AuthMode:
     """Detect which auth mode the host is configured for."""
-    secrets = read_env_file(["ANTHROPIC_API_KEY"])
-    return "api-key" if secrets.get("ANTHROPIC_API_KEY") else "oauth"
+    import os as _os
+
+    return "api-key" if _os.environ.get("ANTHROPIC_API_KEY") else "oauth"
 
 
 __all__ = [

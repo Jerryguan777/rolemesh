@@ -5,16 +5,16 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from rolemesh.core.env import read_env_file
-
-_env_config = read_env_file(["ASSISTANT_NAME", "ASSISTANT_HAS_OWN_NUMBER"])
+# ``.env`` → ``os.environ`` loading is handled by
+# ``rolemesh.bootstrap`` at the process entry (imported first in
+# rolemesh.main / webui.main). Here we read ``os.environ`` directly
+# and the same lookup works whether the value was set by a shell
+# export, systemd, docker --env-file, or a local ``.env`` file.
 
 # Legacy: ASSISTANT_NAME is no longer the global trigger source.
 # Kept for backward compatibility; new code should use coworker.name.
-ASSISTANT_NAME: str = os.environ.get("ASSISTANT_NAME") or _env_config.get("ASSISTANT_NAME", "Andy")
-ASSISTANT_HAS_OWN_NUMBER: bool = (
-    os.environ.get("ASSISTANT_HAS_OWN_NUMBER") or _env_config.get("ASSISTANT_HAS_OWN_NUMBER", "")
-) == "true"
+ASSISTANT_NAME: str = os.environ.get("ASSISTANT_NAME") or "Andy"
+ASSISTANT_HAS_OWN_NUMBER: bool = os.environ.get("ASSISTANT_HAS_OWN_NUMBER", "") == "true"
 
 POLL_INTERVAL: float = 2.0  # seconds
 SCHEDULER_POLL_INTERVAL: float = 60.0  # seconds

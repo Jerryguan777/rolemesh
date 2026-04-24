@@ -26,8 +26,18 @@ populated policy cache would mean defaulting every request to allow
 or every request to block, both of which are worse than no gateway
 (agents time out quickly and the operator sees the paging signal).
 """
+# ruff: noqa: I001
+# Intentional import order: rolemesh.bootstrap MUST run before
+# rolemesh.core.config to get .env values into os.environ.
 
 from __future__ import annotations
+
+# Side-effect import: loads /app/.env (bind-mounted by the launcher)
+# into os.environ before rolemesh.core.config captures module-level
+# values. Without this the gateway's NATS_URL / CREDENTIAL_PROXY_PORT
+# etc. come through as defaults even when the operator set them in
+# .env. Must stay at the very top of rolemesh imports.
+import rolemesh.bootstrap  # noqa: F401
 
 import asyncio
 import os

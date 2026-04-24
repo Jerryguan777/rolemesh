@@ -3,8 +3,19 @@
 Multi-tenant architecture: OrchestratorState replaces module-level globals.
 Routing: binding_id -> conversation -> coworker.
 """
+# ruff: noqa: I001
+# Intentional import order: rolemesh.bootstrap MUST run first to
+# populate os.environ from .env before other rolemesh imports capture
+# module-level values. Disable ruff's import sorter for this file
+# only; semantics > stylistic ordering here.
 
 from __future__ import annotations
+
+# Side-effect import: runs load_env() so ``.env`` lands in os.environ
+# BEFORE core/config + peers capture module-level values at import
+# time. Must stay at the very top of rolemesh imports. See
+# ``rolemesh.bootstrap`` for why and how this is structured.
+import rolemesh.bootstrap  # noqa: F401
 
 import asyncio
 import contextlib

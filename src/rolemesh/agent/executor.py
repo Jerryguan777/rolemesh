@@ -102,11 +102,12 @@ def _pi_extra_env() -> dict[str, str]:
     """
     import os
 
-    from rolemesh.core.env import read_env_file
-
-    secrets = read_env_file(["PI_MODEL_ID"])
+    # .env loading is handled at process entry by
+    # ``rolemesh.bootstrap``; reading from os.environ here works
+    # for shell exports, systemd EnvironmentFile, docker --env-file,
+    # and the auto-loaded .env alike.
     env: dict[str, str] = {"AGENT_BACKEND": "pi"}
-    model_id = secrets.get("PI_MODEL_ID") or os.environ.get("PI_MODEL_ID", "")
+    model_id = os.environ.get("PI_MODEL_ID", "")
     if model_id:
         env["PI_MODEL_ID"] = model_id
     return env

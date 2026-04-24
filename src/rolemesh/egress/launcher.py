@@ -80,11 +80,13 @@ async def launch_egress_gateway(
     host_config: dict[str, Any] = {
         "NetworkMode": agent_network,
         "RestartPolicy": {"Name": "unless-stopped"},
-        # Bind-mount the host .env file so the existing credential-
-        # injection logic continues to work inside the container. The
-        # gateway's WORKDIR is /app, which is where ``read_env_file``
-        # looks by default (Path.cwd() / ".env"). Read-only to avoid
-        # surprise writes.
+        # Bind-mount the host .env into /app/.env read-only so the
+        # ``rolemesh.bootstrap`` auto-load inside the gateway
+        # process picks up the same secrets the orchestrator uses.
+        # (Bootstrap's resolver walks CWD; the image's WORKDIR is
+        # /app.) Deployments using docker --env-file or K8s envFrom
+        # instead of a host .env get an empty bind list and rely on
+        # the env vars already present in the container environment.
         "Binds": _optional_env_bind(),
         # CAP_NET_BIND_SERVICE lets the non-root gateway user bind
         # UDP/53 for the authoritative DNS resolver. The image itself
@@ -176,21 +178,19 @@ async def wait_for_gateway_ready(
 def _optional_env_bind() -> list[str]:
     """Bind-mount the host .env into the gateway container if present.
 
-    Returns an empty list when no .env exists (typical for containerized
-    deploys that inject secrets via docker --env-file or K8s
-    secrets). In that case the gateway relies on the fallback path in
-    ``rolemesh.core.env.read_env_file``, which reads os.environ for
-    any key missing from .env — so Env vars plumbed via
-    ``_gateway_env`` below + ``docker run -e`` / K8s env carry the
-    secrets in.
+    Returns an empty list when no .env exists (typical for
+    containerized deploys that inject secrets via docker --env-file
+    or K8s secrets). In that case the gateway's ``_gateway_env``
+    below forwards the provider-secret env vars explicitly, and
+    ``rolemesh.bootstrap`` reads them from the process env on
+    startup — same lookup path as a .env-backed deploy.
     """
     env_path = Path(PROJECT_ROOT) / ".env"
     if env_path.is_file():
         return [f"{env_path}:/app/.env:ro"]
     logger.info(
-        "No host .env found — gateway will read secrets from its process env "
-        "(see rolemesh.core.env.read_env_file fallback). Ensure secret env "
-        "vars are passed via the container's Env block.",
+        "No host .env found — gateway will rely on provider-secret "
+        "env vars forwarded via the container's Env block.",
         project_root=str(PROJECT_ROOT),
     )
     return []

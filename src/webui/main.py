@@ -1,6 +1,16 @@
 """FastAPI application for the RoleMesh WebUI."""
+# ruff: noqa: I001
+# See rolemesh.main for the import-order rationale. bootstrap must
+# run before webui.config + peers capture module-level env values.
 
 from __future__ import annotations
+
+# Side-effect import: runs load_env() so ``.env`` lands in os.environ
+# BEFORE webui/config (ADMIN_BOOTSTRAP_TOKEN, DATABASE_URL, NATS_URL,
+# WEB_UI_PORT, ...) captures module-level values. The previous
+# smoke test rejected every valid bootstrap token because this load
+# wasn't happening and ADMIN_BOOTSTRAP_TOKEN came through as "".
+import rolemesh.bootstrap  # noqa: F401
 
 import os
 import re
