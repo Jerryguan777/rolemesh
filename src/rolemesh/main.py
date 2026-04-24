@@ -1133,6 +1133,7 @@ async def _ensure_container_system_running() -> None:
         hasattr(_runtime, "ensure_egress_network")
         and hasattr(_runtime, "verify_egress_gateway_reachable")
     ):
+        from rolemesh.container.runner import set_egress_gateway_dns_ip
         from rolemesh.egress.launcher import launch_egress_gateway, wait_for_gateway_ready
 
         # Access the aiodocker client directly via the Docker runtime's
@@ -1149,6 +1150,39 @@ async def _ensure_container_system_running() -> None:
             gateway_service_name=EGRESS_GATEWAY_CONTAINER_NAME,
             reverse_proxy_port=CREDENTIAL_PROXY_PORT,
         )
+
+        # Discover the gateway's bridge IP on the agent network and
+        # register it so runner.build_container_spec can pin it as
+        # each agent container's DNS resolver. Without this step the
+        # authoritative DNS resolver built in EC-2 never sees agent
+        # traffic — queries go through Docker's embedded resolver
+        # (127.0.0.11) which forwards to the host. See EC-2 code
+        # review P1 finding.
+        gateway_container = docker_client.containers.container(
+            EGRESS_GATEWAY_CONTAINER_NAME
+        )
+        gateway_info = await gateway_container.show()
+        gateway_ip = (
+            gateway_info.get("NetworkSettings", {})
+            .get("Networks", {})
+            .get(CONTAINER_NETWORK_NAME, {})
+            .get("IPAddress", "")
+        )
+        if gateway_ip:
+            set_egress_gateway_dns_ip(gateway_ip)
+        else:
+            # Gateway is reachable by name (we just verified /healthz)
+            # but doesn't expose an IPAddress on agent-net in inspect
+            # output. Shouldn't happen in practice with our topology;
+            # log as an error because it means agent DNS will silently
+            # fall back to the embedded resolver.
+            logger.error(
+                "Gateway healthy but its agent-net IP is missing from "
+                "inspect output — agents will fall back to Docker DNS "
+                "and the authoritative resolver will not see their queries",
+                gateway=EGRESS_GATEWAY_CONTAINER_NAME,
+                agent_network=CONTAINER_NETWORK_NAME,
+            )
 
     await _runtime.cleanup_orphans("rolemesh-")
 

@@ -62,6 +62,20 @@ async def test_stopped_preserves_ip_when_container_name_mismatch() -> None:
     assert got.container_name == "rolemesh-new-456"
 
 
+async def test_malformed_stopped_event_is_silently_dropped() -> None:
+    """Regression: handle_stopped used to pass ``event=event`` as a
+    structlog kwarg, colliding with structlog's message slot and
+    raising TypeError inside the warning log. nats-py would eat the
+    exception, so malformed stopped events would disappear without a
+    trace. Now we pass the event under ``payload``.
+    """
+    resolver = IdentityResolver()
+    # No container_name in the event → triggers the warn branch.
+    await resolver.handle_stopped({"event": "stopped"})
+    # Must not raise; nothing should be registered.
+    assert resolver.by_container == {}
+
+
 async def test_malformed_started_event_is_ignored() -> None:
     """Fail-safe: missing required keys drop the event, not crash
     the resolver."""

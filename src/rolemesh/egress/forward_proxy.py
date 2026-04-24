@@ -106,8 +106,31 @@ class ForwardProxy:
         source_ip = peer[0] if peer else "?"
         try:
             parsed = await _read_request(reader)
-        except (TimeoutError, ConnectionError, ValueError) as exc:
-            logger.debug("forward proxy: bad initial request", source_ip=source_ip, error=str(exc))
+        except (
+            # TimeoutError: handshake exceeded _HEADER_READ_TIMEOUT_S.
+            # ConnectionError / OSError: socket-level failures.
+            # ValueError: our own guards (method line malformed, header
+            #             block too big, non-ASCII in request line).
+            # LimitOverrunError: readuntil exceeded its 64 KiB buffer
+            #     before finding ``\r\n\r\n`` — catches a slow-loris
+            #     client filling the buffer without ever terminating.
+            # IncompleteReadError: peer closed mid-headers.
+            # Both asyncio.* inherit from Exception, NOT from any of
+            # the above — omitting them leaks the StreamWriter
+            # undrained and piles up connections.
+            TimeoutError,
+            ConnectionError,
+            OSError,
+            ValueError,
+            asyncio.LimitOverrunError,
+            asyncio.IncompleteReadError,
+        ) as exc:
+            logger.debug(
+                "forward proxy: bad initial request",
+                source_ip=source_ip,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
             await _close(writer)
             return
 
@@ -231,7 +254,18 @@ class ForwardProxy:
 
         # Replay the original request with the path rewritten to
         # origin-form (absolute-URI is only legal on the proxy hop).
-        rewritten = _rewrite_request_line(parsed.raw, parsed.method, path)
+        # IMPORTANT: also rewrite the Host header to match the host
+        # we decided on, not whatever the client sent. Otherwise a
+        # client can pass safety with ``GET http://allowed.com/`` but
+        # smuggle ``Host: forbidden-internal.corp`` to a virtual-host-
+        # aware upstream and get routed somewhere we didn't allow.
+        host_header_value = host if port in (80, 443) else f"{host}:{port}"
+        rewritten = _rewrite_request_line(
+            parsed.raw,
+            parsed.method,
+            path,
+            host_header_value=host_header_value,
+        )
         up_writer.write(rewritten)
         await up_writer.drain()
 
@@ -333,21 +367,66 @@ def _extract_plain_http_target(parsed: ParsedRequest) -> tuple[str, int, str]:
     return host, port, parsed.target
 
 
-def _rewrite_request_line(raw: bytes, method: str, path: str) -> bytes:
-    """Replace the absolute-URI in the request line with the origin-form path.
+def _rewrite_request_line(
+    raw: bytes,
+    method: str,
+    path: str,
+    *,
+    host_header_value: str | None = None,
+) -> bytes:
+    """Rewrite the first line (absolute-URI → origin-form) and, when
+    ``host_header_value`` is provided, also rewrite the Host header.
 
-    Keeps the rest of the headers intact; only the first line changes.
-    RFC 7230 §5.3.2 requires the proxy hop to use absolute-URI and the
-    origin hop to use origin-form, so we have to rewrite on forward.
+    RFC 7230 §5.3.2 requires absolute-URI on the proxy hop and
+    origin-form on the origin hop — we rewrite on forward. Host
+    header rewriting defends against request smuggling: a client
+    can legally send an absolute-URI with one host and a Host header
+    pointing elsewhere. Without this rewrite, the safety decision
+    applies to the URI host but the virtual-host-aware upstream
+    sees the attacker-chosen Host. See P2 finding #3 in the EC-2
+    code review.
+
+    Malformed input (no CRLF) is passed through — defensive; this is
+    a belt-and-braces helper and should not be the last line of
+    defense against garbage requests.
     """
     newline = raw.find(b"\r\n")
     if newline < 0:
-        return raw  # caller gave us malformed bytes; pass through
-    # Extract the HTTP version from the original request line.
+        return raw
     original = raw[:newline].decode("ascii", errors="replace")
     version = original.rsplit(" ", 1)[-1] if " " in original else "HTTP/1.1"
     new_line = f"{method} {path} {version}".encode("ascii")
-    return new_line + raw[newline:]
+    rest = raw[newline:]
+
+    if host_header_value is not None:
+        rest = _replace_host_header(rest, host_header_value)
+
+    return new_line + rest
+
+
+_HOST_HEADER_RE = re.compile(
+    rb"(\r\n)(?i:host)[^\S\r\n]*:[^\r\n]*",
+)
+
+
+def _replace_host_header(body_with_leading_crlf: bytes, new_value: str) -> bytes:
+    """Replace the first Host header (case-insensitive) with ``new_value``.
+
+    ``body_with_leading_crlf`` starts with the CRLF that ended the
+    request line, so every header is prefixed by CRLF — using that as
+    the anchor avoids mistaking a token inside some other header's
+    value for a Host header.
+
+    If no Host header is present (rare for HTTP/1.1 but legal in
+    HTTP/1.0), the new header is injected right after the leading
+    CRLF so it reaches upstream anyway.
+    """
+    replacement = f"\r\nHost: {new_value}".encode("ascii", errors="replace")
+    new_body, count = _HOST_HEADER_RE.subn(replacement, body_with_leading_crlf, count=1)
+    if count == 0 and body_with_leading_crlf.startswith(b"\r\n"):
+        # No existing Host header — splice one in.
+        return b"\r\nHost: " + new_value.encode("ascii", errors="replace") + body_with_leading_crlf
+    return new_body
 
 
 async def _write_status_line_only(

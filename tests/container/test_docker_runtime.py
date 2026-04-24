@@ -245,6 +245,25 @@ def test_spec_to_config_extra_hosts() -> None:
     assert "host.docker.internal:host-gateway" in config["HostConfig"]["ExtraHosts"]
 
 
+def test_spec_to_config_dns_plumbs_through() -> None:
+    """EC-2 P1: ContainerSpec.dns must land at HostConfig.Dns so
+    Docker actually overrides the container's resolver. Without this
+    plumbing the agent container ignores the gateway and falls back
+    to Docker's 127.0.0.11."""
+    spec = ContainerSpec(name="t", image="i", dns=["172.22.0.2"])
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["Dns"] == ["172.22.0.2"]
+
+
+def test_spec_to_config_dns_empty_omits_field() -> None:
+    """When spec.dns is empty Docker keeps its embedded DNS — we MUST
+    NOT emit an empty Dns list, which Docker treats as "disable DNS
+    entirely" and breaks everything."""
+    spec = ContainerSpec(name="t", image="i")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert "Dns" not in hc
+
+
 # ---------------------------------------------------------------------------
 # Hardening (R3, R4, R7) — defense-in-depth fields surface on HostConfig
 # ---------------------------------------------------------------------------

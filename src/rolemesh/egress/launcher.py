@@ -176,16 +176,21 @@ async def wait_for_gateway_ready(
 def _optional_env_bind() -> list[str]:
     """Bind-mount the host .env into the gateway container if present.
 
-    Returns an empty list when no .env exists (typical for test /
-    containerized-deploy environments that inject secrets via docker
-    --env-file). The credential proxy then relies on os.environ and
-    gracefully degrades when a provider's key is absent.
+    Returns an empty list when no .env exists (typical for containerized
+    deploys that inject secrets via docker --env-file or K8s
+    secrets). In that case the gateway relies on the fallback path in
+    ``rolemesh.core.env.read_env_file``, which reads os.environ for
+    any key missing from .env — so Env vars plumbed via
+    ``_gateway_env`` below + ``docker run -e`` / K8s env carry the
+    secrets in.
     """
     env_path = Path(PROJECT_ROOT) / ".env"
     if env_path.is_file():
         return [f"{env_path}:/app/.env:ro"]
     logger.info(
-        "No host .env found — gateway container will read secrets from its process env only",
+        "No host .env found — gateway will read secrets from its process env "
+        "(see rolemesh.core.env.read_env_file fallback). Ensure secret env "
+        "vars are passed via the container's Env block.",
         project_root=str(PROJECT_ROOT),
     )
     return []
@@ -194,18 +199,39 @@ def _optional_env_bind() -> list[str]:
 def _gateway_env() -> list[str]:
     """Build the Env block for the gateway container.
 
-    The gateway reads NATS_URL from its environment; EC-2 also exposes
-    EGRESS_UPSTREAM_DNS so operators can point the authoritative
-    resolver at a locked-down DNS server. Every variable is passed
-    through explicitly rather than inheriting the orchestrator's
-    environment — keeps the gateway's attack surface auditable.
+    The gateway reads NATS_URL for its NATS subscriptions, optionally
+    EGRESS_UPSTREAM_DNS for the authoritative resolver, and the
+    provider-secret env vars (ANTHROPIC_API_KEY, PI_OPENAI_API_KEY,
+    ...) for credential injection. The provider secrets are forwarded
+    explicitly rather than leaving them to inherit — that makes the
+    gateway's attack surface auditable, and documents which
+    environment variables the reverse-proxy path will actually
+    consume.
+
+    The allowlist below MUST mirror the keys ``rolemesh.core.env``'s
+    .env-fallback path looks for via ``reverse_proxy.start_credential_proxy``;
+    a missing pair silently produces an unconfigured provider.
     """
-    import os as _os  # local import to avoid polluting module namespace
+    import os as _os
 
     from rolemesh.core.config import NATS_URL as _NATS_URL
 
     env_pairs: list[str] = [f"NATS_URL={_NATS_URL}"]
-    upstream = _os.environ.get("EGRESS_UPSTREAM_DNS")
-    if upstream:
-        env_pairs.append(f"EGRESS_UPSTREAM_DNS={upstream}")
+
+    # Forward-only allowlist of variables the gateway might need.
+    # Declared close to the consumer (reverse_proxy's secret list) so
+    # a divergence is caught in code review rather than at runtime.
+    forwardable_keys = (
+        "EGRESS_UPSTREAM_DNS",
+        "ANTHROPIC_API_KEY",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "PI_OPENAI_API_KEY",
+        "PI_GOOGLE_API_KEY",
+    )
+    for key in forwardable_keys:
+        value = _os.environ.get(key)
+        if value:
+            env_pairs.append(f"{key}={value}")
     return env_pairs

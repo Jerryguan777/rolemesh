@@ -200,6 +200,45 @@ class TestBuildContainerSpec:
         assert spec.extra_hosts["169.254.169.254"] == "127.0.0.1"
         assert spec.extra_hosts["metadata.google.internal"] == "127.0.0.1"
 
+    def test_spec_dns_pinned_to_registered_gateway_ip(self) -> None:
+        """EC-2 P1 regression: build_container_spec must copy the
+        registered egress gateway IP into ContainerSpec.dns so agent
+        containers actually use the authoritative resolver. Pre-fix
+        the field didn't exist and Docker fell back to 127.0.0.11 —
+        the DNS exfil protection was dead code."""
+        from rolemesh.container import runner
+
+        runner.set_egress_gateway_dns_ip("172.22.0.2")
+        try:
+            with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
+                spec = build_container_spec([], "c", "j")
+            assert spec.dns == ["172.22.0.2"], (
+                f"agent spec must pin gateway IP as DNS; got {spec.dns!r}"
+            )
+        finally:
+            runner.set_egress_gateway_dns_ip(None)
+
+    def test_spec_dns_empty_when_gateway_ip_unregistered(self) -> None:
+        """Without the registered IP, build_container_spec falls back
+        to an empty Dns list (Docker keeps its embedded resolver). A
+        structured WARN tells operators this gap is present."""
+        from rolemesh.container import runner
+
+        runner.set_egress_gateway_dns_ip(None)
+        with patch("rolemesh.container.runner.logger") as mock_logger, \
+             patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
+            spec = build_container_spec([], "c", "j")
+        assert spec.dns == []
+        # WARN fires because CONTAINER_NETWORK_NAME is set by default
+        # but the gateway IP isn't.
+        warn_calls = [
+            call for call in mock_logger.warning.call_args_list
+            if "egress gateway DNS IP" in str(call)
+            or "DNS exfil" in str(call)
+            or "embedded resolver" in str(call)
+        ]
+        assert warn_calls, "missing gateway-IP warning was not logged"
+
 
 class TestBackwardCompatAliases:
     def test_container_input_is_agent_input(self) -> None:

@@ -131,7 +131,12 @@ class IdentityResolver:
         """Deregister an agent container. Idempotent."""
         container_name = str(event.get("container_name", ""))
         if not container_name:
-            logger.warning("identity: stopped event without container_name", event=event)
+            # ``payload=`` rather than ``event=`` — structlog reserves
+            # ``event`` as the message slot; passing it as a kwarg
+            # raises TypeError ("got multiple values for argument
+            # 'event'") inside the warning call, which nats-py would
+            # silently eat and the malformed event would disappear.
+            logger.warning("identity: stopped event without container_name", payload=event)
             return
 
         async with self._lock:

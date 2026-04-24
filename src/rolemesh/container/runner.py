@@ -297,6 +297,50 @@ def _default_ulimits() -> list[dict[str, object]]:
     return [{"Name": "nofile", "Soft": 1024, "Hard": 2048}]
 
 
+# ---------------------------------------------------------------------------
+# Egress gateway DNS IP (set by orchestrator startup).
+#
+# build_container_spec runs per-agent-spawn and needs the gateway's
+# bridge IP to pin as the agent's DNS resolver. The IP isn't known until
+# ``launch_egress_gateway`` completes and we can docker-inspect the
+# gateway container, and it is stable for the orchestrator's lifetime
+# (the gateway container outlives any single agent). A module-level
+# holder set by ``set_egress_gateway_dns_ip`` threads the value through
+# without forcing every call site of build_container_spec to accept a
+# new positional argument.
+#
+# Unset → build_container_spec falls back to Docker's embedded resolver
+# and WARNs. This preserves the pre-EC-2 behaviour during tests /
+# development where no gateway is launched, while surfacing the gap in
+# structured logs so an unconfigured production deployment is audible
+# rather than silent.
+# ---------------------------------------------------------------------------
+
+_EGRESS_GATEWAY_DNS_IP: str | None = None
+
+
+def set_egress_gateway_dns_ip(ip: str | None) -> None:
+    """Register the gateway's agent-net IP so agent specs pin it as DNS.
+
+    Called by ``main._ensure_container_system_running`` right after
+    ``launch_egress_gateway`` / ``wait_for_gateway_ready`` — by that
+    point the gateway has a stable IP on the agent bridge and
+    ``docker inspect`` returns it.
+
+    Setting ``None`` (explicit deregistration) resets to the fallback
+    path; useful in tests that tear down the topology between cases.
+    """
+    global _EGRESS_GATEWAY_DNS_IP
+    _EGRESS_GATEWAY_DNS_IP = ip
+    if ip:
+        logger.info("egress gateway DNS IP registered", ip=ip)
+
+
+def get_egress_gateway_dns_ip() -> str | None:
+    """Read-only accessor for the registered gateway DNS IP."""
+    return _EGRESS_GATEWAY_DNS_IP
+
+
 # Cloud-instance-metadata services. Resolving these to 127.0.0.1 inside the
 # container means a compromised agent that tries to exfil IAM creds via
 # SSRF-style metadata access gets connection-refused instead of real
@@ -499,6 +543,28 @@ def build_container_spec(
     # the whole point, and Docker itself will reject an unregistered runtime.
     oci_runtime = (cfg.runtime if cfg and cfg.runtime else CONTAINER_OCI_RUNTIME)
 
+    # EC-2: pin the egress gateway as DNS so every agent DNS query
+    # flows through the authoritative resolver. Without this the
+    # dns_resolver.py module is dead code — agents keep resolving via
+    # Docker's embedded DNS (127.0.0.11) which forwards to the host
+    # resolver and the DNS exfil protection never runs. See the P1
+    # finding in the EC-2 code review.
+    dns_servers: list[str] = []
+    if CONTAINER_NETWORK_NAME and _EGRESS_GATEWAY_DNS_IP:
+        dns_servers = [_EGRESS_GATEWAY_DNS_IP]
+    elif CONTAINER_NETWORK_NAME:
+        # Custom bridge configured but gateway IP wasn't registered —
+        # typically means the orchestrator forgot to call
+        # ``set_egress_gateway_dns_ip`` after launching the gateway, or
+        # the gateway launch was skipped (tests). Log loudly so this
+        # gap isn't silent in production.
+        logger.warning(
+            "No egress gateway DNS IP registered — agent will use Docker's "
+            "default resolver; DNS exfil protection is inactive",
+            coworker=coworker_name,
+            container_name=container_name,
+        )
+
     return ContainerSpec(
         name=container_name,
         image=image,
@@ -513,6 +579,7 @@ def build_container_spec(
         readonly_rootfs=True,
         tmpfs=_default_tmpfs(run_uid, run_gid),
         pids_limit=CONTAINER_PIDS_LIMIT,
+        dns=dns_servers,
         ulimits=_default_ulimits(),
         network_name=CONTAINER_NETWORK_NAME or None,
         runtime=oci_runtime,

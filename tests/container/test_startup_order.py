@@ -39,7 +39,22 @@ def _make_runtime_mock() -> MagicMock:
     rt.ensure_egress_network = AsyncMock()
     rt.verify_egress_gateway_reachable = AsyncMock()
     rt.cleanup_orphans = AsyncMock(return_value=[])
-    rt._ensure_client = MagicMock(return_value=MagicMock())
+
+    # EC-2 P1: after launch/wait, main.py inspects the gateway container
+    # to pull its agent-net IP. The fake here returns a valid shape so
+    # the test doesn't assert on that path — it's covered by the runner
+    # spec test directly.
+    fake_gateway_container = MagicMock()
+    fake_gateway_container.show = AsyncMock(
+        return_value={
+            "NetworkSettings": {
+                "Networks": {"rolemesh-agent-net": {"IPAddress": "172.22.0.2"}},
+            }
+        }
+    )
+    fake_client = MagicMock()
+    fake_client.containers.container = MagicMock(return_value=fake_gateway_container)
+    rt._ensure_client = MagicMock(return_value=fake_client)
     return rt
 
 

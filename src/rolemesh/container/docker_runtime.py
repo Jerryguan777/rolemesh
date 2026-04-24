@@ -350,6 +350,14 @@ class DockerRuntime:
         if spec.network_name:
             host_config["NetworkMode"] = spec.network_name
 
+        # EC-2: agent containers get the egress gateway's IP pinned as
+        # their DNS resolver so DNS queries flow through the
+        # authoritative resolver (and thus the Safety pipeline). An
+        # empty list leaves Docker's embedded DNS in place, which is
+        # appropriate for the gateway container itself.
+        if spec.dns:
+            host_config["Dns"] = list(spec.dns)
+
         # OCI runtime (R1). Docker only honours HostConfig.Runtime for values
         # registered in /etc/docker/daemon.json — setting "runsc" on a host
         # without gVisor installed will fail at container create time, which
