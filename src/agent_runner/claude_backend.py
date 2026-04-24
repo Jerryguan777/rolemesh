@@ -303,7 +303,14 @@ class ClaudeBackend:
         self._init = init
         self._session_id = init.session_id
         self._assistant_name = init.assistant_name
-        self._mcp_server = create_rolemesh_mcp_server(tool_ctx)
+        # Conditionally register send_message: only scheduled-task
+        # containers get it. See create_rolemesh_mcp_server docstring
+        # for rationale (avoids Claude misusing it as the reply channel
+        # in interactive turns).
+        self._mcp_server = create_rolemesh_mcp_server(
+            tool_ctx,
+            register_send_message=init.is_scheduled_task,
+        )
         self._hooks = hooks if hooks is not None else HookRegistry()
         self._sdk_hooks = _build_hook_callbacks(
             self._hooks,

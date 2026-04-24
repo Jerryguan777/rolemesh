@@ -355,8 +355,13 @@ class PiBackend:
         )
         await resource_loader.reload()
 
-        # Build custom tools (RoleMesh IPC tools + external MCP tools)
-        custom_tools = create_rolemesh_tools(tool_ctx)
+        # Build custom tools (RoleMesh IPC tools + external MCP tools).
+        # send_message is restricted to scheduled-task containers — see
+        # claude_adapter.create_rolemesh_mcp_server for rationale.
+        custom_tools = create_rolemesh_tools(
+            tool_ctx,
+            register_send_message=init.is_scheduled_task,
+        )
 
         if mcp_servers:
             mcp_tools, self._mcp_connections = await load_mcp_tools(

@@ -15,8 +15,22 @@ from . import rolemesh_tools as rt
 from .context import ToolContext
 
 
-def create_rolemesh_mcp_server(ctx: ToolContext) -> Any:
-    """Create an in-process MCP server with all RoleMesh tools for Claude SDK."""
+def create_rolemesh_mcp_server(
+    ctx: ToolContext,
+    *,
+    register_send_message: bool = False,
+) -> Any:
+    """Create an in-process MCP server with all RoleMesh tools for Claude SDK.
+
+    ``register_send_message``: only register the ``send_message`` tool
+    when True. Per the nanoclaw-derived design intent, send_message is
+    a scheduled-task notification output — it should be unavailable to
+    interactive turns. Conditional registration removes it from
+    Claude's tool choice set entirely on interactive containers, so
+    Claude cannot misuse it to deliver replies (which would cause the
+    reply to be dropped by the orchestrator's _handle_agent_message_ipc).
+    Pass True only when ``init.is_scheduled_task`` is True.
+    """
 
     @tool(
         "send_message",
@@ -84,15 +98,15 @@ def create_rolemesh_mcp_server(ctx: ToolContext) -> Any:
     async def update_task(args: dict[str, Any]) -> dict[str, Any]:
         return await rt.update_task(args, ctx)
 
-    return create_sdk_mcp_server(
-        "rolemesh",
-        tools=[
-            send_message,
-            schedule_task,
-            list_tasks,
-            pause_task,
-            resume_task,
-            cancel_task,
-            update_task,
-        ],
-    )
+    tool_list: list[Any] = [
+        schedule_task,
+        list_tasks,
+        pause_task,
+        resume_task,
+        cancel_task,
+        update_task,
+    ]
+    if register_send_message:
+        tool_list.insert(0, send_message)
+
+    return create_sdk_mcp_server("rolemesh", tools=tool_list)
