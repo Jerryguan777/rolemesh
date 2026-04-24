@@ -17,10 +17,22 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-import asyncpg
-
 from rolemesh.core.logger import get_logger
-from rolemesh.db.pg import list_safety_rules_for_coworker
+
+# ``rolemesh.db.pg`` and ``asyncpg`` are orchestrator-only dependencies
+# (not shipped in the agent container image). We still expose
+# ``list_safety_rules_for_coworker`` as a module attribute so that
+# orchestrator-side tests can ``monkeypatch.setattr(loader,
+# "list_safety_rules_for_coworker", ...)`` — the agent container path
+# never calls it.
+try:
+    from rolemesh.db.pg import list_safety_rules_for_coworker  # noqa: F401
+except ModuleNotFoundError:
+    # Agent container: rolemesh.db is not packaged. Leave the symbol
+    # undefined at module scope; ``fetch_safety_rule_snapshots`` below
+    # re-imports inside the function body so the orchestrator-only
+    # code path still works when asyncpg + pg ARE present.
+    pass
 
 if TYPE_CHECKING:
     from agent_runner.hooks.registry import HookRegistry
@@ -39,12 +51,24 @@ logger = get_logger()
 # Python's stdlib makes TimeoutError a subclass of OSError since 3.11,
 # but we list it explicitly for readability — reviewers should be able
 # to see the intent without consulting the hierarchy.
-_DB_UNREACHABLE_EXCEPTIONS = (
-    asyncpg.PostgresError,
-    ConnectionError,
-    OSError,
-    TimeoutError,
-)
+#
+# ``asyncpg.PostgresError`` is resolved lazily in ``_get_db_exceptions``
+# so this module can import without asyncpg present (agent container
+# path).
+
+
+def _get_db_exceptions() -> tuple[type[BaseException], ...]:
+    """Return the exception tuple that signals "DB unreachable".
+
+    Lazy import of asyncpg so the agent container — which has asyncpg
+    via pip but also has this module on its path — doesn't hit a
+    ``ModuleNotFoundError`` on the orchestrator-only ``rolemesh.db``
+    package. The orchestrator is the only caller of the fail-mode
+    path, and it always has asyncpg installed.
+    """
+    import asyncpg
+
+    return (asyncpg.PostgresError, ConnectionError, OSError, TimeoutError)
 
 
 async def fetch_safety_rule_snapshots(
@@ -62,7 +86,21 @@ async def fetch_safety_rule_snapshots(
     ``list_safety_rules_for_coworker`` already filters ``enabled=TRUE``
     in SQL, so no application-side filter is needed here.
     """
-    rules = await list_safety_rules_for_coworker(tenant_id, coworker_id)
+    # Resolve via ``globals()`` so orchestrator tests that
+    # ``monkeypatch.setattr(loader, "list_safety_rules_for_coworker",
+    # ...)`` actually substitute the function at call time. A
+    # ``from rolemesh.db.pg import ...`` at call site would bypass
+    # the patched binding; the try/except at module top imports it
+    # into this namespace on the orchestrator path, and agent
+    # containers hit the ModuleNotFoundError fallback and raise a
+    # clear error if this function is ever called there.
+    fn = globals().get("list_safety_rules_for_coworker")
+    if fn is None:
+        raise RuntimeError(
+            "fetch_safety_rule_snapshots called outside the orchestrator: "
+            "rolemesh.db.pg is not packaged in this environment"
+        )
+    rules = await fn(tenant_id, coworker_id)
     return [r.to_snapshot_dict() for r in rules]
 
 
@@ -92,9 +130,10 @@ async def load_safety_rules_snapshot(
     ``_DB_UNREACHABLE_EXCEPTIONS``); programmer errors propagate so
     they surface as real bugs rather than being masked as outages.
     """
+    db_exceptions = _get_db_exceptions()
     try:
         snapshots = await fetch_safety_rule_snapshots(tenant_id, coworker_id)
-    except _DB_UNREACHABLE_EXCEPTIONS as exc:
+    except db_exceptions as exc:
         # Import SAFETY_FAIL_MODE inside the except so test monkeypatch
         # on the module attribute lands on the same symbol the code
         # reads. The hoisted top-level import of pg / asyncpg does not
