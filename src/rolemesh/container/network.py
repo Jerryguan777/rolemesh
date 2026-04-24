@@ -44,9 +44,31 @@ from rolemesh.core.logger import get_logger
 logger = get_logger()
 
 
-# IPC disabled → compromised containers on the same bridge cannot reach
-# each other. This is the whole point of leaving Docker's default bridge.
-_NETWORK_OPTIONS: dict[str, str] = {"com.docker.network.bridge.enable_icc": "false"}
+# EC-2 followup: ICC left ENABLED on the agent bridge.
+#
+# ICC=false would have Docker insert a FORWARD DROP rule blocking any
+# container-to-container L3 traffic on the bridge. With EC-1 that also
+# blocks the agent↔gateway and gateway↔NATS paths the whole egress
+# design is built on, so it cannot stay disabled.
+#
+# The anti-horizontal-movement posture ICC=false used to provide was
+# always weak in this threat model — agent containers ship CapDrop:ALL
+# + readonly rootfs + no-new-privileges, and expose no listeners. A
+# real lateral-movement attack requires a kernel or Docker escape
+# that ICC does not help against. Application-layer isolation
+# (Safety Framework, tenant boundaries) is the load-bearing defense.
+_AGENT_NETWORK_OPTIONS: dict[str, str] = {
+    "com.docker.network.bridge.enable_icc": "true",
+}
+
+# The egress bridge keeps ICC=false because only the gateway container
+# attaches to it; any accidental neighbour there would get blocked at
+# the bridge rather than relying on policy. Gateway's real outbound
+# traffic (to the public internet) leaves via the bridge's default
+# gateway, not via another container, so ICC does not affect it.
+_EGRESS_NETWORK_OPTIONS: dict[str, str] = {
+    "com.docker.network.bridge.enable_icc": "false",
+}
 
 # Small busybox-like image used only for the connectivity probe. Kept
 # intentionally tiny; alpine is already present in most dev environments
@@ -60,16 +82,21 @@ async def ensure_agent_network(
 ) -> None:
     """Create the agent bridge with ``Internal=true`` if missing.
 
-    Idempotent by name. If the network already exists and is NOT
-    internal (pre-EC-1 state), we log a warning and reuse it rather
-    than forcibly recreate. Recreating would disconnect every running
-    agent container; the operator can stop orchestrator traffic,
-    ``docker network rm rolemesh-agent-net`` manually, and restart to
-    pick up the new Internal flag.
+    Idempotent by name. If the network already exists and is in a
+    pre-EC-1 or pre-EC-2-followup shape (not Internal, or ICC
+    disabled) we log a warning and reuse it rather than forcibly
+    recreate — recreating disconnects every running agent container.
+    Operators pick up the correct invariants by stopping traffic,
+    running ``docker network rm rolemesh-agent-net`` manually, and
+    restarting the orchestrator.
 
-    The same warning fires when ICC is unexpectedly enabled on a
-    re-used network — both invariants (Internal=true, ICC=false) are
-    load-bearing for agent isolation.
+    Invariants now enforced on agent-net:
+      * ``Internal=true``      — no default route out (EC-1)
+      * ``enable_icc=true``    — agent↔gateway + gateway↔NATS traffic
+                                 is required for EC-1+. Operators used
+                                 to expect ICC=false here; they get a
+                                 warning now so they understand why
+                                 the flag flipped.
     """
     if not network_name:
         logger.info("CONTAINER_NETWORK_NAME is empty — using Docker default bridge")
@@ -88,8 +115,11 @@ async def ensure_agent_network(
         icc = opts.get("com.docker.network.bridge.enable_icc", "true").lower()
         internal = bool(info.get("Internal", False))
         problems: list[str] = []
-        if icc != "false":
-            problems.append("ICC enabled")
+        # ICC=false on a pre-EC-2-followup network would break EC-1+
+        # in the first agent request — flag it so operators recreate
+        # the bridge before traffic starts failing mysteriously.
+        if icc == "false":
+            problems.append("ICC disabled (breaks agent↔gateway path)")
         if not internal:
             problems.append("not Internal")
         if problems:
@@ -115,7 +145,7 @@ async def ensure_agent_network(
         # in the container's dependency tree shells out with a direct
         # socket.
         "Internal": True,
-        "Options": _NETWORK_OPTIONS,
+        "Options": _AGENT_NETWORK_OPTIONS,
         # Labels let operators see this network was created by RoleMesh
         # (so `docker network prune` / audit scripts don't mistake it for
         # an abandoned user network).
@@ -125,7 +155,7 @@ async def ensure_agent_network(
     logger.info(
         "Created agent network",
         network=network_name,
-        options=_NETWORK_OPTIONS,
+        options=_AGENT_NETWORK_OPTIONS,
         internal=True,
     )
 
@@ -183,11 +213,11 @@ async def ensure_egress_network(
         "Name": network_name,
         "Driver": "bridge",
         "Internal": False,
-        "Options": _NETWORK_OPTIONS,
+        "Options": _EGRESS_NETWORK_OPTIONS,
         "Labels": {"io.rolemesh.owner": "orchestrator"},
     }
     await client.networks.create(config=config)
-    logger.info("Created egress network", network=network_name, options=_NETWORK_OPTIONS)
+    logger.info("Created egress network", network=network_name, options=_EGRESS_NETWORK_OPTIONS)
 
 
 async def verify_egress_gateway_reachable(

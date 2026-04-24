@@ -81,16 +81,15 @@ async def topology(docker_client: aiodocker.Docker) -> AsyncIterator[Topology]:
     egress_network = f"rolemesh-test-egress-{suffix}"
 
     # --- Networks ------------------------------------------------------
-    # agent-net MUST be Internal=true to exercise the real block path.
+    # These configs mirror production: agent-net is Internal=true +
+    # ICC=true, egress-net is Internal=false + ICC=false. We override
+    # the names with a per-run suffix so concurrent CI runs don't
+    # collide.
     #
-    # KNOWN DESIGN GAP (flagged by these integration tests): production
-    # ``rolemesh-agent-net`` also sets ``enable_icc=false``, which
-    # Docker enforces via iptables DROP rules between any two
-    # containers on the bridge. That breaks the EC-1 assumption that
-    # agents reach the gateway by service name — the FORWARD drop
-    # applies to that traffic too. For the tests we relax ICC so the
-    # gateway↔NATS and agent↔gateway paths actually work; the
-    # upstream production config needs a matching fix (followup).
+    # egress-net gets ICC=true *in tests only* so the fake-upstream
+    # container (co-located with the gateway on this bridge) is
+    # reachable for CONNECT tunnel tests. Production egress-net hosts
+    # only the gateway, so ICC=false stays on there.
     await docker_client.networks.create(
         config={
             "Name": agent_network,

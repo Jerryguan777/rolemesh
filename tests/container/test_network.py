@@ -27,7 +27,7 @@ def _docker_error(status: int, reason: str = "") -> aiodocker.exceptions.DockerE
 
 
 class TestEnsureAgentNetwork:
-    async def test_creates_network_with_internal_and_icc_off(self) -> None:
+    async def test_creates_network_with_internal_and_icc_enabled(self) -> None:
         client = MagicMock()
         client.networks = MagicMock()
         client.networks.get = AsyncMock(side_effect=_docker_error(404, "not found"))
@@ -39,16 +39,21 @@ class TestEnsureAgentNetwork:
         config = client.networks.create.await_args.kwargs["config"]
         assert config["Name"] == "rolemesh-agent-net"
         assert config["Driver"] == "bridge"
-        # EC-1 invariants: the agent bridge MUST be internal and MUST disable
-        # ICC. Flipping either of these silently is a regression in the
-        # security posture, so each is a separate hard assertion.
+        # EC-1 + EC-2-followup invariants. Internal=true is the physical
+        # egress block. ICC must be ENABLED because agents reach the
+        # gateway (and the gateway reaches NATS) over this bridge;
+        # ICC=false would have Docker insert a FORWARD DROP rule that
+        # kills those flows. The old ICC=false posture was primarily a
+        # soft defense against agent-to-agent lateral movement — see
+        # the comment on _AGENT_NETWORK_OPTIONS in network.py for why
+        # that defense was dropped.
         assert config["Internal"] is True, "agent bridge must be Internal=true"
-        assert config["Options"]["com.docker.network.bridge.enable_icc"] == "false"
+        assert config["Options"]["com.docker.network.bridge.enable_icc"] == "true"
 
     async def test_reuses_existing_internal_network(self) -> None:
         existing = MagicMock()
         existing.show = AsyncMock(return_value={
-            "Options": {"com.docker.network.bridge.enable_icc": "false"},
+            "Options": {"com.docker.network.bridge.enable_icc": "true"},
             "Internal": True,
         })
         client = MagicMock()
@@ -66,7 +71,7 @@ class TestEnsureAgentNetwork:
         whether to recreate."""
         existing = MagicMock()
         existing.show = AsyncMock(return_value={
-            "Options": {"com.docker.network.bridge.enable_icc": "false"},
+            "Options": {"com.docker.network.bridge.enable_icc": "true"},
             "Internal": False,
         })
         client = MagicMock()
@@ -82,10 +87,13 @@ class TestEnsureAgentNetwork:
         problems = mock_logger.warning.call_args.kwargs.get("problems", [])
         assert "not Internal" in problems
 
-    async def test_warns_when_existing_network_has_icc_enabled(self) -> None:
+    async def test_warns_when_existing_network_has_icc_disabled(self) -> None:
+        """ICC=false on agent-net breaks agent↔gateway traffic post-EC-1.
+        This warning tells operators their legacy bridge is incompatible
+        with the new gateway flow before they see mysterious timeouts."""
         existing = MagicMock()
         existing.show = AsyncMock(return_value={
-            "Options": {"com.docker.network.bridge.enable_icc": "true"},
+            "Options": {"com.docker.network.bridge.enable_icc": "false"},
             "Internal": True,
         })
         client = MagicMock()
@@ -99,7 +107,7 @@ class TestEnsureAgentNetwork:
         client.networks.create.assert_not_awaited()
         mock_logger.warning.assert_called_once()
         problems = mock_logger.warning.call_args.kwargs.get("problems", [])
-        assert "ICC enabled" in problems
+        assert any("ICC disabled" in p for p in problems), problems
 
     async def test_empty_network_name_skips_creation(self) -> None:
         client = MagicMock()
