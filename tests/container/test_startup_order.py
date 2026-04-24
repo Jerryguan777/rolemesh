@@ -174,6 +174,34 @@ async def test_startup_aborts_when_gateway_readiness_probe_fails() -> None:
     rt.cleanup_orphans.assert_not_awaited()
 
 
+async def test_rollback_mode_skips_gateway_launch() -> None:
+    """Path C contract: ``CONTAINER_NETWORK_NAME=""`` is the operator
+    rollback switch. Gateway launch + readiness probe + IP discovery
+    must all be skipped — pre-Path-C the code tried to launch with
+    an empty network name and crashed startup."""
+    from rolemesh import main as main_module
+
+    rt = _make_runtime_mock()
+    launch_mock = AsyncMock()
+    wait_mock = AsyncMock()
+
+    with (
+        patch.object(main_module, "CONTAINER_NETWORK_NAME", ""),
+        patch.object(main_module, "get_runtime", return_value=rt),
+        patch("rolemesh.egress.launcher.launch_egress_gateway", launch_mock),
+        patch("rolemesh.egress.launcher.wait_for_gateway_ready", wait_mock),
+    ):
+        await main_module._ensure_container_system_running()
+
+    rt.ensure_available.assert_awaited_once()
+    rt.ensure_agent_network.assert_awaited_once_with("")
+    # Egress bridge + gateway + readiness probe — all skipped.
+    rt.ensure_egress_network.assert_not_awaited()
+    launch_mock.assert_not_awaited()
+    wait_mock.assert_not_awaited()
+    rt.cleanup_orphans.assert_awaited_once()
+
+
 async def test_startup_tolerates_runtime_without_egress_hooks() -> None:
     """Future k8s backend won't expose ensure_egress_network /
     verify_egress_gateway_reachable. hasattr() gates skip the EC-1 path

@@ -1122,15 +1122,23 @@ async def _ensure_container_system_running() -> None:
     await _runtime.ensure_available()
     if hasattr(_runtime, "ensure_agent_network"):
         await _runtime.ensure_agent_network(CONTAINER_NETWORK_NAME)
-    if hasattr(_runtime, "ensure_egress_network"):
+    # egress-net only exists to carry the gateway's outbound; if EC is
+    # turned off there's no gateway to attach, so skip the bridge too.
+    if CONTAINER_NETWORK_NAME and hasattr(_runtime, "ensure_egress_network"):
         await _runtime.ensure_egress_network(CONTAINER_EGRESS_NETWORK_NAME)
 
-    # Gateway launch + readiness probe are gated behind both the agent
-    # and egress networks existing. The hasattr() is forward-looking:
-    # the k8s runtime (not yet implemented) will grow its own gateway
-    # pod primitive and should not use this path.
+    # Gateway launch + readiness probe are gated on:
+    #   * ``CONTAINER_NETWORK_NAME`` being non-empty — operators disable
+    #     the whole EC stack with ``CONTAINER_NETWORK_NAME=""`` (see
+    #     docs/egress/deployment.md). In rollback mode we don't launch
+    #     the gateway, and runner.py stops injecting the proxy env vars
+    #     that would otherwise point agents at a nonexistent container.
+    #   * ``hasattr(_runtime, ...)`` — forward-looking; the k8s runtime
+    #     (not yet implemented) will grow its own gateway pod primitive
+    #     and should not use this path.
     if (
-        hasattr(_runtime, "ensure_egress_network")
+        CONTAINER_NETWORK_NAME
+        and hasattr(_runtime, "ensure_egress_network")
         and hasattr(_runtime, "verify_egress_gateway_reachable")
     ):
         from rolemesh.container.runner import set_egress_gateway_dns_ip

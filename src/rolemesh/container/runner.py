@@ -16,8 +16,10 @@ from typing import TYPE_CHECKING
 from rolemesh.auth.permissions import AgentPermissions
 from rolemesh.container.docker_runtime import _parse_memory
 from rolemesh.container.runtime import (
+    CONTAINER_HOST_GATEWAY,
     ContainerSpec,
     VolumeMount,
+    get_host_gateway_extra_hosts,
 )
 from rolemesh.core.config import (
     CONTAINER_CPU_LIMIT,
@@ -357,16 +359,25 @@ _METADATA_BLACKHOLE: dict[str, str] = {
 def _build_extra_hosts() -> dict[str, str]:
     """Return /etc/hosts entries for the agent container.
 
-    EC-1 removed the ``host.docker.internal:host-gateway`` entry: on an
-    ``Internal=true`` bridge there is no route to the host-gateway IP
-    anyway, and the gateway container is now reachable by its service
-    name via Docker's embedded DNS on the agent bridge.
+    EC enabled (``CONTAINER_NETWORK_NAME`` non-empty):
+      Agent bridge is ``Internal=true`` and the gateway is reached by
+      service name via Docker embedded DNS — ``host.docker.internal``
+      isn't needed (and wouldn't route there anyway). Only the
+      metadata-service blackhole entries remain.
 
-    Only the metadata-service blackhole entries remain — those resolve
-    IMDS hostnames to 127.0.0.1 so a compromised agent cannot exfil IAM
-    credentials via SSRF-style metadata access.
+    EC off (rollback):
+      Reinstate ``host.docker.internal:host-gateway`` so agents on the
+      default bridge can reach the host-side credential proxy the way
+      they did pre-EC-1. Metadata blackhole still applies.
     """
-    return dict(_METADATA_BLACKHOLE)
+    hosts: dict[str, str] = dict(_METADATA_BLACKHOLE)
+    if not CONTAINER_NETWORK_NAME:
+        # Pre-EC / rollback: restore the host-gateway ExtraHosts entry
+        # that the pre-EC-1 orchestrator relied on so
+        # ``http://host.docker.internal:3001`` reaches the host-side
+        # start_credential_proxy.
+        hosts.update(get_host_gateway_extra_hosts())
+    return hosts
 
 
 def _clamp_memory(value: str, max_value: str, *, coworker_name: str) -> str:
@@ -427,27 +438,37 @@ def build_container_spec(
     """
     image = backend_config.image if backend_config else CONTAINER_IMAGE
 
-    # NATS URL passed through as-is. The localhost→host-gateway
-    # substitution the pre-EC-1 orchestrator applied is no longer valid:
-    # the agent bridge is Internal=true, so a URL that only resolves on
-    # the host would hit EHOSTUNREACH. Operators must ensure NATS is
-    # reachable ON the agent bridge — typically by attaching the NATS
-    # container to rolemesh-agent-net and setting NATS_URL to the
-    # container's service name (docs/egress/deployment.md).
-    nats_url = NATS_URL
-
-    # Reverse-proxy base URL. Agents reach the gateway by its service
-    # name ``egress-gateway`` (resolved via Docker embedded DNS on the
-    # agent bridge) rather than the old host-gateway escape hatch.
-    proxy_base = f"http://{EGRESS_GATEWAY_CONTAINER_NAME}:{CREDENTIAL_PROXY_PORT}"
-    # Forward-proxy URL for arbitrary HTTP(S) egress. Agents inherit
-    # this via HTTP_PROXY / HTTPS_PROXY and every stdlib / third-party
-    # HTTP client routes through the CONNECT listener automatically.
-    # EC-1 ships the variables even though the CONNECT listener only
-    # goes live in EC-2 — the envelope is then already in place.
-    forward_proxy_url = (
-        f"http://{EGRESS_GATEWAY_CONTAINER_NAME}:{EGRESS_GATEWAY_FORWARD_PORT}"
-    )
+    # Branch on whether EC is active. The whole env block flips
+    # between EC and rollback modes:
+    #
+    #   EC enabled — the agent is on the Internal=true bridge and
+    #     reaches the gateway by service name. NATS_URL is passed
+    #     through as-is (operator ensures NATS is reachable on the
+    #     bridge; documented in deployment.md). Proxy env vars point
+    #     every HTTP client at the forward proxy.
+    #
+    #   EC off — pre-EC-1 behaviour. NATS_URL's ``localhost`` is
+    #     substituted for host-gateway so agents on Docker's default
+    #     bridge can reach the NATS process on the host. ANTHROPIC /
+    #     OPENAI base URLs point at the host-side credential_proxy via
+    #     host-gateway. No HTTP(S)_PROXY env is injected — there is no
+    #     forward proxy.
+    if CONTAINER_NETWORK_NAME:
+        nats_url = NATS_URL
+        proxy_base = f"http://{EGRESS_GATEWAY_CONTAINER_NAME}:{CREDENTIAL_PROXY_PORT}"
+        forward_proxy_url = (
+            f"http://{EGRESS_GATEWAY_CONTAINER_NAME}:{EGRESS_GATEWAY_FORWARD_PORT}"
+        )
+        proxy_env: dict[str, str] = {
+            "HTTP_PROXY": forward_proxy_url,
+            "HTTPS_PROXY": forward_proxy_url,
+            "NO_PROXY": f"{EGRESS_GATEWAY_CONTAINER_NAME},localhost,127.0.0.1",
+        }
+    else:
+        # Rollback: emulate pre-EC-1 routing.
+        nats_url = NATS_URL.replace("localhost", CONTAINER_HOST_GATEWAY)
+        proxy_base = f"http://{CONTAINER_HOST_GATEWAY}:{CREDENTIAL_PROXY_PORT}"
+        proxy_env = {}
 
     env: dict[str, str] = {
         "TZ": TIMEZONE,
@@ -457,21 +478,13 @@ def build_container_spec(
         "ANTHROPIC_BASE_URL": proxy_base,
         # Multi-provider proxy URLs for Pi backend (each SDK reads its own env var)
         "OPENAI_BASE_URL": f"{proxy_base}/proxy/openai",
-        # EC-1: standard HTTP proxy env. Both upper-case keys set — some
-        # libraries (requests) check HTTPS_PROXY, others (urllib) also
-        # honour HTTP_PROXY for plain-HTTP URLs. NO_PROXY carves out the
-        # gateway's own service name (so reverse-proxy calls bypass the
-        # forward-proxy) and loopback (so in-process services that
-        # spawn do not go out and back in).
-        "HTTP_PROXY": forward_proxy_url,
-        "HTTPS_PROXY": forward_proxy_url,
-        "NO_PROXY": f"{EGRESS_GATEWAY_CONTAINER_NAME},localhost,127.0.0.1",
         # Redirect Claude Code CLI's .claude.json writes into the per-coworker
         # writable bind mount at /home/agent/.claude. Without this, the CLI
         # tries to write /home/agent/.claude.json on the readonly rootfs and
         # the Claude backend fails its 30s initialize handshake.
         # Pi backend ignores this env, so shipping it unconditionally is safe.
         "CLAUDE_CONFIG_DIR": "/home/agent/.claude",
+        **proxy_env,
     }
 
     # Mirror the host's auth method with a placeholder value.

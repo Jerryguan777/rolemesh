@@ -23,6 +23,7 @@ from rolemesh.container.runner import (
     build_container_spec,
     build_volume_mounts,
 )
+from rolemesh.container.runtime import CONTAINER_HOST_GATEWAY
 from rolemesh.core.config import (
     CONTAINER_MAX_OUTPUT_SIZE,
     CONTAINER_NETWORK_NAME,
@@ -167,13 +168,23 @@ class ContainerAgentExecutor:
         logs_dir = coworker_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
 
-        # Build MCP server specs from coworker tools config
+        # Build MCP server specs from coworker tools config.
+        # proxy_host branches on EC: egress-gateway service name when
+        # EC is active, host.docker.internal for the pre-EC rollback
+        # path — matches build_container_spec's env routing so a
+        # coworker's MCP proxy URL hits the same endpoint agents use
+        # for LLM calls.
+        mcp_proxy_host = (
+            EGRESS_GATEWAY_CONTAINER_NAME
+            if CONTAINER_NETWORK_NAME
+            else CONTAINER_HOST_GATEWAY
+        )
         mcp_specs: list[McpServerSpec] | None = None
         if coworker.tools:
             mcp_specs = [
                 rewrite_mcp_url_for_container(
                     tool_cfg,
-                    proxy_host=EGRESS_GATEWAY_CONTAINER_NAME,
+                    proxy_host=mcp_proxy_host,
                     proxy_port=CREDENTIAL_PROXY_PORT,
                     proxy_prefix=MCP_PROXY_PREFIX,
                 )
