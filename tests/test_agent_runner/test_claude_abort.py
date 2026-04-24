@@ -130,7 +130,12 @@ def _make_backend(monkeypatch: pytest.MonkeyPatch, fake_query: Any) -> tuple[Any
 
     monkeypatch.setattr(claude_backend, "ClaudeAgentOptions", _opts_factory, raising=False)
     monkeypatch.setattr(claude_backend, "HookMatcher", _hook_factory, raising=False)
-    monkeypatch.setattr(claude_backend, "create_rolemesh_mcp_server", lambda ctx: object(), raising=False)
+    monkeypatch.setattr(
+        claude_backend,
+        "create_rolemesh_mcp_server",
+        lambda ctx, **kwargs: object(),
+        raising=False,
+    )
 
     backend = claude_backend.ClaudeBackend()
     listener = _RecordingListener()
@@ -150,6 +155,9 @@ def init_data() -> Any:
         system_prompt: str | None = None
         mcp_servers: list[Any] | None = None
         user_id: str | None = None
+        # Required by claude_backend.start() to gate send_message tool
+        # registration (see commit introducing register_send_message).
+        is_scheduled_task: bool = False
 
     return _Init()
 

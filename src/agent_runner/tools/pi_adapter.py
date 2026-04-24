@@ -66,10 +66,23 @@ class RoleMeshAgentTool(AgentTool):
         )
 
 
-def create_rolemesh_tools(ctx: ToolContext) -> list[AgentTool]:
-    """Create all RoleMesh IPC tools as Pi AgentTool instances."""
+def create_rolemesh_tools(
+    ctx: ToolContext,
+    *,
+    register_send_message: bool = False,
+) -> list[AgentTool]:
+    """Create all RoleMesh IPC tools as Pi AgentTool instances.
+
+    ``register_send_message`` mirrors the Claude adapter's flag: the
+    send_message tool is for scheduled-task notifications only, so it
+    is excluded from interactive containers' tool list. See
+    ``claude_adapter.create_rolemesh_mcp_server`` for the full rationale.
+    Pass True only when ``init.is_scheduled_task`` is True.
+    """
     tools: list[AgentTool] = []
     for defn in rt.TOOL_DEFINITIONS:
+        if defn["name"] == "send_message" and not register_send_message:
+            continue
         fn = rt.TOOL_FUNCTIONS[defn["name"]]
         tools.append(
             RoleMeshAgentTool(
