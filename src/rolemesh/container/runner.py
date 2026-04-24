@@ -454,7 +454,15 @@ def build_container_spec(
     #     host-gateway. No HTTP(S)_PROXY env is injected — there is no
     #     forward proxy.
     if CONTAINER_NETWORK_NAME:
-        nats_url = NATS_URL
+        # Agent bridge is Internal=true — no route to the host. NATS must
+        # be reachable by a name that resolves on agent-net. In local dev
+        # that's the ``nats`` alias we attach to the nats container; in
+        # production the operator puts NATS on the bridge directly. The
+        # orchestrator itself still uses the .env-configured URL (usually
+        # localhost:4222), so rewrite here rather than in the .env.
+        nats_url = NATS_URL.replace("://localhost:", "://nats:").replace(
+            "://127.0.0.1:", "://nats:"
+        )
         proxy_base = f"http://{EGRESS_GATEWAY_CONTAINER_NAME}:{CREDENTIAL_PROXY_PORT}"
         forward_proxy_url = (
             f"http://{EGRESS_GATEWAY_CONTAINER_NAME}:{EGRESS_GATEWAY_FORWARD_PORT}"

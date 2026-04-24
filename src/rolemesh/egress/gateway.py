@@ -54,7 +54,11 @@ from rolemesh.core.logger import get_logger
 
 from .dns_resolver import DnsServer, UpstreamResolver
 from .forward_proxy import ForwardProxy
-from .identity import IdentityResolver, subscribe_lifecycle
+from .identity import (
+    IdentityResolver,
+    fetch_identity_snapshot_via_nats,
+    subscribe_lifecycle,
+)
 from .policy_cache import (
     PolicyCache,
     fetch_snapshot_via_nats,
@@ -139,11 +143,26 @@ async def main() -> None:
 
         # --- Identity resolver: snapshot + lifecycle subscribe -------
         identity = IdentityResolver()
-        # Identity snapshot goes through the same pattern but using an
-        # /api/internal/egress/identity-snapshot REST endpoint that
-        # belongs to EC-2.8. For now, seed empty — the subscription
-        # below picks up state as agents start.
-        # TODO(EC-2.8): fetch via orchestrator REST before subscribing.
+        # Seed from orchestrator's identity registry BEFORE subscribing
+        # to live events. Without this, a gateway restart strands every
+        # already-running agent at "Unknown source identity" until its
+        # next spawn — lifecycle events are NEW-only on the gateway's
+        # consumer and have no replay. A snapshot failure here is
+        # non-fatal: seed empty, keep going, and rely on live events to
+        # refill as new agents spawn. That's the same behavior we had
+        # before this snapshot was implemented, so a degraded snapshot
+        # RPC doesn't make things worse.
+        try:
+            identity_entries = await fetch_identity_snapshot_via_nats(
+                nats_client, timeout_s=_SNAPSHOT_TIMEOUT_S
+            )
+            await identity.seed(identity_entries)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "gateway: identity snapshot fetch failed — continuing with empty "
+                "cache; live lifecycle events will refill",
+                error=str(exc),
+            )
         lifecycle_sub = await subscribe_lifecycle(nats_client, identity)
         stack.push_async_callback(lifecycle_sub.unsubscribe)  # type: ignore[attr-defined]
 

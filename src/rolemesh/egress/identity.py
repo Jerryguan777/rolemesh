@@ -49,6 +49,11 @@ logger = get_logger()
 # name is also stable — a rename would silently orphan the subscription.
 LIFECYCLE_SUBJECT = "orchestrator.agent.lifecycle"
 
+# Identity snapshot subject. Declared here (not imported from orch_glue)
+# so the gateway process — which must not import orchestrator code —
+# can still reach this string without pulling in the orchestrator half.
+IDENTITY_SNAPSHOT_SUBJECT = "egress.identity.snapshot.request"
+
 
 @dataclass(frozen=True)
 class Identity:
@@ -175,6 +180,39 @@ class IdentityResolver:
         docstring).
         """
         return self.by_ip.get(source_ip)
+
+
+async def fetch_identity_snapshot_via_nats(
+    nats_client: nats.aio.client.Client,
+    *,
+    timeout_s: float = 5.0,
+) -> list[dict[str, object]]:
+    """Request the current identity map from the orchestrator.
+
+    Mirrors the rule-snapshot RPC over on ``policy_cache``. The return
+    value is the list of entries the gateway's ``IdentityResolver.seed``
+    expects — each entry has at least ``ip``, ``tenant_id``,
+    ``coworker_id``, ``container_name``.
+
+    Raises ``TimeoutError`` on no-responder / timeout. Callers should
+    treat a failure as "seed with nothing, rely on live events to refill"
+    rather than fail-closing the whole gateway — the snapshot is a
+    correctness booster on warm restart, not a hard requirement for the
+    first request of a newly-booted agent.
+    """
+    response = await nats_client.request(  # type: ignore[attr-defined]
+        IDENTITY_SNAPSHOT_SUBJECT,
+        b"",
+        timeout=timeout_s,
+    )
+    payload = json.loads(response.data)
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        raise ValueError(
+            f"Unexpected identity snapshot shape: expected list under 'entries', "
+            f"got {type(entries).__name__}"
+        )
+    return entries
 
 
 async def subscribe_lifecycle(

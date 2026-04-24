@@ -42,6 +42,9 @@ WORKDIR /app
 # gateway image should not contain agent-side code (agent_runner,
 # pi) so accidental code reuse at runtime fails fast.
 COPY src/rolemesh/__init__.py                      ./rolemesh/__init__.py
+# bootstrap.py runs at process entry to load /app/.env into os.environ
+# before rolemesh.core.config captures module-level values.
+COPY src/rolemesh/bootstrap.py                      ./rolemesh/bootstrap.py
 COPY src/rolemesh/core/                            ./rolemesh/core/
 COPY src/rolemesh/security/credential_proxy.py     ./rolemesh/security/credential_proxy.py
 COPY src/rolemesh/egress/                          ./rolemesh/egress/

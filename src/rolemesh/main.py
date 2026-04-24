@@ -1107,23 +1107,24 @@ async def _recover_pending_messages() -> None:
 
 
 async def _ensure_container_system_running() -> None:
-    """Ensure the container runtime is running and clean up orphans.
+    """Prepare the container runtime and bridge networks.
 
-    Order matters (EC-1):
-      1. get_runtime() + ensure_available() — dockerd version gate runs here
+    Gateway launch used to live here too, but the gateway's first
+    startup step is a NATS request-reply for the rule snapshot — that
+    only gets a responder once ``start_responders`` runs later in
+    ``main()``. Launching the gateway this early produced a chicken-
+    and-egg: gateway crash-loops on ``NoRespondersError`` while the
+    orchestrator is still blocked on its readiness probe. Gateway
+    launch is now ``_launch_egress_gateway_once_ready`` and runs after
+    the responders are registered.
+
+    Order here is just:
+      1. get_runtime() + ensure_available() — dockerd version gate
       2. ensure_agent_network() — creates the agent bridge with
          ``Internal=true``; physically removes the default route.
       3. ensure_egress_network() — creates the outbound bridge.
-      4. launch_egress_gateway() — starts the gateway container attached
-         to both bridges. Fails fast when the image is not built, since
-         every agent turn depends on the gateway.
-      5. verify_egress_gateway_reachable() (with retry budget) — a
-         throwaway probe on the agent bridge confirms the gateway
-         answers /healthz by service name. Without this, agent startup
-         would fail later in a much harder-to-diagnose way.
-      6. cleanup_orphans() — must run after the networks and gateway
-         exist; ranks can interpret "leaked container" logs against a
-         stable topology.
+      4. cleanup_orphans() — safe to run before the gateway exists;
+         operates only on containers we labeled.
 
     Fail-closed throughout: any step raising makes the orchestrator
     refuse to enter the ready state.
@@ -1138,15 +1139,23 @@ async def _ensure_container_system_running() -> None:
     if CONTAINER_NETWORK_NAME and hasattr(_runtime, "ensure_egress_network"):
         await _runtime.ensure_egress_network(CONTAINER_EGRESS_NETWORK_NAME)
 
-    # Gateway launch + readiness probe are gated on:
-    #   * ``CONTAINER_NETWORK_NAME`` being non-empty — operators disable
-    #     the whole EC stack with ``CONTAINER_NETWORK_NAME=""`` (see
-    #     docs/egress/deployment.md). In rollback mode we don't launch
-    #     the gateway, and runner.py stops injecting the proxy env vars
-    #     that would otherwise point agents at a nonexistent container.
-    #   * ``hasattr(_runtime, ...)`` — forward-looking; the k8s runtime
-    #     (not yet implemented) will grow its own gateway pod primitive
-    #     and should not use this path.
+    await _runtime.cleanup_orphans("rolemesh-")
+
+
+async def _launch_egress_gateway_once_ready() -> None:
+    """Start the egress-gateway container and wait for it to be ready.
+
+    Must be called AFTER ``start_responders`` has registered the NATS
+    rule-snapshot / identity-snapshot responders. The gateway's first
+    action on boot is a request-reply for the snapshot; without a
+    responder it fails-closed and Docker restart-loops the container.
+
+    Gated on:
+      * ``CONTAINER_NETWORK_NAME`` non-empty — operators disable EC
+        with ``CONTAINER_NETWORK_NAME=""`` (rollback mode).
+      * ``hasattr(_runtime, ...)`` — k8s runtime will grow its own
+        gateway pod primitive and should not use this path.
+    """
     if (
         CONTAINER_NETWORK_NAME
         and hasattr(_runtime, "ensure_egress_network")
@@ -1202,8 +1211,6 @@ async def _ensure_container_system_running() -> None:
                 gateway=EGRESS_GATEWAY_CONTAINER_NAME,
                 agent_network=CONTAINER_NETWORK_NAME,
             )
-
-    await _runtime.cleanup_orphans("rolemesh-")
 
 
 # ---------------------------------------------------------------------------
@@ -1443,6 +1450,12 @@ async def main() -> None:
         state=_state,
         rules_fetcher=fetch_all_egress_rules,
     )
+
+    # Launch the egress gateway now that the snapshot responders are
+    # registered. Moved here from _ensure_container_system_running()
+    # because otherwise the gateway NATS-requests the snapshot before
+    # anyone is listening and crash-loops the container.
+    await _launch_egress_gateway_once_ready()
 
     _queue.set_process_messages_fn(_process_conversation_messages)
     _queue.set_on_queued(_emit_queued_status)

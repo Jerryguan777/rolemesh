@@ -42,10 +42,29 @@ logger = get_logger()
 # Subject names — imported from egress.policy_cache + egress.identity
 # so there's a single authoritative string for each subject. Duplicate
 # definitions would drift.
-from .identity import LIFECYCLE_SUBJECT  # noqa: E402
+from .identity import IDENTITY_SNAPSHOT_SUBJECT, LIFECYCLE_SUBJECT  # noqa: E402
 from .policy_cache import RULE_CHANGED_SUBJECT, SNAPSHOT_REQUEST_SUBJECT  # noqa: E402
 
-IDENTITY_SNAPSHOT_SUBJECT = "egress.identity.snapshot.request"
+
+# ---------------------------------------------------------------------------
+# Identity registry (mirrors what we've published to the gateway)
+# ---------------------------------------------------------------------------
+#
+# The gateway's identity cache is fed by two streams — an initial
+# snapshot on its boot, then live lifecycle events. Before this module
+# grew a registry, the snapshot was empty (returned []), so a gateway
+# restart while agents were already running stranded every one of them
+# at "Unknown source identity" until the next spawn.
+#
+# We mirror the same writes we send over NATS here so the snapshot
+# responder has an authoritative view without having to re-walk Docker
+# or cross-reference OrchestratorState. Because this registry and the
+# NATS publish are updated atomically (same function body), the two
+# cannot disagree: the gateway either sees an entry as both a snapshot
+# entry and via a live 'started' event (idempotent on the gateway
+# side), or sees neither.
+
+_identity_registry: dict[str, dict[str, str]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -73,8 +92,7 @@ async def publish_lifecycle_started(
     fail-closed at this site would also kill agent startup for every
     downstream workload.
     """
-    payload = {
-        "event": "started",
+    entry: dict[str, str] = {
         "container_name": container_name,
         "ip": ip,
         "tenant_id": tenant_id,
@@ -83,6 +101,14 @@ async def publish_lifecycle_started(
         "conversation_id": conversation_id,
         "job_id": job_id,
     }
+    # Register BEFORE publish so if the gateway happens to restart
+    # between our publish and its subscription, the next snapshot still
+    # includes this agent. Docker reuses bridge IPs only after the prior
+    # container is removed, which in our flow comes with its own stop
+    # event; see handle_stopped on the gateway side for the dedup.
+    _identity_registry[container_name] = entry
+
+    payload = {"event": "started", **entry}
     try:
         await nc.publish(LIFECYCLE_SUBJECT, json.dumps(payload).encode("utf-8"))
     except Exception as exc:  # noqa: BLE001 — best-effort
@@ -94,6 +120,12 @@ async def publish_lifecycle_stopped(
     *,
     container_name: str,
 ) -> None:
+    # Drop from the local registry first (mirrors the publish-before-
+    # register ordering in publish_lifecycle_started). A benign race
+    # where two stop events arrive back-to-back is harmless — the
+    # second pop silently no-ops.
+    _identity_registry.pop(container_name, None)
+
     payload = {"event": "stopped", "container_name": container_name}
     try:
         await nc.publish(LIFECYCLE_SUBJECT, json.dumps(payload).encode("utf-8"))
@@ -194,18 +226,19 @@ async def fetch_all_egress_rules() -> list[dict[str, Any]]:
 
 
 def _build_identity_snapshot(state: OrchestratorState) -> list[dict[str, Any]]:
-    """Walk OrchestratorState for every running container and collect (ip, identity) pairs.
+    """Return all agents the orchestrator has registered as started.
 
-    OrchestratorState carries conversation-keyed state; actual running
-    containers are tracked in ``GroupQueue`` which this module does
-    not yet read. V1 returns an empty list, which is safe because the
-    NATS lifecycle event stream picks up new containers as they start.
-    Follow-up: walk the queue's process map and Docker-inspect each
-    container's IP here.
+    Source of truth is ``_identity_registry``, which the lifecycle
+    publishers update in lockstep with their NATS publish. That means
+    the snapshot mirrors the sum of every 'started' event we've sent
+    minus every 'stopped' event — the same state the gateway would
+    have assembled if it had been listening the whole time.
+
+    ``state`` is unused now but kept in the signature so a future
+    implementation can cross-check against OrchestratorState if we
+    ever want a defense-in-depth consistency probe.
     """
-    # TODO(ec-2-follow-up): enumerate GroupQueue.process_map and inspect
-    # each container's agent-net IP. For PR-2 we lean on the lifecycle
-    # event stream; the snapshot is a correctness fallback rather than
-    # a primary source.
     _ = state
-    return []
+    # Copy each entry so a concurrent publish mutating the registry
+    # dict can't surprise JSON serialization.
+    return [dict(entry) for entry in _identity_registry.values()]
