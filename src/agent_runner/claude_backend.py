@@ -31,6 +31,7 @@ from .backend import (
     ErrorEvent,
     ResultEvent,
     RunningEvent,
+    SafetyBlockEvent,
     SessionInitEvent,
     StoppedEvent,
     ToolUseEvent,
@@ -111,8 +112,24 @@ def _deny(reason: str) -> dict[str, Any]:
 
 def _build_hook_callbacks(
     hooks: HookRegistry,
+    emit_safety_block: Callable[[SafetyBlockEvent], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
-    """Translate HookRegistry into claude_agent_sdk hook callbacks."""
+    """Translate HookRegistry into claude_agent_sdk hook callbacks.
+
+    ``emit_safety_block`` is invoked whenever a control hook (currently
+    UserPromptSubmit) blocks. Claude SDK's response to
+    ``{"decision":"block"}`` is to short-circuit the turn WITHOUT
+    yielding a ResultMessage — which means the backend's async-for
+    loop produces nothing, and without this emission the entire turn
+    stays invisible to the orchestrator. Pi backend surfaces its own
+    block via a SafetyBlockEvent in _apply_user_prompt_hook; this
+    callback gives the Claude path parity.
+
+    Kept as an optional callable (rather than a hardcoded emit) so
+    unit tests can drive _build_hook_callbacks without setting up a
+    full ClaudeBackend instance. See tests/test_agent_runner/
+    test_claude_safety_block.py.
+    """
 
     async def pre_tool_use(
         input_data: Any, _tool_use_id: Any, _context: Any
@@ -184,10 +201,17 @@ def _build_hook_callbacks(
         if verdict is None:
             return {}
         if verdict.block:
-            return {
-                "decision": "block",
-                "reason": verdict.reason or "Prompt blocked by hook",
-            }
+            reason = verdict.reason or "Prompt blocked by hook"
+            if emit_safety_block is not None:
+                # Telemetry-quality: a failure here must not flip the
+                # safety-block decision below into a safety-allow.
+                try:
+                    await emit_safety_block(
+                        SafetyBlockEvent(stage="input_prompt", reason=reason)
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _log(f"safety block emit failed: {exc}")
+            return {"decision": "block", "reason": reason}
         if verdict.appended_context:
             return {
                 "hookSpecificOutput": {
@@ -281,7 +305,10 @@ class ClaudeBackend:
         self._assistant_name = init.assistant_name
         self._mcp_server = create_rolemesh_mcp_server(tool_ctx)
         self._hooks = hooks if hooks is not None else HookRegistry()
-        self._sdk_hooks = _build_hook_callbacks(self._hooks)
+        self._sdk_hooks = _build_hook_callbacks(
+            self._hooks,
+            emit_safety_block=self._emit,
+        )
 
     async def run_prompt(self, text: str) -> None:
         """Run a single query through the Claude SDK."""

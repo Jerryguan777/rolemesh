@@ -85,6 +85,30 @@ class StoppedEvent:
     """
 
 
+@dataclass(frozen=True)
+class SafetyBlockEvent:
+    """Emitted when the safety framework blocks a turn or tool call.
+
+    Kept distinct from ResultEvent so the full pipeline — orchestrator
+    _on_output, DB message persistence, metrics, WebSocket frames, and
+    UI rendering — can tell "safety intercepted this" apart from "the
+    LLM produced this text". Pre-this-event, both backends forged a
+    ResultEvent with the block reason as its text, which polluted the
+    messages table with fake assistant replies and made metrics lie.
+
+    ``stage`` is the Stage enum value from rolemesh.safety.types
+    (``input_prompt`` / ``pre_tool_call`` / ``model_output`` / ...).
+    ``rule_id`` is the UUID of the rule that fired, when one is
+    available (a hook-system-error fallback leaves it None).
+    ``reason`` is the human-readable message shown in the UI and
+    recorded in safety_decisions.
+    """
+
+    stage: str
+    reason: str
+    rule_id: str | None = None
+
+
 BackendEvent = (
     ResultEvent
     | SessionInitEvent
@@ -93,6 +117,7 @@ BackendEvent = (
     | RunningEvent
     | ToolUseEvent
     | StoppedEvent
+    | SafetyBlockEvent
 )
 
 

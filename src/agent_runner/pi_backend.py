@@ -67,6 +67,7 @@ from .backend import (
     ErrorEvent,
     ResultEvent,
     RunningEvent,
+    SafetyBlockEvent,
     SessionInitEvent,
     StoppedEvent,
     ToolUseEvent,
@@ -481,8 +482,10 @@ class PiBackend:
 
         Block semantics on Pi: since Pi does not have a first-class
         'reject incoming prompt' signal, we refuse to hand the text to
-        session.prompt() and instead emit a ResultEvent that surfaces
-        the block reason to the orchestrator — the user sees why.
+        session.prompt() and instead emit a SafetyBlockEvent that
+        surfaces the block reason to the orchestrator on a dedicated
+        channel — distinct from ResultEvent so blocks don't end up in
+        the conversation messages table posing as assistant replies.
         """
         try:
             verdict = await self._hooks.emit_user_prompt_submit(
@@ -491,10 +494,9 @@ class PiBackend:
         except Exception as exc:  # noqa: BLE001 — fail-close by design
             _log(f"UserPromptSubmit handler raised, failing closed: {exc}")
             await self._emit(
-                ResultEvent(
-                    text=f"Hook system error: {exc}",
-                    new_session_id=self._session_file,
-                    is_final=False,
+                SafetyBlockEvent(
+                    stage="input_prompt",
+                    reason=f"Hook system error: {exc}",
                 )
             )
             return None
@@ -503,11 +505,7 @@ class PiBackend:
         if verdict.block:
             reason = verdict.reason or "Prompt blocked by hook"
             await self._emit(
-                ResultEvent(
-                    text=reason,
-                    new_session_id=self._session_file,
-                    is_final=False,
-                )
+                SafetyBlockEvent(stage="input_prompt", reason=reason)
             )
             return None
         if verdict.appended_context:

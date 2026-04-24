@@ -9,9 +9,14 @@ interface AgentStatusState {
 }
 
 export interface ChatMessage {
-  role: 'user' | 'assistant';
+  role: 'user' | 'assistant' | 'safety';
   content: string;
   streaming?: boolean;
+  // Populated when role === 'safety'. Stage is the pipeline stage the
+  // rule fired at (input_prompt / model_output / ...); rule_id is the
+  // UUID of the rule when present.
+  safetyStage?: string;
+  safetyRuleId?: string;
 }
 
 @customElement('rm-chat-panel')
@@ -203,6 +208,27 @@ export class ChatPanel extends LitElement {
         }
         this.isStreaming = false;
         this.agentState = 'idle';
+        break;
+      }
+      case 'safety_blocked': {
+        // Safety layer intercepted the turn. Replace the empty placeholder
+        // assistant bubble (if one was spawned from the 'thinking' event)
+        // with a dedicated safety bubble so the reason is visually distinct
+        // from real assistant replies. A concurrent 'done' is still
+        // expected and handled normally.
+        const last = this.messages[this.messages.length - 1];
+        const safetyMsg: ChatMessage = {
+          role: 'safety',
+          content: msg.reason,
+          safetyStage: msg.stage,
+          safetyRuleId: msg.rule_id,
+        };
+        if (last?.role === 'assistant' && last.streaming && !last.content) {
+          this.messages = [...this.messages.slice(0, -1), safetyMsg];
+        } else {
+          this.messages = [...this.messages, safetyMsg];
+        }
+        this.agentStatus = null;
         break;
       }
     }

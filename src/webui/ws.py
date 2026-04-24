@@ -148,6 +148,13 @@ async def handle_ws(ws: WebSocket, agent_id: str, token: str, chat_id: str = "")
                     payload = json.loads(data.get("content", "{}"))
                     out = {**payload, "type": "status"}
                     await _broadcast(binding_id, chat_id, out)
+                elif kind == "safety_blocked":
+                    # Safety-block forwarded as its own frame so the client
+                    # can render a distinct bubble (red shield) rather than
+                    # conflating it with an assistant text reply.
+                    payload = json.loads(data.get("content", "{}"))
+                    out = {**payload, "type": "safety_blocked"}
+                    await _broadcast(binding_id, chat_id, out)
                 await msg.ack()
             except (WebSocketDisconnect, RuntimeError):
                 return

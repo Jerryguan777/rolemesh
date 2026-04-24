@@ -33,21 +33,28 @@ class AgentInput:
 # final result or error. The tuple is the single source of truth — the Literal
 # below and is_progress() both derive from it.
 PROGRESS_STATUSES: tuple[str, ...] = ("queued", "container_starting", "running", "tool_use")
-TERMINAL_STATUSES: tuple[str, ...] = ("success", "error", "stopped")
+TERMINAL_STATUSES: tuple[str, ...] = ("success", "error", "stopped", "safety_blocked")
 
 ProgressStatus = Literal["queued", "container_starting", "running", "tool_use"]
-TerminalStatus = Literal["success", "error", "stopped"]
+TerminalStatus = Literal["success", "error", "stopped", "safety_blocked"]
 
 
 @dataclass(frozen=True)
 class AgentOutput:
     """Output from an agent execution.
 
-    Terminal statuses ("success" / "error" / "stopped") end the current turn:
-      - success: turn completed normally with a result
-      - error:   turn failed; error field carries the reason
-      - stopped: user interrupted the turn via Stop button; container is
-                 still alive for subsequent prompts
+    Terminal statuses end the current turn:
+      - success:         turn completed normally with a result
+      - error:           turn failed; error field carries the reason
+      - stopped:         user interrupted the turn via Stop button;
+                         container is still alive for subsequent prompts
+      - safety_blocked:  safety framework intercepted the turn
+                         (INPUT_PROMPT hook, PRE_TOOL_CALL hook, or
+                         orchestrator-side MODEL_OUTPUT pipeline).
+                         ``result`` carries the user-facing reason;
+                         ``metadata`` carries ``{stage, rule_id?}``.
+                         Orchestrator routes this to a dedicated WS
+                         frame without writing to the messages table.
     Progress statuses (see PROGRESS_STATUSES) are transient indicators for UX;
     `metadata` carries the structured payload.
 
@@ -59,7 +66,7 @@ class AgentOutput:
     """
 
     status: Literal[
-        "success", "error", "stopped",
+        "success", "error", "stopped", "safety_blocked",
         "queued", "container_starting", "running", "tool_use",
     ]
     result: str | None

@@ -11,7 +11,32 @@ export class MessageItem extends LitElement {
   protected override createRenderRoot() { return this; }
 
   override render() {
-    return this.message.role === 'user' ? this.renderUser() : this.renderAssistant();
+    if (this.message.role === 'user') return this.renderUser();
+    if (this.message.role === 'safety') return this.renderSafety();
+    return this.renderAssistant();
+  }
+
+  private renderSafety() {
+    const stage = this.message.safetyStage ?? 'unknown';
+    return html`
+      <div class="mb-5 anim-enter">
+        <div class="flex items-start gap-3">
+          <div class="shrink-0 w-7 h-7 rounded-full bg-red-50 dark:bg-red-900/30 border border-red-200 dark:border-red-800 flex items-center justify-center mt-0.5">
+            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24" class="text-red-600 dark:text-red-400">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+              <line x1="12" y1="8" x2="12" y2="12"/>
+              <line x1="12" y1="16" x2="12.01" y2="16"/>
+            </svg>
+          </div>
+          <div class="min-w-0 flex-1 pt-0.5">
+            <div class="text-[11.5px] font-semibold text-red-600 dark:text-red-400 uppercase tracking-wide mb-1">
+              Safety blocked · ${stage}
+            </div>
+            <div class="text-[13.5px] text-ink-1 dark:text-d-ink-1 leading-relaxed whitespace-pre-wrap">${this.message.content}</div>
+          </div>
+        </div>
+      </div>
+    `;
   }
 
   private renderUser() {

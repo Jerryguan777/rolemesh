@@ -47,12 +47,14 @@ class WebInboundMessage:
 class WebStreamChunk:
     """Streaming chunk from Orchestrator to FastAPI (web.stream.{binding_id}.{chat_id}).
 
-    type="text"   — content carries a text fragment
-    type="done"   — end-of-stream marker (content ignored)
-    type="status" — content carries a JSON-encoded progress payload
+    type="text"           — content carries a text fragment
+    type="done"           — end-of-stream marker (content ignored)
+    type="status"         — content carries a JSON-encoded progress payload
+    type="safety_blocked" — content carries a JSON-encoded safety block
+                            payload with keys {reason, stage, rule_id?}
     """
 
-    type: str  # "text" | "done" | "status"
+    type: str  # "text" | "done" | "status" | "safety_blocked"
     content: str = ""
 
     def to_bytes(self) -> bytes:
