@@ -239,6 +239,38 @@ def test_spec_to_config_cpu() -> None:
     assert config["HostConfig"]["NanoCpus"] == int(1.5e9)
 
 
+def test_spec_to_config_cpu_limit_sets_hard_cap_alongside_shares() -> None:
+    """When cpu_limit is set, CpuPeriod + CpuQuota must accompany NanoCpus.
+
+    NanoCpus alone is a relative weight; without CpuQuota a single agent
+    can burst past its share on an idle host. The hard cap is the whole
+    point of the cpu-quota work — regression here re-opens the burst
+    path silently.
+
+    CpuQuota = cpu_limit * CpuPeriod is the cgroup-native conversion.
+    """
+    spec = ContainerSpec(name="test", image="img", cpu_limit=2.0)
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert hc["NanoCpus"] == int(2.0e9)
+    assert hc["CpuPeriod"] == 100_000
+    assert hc["CpuQuota"] == 200_000  # 2.0 cores * 100ms period
+    assert hc["CpuQuota"] == int(2.0 * hc["CpuPeriod"])
+
+
+def test_spec_to_config_cpu_limit_unset_omits_all_cpu_keys() -> None:
+    """Without cpu_limit the container should run under cgroup defaults.
+
+    Emitting CpuPeriod or CpuQuota with zero/None would either error at
+    Docker API level or, worse, silently apply a 0-quota = "no CPU at
+    all". All three fields must be absent in the unset case.
+    """
+    spec = ContainerSpec(name="test", image="img")
+    hc = DockerRuntime._spec_to_config(spec)["HostConfig"]
+    assert "NanoCpus" not in hc
+    assert "CpuPeriod" not in hc
+    assert "CpuQuota" not in hc
+
+
 def test_spec_to_config_extra_hosts() -> None:
     spec = ContainerSpec(name="test", image="img", extra_hosts={"host.docker.internal": "host-gateway"})
     config: dict[str, Any] = DockerRuntime._spec_to_config(spec)
