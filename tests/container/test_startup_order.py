@@ -1,17 +1,27 @@
-"""Startup-sequence invariants for _ensure_container_system_running().
+"""Startup-sequence invariants across the two startup phases.
 
-The function's body is imperative — there is no type signature forcing
-the six steps to happen in the right order, and a future refactor can
-silently reorder them. These tests pin the invariants:
+Container-system startup is split between two functions in ``main.py``:
+
+  * ``_ensure_container_system_running`` — bridge-prep: dockerd version
+    gate, agent-net + egress-net creation, orphan cleanup. Runs early.
+  * ``_launch_egress_gateway_once_ready`` — gateway: launch, readiness
+    probe, DNS-IP discovery. Runs AFTER ``start_responders`` registers
+    the NATS snapshot responders; the gateway's first boot action is a
+    NATS request-reply for the rule snapshot, so launching it earlier
+    crash-loops the container with ``NoRespondersError``.
+
+Both bodies are imperative with no type signature pinning order, and a
+future refactor can silently reorder steps or merge the two functions
+back together. These tests pin the invariants for each phase:
 
   1. ensure_available() failure must short-circuit the rest.
   2. ensure_agent_network() failure must prevent every downstream step.
-  3. ensure_egress_network() failure must prevent gateway launch + orphan
-     cleanup.
-  4. launch_egress_gateway() failure must prevent readiness probe + orphan
-     cleanup.
-  5. Happy path: all six steps called, in order.
-  6. Backends without the EC-1 hooks (future k8s) fall back to the old
+  3. Happy path of bridge-prep: four steps in order, NO launch/wait.
+  4. launch_egress_gateway() failure must prevent the readiness probe.
+  5. wait_for_gateway_ready() failure must propagate (fail-closed).
+  6. Path C rollback (``CONTAINER_NETWORK_NAME=""``) skips the egress
+     bridge in phase 1 and the entire launch path in phase 2.
+  7. Backends without the EC-1 hooks (future k8s) fall back to the old
      surface gracefully — we use hasattr() gates for each hook so a
      minimal runtime doesn't have to stub them.
 
@@ -59,6 +69,13 @@ def _make_runtime_mock() -> MagicMock:
 
 
 async def test_startup_happy_path_calls_all_steps_in_order() -> None:
+    """``_ensure_container_system_running`` runs the four bridge-prep
+    steps and stops there. Gateway launch + readiness probe were split
+    out into ``_launch_egress_gateway_once_ready`` (called later in
+    ``main()`` after ``start_responders`` registers the NATS snapshot
+    responders) to break a chicken-and-egg deadlock — so they MUST NOT
+    appear in this function's call order.
+    """
     from rolemesh import main as main_module
 
     parent = MagicMock()
@@ -68,17 +85,7 @@ async def test_startup_happy_path_calls_all_steps_in_order() -> None:
     parent.attach_mock(rt.ensure_egress_network, "ensure_egress_network")
     parent.attach_mock(rt.cleanup_orphans, "cleanup_orphans")
 
-    launch_mock = AsyncMock()
-    wait_mock = AsyncMock()
-
-    with (
-        patch.object(main_module, "get_runtime", return_value=rt),
-        patch("rolemesh.egress.launcher.launch_egress_gateway", launch_mock),
-        patch("rolemesh.egress.launcher.wait_for_gateway_ready", wait_mock),
-    ):
-        parent.attach_mock(launch_mock, "launch_egress_gateway")
-        parent.attach_mock(wait_mock, "wait_for_gateway_ready")
-
+    with patch.object(main_module, "get_runtime", return_value=rt):
         await main_module._ensure_container_system_running()
 
     call_order = [c[0] for c in parent.mock_calls if c[0]]
@@ -86,8 +93,6 @@ async def test_startup_happy_path_calls_all_steps_in_order() -> None:
         "ensure_available",
         "ensure_agent_network",
         "ensure_egress_network",
-        "launch_egress_gateway",
-        "wait_for_gateway_ready",
         "cleanup_orphans",
     ]
 
@@ -130,55 +135,89 @@ async def test_startup_aborts_when_agent_network_fails() -> None:
     rt.cleanup_orphans.assert_not_awaited()
 
 
-async def test_startup_aborts_when_gateway_launch_fails() -> None:
+async def test_launch_aborts_when_gateway_launch_fails() -> None:
     """Gateway-image-not-built and similar errors stop startup — agents
-    without a gateway cannot do their job, so we refuse to enter ready."""
+    without a gateway cannot do their job, so we refuse to enter ready.
+
+    Originally this contract sat next to ``_ensure_container_system_running``
+    when launch was inlined there. Launch was split into a post-responder
+    function to break a NATS chicken-and-egg, but the fail-closed contract
+    still applies: a launch failure must propagate, and the readiness
+    probe MUST NOT run on a container we couldn't start.
+    """
     from rolemesh import main as main_module
 
     rt = _make_runtime_mock()
-
     launch_mock = AsyncMock(side_effect=RuntimeError("image missing"))
     wait_mock = AsyncMock()
 
     with (
-        patch.object(main_module, "get_runtime", return_value=rt),
+        patch.object(main_module, "_runtime", rt),
         patch("rolemesh.egress.launcher.launch_egress_gateway", launch_mock),
         patch("rolemesh.egress.launcher.wait_for_gateway_ready", wait_mock),
         pytest.raises(RuntimeError, match="image missing"),
     ):
-        await main_module._ensure_container_system_running()
+        await main_module._launch_egress_gateway_once_ready()
 
     wait_mock.assert_not_awaited()
-    rt.cleanup_orphans.assert_not_awaited()
 
 
-async def test_startup_aborts_when_gateway_readiness_probe_fails() -> None:
+async def test_launch_aborts_when_gateway_readiness_probe_fails() -> None:
     """Gateway binary up but not serving /healthz within budget → refuse
-    to enter ready. Agents would only produce a cryptic failure later."""
+    to enter ready. Agents would only produce a cryptic failure later.
+
+    Same provenance as the launch-fails test: the contract followed the
+    code into ``_launch_egress_gateway_once_ready`` after the chicken-
+    and-egg fix.
+    """
     from rolemesh import main as main_module
 
     rt = _make_runtime_mock()
-
     launch_mock = AsyncMock()
     wait_mock = AsyncMock(side_effect=RuntimeError("probe exhausted"))
 
     with (
-        patch.object(main_module, "get_runtime", return_value=rt),
+        patch.object(main_module, "_runtime", rt),
         patch("rolemesh.egress.launcher.launch_egress_gateway", launch_mock),
         patch("rolemesh.egress.launcher.wait_for_gateway_ready", wait_mock),
         pytest.raises(RuntimeError, match="probe exhausted"),
     ):
-        await main_module._ensure_container_system_running()
+        await main_module._launch_egress_gateway_once_ready()
 
     launch_mock.assert_awaited_once()
-    rt.cleanup_orphans.assert_not_awaited()
 
 
-async def test_rollback_mode_skips_gateway_launch() -> None:
-    """Path C contract: ``CONTAINER_NETWORK_NAME=""`` is the operator
-    rollback switch. Gateway launch + readiness probe + IP discovery
-    must all be skipped — pre-Path-C the code tried to launch with
-    an empty network name and crashed startup."""
+async def test_rollback_mode_skips_egress_bridge() -> None:
+    """Path C contract on the bridge-prep half: ``CONTAINER_NETWORK_NAME=""``
+    is the operator rollback switch, and ``_ensure_container_system_running``
+    must skip ``ensure_egress_network`` (the egress bridge has no purpose
+    when the gateway is disabled). Other steps still run.
+
+    Pre-Path-C the code tried to create the egress bridge unconditionally
+    and crashed when the operator opted out.
+    """
+    from rolemesh import main as main_module
+
+    rt = _make_runtime_mock()
+
+    with (
+        patch.object(main_module, "CONTAINER_NETWORK_NAME", ""),
+        patch.object(main_module, "get_runtime", return_value=rt),
+    ):
+        await main_module._ensure_container_system_running()
+
+    rt.ensure_available.assert_awaited_once()
+    rt.ensure_agent_network.assert_awaited_once_with("")
+    rt.ensure_egress_network.assert_not_awaited()
+    rt.cleanup_orphans.assert_awaited_once()
+
+
+async def test_launch_skips_in_rollback_mode() -> None:
+    """Path C contract on the launch half: ``CONTAINER_NETWORK_NAME=""``
+    must short-circuit ``_launch_egress_gateway_once_ready`` so launch +
+    readiness probe + IP discovery are all skipped. Pre-Path-C, launch
+    was attempted with an empty network name and crashed startup.
+    """
     from rolemesh import main as main_module
 
     rt = _make_runtime_mock()
@@ -187,19 +226,16 @@ async def test_rollback_mode_skips_gateway_launch() -> None:
 
     with (
         patch.object(main_module, "CONTAINER_NETWORK_NAME", ""),
-        patch.object(main_module, "get_runtime", return_value=rt),
+        patch.object(main_module, "_runtime", rt),
         patch("rolemesh.egress.launcher.launch_egress_gateway", launch_mock),
         patch("rolemesh.egress.launcher.wait_for_gateway_ready", wait_mock),
     ):
-        await main_module._ensure_container_system_running()
+        await main_module._launch_egress_gateway_once_ready()
 
-    rt.ensure_available.assert_awaited_once()
-    rt.ensure_agent_network.assert_awaited_once_with("")
-    # Egress bridge + gateway + readiness probe — all skipped.
-    rt.ensure_egress_network.assert_not_awaited()
     launch_mock.assert_not_awaited()
     wait_mock.assert_not_awaited()
-    rt.cleanup_orphans.assert_awaited_once()
+    # IP-discovery path also skipped — would have called rt._ensure_client().
+    rt._ensure_client.assert_not_called()
 
 
 async def test_startup_tolerates_runtime_without_egress_hooks() -> None:
