@@ -1,5 +1,5 @@
 import { LitElement, html } from 'lit';
-import { customElement, property } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 import type { ConversationSummary } from '../services/agent-client.js';
 
 interface GroupedConversations {
@@ -42,8 +42,29 @@ export class Sidebar extends LitElement {
   @property({ attribute: false }) conversations: ConversationSummary[] = [];
   @property() activeChatId: string | null = null;
   @property({ type: Boolean }) collapsed = false;
+  @state() private settingsOpen = false;
 
   protected override createRenderRoot() { return this; }
+
+  override connectedCallback() {
+    super.connectedCallback();
+    document.addEventListener('click', this.handleOutsideClick);
+  }
+
+  override disconnectedCallback() {
+    super.disconnectedCallback();
+    document.removeEventListener('click', this.handleOutsideClick);
+  }
+
+  // Close the settings popover when the user clicks outside of it.
+  // Bound as an arrow to keep `this` stable for add/remove listener.
+  private handleOutsideClick = (e: Event) => {
+    if (!this.settingsOpen) return;
+    const target = e.target as Node;
+    if (!this.contains(target)) {
+      this.settingsOpen = false;
+    }
+  };
 
   private handleSelect(chatId: string) {
     this.dispatchEvent(new CustomEvent('select-conversation', {
@@ -62,6 +83,18 @@ export class Sidebar extends LitElement {
     this.dispatchEvent(new CustomEvent('toggle-sidebar', {
       bubbles: true, composed: true,
     }));
+  }
+
+  private toggleSettings(e: Event) {
+    // Stop propagation so the document-level outside-click handler
+    // doesn't immediately close the popover we just opened.
+    e.stopPropagation();
+    this.settingsOpen = !this.settingsOpen;
+  }
+
+  private navigateHash(hash: string) {
+    location.hash = hash;
+    this.settingsOpen = false;
   }
 
   override render() {
@@ -106,6 +139,34 @@ export class Sidebar extends LitElement {
               No conversations yet
             </div>
           ` : ''}
+        </div>
+
+        <!-- Settings (pinned at bottom; does not scroll with conversation list) -->
+        <div class="shrink-0 border-t border-surface-3 dark:border-d-surface-3 p-2 relative">
+          ${this.settingsOpen ? html`
+            <div class="absolute bottom-full left-2 right-2 mb-1 bg-surface-0 dark:bg-d-surface-0 border border-surface-3 dark:border-d-surface-3 rounded-lg shadow-lg py-1 z-10">
+              <button
+                class="w-full text-left px-3 py-2 text-[13px] text-ink-1 dark:text-d-ink-1 hover:bg-surface-2 dark:hover:bg-d-surface-2 cursor-pointer"
+                @click=${() => this.navigateHash('#/admin/safety/rules')}
+              >Safety rules</button>
+              <button
+                class="w-full text-left px-3 py-2 text-[13px] text-ink-1 dark:text-d-ink-1 hover:bg-surface-2 dark:hover:bg-d-surface-2 cursor-pointer"
+                @click=${() => this.navigateHash('#/admin/safety/decisions')}
+              >Safety decisions</button>
+            </div>
+          ` : ''}
+          <button
+            class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-[13px] font-medium text-ink-1 dark:text-d-ink-1 hover:bg-surface-2 dark:hover:bg-d-surface-2 transition-colors cursor-pointer"
+            @click=${(e: Event) => this.toggleSettings(e)}
+            aria-haspopup="menu"
+            aria-expanded=${this.settingsOpen}
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+            Settings
+          </button>
         </div>
       </div>
     `;

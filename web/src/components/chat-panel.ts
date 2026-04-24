@@ -61,6 +61,12 @@ export class ChatPanel extends LitElement {
     this.style.display = 'flex';
     this.style.flexDirection = 'column';
     this.style.minHeight = '0';
+    // Fill the parent's resolved height so inner h-full works, and
+    // contain overflow here so the sidebar's conversation list and
+    // the messages area scroll independently instead of dragging the
+    // whole page with one shared scrollbar.
+    this.style.height = '100%';
+    this.style.overflow = 'hidden';
     this.unsubscribe = this.client.subscribe((msg) => this.handleMessage(msg));
 
     // React to background token refresh: update client token and reconnect WebSocket
