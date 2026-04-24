@@ -20,8 +20,21 @@ def create_rolemesh_mcp_server(ctx: ToolContext) -> Any:
 
     @tool(
         "send_message",
-        "Send a message to the user or group immediately while you're still running. "
-        "Use this for progress updates or to send multiple messages.",
+        # Description must stay in sync with rolemesh_tools.TOOL_DEFINITIONS.
+        # The tool is designed for scheduled-task notifications only;
+        # using it for interactive replies causes the reply to be dropped
+        # by the orchestrator (the natural assistant text is the reply).
+        "Scheduled-task notification output. Emits a message to the "
+        "current conversation from a background/cron task. "
+        "\n\n"
+        "DO NOT call this during interactive conversations — your normal "
+        "assistant text is automatically delivered to the user as the "
+        "reply. Using this tool to deliver a reply will cause the reply "
+        "to be dropped. "
+        "\n\n"
+        "Only call this when running as a scheduled task (i.e. the initial "
+        "prompt starts with '[SCHEDULED TASK - ...]'), and only for the "
+        "final task result you want posted to the group.",
         {"text": str, "sender": str},
     )
     async def send_message(args: dict[str, Any]) -> dict[str, Any]:

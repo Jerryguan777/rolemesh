@@ -263,12 +263,21 @@ async def run_query_loop(
             )
         elif isinstance(event, ErrorEvent):
             log(f"Backend error: {event.error}")
+            # Do NOT forward session_id on error. The typical ErrorEvent
+            # source is Claude CLI failing to resume a stale session
+            # ("No conversation found with session ID: ..."), in which
+            # case init.session_id IS the dead id we're trying to get
+            # rid of. Forwarding it causes orchestrator _wrapped to
+            # re-persist the dead id via set_session, creating a death
+            # loop: next retry reads the same dead id from DB, resume
+            # fails again, error fires again, id re-persisted. Same
+            # class of bug the safety_blocked handler above addresses.
             await publish_output(
                 js, job_id,
                 ContainerOutput(
                     status="error",
                     result=None,
-                    new_session_id=session_id,
+                    new_session_id=None,
                     error=event.error,
                 ),
             )

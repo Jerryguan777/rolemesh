@@ -33,8 +33,17 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "send_message",
         "description": (
-            "Send a message to the user or group immediately while you're still running. "
-            "Use this for progress updates or to send multiple messages."
+            "Scheduled-task notification output. Emits a message to the "
+            "current conversation from a background/cron task. "
+            "\n\n"
+            "DO NOT call this during interactive conversations — your "
+            "normal assistant text is automatically delivered to the user "
+            "as the reply. Using this tool to deliver a reply will cause "
+            "the reply to be dropped. "
+            "\n\n"
+            "Only call this when running as a scheduled task (i.e. the "
+            "initial prompt starts with '[SCHEDULED TASK - ...]'), and "
+            "only for the final task result you want posted to the group."
         ),
         "parameters": {
             "type": "object",
