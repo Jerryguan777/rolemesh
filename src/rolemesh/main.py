@@ -156,8 +156,6 @@ _transport: NatsTransport | None = None
 _runtime: ContainerRuntime | None = None
 _executor: ContainerAgentExecutor | None = None
 _executors: dict[str, ContainerAgentExecutor] = {}
-# Track texts sent via IPC send_message to deduplicate against results stream
-_ipc_sent_texts: set[str] = set()
 _bg_tasks: set[asyncio.Task[None]] = set()
 
 # SafetyEngine is shared by the NATS safety_events subscriber (ingests
@@ -173,6 +171,39 @@ _safety_engine: SafetyEngine | None = None
 # at module scope so shutdown can tear them down cleanly.
 _safety_rpc_server: object | None = None
 _safety_thread_pool: object | None = None
+
+
+def _handle_agent_message_ipc(data: dict[str, object]) -> None:
+    """Handle one ``agent.*.messages`` NATS publish from the send_message tool.
+
+    Current behaviour: log the attempt and drop. The send_message tool
+    publishes to this subject when the agent calls it, but the tool
+    hard-codes ``chatJid=ctx.chat_jid`` (``rolemesh_tools.py:169``)
+    — meaning it can only ever target the agent's current conversation.
+    That conversation's natural output (``agent.*.results`` → ``_on_output``)
+    already delivers the final reply, so forwarding this IPC to the
+    channel gateway a SECOND time resulted in duplicate user-visible
+    replies. Previously a race-prone string-match dedup (``_ipc_sent_texts``)
+    tried to suppress the duplicate; removing the forward here removes
+    the duplicate at the source.
+
+    If the send_message tool signature gains a target chat_jid parameter
+    in the future (for cross-chat notifications / scheduled-task inbox /
+    agent-to-agent messaging), this function grows a branch: forward to
+    ``_send_via_coworker`` only when ``data["chatJid"] !=`` the source
+    coworker's currently-processed conversation. Until then the handler
+    is strictly log-and-drop.
+    """
+    if data.get("type") != "message":
+        return
+    if not data.get("chatJid") or not data.get("text"):
+        return
+    logger.info(
+        "Dropped send_message IPC (redundant with natural output path)",
+        chat_jid=data["chatJid"],
+        source_group=data.get("groupFolder", ""),
+        text_preview=str(data["text"])[:80],
+    )
 
 
 @dataclass(frozen=True)
@@ -514,7 +545,6 @@ async def _handle_incoming(
 
 async def _process_conversation_messages(conversation_id: str) -> bool:
     """Process all pending messages for a conversation (identified by conversation_id)."""
-    _ipc_sent_texts.clear()  # Reset dedup set for each processing cycle
     found = _state.get_conversation(conversation_id)
     if not found:
         return True
@@ -660,11 +690,7 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
                 _reset_idle_timer()
             elif safety_result.text and binding:
                 text = safety_result.text
-                # Skip if this exact text was already sent via IPC send_message
-                if text in _ipc_sent_texts:
-                    _ipc_sent_texts.discard(text)
-                    logger.debug("Skipping duplicate result (already sent via IPC)", coworker=config.name)
-                elif isinstance(gw, WebNatsGateway):
+                if isinstance(gw, WebNatsGateway):
                     await gw.send_stream_chunk(binding.id, conv.channel_chat_id, text)
                     # Store assistant response for web history
                     await db_store_message(
@@ -868,39 +894,7 @@ async def _start_nats_ipc_subscriptions(transport: NatsTransport, deps: _IpcDeps
     async def _handle_messages() -> None:
         async for msg in messages_sub.messages:
             try:
-                data = json.loads(msg.data)
-                if data.get("type") == "message" and data.get("chatJid") and data.get("text"):
-                    chat_jid = data["chatJid"]
-                    source_group = data.get("groupFolder", "")
-                    source_coworker_id = data.get("coworkerId", "")
-
-                    # Find source coworker (by ID, or fallback to folder lookup)
-                    source_cw = _state.coworkers.get(source_coworker_id) if source_coworker_id else None
-                    if source_cw is None and source_group:
-                        for tenant in _state.tenants.values():
-                            source_cw = _state.get_coworker_by_folder(tenant.id, source_group)
-                            if source_cw:
-                                break
-
-                    # Authorization: all agents can only message their own conversations
-                    authorized = False
-                    if source_cw:
-                        for conv in source_cw.conversations.values():
-                            if conv.conversation.channel_chat_id == chat_jid:
-                                authorized = True
-                                break
-
-                    if authorized:
-                        # Track text sent via IPC so _on_output can deduplicate
-                        _ipc_sent_texts.add(data["text"])
-                        await _send_via_coworker(source_cw, chat_jid, data["text"])
-                        logger.info("NATS IPC message sent", chat_jid=chat_jid, source_group=source_group)
-                    else:
-                        logger.warning(
-                            "Unauthorized IPC message attempt blocked",
-                            chat_jid=chat_jid,
-                            source_group=source_group,
-                        )
+                _handle_agent_message_ipc(json.loads(msg.data))
                 await msg.ack()
             except Exception:
                 logger.exception("Error processing NATS IPC message")
