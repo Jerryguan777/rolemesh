@@ -13,7 +13,8 @@ export type ServerMessage =
   | { type: 'text'; content: string }
   | { type: 'done' }
   | { type: 'error'; message: string }
-  | { type: 'status'; status: AgentStatus; tool?: string; input?: string };
+  | { type: 'status'; status: AgentStatus; tool?: string; input?: string }
+  | { type: 'safety_blocked'; reason: string; stage: string; rule_id?: string };
 
 export type MessageHandler = (msg: ServerMessage) => void;
 

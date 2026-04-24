@@ -175,6 +175,22 @@ _safety_rpc_server: object | None = None
 _safety_thread_pool: object | None = None
 
 
+@dataclass(frozen=True)
+class ModelOutputSafetyResult:
+    """Outcome of ``_apply_model_output_safety``.
+
+    Two terminal shapes:
+      - ``text`` set, ``block`` is None: forward ``text`` to the user as
+        an ordinary assistant reply. May be the original input (allow /
+        warn) or a redacted copy (redact).
+      - ``block`` set, ``text`` is None: forward through the dedicated
+        safety-block channel instead of the assistant channel.
+    """
+
+    text: str | None = None
+    block: tuple[str, str | None] | None = None  # (reason, rule_id)
+
+
 async def _apply_model_output_safety(
     *,
     safety_engine: SafetyEngine | None,
@@ -183,8 +199,8 @@ async def _apply_model_output_safety(
     user_id: str,
     conversation_id: str,
     text: str,
-) -> str:
-    """Run the MODEL_OUTPUT pipeline and return possibly-replaced text.
+) -> ModelOutputSafetyResult:
+    """Run the MODEL_OUTPUT pipeline and return the decision.
 
     Split out of ``_on_output`` so it is reachable from unit tests
     without standing up the full conversation / gateway closure. The
@@ -192,33 +208,23 @@ async def _apply_model_output_safety(
     wrapper is purely the "where does the text go on block / exception"
     policy that the orchestrator hot path applies.
 
-    Behaviour contract:
+    Return contract:
 
-      - No engine or no text → return ``text`` unchanged (zero-cost path).
-      - Rule load failure → log, fail-open (return ``text``). MODEL_OUTPUT
-        is one of several defense layers, and a transient DB blip
-        breaking every agent reply would magnify the blast radius of
-        the outage without closing an attack vector the container-side
-        pipeline is already watching.
-      - Pipeline internal exception → fail-close (substitute a generic
-        block string). That path indicates a programming error, not an
-        infra blip — suppressing the reply is the conservative choice.
-      - Block / require_approval verdict → substitute ``verdict.reason``
-        (or a generic block string when reason is empty). On MODEL_OUTPUT
-        require_approval is treated like block for the user-facing reply;
-        the orchestrator's audit ingestion path owns approval-request
-        creation in P1.1.
-      - Redact verdict → substitute the cleaned text from
-        ``verdict.modified_payload["text"]``. Unlike the container hooks,
-        MODEL_OUTPUT can actually replace the user-facing content, so
-        redact takes effect here rather than downgrading.
-      - Warn verdict → return the original text unchanged. MODEL_OUTPUT
-        has no place to inject a warning (it is the final reply), so
-        warn is purely an audit event on this stage.
-      - Allow → return original ``text``.
+      - No engine / no text / no rules → text unchanged, no block.
+      - Rule load failure → log, fail-open: text unchanged, no block.
+      - Pipeline internal exception → fail-close: emit a generic block.
+      - Block / require_approval verdict → emit a block with reason.
+        require_approval is downgraded to block for the user-facing
+        reply on MODEL_OUTPUT; the approval-request creation path is
+        a separate concern.
+      - Redact verdict → text substituted from
+        ``verdict.modified_payload["text"]``.
+      - Warn verdict → text unchanged (warn is audit-only at this
+        stage since the reply is the final output).
+      - Allow → text unchanged.
     """
     if not text or safety_engine is None:
-        return text
+        return ModelOutputSafetyResult(text=text)
     try:
         rules = await safety_engine.load_rules_for_coworker(
             tenant_id, coworker_id
@@ -227,9 +233,9 @@ async def _apply_model_output_safety(
         logger.exception(
             "safety: MODEL_OUTPUT rule load failed — skipping pipeline"
         )
-        return text
+        return ModelOutputSafetyResult(text=text)
     if not rules:
-        return text
+        return ModelOutputSafetyResult(text=text)
 
     from rolemesh.safety.types import SafetyContext, Stage
 
@@ -248,23 +254,29 @@ async def _apply_model_output_safety(
         logger.exception(
             "safety: MODEL_OUTPUT pipeline raised — failing closed"
         )
-        return "[Response blocked by safety policy]"
+        return ModelOutputSafetyResult(
+            block=("[Response blocked by safety policy]", None)
+        )
     if verdict.action in ("block", "require_approval"):
-        return verdict.reason or "[Response blocked by safety policy]"
+        reason = verdict.reason or "[Response blocked by safety policy]"
+        # Verdict at pipeline level doesn't carry rule_ids — the audit
+        # path persists per-rule records to safety_decisions separately.
+        # UI shows stage=model_output which is enough context.
+        return ModelOutputSafetyResult(block=(reason, None))
     if verdict.action == "redact":
         modified = verdict.modified_payload or {}
         cleaned = (
             modified.get("text") if isinstance(modified, dict) else None
         )
         if isinstance(cleaned, str):
-            return cleaned
+            return ModelOutputSafetyResult(text=cleaned)
         logger.warning(
             "safety: MODEL_OUTPUT redact without 'text' in modified_payload "
             "— falling back to original text",
             coworker_id=coworker_id,
         )
-        return text
-    return text
+        return ModelOutputSafetyResult(text=text)
+    return ModelOutputSafetyResult(text=text)
 
 
 # ---------------------------------------------------------------------------
@@ -575,6 +587,42 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
                 except (OSError, RuntimeError):
                     logger.debug("send_status failed", conversation_id=conv.id, exc_info=True)
             return
+
+        # Safety-block events go on a dedicated channel so the UI can
+        # distinguish them from ordinary assistant replies. Crucially we
+        # do NOT write to the messages table — blocks are already
+        # audited in safety_decisions, and storing them as is_from_me
+        # messages would pollute conversation history and confuse LLM
+        # context reconstruction. send_stream_done still fires so the
+        # client exits the 'streaming' state.
+        if result.status == "safety_blocked":
+            reason = result.result or "Blocked by safety policy"
+            meta = result.metadata or {}
+            stage = str(meta.get("stage", "unknown"))
+            rule_id = meta.get("rule_id")
+            logger.info(
+                "Safety-block event",
+                coworker=config.name,
+                stage=stage,
+                rule_id=rule_id,
+                chars=len(reason),
+            )
+            if binding and isinstance(gw, WebNatsGateway):
+                with contextlib.suppress(OSError, RuntimeError, TypeError, ValueError):
+                    await gw.send_safety_block(
+                        binding.id,
+                        conv.channel_chat_id,
+                        reason=reason,
+                        stage=stage,
+                        rule_id=str(rule_id) if isinstance(rule_id, str) else None,
+                    )
+                with contextlib.suppress(OSError, RuntimeError, TypeError, ValueError):
+                    await gw.send_stream_done(binding.id, conv.channel_chat_id)
+            output_sent_to_user = True
+            _reset_idle_timer()
+            if result.is_final:
+                _queue.notify_idle(conversation_id)
+            return
         if result.result:
             raw = result.result
             text = re.sub(r"<internal>[\s\S]*?</internal>", "", raw).strip()
@@ -582,7 +630,7 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
 
             # V2 P0.1: orchestrator-side MODEL_OUTPUT safety pipeline.
             # Runs on the user-visible text (internal tags already stripped).
-            text = await _apply_model_output_safety(
+            safety_result = await _apply_model_output_safety(
                 safety_engine=_safety_engine,
                 tenant_id=config.tenant_id,
                 coworker_id=config.id,
@@ -591,7 +639,27 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
                 text=text,
             )
 
-            if text and binding:
+            if safety_result.block is not None:
+                reason, rule_id = safety_result.block
+                logger.info(
+                    "Safety-block (model_output)",
+                    coworker=config.name,
+                    rule_id=rule_id,
+                    chars=len(reason),
+                )
+                if binding and isinstance(gw, WebNatsGateway):
+                    with contextlib.suppress(OSError, RuntimeError, TypeError, ValueError):
+                        await gw.send_safety_block(
+                            binding.id,
+                            conv.channel_chat_id,
+                            reason=reason,
+                            stage="model_output",
+                            rule_id=rule_id,
+                        )
+                output_sent_to_user = True
+                _reset_idle_timer()
+            elif safety_result.text and binding:
+                text = safety_result.text
                 # Skip if this exact text was already sent via IPC send_message
                 if text in _ipc_sent_texts:
                     _ipc_sent_texts.discard(text)
@@ -613,7 +681,9 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
                 elif gw:
                     await gw.send_message(binding.id, conv.channel_chat_id, text)
                 output_sent_to_user = True
-            _reset_idle_timer()
+                _reset_idle_timer()
+            else:
+                _reset_idle_timer()
         if result.status == "success":
             # Send stream done immediately for web channel (don't wait for
             # _run_agent to return — the container stays alive until idle timeout).

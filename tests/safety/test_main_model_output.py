@@ -1,10 +1,15 @@
 """Unit tests for rolemesh.main._apply_model_output_safety.
 
-The helper exists so the MODEL_OUTPUT policy (what text replaces the
-reply on block vs. fail-close vs. rule-load outage) is reachable
-without the full `_on_output` closure scaffolding. These tests pin
-the exact substitution strings so a later refactor cannot silently
-downgrade the user-facing message for a block verdict.
+The helper exists so the MODEL_OUTPUT policy (what the user sees on
+block vs. fail-close vs. rule-load outage) is reachable without the
+full ``_on_output`` closure scaffolding. These tests pin the exact
+decision shape a later refactor cannot silently downgrade.
+
+The helper returns a ``ModelOutputSafetyResult`` with mutually-exclusive
+``text`` (deliver as normal assistant reply) and ``block`` (deliver
+through the dedicated safety-block channel); pre-rework the helper
+returned a plain string with the block reason substituted inline,
+which let blocks leak into the messages table posing as real replies.
 """
 
 from __future__ import annotations
@@ -27,10 +32,7 @@ class _NullSink:
 
 
 class _RaisingEngine:
-    """Stand-in for a SafetyEngine whose load_rules_for_coworker raises
-    (simulating DB unreachable) or whose run_orchestrator_pipeline raises
-    (simulating programmer error).
-    """
+    """Stand-in SafetyEngine for arranging each terminal verdict shape."""
 
     def __init__(
         self,
@@ -60,6 +62,12 @@ class _RaisingEngine:
         return self._pipeline_verdict
 
 
+async def _fail_if_called(
+    _ctx: Any, _rules: list[dict[str, Any]]
+) -> Verdict:
+    raise AssertionError("run_orchestrator_pipeline must not be called")
+
+
 class TestZeroCostPaths:
     @pytest.mark.asyncio
     async def test_none_engine_returns_text_unchanged(self) -> None:
@@ -71,13 +79,14 @@ class TestZeroCostPaths:
             conversation_id="conv",
             text="hello",
         )
-        assert out == "hello"
+        assert out.text == "hello"
+        assert out.block is None
 
     @pytest.mark.asyncio
     async def test_empty_text_bypasses_pipeline(self) -> None:
         # Empty text means nothing to scan; the engine (even if real)
-        # must not be touched. This is also what the caller relies on
-        # to avoid feeding "" into pii.regex in production.
+        # must not be touched. This is what the caller relies on to
+        # avoid feeding "" into pii.regex in production.
         called: list[str] = []
 
         class _WatchEngine:
@@ -99,7 +108,8 @@ class TestZeroCostPaths:
             conversation_id="conv",
             text="",
         )
-        assert out == ""
+        assert out.text == ""
+        assert out.block is None
         assert called == []
 
     @pytest.mark.asyncio
@@ -107,11 +117,6 @@ class TestZeroCostPaths:
         self,
     ) -> None:
         engine = _RaisingEngine(rules=[])
-
-        # If the pipeline is called with no rules, run_orchestrator_pipeline
-        # would short-circuit. But the helper is expected to short-circuit
-        # even earlier (no rules → skip pipeline entirely) to skip the
-        # SafetyContext construction cost. Sentinel below detects it.
         engine.run_orchestrator_pipeline = _fail_if_called  # type: ignore[assignment, method-assign]
 
         out = await _apply_model_output_safety(
@@ -122,13 +127,8 @@ class TestZeroCostPaths:
             conversation_id="conv",
             text="hi",
         )
-        assert out == "hi"
-
-
-async def _fail_if_called(
-    _ctx: Any, _rules: list[dict[str, Any]]
-) -> Verdict:
-    raise AssertionError("run_orchestrator_pipeline must not be called")
+        assert out.text == "hi"
+        assert out.block is None
 
 
 class TestRuleLoadFailureFailsOpen:
@@ -137,8 +137,7 @@ class TestRuleLoadFailureFailsOpen:
         # Rule load failure = fail-open (keep text). The container-side
         # pipeline is still running; this method is one of several
         # defense layers. Flipping fail-open to fail-close here would
-        # mean a DB blip replaces every agent reply with a safety
-        # placeholder — disproportionate to the actual threat.
+        # mean a DB blip replaces every agent reply — disproportionate.
         engine = _RaisingEngine(load_exc=RuntimeError("db down"))
         out = await _apply_model_output_safety(
             safety_engine=engine,  # type: ignore[arg-type]
@@ -148,12 +147,19 @@ class TestRuleLoadFailureFailsOpen:
             conversation_id="conv",
             text="original response",
         )
-        assert out == "original response"
+        assert out.text == "original response"
+        assert out.block is None
 
 
 class TestBlockVerdict:
     @pytest.mark.asyncio
-    async def test_block_with_reason_uses_reason_string(self) -> None:
+    async def test_block_with_reason_returns_block_not_text(self) -> None:
+        """A block verdict must route through the dedicated block path,
+        NOT substitute the assistant text. This is the whole point of
+        the refactor away from in-text substitution — blocks that
+        used to flow through ResultEvent now flow through
+        SafetyBlockEvent and never contaminate messages or metrics.
+        """
         rule = {
             "id": "r-b",
             "tenant_id": "t",
@@ -167,7 +173,8 @@ class TestBlockVerdict:
         engine = _RaisingEngine(
             rules=[rule],
             pipeline_verdict=Verdict(
-                action="block", reason="Blocked: detected PII.SSN"
+                action="block",
+                reason="Blocked: detected PII.SSN",
             ),
         )
         out = await _apply_model_output_safety(
@@ -178,7 +185,12 @@ class TestBlockVerdict:
             conversation_id="conv",
             text="my ssn is 123-45-6789",
         )
-        assert out == "Blocked: detected PII.SSN"
+        assert out.text is None
+        # Verdict doesn't carry rule_id at pipeline aggregate level; the
+        # per-rule audit lives in safety_decisions. UI gets stage from
+        # a separate arg in _on_output — so rule_id is None here by
+        # design, not oversight.
+        assert out.block == ("Blocked: detected PII.SSN", None)
 
     @pytest.mark.asyncio
     async def test_block_without_reason_uses_generic_placeholder(
@@ -206,17 +218,15 @@ class TestBlockVerdict:
             conversation_id="conv",
             text="something",
         )
-        assert out == "[Response blocked by safety policy]"
-
+        assert out.text is None
+        assert out.block == ("[Response blocked by safety policy]", None)
 
 class TestPipelineExceptionFailsClosed:
     @pytest.mark.asyncio
-    async def test_pipeline_exception_replaces_text(self) -> None:
-        # MODEL_OUTPUT is a control stage; a bug in a check that raises
-        # all the way up through pipeline_run must fail-closed —
-        # otherwise a check implementation error would silently let PII
-        # through. The placeholder is shown to the user so they know
-        # something was filtered (not a silent empty reply).
+    async def test_pipeline_exception_returns_block(self) -> None:
+        # MODEL_OUTPUT is a control stage; a check implementation bug
+        # that raises must fail-closed, delivered through the block
+        # channel (not as a silently-substituted string).
         rule = {
             "id": "r-x",
             "tenant_id": "t",
@@ -238,7 +248,8 @@ class TestPipelineExceptionFailsClosed:
             conversation_id="conv",
             text="original",
         )
-        assert out == "[Response blocked by safety policy]"
+        assert out.text is None
+        assert out.block == ("[Response blocked by safety policy]", None)
 
 
 class TestAllowPassesThrough:
@@ -265,13 +276,14 @@ class TestAllowPassesThrough:
             conversation_id="conv",
             text="clean response",
         )
-        assert out == "clean response"
+        assert out.text == "clean response"
+        assert out.block is None
 
 
 class TestRedactVerdict:
-    """MODEL_OUTPUT is one of the few stages where redact can actually
-    take effect — the orchestrator replaces the user-facing reply with
-    the cleaned text. This pins that contract.
+    """MODEL_OUTPUT is one of the few stages where redact takes effect
+    — the orchestrator replaces the user-facing reply with the cleaned
+    text. Redact is NOT a block, so it flows through the text channel.
     """
 
     @pytest.mark.asyncio
@@ -301,13 +313,13 @@ class TestRedactVerdict:
             conversation_id="conv",
             text="original with SSN 123-45-6789",
         )
-        assert out == "cleaned reply"
+        assert out.text == "cleaned reply"
+        assert out.block is None
 
     @pytest.mark.asyncio
     async def test_redact_without_text_falls_back_to_original(self) -> None:
         """Defensive — a misbehaving check returning redact with a
-        non-string text must not crash the reply path. Fall back to
-        original text and log."""
+        non-string text must not crash. Fall back to original text."""
         rule = {
             "id": "r-r",
             "tenant_id": "t",
@@ -333,7 +345,8 @@ class TestRedactVerdict:
             conversation_id="conv",
             text="untouched",
         )
-        assert out == "untouched"
+        assert out.text == "untouched"
+        assert out.block is None
 
 
 class TestWarnVerdict:
@@ -365,7 +378,8 @@ class TestWarnVerdict:
             conversation_id="conv",
             text="original reply",
         )
-        assert out == "original reply"
+        assert out.text == "original reply"
+        assert out.block is None
 
 
 class TestRequireApprovalVerdict:
@@ -373,8 +387,8 @@ class TestRequireApprovalVerdict:
     async def test_require_approval_treated_like_block(self) -> None:
         # P1.1 will handle the actual approval-request creation via
         # the audit ingestion path. From the user's perspective on
-        # MODEL_OUTPUT, the reply is suppressed with the verdict's
-        # reason (or the generic placeholder).
+        # MODEL_OUTPUT, the reply is suppressed via the block channel
+        # with the verdict's reason.
         rule = {
             "id": "r-ap",
             "tenant_id": "t",
@@ -400,17 +414,18 @@ class TestRequireApprovalVerdict:
             conversation_id="conv",
             text="sensitive answer",
         )
-        assert out == "needs human review"
+        assert out.text is None
+        assert out.block == ("needs human review", None)
 
 
 class TestWithRealEngineAndPiiRegex:
     """End-to-end using the real SafetyEngine + pii.regex check so a
-    refactor that drops MODEL_OUTPUT from pii.regex's stages or
-    breaks the orchestrator registry immediately trips a test.
+    refactor that drops MODEL_OUTPUT from pii.regex's stages or breaks
+    the orchestrator registry immediately trips a test.
     """
 
     @pytest.mark.asyncio
-    async def test_pii_in_text_produces_block_substitution(self) -> None:
+    async def test_pii_in_text_produces_block_channel(self) -> None:
         engine = SafetyEngine(audit_sink=_NullSink())
 
         async def _fake_load(
@@ -439,8 +454,12 @@ class TestWithRealEngineAndPiiRegex:
             conversation_id="conv",
             text="leaked 123-45-6789",
         )
-        assert "Blocked" in out
-        assert "PII.SSN" in out
+        assert out.text is None
+        assert out.block is not None
+        reason, rule_id = out.block
+        assert "Blocked" in reason
+        assert "PII.SSN" in reason
+        assert rule_id is None  # not exposed at pipeline-aggregate level
 
     @pytest.mark.asyncio
     async def test_clean_text_returns_unchanged(self) -> None:
@@ -472,4 +491,5 @@ class TestWithRealEngineAndPiiRegex:
             conversation_id="conv",
             text="just a friendly reply",
         )
-        assert out == "just a friendly reply"
+        assert out.text == "just a friendly reply"
+        assert out.block is None

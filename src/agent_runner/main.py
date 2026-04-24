@@ -36,6 +36,7 @@ from .backend import (
     ErrorEvent,
     ResultEvent,
     RunningEvent,
+    SafetyBlockEvent,
     SessionInitEvent,
     StoppedEvent,
     ToolUseEvent,
@@ -59,7 +60,7 @@ AGENT_BACKEND = os.environ.get("AGENT_BACKEND", "claude")
 
 @dataclass
 class ContainerOutput:
-    status: str  # "success" | "error" | "running" | "tool_use" | "stopped"
+    status: str  # "success" | "error" | "running" | "tool_use" | "stopped" | "safety_blocked"
     result: str | None
     new_session_id: str | None = None
     error: str | None = None
@@ -69,6 +70,14 @@ class ContainerOutput:
     # coming in the same run_prompt batch). Default True preserves legacy
     # single-reply semantics for status values that don't participate in
     # batched replies (running/tool_use/error/stopped).
+    #
+    # status="safety_blocked" is its own terminal status: the framework
+    # intercepted the turn (INPUT_PROMPT hook, PRE_TOOL_CALL hook, or
+    # orchestrator-side MODEL_OUTPUT pipeline). ``result`` carries the
+    # user-facing reason and ``metadata={"stage": ..., "rule_id": ...}``
+    # carries the structured payload. Orchestrator _on_output routes
+    # this to a dedicated WS frame without writing to the messages
+    # table — blocks are already audited in safety_decisions.
     is_final: bool = True
 
     def to_dict(self) -> dict[str, Any]:
@@ -223,6 +232,25 @@ async def run_query_loop(
             log(f"Session initialized: {session_id}")
         elif isinstance(event, CompactionEvent):
             log("Compaction event received")
+        elif isinstance(event, SafetyBlockEvent):
+            # Route through its own status so the orchestrator can skip
+            # the "store as assistant message" DB write and render the
+            # reason as a distinct UI bubble. ``result`` carries the
+            # human-readable reason (recorded in logs / Agent output
+            # telemetry) while metadata carries the structured fields
+            # the orchestrator matches on.
+            metadata: dict[str, Any] = {"stage": event.stage}
+            if event.rule_id is not None:
+                metadata["rule_id"] = event.rule_id
+            await publish_output(
+                js, job_id,
+                ContainerOutput(
+                    status="safety_blocked",
+                    result=event.reason,
+                    new_session_id=session_id,
+                    metadata=metadata,
+                ),
+            )
         elif isinstance(event, ErrorEvent):
             log(f"Backend error: {event.error}")
             await publish_output(

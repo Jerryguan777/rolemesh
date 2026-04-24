@@ -127,6 +127,31 @@ class WebNatsGateway:
             chunk.to_bytes(),
         )
 
+    async def send_safety_block(
+        self,
+        binding_id: str,
+        chat_id: str,
+        *,
+        reason: str,
+        stage: str,
+        rule_id: str | None = None,
+    ) -> None:
+        """Publish a safety-block notification on the stream subject.
+
+        Shares ``web.stream.*`` with text / done / status so the WS
+        handler receives it in order relative to those. ws.py forwards
+        it to the client as a distinct ``{"type":"safety_blocked"}``
+        frame that the frontend renders as its own bubble kind.
+        """
+        payload: dict[str, object] = {"reason": reason, "stage": stage}
+        if rule_id is not None:
+            payload["rule_id"] = rule_id
+        chunk = WebStreamChunk(type="safety_blocked", content=json.dumps(payload))
+        await self._transport.js.publish(
+            f"web.stream.{binding_id}.{chat_id}",
+            chunk.to_bytes(),
+        )
+
     # -- Lifecycle --------------------------------------------------------------
 
     async def start(self) -> None:
