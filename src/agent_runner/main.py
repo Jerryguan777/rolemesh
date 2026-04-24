@@ -239,6 +239,16 @@ async def run_query_loop(
             # human-readable reason (recorded in logs / Agent output
             # telemetry) while metadata carries the structured fields
             # the orchestrator matches on.
+            #
+            # Deliberately does NOT forward ``session_id``. Claude SDK's
+            # SessionInitEvent fires on SystemMessage(init) — before any
+            # user message is processed — but the session file is only
+            # persisted after a real turn completes. If we propagate the
+            # init-time SID to the orchestrator, next turn's ``--resume``
+            # hits "No conversation found" and the container exits 1,
+            # triggering the scheduler's retry loop indefinitely. Pi
+            # backend tracks session differently (session_file written
+            # eagerly) so this concern is Claude-specific.
             metadata: dict[str, Any] = {"stage": event.stage}
             if event.rule_id is not None:
                 metadata["rule_id"] = event.rule_id
@@ -247,7 +257,7 @@ async def run_query_loop(
                 ContainerOutput(
                     status="safety_blocked",
                     result=event.reason,
-                    new_session_id=session_id,
+                    new_session_id=None,
                     metadata=metadata,
                 ),
             )
