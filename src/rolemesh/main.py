@@ -3,8 +3,19 @@
 Multi-tenant architecture: OrchestratorState replaces module-level globals.
 Routing: binding_id -> conversation -> coworker.
 """
+# ruff: noqa: I001
+# Intentional import order: rolemesh.bootstrap MUST run first to
+# populate os.environ from .env before other rolemesh imports capture
+# module-level values. Disable ruff's import sorter for this file
+# only; semantics > stylistic ordering here.
 
 from __future__ import annotations
+
+# Side-effect import: runs load_env() so ``.env`` lands in os.environ
+# BEFORE core/config + peers capture module-level values at import
+# time. Must stay at the very top of rolemesh imports. See
+# ``rolemesh.bootstrap`` for why and how this is structured.
+import rolemesh.bootstrap  # noqa: F401
 
 import asyncio
 import contextlib
@@ -48,8 +59,10 @@ from rolemesh.container.scheduler import GroupQueue
 from rolemesh.core.config import (
     AGENT_BACKEND_DEFAULT,
     ASSISTANT_NAME,
+    CONTAINER_EGRESS_NETWORK_NAME,
     CONTAINER_NETWORK_NAME,
     CREDENTIAL_PROXY_PORT,
+    EGRESS_GATEWAY_CONTAINER_NAME,
     GLOBAL_MAX_CONTAINERS,
     IDLE_TIMEOUT,
     NATS_URL,
@@ -1094,26 +1107,110 @@ async def _recover_pending_messages() -> None:
 
 
 async def _ensure_container_system_running() -> None:
-    """Ensure the container runtime is running and clean up orphans.
+    """Prepare the container runtime and bridge networks.
 
-    Order matters:
-      1. get_runtime() + ensure_available() — dockerd version gate runs here
-      2. ensure_agent_network() — creates/verifies the isolated bridge with
-         icc=false. Must happen BEFORE the credential proxy starts so the
-         proxy's reachability probe has a network to attach to.
-      3. cleanup_orphans() — must run after the network exists; otherwise
-         orphan-removal logs cannot tell us anything useful about state.
+    Gateway launch used to live here too, but the gateway's first
+    startup step is a NATS request-reply for the rule snapshot — that
+    only gets a responder once ``start_responders`` runs later in
+    ``main()``. Launching the gateway this early produced a chicken-
+    and-egg: gateway crash-loops on ``NoRespondersError`` while the
+    orchestrator is still blocked on its readiness probe. Gateway
+    launch is now ``_launch_egress_gateway_once_ready`` and runs after
+    the responders are registered.
 
-    The post-proxy connectivity probe (verify_proxy_reachable) is called
-    separately from the main() startup sequence, not here — this function
-    runs before the credential proxy exists.
+    Order here is just:
+      1. get_runtime() + ensure_available() — dockerd version gate
+      2. ensure_agent_network() — creates the agent bridge with
+         ``Internal=true``; physically removes the default route.
+      3. ensure_egress_network() — creates the outbound bridge.
+      4. cleanup_orphans() — safe to run before the gateway exists;
+         operates only on containers we labeled.
+
+    Fail-closed throughout: any step raising makes the orchestrator
+    refuse to enter the ready state.
     """
     global _runtime
     _runtime = get_runtime()
     await _runtime.ensure_available()
     if hasattr(_runtime, "ensure_agent_network"):
         await _runtime.ensure_agent_network(CONTAINER_NETWORK_NAME)
+    # egress-net only exists to carry the gateway's outbound; if EC is
+    # turned off there's no gateway to attach, so skip the bridge too.
+    if CONTAINER_NETWORK_NAME and hasattr(_runtime, "ensure_egress_network"):
+        await _runtime.ensure_egress_network(CONTAINER_EGRESS_NETWORK_NAME)
+
     await _runtime.cleanup_orphans("rolemesh-")
+
+
+async def _launch_egress_gateway_once_ready() -> None:
+    """Start the egress-gateway container and wait for it to be ready.
+
+    Must be called AFTER ``start_responders`` has registered the NATS
+    rule-snapshot / identity-snapshot responders. The gateway's first
+    action on boot is a request-reply for the snapshot; without a
+    responder it fails-closed and Docker restart-loops the container.
+
+    Gated on:
+      * ``CONTAINER_NETWORK_NAME`` non-empty — operators disable EC
+        with ``CONTAINER_NETWORK_NAME=""`` (rollback mode).
+      * ``hasattr(_runtime, ...)`` — k8s runtime will grow its own
+        gateway pod primitive and should not use this path.
+    """
+    if (
+        CONTAINER_NETWORK_NAME
+        and hasattr(_runtime, "ensure_egress_network")
+        and hasattr(_runtime, "verify_egress_gateway_reachable")
+    ):
+        from rolemesh.container.runner import set_egress_gateway_dns_ip
+        from rolemesh.egress.launcher import launch_egress_gateway, wait_for_gateway_ready
+
+        # Access the aiodocker client directly via the Docker runtime's
+        # adapter surface. For the k8s backend we'll wrap this differently.
+        docker_client = _runtime._ensure_client()  # type: ignore[attr-defined]
+        await launch_egress_gateway(
+            docker_client,
+            agent_network=CONTAINER_NETWORK_NAME,
+            egress_network=CONTAINER_EGRESS_NETWORK_NAME,
+        )
+        await wait_for_gateway_ready(
+            docker_client,
+            agent_network=CONTAINER_NETWORK_NAME,
+            gateway_service_name=EGRESS_GATEWAY_CONTAINER_NAME,
+            reverse_proxy_port=CREDENTIAL_PROXY_PORT,
+        )
+
+        # Discover the gateway's bridge IP on the agent network and
+        # register it so runner.build_container_spec can pin it as
+        # each agent container's DNS resolver. Without this step the
+        # authoritative DNS resolver built in EC-2 never sees agent
+        # traffic — queries go through Docker's embedded resolver
+        # (127.0.0.11) which forwards to the host. See EC-2 code
+        # review P1 finding.
+        gateway_container = docker_client.containers.container(
+            EGRESS_GATEWAY_CONTAINER_NAME
+        )
+        gateway_info = await gateway_container.show()
+        gateway_ip = (
+            gateway_info.get("NetworkSettings", {})
+            .get("Networks", {})
+            .get(CONTAINER_NETWORK_NAME, {})
+            .get("IPAddress", "")
+        )
+        if gateway_ip:
+            set_egress_gateway_dns_ip(gateway_ip)
+        else:
+            # Gateway is reachable by name (we just verified /healthz)
+            # but doesn't expose an IPAddress on agent-net in inspect
+            # output. Shouldn't happen in practice with our topology;
+            # log as an error because it means agent DNS will silently
+            # fall back to the embedded resolver.
+            logger.error(
+                "Gateway healthy but its agent-net IP is missing from "
+                "inspect output — agents will fall back to Docker DNS "
+                "and the authoritative resolver will not see their queries",
+                gateway=EGRESS_GATEWAY_CONTAINER_NAME,
+                agent_network=CONTAINER_NETWORK_NAME,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -1163,14 +1260,21 @@ async def main() -> None:
 
     _queue = GroupQueue(transport=_transport, runtime=_runtime, orchestrator_state=_state)
 
+    # Host-side credential proxy: kept running for backward compatibility
+    # with operator tooling and so the `register_mcp_server` /
+    # `set_token_vault` wiring below has a sink to write to. Agents no
+    # longer reach this listener (the EC-1 agent bridge is Internal=true
+    # and agents resolve ``egress-gateway`` via Docker DNS instead), but
+    # the in-process dicts are still authoritative state that EC-2 will
+    # propagate into the gateway container. Leaving the host-side
+    # listener bound is the simplest compatibility shim during the PR-1
+    # → PR-2 transition; EC-2 removes this line entirely.
     proxy_runner = await start_credential_proxy(CREDENTIAL_PROXY_PORT, PROXY_BIND_HOST)
 
-    # R5.1-2: Connectivity self-check. If containers on the custom bridge
-    # cannot TCP-reach host.docker.internal:<PROXY_PORT> and get an HTTP
-    # response back, agents will silently fail all credentialed traffic.
-    # Fail closed — abort orchestrator startup.
-    if hasattr(_runtime, "verify_proxy_reachable"):
-        await _runtime.verify_proxy_reachable(CONTAINER_NETWORK_NAME, CREDENTIAL_PROXY_PORT)
+    # Gateway reachability is already enforced in
+    # _ensure_container_system_running() via wait_for_gateway_ready. No
+    # second probe is needed at this point — keeping one here would
+    # double the startup latency for no diagnostic gain.
 
     # Initialize TokenVault for per-user MCP token forwarding (OIDC mode only).
     # Note: this only sets the vault in THIS process. The WebUI runs in a
@@ -1335,6 +1439,24 @@ async def main() -> None:
 
     ipc_tasks = await _start_nats_ipc_subscriptions(_transport, ipc_deps)
 
+    # EC-2: serve the egress gateway's snapshot RPCs. The gateway asks
+    # for a rule snapshot at startup and the identity map on demand;
+    # without these responders the gateway fails closed (blocks every
+    # request) and agents on the internal bridge lose egress.
+    from rolemesh.egress.orch_glue import fetch_all_egress_rules, start_responders
+
+    egress_responder_subs = await start_responders(
+        _transport.nc,
+        state=_state,
+        rules_fetcher=fetch_all_egress_rules,
+    )
+
+    # Launch the egress gateway now that the snapshot responders are
+    # registered. Moved here from _ensure_container_system_running()
+    # because otherwise the gateway NATS-requests the snapshot before
+    # anyone is listening and crash-loops the container.
+    await _launch_egress_gateway_once_ready()
+
     _queue.set_process_messages_fn(_process_conversation_messages)
     _queue.set_on_queued(_emit_queued_status)
     _queue.set_on_container_starting(_emit_container_starting_status)
@@ -1347,6 +1469,10 @@ async def main() -> None:
         t.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await t
+
+    for sub in egress_responder_subs:
+        with contextlib.suppress(Exception):
+            await sub.unsubscribe()  # type: ignore[union-attr]
 
     approval_maintenance_stop.set()
     safety_maintenance_stop.set()

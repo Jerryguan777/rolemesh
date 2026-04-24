@@ -1,0 +1,85 @@
+# RoleMesh Egress Gateway Container
+#
+# EC-1 role:
+#   * Relocates the credential proxy's reverse-proxy half into its own
+#     container so agent containers on the Internal=true agent bridge
+#     can reach LLM / MCP endpoints through a single auditable hop.
+#   * Exposes /healthz on port 3001 for the orchestrator's readiness
+#     probe (see container/network.py:verify_egress_gateway_reachable).
+#
+# EC-2 will add:
+#   * HTTP CONNECT forward proxy on port 3128
+#   * Authoritative DNS resolver on port 53 (needs CAP_NET_BIND_SERVICE
+#     — added per-container at launch time, not baked into the image)
+#   * NATS client for Safety pipeline audit + rule hot-reload
+#
+# Build:
+#   docker build -f container/Dockerfile.egress-gateway \
+#       -t rolemesh-egress-gateway:latest .
+#
+# The build context MUST be the repo root so src/rolemesh/** paths resolve.
+
+FROM python:3.12-slim
+
+# Runtime deps (EC-2):
+#   aiohttp        — reverse proxy (credential injection for LLM/MCP)
+#   structlog      — structured logging
+#   dnslib         — pure-Python DNS wire format; EC-2 authoritative resolver
+#   nats-py        — rule.changed subscription, lifecycle events,
+#                    safety_events publish, identity-snapshot RPC
+RUN pip install --no-cache-dir \
+    aiohttp>=3.9 \
+    structlog>=24.0 \
+    dnslib>=0.9 \
+    nats-py>=2.9 \
+    pydantic>=2.0 \
+    python-dotenv>=1.0
+
+WORKDIR /app
+
+# Copy ONLY the rolemesh subtree the gateway imports. Keeping the
+# copy narrow matters for two reasons: (1) smaller image, (2) the
+# gateway image should not contain agent-side code (agent_runner,
+# pi) so accidental code reuse at runtime fails fast.
+COPY src/rolemesh/__init__.py                      ./rolemesh/__init__.py
+# bootstrap.py runs at process entry to load /app/.env into os.environ
+# before rolemesh.core.config captures module-level values.
+COPY src/rolemesh/bootstrap.py                      ./rolemesh/bootstrap.py
+COPY src/rolemesh/core/                            ./rolemesh/core/
+COPY src/rolemesh/security/credential_proxy.py     ./rolemesh/security/credential_proxy.py
+COPY src/rolemesh/egress/                          ./rolemesh/egress/
+# EC-3: the gateway's safety pipeline lazily imports
+# rolemesh.safety.checks.egress_domain_rule to produce the
+# gateway-adapter callable. Only the types + this one check file
+# are needed at runtime — the broader safety tree (Engine, Subscriber,
+# audit sinks) stays on the orchestrator side. We write stripped-down
+# __init__.py files rather than copying the real ones because the
+# real rolemesh/safety/__init__.py eagerly imports Engine / Subscriber
+# / loader, which would drag asyncpg + the full safety surface into
+# the gateway image.
+COPY src/rolemesh/safety/types.py                  ./rolemesh/safety/types.py
+COPY src/rolemesh/safety/errors.py                 ./rolemesh/safety/errors.py
+COPY src/rolemesh/safety/checks/egress_domain_rule.py ./rolemesh/safety/checks/egress_domain_rule.py
+
+RUN touch ./rolemesh/security/__init__.py \
+    && touch ./rolemesh/safety/__init__.py \
+    && touch ./rolemesh/safety/checks/__init__.py
+
+# Non-root user. 1001 to avoid collision with the agent image's UID 1000
+# — the two containers never share volumes, but keeping UIDs disjoint
+# makes `docker ps --format` output easier to audit.
+RUN useradd -m -u 1001 -s /bin/bash gateway \
+    && chown -R gateway:gateway /app
+USER gateway
+
+ENV PYTHONPATH=/app \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PYTHONUNBUFFERED=1
+
+# Orchestrator owns liveness via verify_egress_gateway_reachable; a
+# separate Docker healthcheck would just add a shell per interval for no
+# value and mask real failures behind "healthy".
+HEALTHCHECK NONE
+
+ENTRYPOINT ["python", "-m", "rolemesh.egress.gateway"]

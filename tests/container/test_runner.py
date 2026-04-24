@@ -154,10 +154,135 @@ class TestBuildContainerSpec:
         assert "CLAUDE_CODE_OAUTH_TOKEN" in spec.env
 
     def test_spec_env_has_nats_url(self) -> None:
+        """EC-1 removed the localhost→host-gateway substitution. NATS_URL
+        is passed through as-is; operators set it to the right value for
+        the Internal=true agent bridge (typically attaching NATS to the
+        bridge and using its service name).
+        """
         with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
             spec = build_container_spec([], "c", "j")
         assert "NATS_URL" in spec.env
-        assert "host.docker.internal" in spec.env["NATS_URL"]
+
+    def test_spec_env_routes_llm_through_egress_gateway(self) -> None:
+        """EC-1: ANTHROPIC_BASE_URL / OPENAI_BASE_URL point at the gateway
+        by service name, never at host.docker.internal."""
+        with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
+            spec = build_container_spec([], "c", "j")
+        assert "egress-gateway" in spec.env["ANTHROPIC_BASE_URL"]
+        assert "egress-gateway" in spec.env["OPENAI_BASE_URL"]
+        # Regression: the old host.docker.internal escape hatch is gone.
+        assert "host.docker.internal" not in spec.env["ANTHROPIC_BASE_URL"]
+
+    def test_spec_env_injects_http_proxy(self) -> None:
+        """EC-1: standard proxy env is set on every agent container so
+        any HTTP client library routes through the gateway without
+        per-library configuration."""
+        with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
+            spec = build_container_spec([], "c", "j")
+        assert spec.env["HTTP_PROXY"].startswith("http://egress-gateway:")
+        assert spec.env["HTTPS_PROXY"].startswith("http://egress-gateway:")
+        # NO_PROXY must carve out the gateway service name itself so
+        # calls to the reverse-proxy (/proxy/anthropic/...) do not
+        # double-proxy through the forward proxy.
+        no_proxy = spec.env["NO_PROXY"].split(",")
+        assert "egress-gateway" in no_proxy
+        assert "127.0.0.1" in no_proxy
+
+    def test_spec_extra_hosts_drops_host_gateway(self) -> None:
+        """EC-1 red line: host-gateway is the old escape path. With the
+        agent bridge Internal=true, keeping it wouldn't work anyway, but
+        removing it makes accidental re-adds visible in code review."""
+        with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
+            spec = build_container_spec([], "c", "j")
+        assert "host.docker.internal" not in spec.extra_hosts
+        # Metadata blackhole entries are orthogonal — keep asserting
+        # those so we don't accidentally drop them together.
+        assert spec.extra_hosts["169.254.169.254"] == "127.0.0.1"
+        assert spec.extra_hosts["metadata.google.internal"] == "127.0.0.1"
+
+    def test_spec_dns_pinned_to_registered_gateway_ip(self) -> None:
+        """EC-2 P1 regression: build_container_spec must copy the
+        registered egress gateway IP into ContainerSpec.dns so agent
+        containers actually use the authoritative resolver. Pre-fix
+        the field didn't exist and Docker fell back to 127.0.0.11 —
+        the DNS exfil protection was dead code."""
+        from rolemesh.container import runner
+
+        runner.set_egress_gateway_dns_ip("172.22.0.2")
+        try:
+            with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
+                spec = build_container_spec([], "c", "j")
+            assert spec.dns == ["172.22.0.2"], (
+                f"agent spec must pin gateway IP as DNS; got {spec.dns!r}"
+            )
+        finally:
+            runner.set_egress_gateway_dns_ip(None)
+
+    def test_rollback_mode_restores_pre_ec_routing(self) -> None:
+        """``CONTAINER_NETWORK_NAME=""`` is documented as a rollback
+        switch. Pre-Path-C it was half-finished — EC-1 env still
+        pointed agents at ``egress-gateway`` which doesn't exist on
+        the default bridge. Path C completes the rollback:
+
+          * ANTHROPIC_BASE_URL / OPENAI_BASE_URL go to
+            ``host.docker.internal:3001`` via host-gateway
+          * No HTTP_PROXY / HTTPS_PROXY / NO_PROXY env
+          * NATS_URL ``localhost`` substituted for ``host.docker.internal``
+          * ExtraHosts includes ``host.docker.internal:host-gateway``
+            (Linux) so the above URLs actually resolve
+
+        Pin the full rollback shape here so regressing this path shows
+        up as a single-line test failure rather than a mysterious
+        "agent can't reach LLM after toggling the switch".
+        """
+        from rolemesh.container import runner
+
+        with (
+            patch.object(runner, "CONTAINER_NETWORK_NAME", ""),
+            patch.object(runner, "NATS_URL", "nats://localhost:4222"),
+            patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"),
+        ):
+            spec = build_container_spec([], "c", "j")
+
+        # LLM base URLs: host-gateway, NOT egress-gateway.
+        assert "host.docker.internal" in spec.env["ANTHROPIC_BASE_URL"]
+        assert "egress-gateway" not in spec.env["ANTHROPIC_BASE_URL"]
+        assert "host.docker.internal" in spec.env["OPENAI_BASE_URL"]
+
+        # Forward-proxy env must NOT be injected — no gateway exists.
+        assert "HTTP_PROXY" not in spec.env
+        assert "HTTPS_PROXY" not in spec.env
+        assert "NO_PROXY" not in spec.env
+
+        # NATS substitution restored so localhost reaches host.
+        assert spec.env["NATS_URL"] == "nats://host.docker.internal:4222"
+
+        # ExtraHosts has host-gateway (Linux — empty on mac in CI, but
+        # the metadata blackhole is always there; assert on Linux only).
+        import platform
+        if platform.system() == "Linux":
+            assert spec.extra_hosts.get("host.docker.internal") == "host-gateway"
+
+    def test_spec_dns_empty_when_gateway_ip_unregistered(self) -> None:
+        """Without the registered IP, build_container_spec falls back
+        to an empty Dns list (Docker keeps its embedded resolver). A
+        structured WARN tells operators this gap is present."""
+        from rolemesh.container import runner
+
+        runner.set_egress_gateway_dns_ip(None)
+        with patch("rolemesh.container.runner.logger") as mock_logger, \
+             patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
+            spec = build_container_spec([], "c", "j")
+        assert spec.dns == []
+        # WARN fires because CONTAINER_NETWORK_NAME is set by default
+        # but the gateway IP isn't.
+        warn_calls = [
+            call for call in mock_logger.warning.call_args_list
+            if "egress gateway DNS IP" in str(call)
+            or "DNS exfil" in str(call)
+            or "embedded resolver" in str(call)
+        ]
+        assert warn_calls, "missing gateway-IP warning was not logged"
 
 
 class TestBackwardCompatAliases:

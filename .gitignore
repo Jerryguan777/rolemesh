@@ -16,6 +16,7 @@ store/
 .env
 .env.bak.*
 .playwright-mcp/
+.claude/
 STEPS.md
 plan_*.md
 docs/

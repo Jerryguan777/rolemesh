@@ -33,6 +33,8 @@ from rolemesh.core.config import (
     CONTAINER_PIDS_LIMIT,
     CREDENTIAL_PROXY_PORT,
     DATA_DIR,
+    EGRESS_GATEWAY_CONTAINER_NAME,
+    EGRESS_GATEWAY_FORWARD_PORT,
     NATS_URL,
     PROJECT_ROOT,
     TIMEZONE,
@@ -297,6 +299,50 @@ def _default_ulimits() -> list[dict[str, object]]:
     return [{"Name": "nofile", "Soft": 1024, "Hard": 2048}]
 
 
+# ---------------------------------------------------------------------------
+# Egress gateway DNS IP (set by orchestrator startup).
+#
+# build_container_spec runs per-agent-spawn and needs the gateway's
+# bridge IP to pin as the agent's DNS resolver. The IP isn't known until
+# ``launch_egress_gateway`` completes and we can docker-inspect the
+# gateway container, and it is stable for the orchestrator's lifetime
+# (the gateway container outlives any single agent). A module-level
+# holder set by ``set_egress_gateway_dns_ip`` threads the value through
+# without forcing every call site of build_container_spec to accept a
+# new positional argument.
+#
+# Unset → build_container_spec falls back to Docker's embedded resolver
+# and WARNs. This preserves the pre-EC-2 behaviour during tests /
+# development where no gateway is launched, while surfacing the gap in
+# structured logs so an unconfigured production deployment is audible
+# rather than silent.
+# ---------------------------------------------------------------------------
+
+_EGRESS_GATEWAY_DNS_IP: str | None = None
+
+
+def set_egress_gateway_dns_ip(ip: str | None) -> None:
+    """Register the gateway's agent-net IP so agent specs pin it as DNS.
+
+    Called by ``main._ensure_container_system_running`` right after
+    ``launch_egress_gateway`` / ``wait_for_gateway_ready`` — by that
+    point the gateway has a stable IP on the agent bridge and
+    ``docker inspect`` returns it.
+
+    Setting ``None`` (explicit deregistration) resets to the fallback
+    path; useful in tests that tear down the topology between cases.
+    """
+    global _EGRESS_GATEWAY_DNS_IP
+    _EGRESS_GATEWAY_DNS_IP = ip
+    if ip:
+        logger.info("egress gateway DNS IP registered", ip=ip)
+
+
+def get_egress_gateway_dns_ip() -> str | None:
+    """Read-only accessor for the registered gateway DNS IP."""
+    return _EGRESS_GATEWAY_DNS_IP
+
+
 # Cloud-instance-metadata services. Resolving these to 127.0.0.1 inside the
 # container means a compromised agent that tries to exfil IAM creds via
 # SSRF-style metadata access gets connection-refused instead of real
@@ -311,9 +357,26 @@ _METADATA_BLACKHOLE: dict[str, str] = {
 
 
 def _build_extra_hosts() -> dict[str, str]:
-    """Merge host-gateway (Linux) with metadata blackhole entries."""
-    hosts = dict(get_host_gateway_extra_hosts())
-    hosts.update(_METADATA_BLACKHOLE)
+    """Return /etc/hosts entries for the agent container.
+
+    EC enabled (``CONTAINER_NETWORK_NAME`` non-empty):
+      Agent bridge is ``Internal=true`` and the gateway is reached by
+      service name via Docker embedded DNS — ``host.docker.internal``
+      isn't needed (and wouldn't route there anyway). Only the
+      metadata-service blackhole entries remain.
+
+    EC off (rollback):
+      Reinstate ``host.docker.internal:host-gateway`` so agents on the
+      default bridge can reach the host-side credential proxy the way
+      they did pre-EC-1. Metadata blackhole still applies.
+    """
+    hosts: dict[str, str] = dict(_METADATA_BLACKHOLE)
+    if not CONTAINER_NETWORK_NAME:
+        # Pre-EC / rollback: restore the host-gateway ExtraHosts entry
+        # that the pre-EC-1 orchestrator relied on so
+        # ``http://host.docker.internal:3001`` reaches the host-side
+        # start_credential_proxy.
+        hosts.update(get_host_gateway_extra_hosts())
     return hosts
 
 
@@ -374,9 +437,46 @@ def build_container_spec(
     Merge order for resource limits: global default ← coworker override ← clamp to max.
     """
     image = backend_config.image if backend_config else CONTAINER_IMAGE
-    nats_url = NATS_URL.replace("localhost", CONTAINER_HOST_GATEWAY)
 
-    proxy_base = f"http://{CONTAINER_HOST_GATEWAY}:{CREDENTIAL_PROXY_PORT}"
+    # Branch on whether EC is active. The whole env block flips
+    # between EC and rollback modes:
+    #
+    #   EC enabled — the agent is on the Internal=true bridge and
+    #     reaches the gateway by service name. NATS_URL is passed
+    #     through as-is (operator ensures NATS is reachable on the
+    #     bridge; documented in deployment.md). Proxy env vars point
+    #     every HTTP client at the forward proxy.
+    #
+    #   EC off — pre-EC-1 behaviour. NATS_URL's ``localhost`` is
+    #     substituted for host-gateway so agents on Docker's default
+    #     bridge can reach the NATS process on the host. ANTHROPIC /
+    #     OPENAI base URLs point at the host-side credential_proxy via
+    #     host-gateway. No HTTP(S)_PROXY env is injected — there is no
+    #     forward proxy.
+    if CONTAINER_NETWORK_NAME:
+        # Agent bridge is Internal=true — no route to the host. NATS must
+        # be reachable by a name that resolves on agent-net. In local dev
+        # that's the ``nats`` alias we attach to the nats container; in
+        # production the operator puts NATS on the bridge directly. The
+        # orchestrator itself still uses the .env-configured URL (usually
+        # localhost:4222), so rewrite here rather than in the .env.
+        nats_url = NATS_URL.replace("://localhost:", "://nats:").replace(
+            "://127.0.0.1:", "://nats:"
+        )
+        proxy_base = f"http://{EGRESS_GATEWAY_CONTAINER_NAME}:{CREDENTIAL_PROXY_PORT}"
+        forward_proxy_url = (
+            f"http://{EGRESS_GATEWAY_CONTAINER_NAME}:{EGRESS_GATEWAY_FORWARD_PORT}"
+        )
+        proxy_env: dict[str, str] = {
+            "HTTP_PROXY": forward_proxy_url,
+            "HTTPS_PROXY": forward_proxy_url,
+            "NO_PROXY": f"{EGRESS_GATEWAY_CONTAINER_NAME},localhost,127.0.0.1",
+        }
+    else:
+        # Rollback: emulate pre-EC-1 routing.
+        nats_url = NATS_URL.replace("localhost", CONTAINER_HOST_GATEWAY)
+        proxy_base = f"http://{CONTAINER_HOST_GATEWAY}:{CREDENTIAL_PROXY_PORT}"
+        proxy_env = {}
 
     env: dict[str, str] = {
         "TZ": TIMEZONE,
@@ -392,6 +492,7 @@ def build_container_spec(
         # the Claude backend fails its 30s initialize handshake.
         # Pi backend ignores this env, so shipping it unconditionally is safe.
         "CLAUDE_CONFIG_DIR": "/home/agent/.claude",
+        **proxy_env,
     }
 
     # Mirror the host's auth method with a placeholder value.
@@ -463,6 +564,28 @@ def build_container_spec(
     # the whole point, and Docker itself will reject an unregistered runtime.
     oci_runtime = (cfg.runtime if cfg and cfg.runtime else CONTAINER_OCI_RUNTIME)
 
+    # EC-2: pin the egress gateway as DNS so every agent DNS query
+    # flows through the authoritative resolver. Without this the
+    # dns_resolver.py module is dead code — agents keep resolving via
+    # Docker's embedded DNS (127.0.0.11) which forwards to the host
+    # resolver and the DNS exfil protection never runs. See the P1
+    # finding in the EC-2 code review.
+    dns_servers: list[str] = []
+    if CONTAINER_NETWORK_NAME and _EGRESS_GATEWAY_DNS_IP:
+        dns_servers = [_EGRESS_GATEWAY_DNS_IP]
+    elif CONTAINER_NETWORK_NAME:
+        # Custom bridge configured but gateway IP wasn't registered —
+        # typically means the orchestrator forgot to call
+        # ``set_egress_gateway_dns_ip`` after launching the gateway, or
+        # the gateway launch was skipped (tests). Log loudly so this
+        # gap isn't silent in production.
+        logger.warning(
+            "No egress gateway DNS IP registered — agent will use Docker's "
+            "default resolver; DNS exfil protection is inactive",
+            coworker=coworker_name,
+            container_name=container_name,
+        )
+
     return ContainerSpec(
         name=container_name,
         image=image,
@@ -477,6 +600,7 @@ def build_container_spec(
         readonly_rootfs=True,
         tmpfs=_default_tmpfs(run_uid, run_gid),
         pids_limit=CONTAINER_PIDS_LIMIT,
+        dns=dns_servers,
         ulimits=_default_ulimits(),
         network_name=CONTAINER_NETWORK_NAME or None,
         runtime=oci_runtime,

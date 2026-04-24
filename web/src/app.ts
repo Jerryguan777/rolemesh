@@ -107,36 +107,6 @@ export class RmApp extends LitElement {
     });
   }
 
-  private navTo(route: Route): void {
-    const map: Record<Route, string> = {
-      'chat': '',
-      'admin-safety-rules': '#/admin/safety/rules',
-      'admin-safety-decisions': '#/admin/safety/decisions',
-    };
-    location.hash = map[route];
-  }
-
-  private renderTopNav() {
-    const item = (r: Route, label: string) => {
-      const active = this.route === r;
-      const cls = active
-        ? 'px-3 py-1 border-b-2 border-blue-500 text-sm font-medium'
-        : 'px-3 py-1 text-sm text-gray-600 hover:text-gray-900 dark:hover:text-gray-100';
-      return html`
-        <button class=${cls} @click=${() => this.navTo(r)}>${label}</button>
-      `;
-    };
-    return html`
-      <nav
-        class="flex gap-2 border-b px-4 py-2 bg-surface-0 dark:bg-d-surface-0"
-      >
-        ${item('chat', 'Chat')}
-        ${item('admin-safety-rules', 'Safety rules')}
-        ${item('admin-safety-decisions', 'Safety decisions')}
-      </nav>
-    `;
-  }
-
   private renderRouted() {
     switch (this.route) {
       case 'admin-safety-rules':
@@ -157,7 +127,6 @@ export class RmApp extends LitElement {
     }
     return html`
       <div class="h-full flex flex-col bg-surface-0 dark:bg-d-surface-0">
-        ${this.renderTopNav()}
         <div class="flex-1 min-h-0 overflow-auto">${this.renderRouted()}</div>
       </div>
     `;

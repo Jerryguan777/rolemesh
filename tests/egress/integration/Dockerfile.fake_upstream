@@ -1,0 +1,12 @@
+# Fake upstream image for egress integration tests.
+#
+# Bakes aiohttp in so we don't pip-install at every topology startup
+# — that saves ~5s per session and dodges flakiness from PyPI.
+
+FROM python:3.12-slim
+
+RUN pip install --no-cache-dir aiohttp>=3.9
+
+COPY fake_upstream.py /fake_upstream.py
+
+ENTRYPOINT ["python", "/fake_upstream.py"]

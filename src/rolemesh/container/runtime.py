@@ -76,6 +76,14 @@ class ContainerSpec:
     # production runs should set this to a custom bridge with enable_icc=false.
     network_name: str | None = None
 
+    # Hardening — explicit DNS servers. When set, Docker overrides the
+    # default embedded resolver (127.0.0.11) with these IPs. EC-2
+    # points agent containers at the egress gateway's authoritative
+    # resolver so DNS exfil attempts go through the Safety pipeline.
+    # An empty list keeps the default — appropriate for the gateway
+    # container itself and any non-agent container.
+    dns: list[str] = field(default_factory=list)
+
     # Hardening — OCI runtime selection: "runc" (default) | "runsc" (gVisor).
     # None means "let Docker pick its default runtime", which is backward-
     # compatible with existing deployments that have not registered runsc.

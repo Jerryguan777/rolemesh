@@ -402,6 +402,10 @@ export class SafetyRulesPage extends LitElement {
   override render() {
     return html`
       <div class="p-6 max-w-5xl mx-auto">
+        <a href="#" class="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-gray-900 dark:hover:text-gray-100 mb-3">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>
+          Back to chat
+        </a>
         <div class="flex items-center justify-between mb-4">
           <h2 class="text-xl font-semibold">Safety rules</h2>
           <div class="flex gap-2">

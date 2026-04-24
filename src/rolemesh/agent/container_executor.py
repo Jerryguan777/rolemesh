@@ -26,9 +26,11 @@ from rolemesh.container.runner import (
 from rolemesh.container.runtime import CONTAINER_HOST_GATEWAY
 from rolemesh.core.config import (
     CONTAINER_MAX_OUTPUT_SIZE,
+    CONTAINER_NETWORK_NAME,
     CONTAINER_TIMEOUT,
     CREDENTIAL_PROXY_PORT,
     DATA_DIR,
+    EGRESS_GATEWAY_CONTAINER_NAME,
     IDLE_TIMEOUT,
     MCP_PROXY_PREFIX,
 )
@@ -166,13 +168,23 @@ class ContainerAgentExecutor:
         logs_dir = coworker_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
 
-        # Build MCP server specs from coworker tools config
+        # Build MCP server specs from coworker tools config.
+        # proxy_host branches on EC: egress-gateway service name when
+        # EC is active, host.docker.internal for the pre-EC rollback
+        # path — matches build_container_spec's env routing so a
+        # coworker's MCP proxy URL hits the same endpoint agents use
+        # for LLM calls.
+        mcp_proxy_host = (
+            EGRESS_GATEWAY_CONTAINER_NAME
+            if CONTAINER_NETWORK_NAME
+            else CONTAINER_HOST_GATEWAY
+        )
         mcp_specs: list[McpServerSpec] | None = None
         if coworker.tools:
             mcp_specs = [
                 rewrite_mcp_url_for_container(
                     tool_cfg,
-                    proxy_host=CONTAINER_HOST_GATEWAY,
+                    proxy_host=mcp_proxy_host,
                     proxy_port=CREDENTIAL_PROXY_PORT,
                     proxy_prefix=MCP_PROXY_PREFIX,
                 )
@@ -303,6 +315,23 @@ class ContainerAgentExecutor:
         handle = await self._runtime.run(spec)
         on_process(container_name, job_id)
 
+        # EC-2: publish agent-started lifecycle event so the egress
+        # gateway can map this container's bridge IP to its identity.
+        # Wrapped in ``try`` because lifecycle publish is best-effort —
+        # the gateway snapshots its identity map on its own schedule
+        # and a missed event only widens the unknown-IP window briefly.
+        with contextlib.suppress(Exception):
+            await _publish_agent_started(
+                runtime=self._runtime,
+                transport=self._transport,
+                container_name=container_name,
+                tenant_id=tenant_id,
+                coworker_id=inp.coworker_id,
+                user_id=inp.user_id,
+                conversation_id=inp.conversation_id,
+                job_id=job_id,
+            )
+
         stderr_buf = ""
         stderr_truncated = False
         new_session_id: str | None = None
@@ -411,6 +440,17 @@ class ContainerAgentExecutor:
 
         # Wait for container to exit
         code = await handle.wait()
+
+        # EC-2: publish agent-stopped so the gateway's identity map
+        # drops this container. Idempotent on the gateway side; a
+        # missed publish widens the stale-IP window until the next
+        # identity snapshot.
+        with contextlib.suppress(Exception):
+            from rolemesh.egress.orch_glue import publish_lifecycle_stopped
+
+            await publish_lifecycle_stopped(
+                self._transport.nc, container_name=container_name
+            )
 
         # Cancel the results subscription and readers
         if results_sub is not None:
@@ -547,3 +587,52 @@ class ContainerAgentExecutor:
             result=None,
             new_session_id=new_session_id,
         )
+
+
+async def _publish_agent_started(
+    *,
+    runtime: ContainerRuntime,
+    transport: NatsTransport,
+    container_name: str,
+    tenant_id: str,
+    coworker_id: str,
+    user_id: str,
+    conversation_id: str,
+    job_id: str,
+) -> None:
+    """Inspect the container for its agent-net IP and emit a started event.
+
+    Fails quietly on any error — lifecycle publish is best-effort from
+    the orchestrator's perspective. A missed event widens the gateway's
+    unknown-source-IP window until the next snapshot, which is a
+    brief-block failure mode, not a cross-tenant leak.
+    """
+    ensure_client = getattr(runtime, "_ensure_client", None)
+    if ensure_client is None:
+        return
+    try:
+        client = ensure_client()
+        info = await client.containers.container(container_name).show()
+    except Exception:  # noqa: BLE001 — publish is optional
+        return
+
+    network_settings = info.get("NetworkSettings", {}) or {}
+    networks = network_settings.get("Networks", {}) or {}
+    network_info = networks.get(CONTAINER_NETWORK_NAME, {}) or {}
+    ip = network_info.get("IPAddress", "")
+    if not ip:
+        return
+
+    from rolemesh.egress.orch_glue import publish_lifecycle_started
+
+    await publish_lifecycle_started(
+        transport.nc,
+        container_name=container_name,
+        ip=ip,
+        tenant_id=tenant_id,
+        coworker_id=coworker_id,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        job_id=job_id,
+    )
+

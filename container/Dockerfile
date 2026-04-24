@@ -26,11 +26,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python agent SDK (bundles Claude Code CLI) and Pi backend dependencies
+# Install Python agent SDK (bundles Claude Code CLI) and Pi backend dependencies.
+# ``structlog`` is needed by the rolemesh.core.logger shim that the safety
+# loader + hook handler imports at module load — without it, agent_runner
+# crashes at boot with ``No module named 'structlog'``.
 RUN pip install --no-cache-dir \
     claude-agent-sdk croniter nats-py \
     anthropic openai google-genai boto3 httpx mcp \
-    partial-json-parser pyyaml filelock Pillow mistune wcwidth
+    partial-json-parser pyyaml filelock Pillow mistune wcwidth \
+    structlog
 
 # Create app directory
 WORKDIR /app
@@ -42,7 +46,37 @@ COPY src/agent_runner/ ./agent_runner/
 COPY src/pi/ ./pi/
 COPY src/rolemesh/ipc/protocol.py ./rolemesh/ipc/protocol.py
 COPY src/rolemesh/auth/permissions.py ./rolemesh/auth/permissions.py
-RUN touch ./rolemesh/__init__.py ./rolemesh/ipc/__init__.py ./rolemesh/auth/__init__.py
+
+# rolemesh.safety subset needed by agent_runner's container-side hook
+# chain + tool_reversibility helper. The orchestrator-only modules
+# (audit.py, engine.py, subscriber.py, maintenance.py, rpc_server.py,
+# the slow checks, egress_domain_rule) are intentionally NOT copied —
+# they import asyncpg / rolemesh.db / approval / ML libraries that
+# have no business in the agent image. We ship a stub __init__.py
+# rather than the real one because the real __init__ eagerly imports
+# audit + engine + loader's pg path and would fail at container
+# startup.
+COPY src/rolemesh/core/logger.py ./rolemesh/core/logger.py
+COPY src/rolemesh/safety/types.py ./rolemesh/safety/types.py
+COPY src/rolemesh/safety/errors.py ./rolemesh/safety/errors.py
+COPY src/rolemesh/safety/loader.py ./rolemesh/safety/loader.py
+COPY src/rolemesh/safety/pipeline_core.py ./rolemesh/safety/pipeline_core.py
+COPY src/rolemesh/safety/rpc_codec.py ./rolemesh/safety/rpc_codec.py
+COPY src/rolemesh/safety/registry.py ./rolemesh/safety/registry.py
+COPY src/rolemesh/safety/tool_reversibility.py ./rolemesh/safety/tool_reversibility.py
+# audit.py is safe to ship to agents: it holds the stateless
+# compute_context_digest/summarize_context helpers pipeline_core
+# imports. ``DbAuditSink`` is in this file too but lazy-imports pg
+# inside ``.write`` — the agent container never instantiates it, so
+# the lazy path never fires.
+COPY src/rolemesh/safety/audit.py ./rolemesh/safety/audit.py
+COPY src/rolemesh/safety/checks/pii_regex.py ./rolemesh/safety/checks/pii_regex.py
+COPY src/rolemesh/safety/checks/domain_allowlist.py ./rolemesh/safety/checks/domain_allowlist.py
+
+RUN touch ./rolemesh/__init__.py ./rolemesh/ipc/__init__.py ./rolemesh/auth/__init__.py \
+    && touch ./rolemesh/core/__init__.py \
+    && touch ./rolemesh/safety/__init__.py \
+    && touch ./rolemesh/safety/checks/__init__.py
 
 # Create workspace directories (no IPC dirs needed — all IPC goes through NATS)
 RUN mkdir -p /workspace/group /workspace/global /workspace/extra
