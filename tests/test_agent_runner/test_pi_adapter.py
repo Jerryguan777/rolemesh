@@ -87,18 +87,31 @@ class TestRoleMeshAgentTool:
 
 
 class TestCreateRoleMeshTools:
-    def test_creates_all_tools(self) -> None:
-        # Adapter must produce exactly one AgentTool per TOOL_DEFINITIONS
-        # entry; the spec's "seven tools" count was extended when
-        # submit_proposal landed, so assert against the live definitions
-        # rather than a hardcoded number.
+    def test_creates_all_tools_when_send_message_enabled(self) -> None:
+        # With register_send_message=True the adapter must produce exactly
+        # one AgentTool per TOOL_DEFINITIONS entry. The "seven tools"
+        # count was extended when submit_proposal landed, so we assert
+        # against the live definitions rather than a hardcoded number.
+        ctx = _make_ctx()
+        tools = create_rolemesh_tools(ctx, register_send_message=True)
+        assert len(tools) == len(TOOL_DEFINITIONS)
+
+    def test_default_omits_send_message(self) -> None:
+        # Commit 2e63ca7 made send_message conditional: by default
+        # (interactive containers) the tool is NOT exposed, because
+        # Claude/Pi was misusing it as the reply channel and dropping
+        # real assistant text. Pin that contract here so a future
+        # refactor doesn't accidentally flip the default back to "always
+        # register".
         ctx = _make_ctx()
         tools = create_rolemesh_tools(ctx)
-        assert len(tools) == len(TOOL_DEFINITIONS)
+        tool_names = {t.name for t in tools}
+        assert "send_message" not in tool_names
+        assert len(tools) == len(TOOL_DEFINITIONS) - 1
 
     def test_tool_names_match_definitions(self) -> None:
         ctx = _make_ctx()
-        tools = create_rolemesh_tools(ctx)
+        tools = create_rolemesh_tools(ctx, register_send_message=True)
         tool_names = {t.name for t in tools}
         expected = {d["name"] for d in TOOL_DEFINITIONS}
         assert tool_names == expected

@@ -134,6 +134,9 @@ def init_data() -> Any:
         system_prompt: str | None = None
         mcp_servers: list[Any] | None = None
         user_id: str | None = None
+        # Required by claude_backend.start() to gate send_message tool
+        # registration (see commit 2e63ca7).
+        is_scheduled_task: bool = False
 
     return _Init()
 
@@ -156,7 +159,7 @@ def _make_backend(
     monkeypatch.setattr(
         claude_backend,
         "create_rolemesh_mcp_server",
-        lambda _ctx: object(),
+        lambda ctx, **kwargs: object(),
         raising=False,
     )
 

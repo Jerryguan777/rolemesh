@@ -59,6 +59,7 @@ class _RecordingHookMatcher:
 
 claude_backend.HookMatcher = _RecordingHookMatcher  # type: ignore[assignment]
 
+from agent_runner.backend import SafetyBlockEvent  # noqa: E402
 from agent_runner.hooks import (  # noqa: E402
     CompactionEvent,
     HookRegistry,
@@ -440,8 +441,12 @@ async def test_user_prompt_submit_block_pi() -> None:
 
     result = await backend._apply_user_prompt_hook("FORBIDDEN")
     assert result is None
+    # Commit a353381 made block surface as a first-class SafetyBlockEvent
+    # rather than masquerading as a ResultEvent (assistant-text channel).
     assert len(emitted) == 1
-    assert "prompt forbidden" in emitted[0].text
+    assert isinstance(emitted[0], SafetyBlockEvent)
+    assert emitted[0].stage == "input_prompt"
+    assert "prompt forbidden" in emitted[0].reason
 
 
 async def test_user_prompt_submit_allow_pi_returns_text_unchanged() -> None:
