@@ -921,6 +921,9 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     await _enable_rls_on(conn, "approval_audit_log")  # D1 canary
     await _enable_rls_on(conn, "approval_requests")    # D2
     await _enable_rls_on(conn, "approval_policies")    # D3
+    await _enable_rls_on(conn, "safety_rules")         # D4 (safety triplet)
+    await _enable_rls_on(conn, "safety_decisions")
+    await _enable_rls_on(conn, "safety_rules_audit")
 
 
 async def _enable_rls_on(
