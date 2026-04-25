@@ -104,11 +104,11 @@ async def _drain(backend: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_error_stop_reason_emits_error_event_with_pi_error_message() -> None:
-    """The egress-403 / 5xx / timeout case: Pi hands us a stop_reason="error"
-    PromptTurnComplete with error_message="Proxy error: 403 ...". Backend must
-    forward that message verbatim as an ErrorEvent so the orchestrator can
-    publish status="error" with a meaningful reason."""
+async def test_error_stop_reason_with_no_partial_text_emits_only_error_event() -> None:
+    """The clean upstream-failure case: stream ended in error before any text
+    was produced (e.g. egress 403 on the very first byte). content is empty,
+    so the backend must emit ONLY an ErrorEvent — no synthetic empty
+    ResultEvent posing as an assistant reply."""
     backend, emitted = _backend_with_recorder()
     msg = _msg(
         stop_reason="error",
@@ -122,8 +122,36 @@ async def test_error_stop_reason_emits_error_event_with_pi_error_message() -> No
     event = emitted[0]
     assert isinstance(event, ErrorEvent)
     assert event.error == "Proxy error: 403 Forbidden — domain not in allowlist"
-    # No ResultEvent emitted — error must NOT pose as an assistant reply.
     assert not any(isinstance(e, ResultEvent) for e in emitted)
+
+
+async def test_error_stop_reason_with_partial_text_emits_both_result_then_error() -> None:
+    """The mid-stream-failure case (the most common upstream timeout pattern):
+    LLM has streamed some text, then connection drops. proxy.py reuses the
+    same partial AssistantMessage when it yields ErrorEvent — so the
+    PromptTurnComplete message has stop_reason="error" AND non-empty content.
+
+    Both must surface: the partial reply so the user sees what the model
+    actually said, and the error so the orchestrator records the failure.
+    Order is load-bearing — ResultEvent before ErrorEvent so a UI streaming
+    these in order shows the text first, then the error indicator."""
+    backend, emitted = _backend_with_recorder()
+    msg = _msg(
+        stop_reason="error",
+        error_message="upstream connection reset",
+        text="I think the answer is",
+    )
+
+    backend._handle_event(PromptTurnCompleteEvent(message=msg))
+    await _drain(backend)
+
+    assert len(emitted) == 2
+    result, err = emitted
+    assert isinstance(result, ResultEvent)
+    assert result.text == "I think the answer is"
+    assert result.is_final is False
+    assert isinstance(err, ErrorEvent)
+    assert err.error == "upstream connection reset"
 
 
 async def test_error_with_no_error_message_uses_fallback() -> None:

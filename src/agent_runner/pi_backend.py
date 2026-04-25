@@ -494,6 +494,24 @@ class PiBackend:
             msg = getattr(event, "message", None)
             stop_reason = getattr(msg, "stop_reason", None)
             if stop_reason == "error":
+                # Surface BOTH the partial reply (if any) and the error.
+                # proxy.py accumulates streamed TextContent into the same
+                # AssistantMessage that ends up here on failure — losing
+                # that text would silently swallow the model's actual
+                # output up to the point of failure (common pattern: LLM
+                # streams half a paragraph, then upstream times out).
+                # Order matters: ResultEvent first so the user sees the
+                # reply, then ErrorEvent so the orchestrator records
+                # status="error" for the turn.
+                partial_text = _extract_text(msg) if msg is not None else ""
+                if partial_text:
+                    self._schedule_emit(
+                        ResultEvent(
+                            text=partial_text,
+                            new_session_id=self._session_file,
+                            is_final=False,
+                        )
+                    )
                 err = (
                     getattr(msg, "error_message", None)
                     or "LLM stream ended in error with no further detail"

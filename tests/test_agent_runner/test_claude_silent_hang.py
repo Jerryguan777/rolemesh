@@ -292,13 +292,13 @@ async def test_aborted_path_does_not_synthesize_error(
     await backend.abort()
     await prompt_task
 
-    # No synthetic ErrorEvent on the abort path.
-    synth_errors = [
-        e for e in listener.events
-        if isinstance(e, ErrorEvent)
-        and "ResultMessage" in (e.error or "")
-    ]
-    assert synth_errors == []
+    # The contract is stronger than "no synthetic error" — abort must
+    # produce NO ErrorEvent at all on this path. The except-Exception
+    # block doesn't fire on cancel, the silent-end guard short-circuits
+    # via `not aborted`. Asserting on event type (not error message
+    # contents) means a future wording change to the synthetic error
+    # string can't accidentally degrade this test into a no-op pass.
+    assert not any(isinstance(e, ErrorEvent) for e in listener.events)
     # StoppedEvent from abort() is still expected.
     assert any(isinstance(e, StoppedEvent) for e in listener.events)
 
