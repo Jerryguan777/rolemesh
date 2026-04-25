@@ -29,11 +29,6 @@ class IncompatibleDockerVersionError(RuntimeError):
 
 _MIN_DOCKERD_VERSION: tuple[int, int] = (20, 10)
 
-# CFS scheduling period for the CPU hard cap (CpuQuota). 100ms matches the
-# kernel's cgroup default. Operators don't tune this in practice; if they
-# ever need to, promoting it to a ContainerSpec field is cheap.
-_DEFAULT_CPU_PERIOD_US: int = 100_000
-
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
@@ -341,17 +336,7 @@ class DockerRuntime:
             host_config["MemorySwappiness"] = int(spec.memory_swappiness)
 
         if spec.cpu_limit:
-            # NanoCpus sets cgroup CPU shares — a *relative* weight that
-            # only kicks in under contention. On an idle host a single
-            # agent can still burst past its share and saturate the box,
-            # starving the orchestrator and other agents of latency.
-            # CpuQuota + CpuPeriod set the CFS *hard cap*: the container
-            # never gets more than `cpu_limit` cores' worth of runtime
-            # within each period, contended or not. Both are set
-            # together — they are complementary, not duplicate limits.
             host_config["NanoCpus"] = int(spec.cpu_limit * 1e9)
-            host_config["CpuPeriod"] = _DEFAULT_CPU_PERIOD_US
-            host_config["CpuQuota"] = int(spec.cpu_limit * _DEFAULT_CPU_PERIOD_US)
         if spec.extra_hosts:
             host_config["ExtraHosts"] = [f"{h}:{ip}" for h, ip in spec.extra_hosts.items()]
 
