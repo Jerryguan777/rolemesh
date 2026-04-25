@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -12,7 +13,7 @@ if TYPE_CHECKING:
 import asyncpg
 
 from rolemesh.auth.permissions import AgentPermissions
-from rolemesh.core.config import DATABASE_URL
+from rolemesh.core.config import ADMIN_DATABASE_URL, DATABASE_URL
 from rolemesh.core.group_folder import is_valid_group_folder
 from rolemesh.core.logger import get_logger
 from rolemesh.core.types import (
@@ -48,6 +49,7 @@ def _to_dt(ts: str | None) -> datetime | None:
 
 
 _pool: asyncpg.Pool[asyncpg.Record] | None = None
+_admin_pool: asyncpg.Pool[asyncpg.Record] | None = None
 DEFAULT_TENANT: str = "default"
 
 
@@ -55,6 +57,52 @@ def _get_pool() -> asyncpg.Pool[asyncpg.Record]:
     """Return the module-level connection pool, asserting it is initialized."""
     assert _pool is not None, "Database not initialized. Call await init_database() first."
     return _pool
+
+
+def _get_admin_pool() -> asyncpg.Pool[asyncpg.Record]:
+    """Return the BYPASSRLS admin pool used by cross-tenant maintenance,
+    resolvers, and DDL. Falls back to the business pool if no separate
+    admin DSN was configured (dev/test convenience)."""
+    if _admin_pool is not None:
+        return _admin_pool
+    return _get_pool()
+
+
+@asynccontextmanager
+async def tenant_conn(
+    tenant_id: str,
+) -> AsyncIterator[asyncpg.pool.PoolConnectionProxy[asyncpg.Record]]:
+    """Acquire a business connection bound to ``tenant_id``.
+
+    Sets ``app.current_tenant_id`` GUC inside an explicit transaction so
+    the value is wiped when the transaction commits/rolls back. RLS
+    policies (added in PR-D) read it via ``current_tenant_id()``.
+
+    Use ``set_config(name, value, is_local=true)`` rather than
+    ``SET LOCAL`` so the value can be parameterised — string-concat'd
+    SET LOCAL would be a SQL injection foothold.
+    """
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT set_config('app.current_tenant_id', $1, true)",
+                str(tenant_id),
+            )
+            yield conn
+
+
+@asynccontextmanager
+async def admin_conn() -> AsyncIterator[asyncpg.pool.PoolConnectionProxy[asyncpg.Record]]:
+    """Acquire a BYPASSRLS connection for cross-tenant maintenance.
+
+    Callers must justify cross-tenant scope in their docstring (see the
+    classification in the RLS design: B = list_*/cleanup_*, C =
+    resolve_*, D = init_*/_create_*). Never use this from REST handlers.
+    """
+    pool = _get_admin_pool()
+    async with pool.acquire() as conn:
+        yield conn
 
 
 # ---------------------------------------------------------------------------
@@ -800,21 +848,115 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         """
     )
 
+    # ----- RLS infrastructure (PR-B) ---------------------------------------
+    # current_tenant_id() reads the per-connection GUC set by
+    # tenant_conn(). Returns NULL when unset → policies of the form
+    # ``USING (tenant_id = current_tenant_id())`` evaluate to NULL,
+    # which the planner treats as "row excluded" (fail-closed). STABLE
+    # lets PG cache the result within a single statement.
+    await conn.execute("""
+        CREATE OR REPLACE FUNCTION current_tenant_id() RETURNS UUID
+        LANGUAGE sql STABLE AS $$
+            SELECT NULLIF(current_setting('app.current_tenant_id', true), '')::uuid
+        $$
+    """)
 
-async def init_database(database_url: str | None = None) -> None:
-    """Initialize PostgreSQL connection pool and create schema."""
-    global _pool
+    # rolemesh_app: business connections; NOBYPASSRLS so policies bind.
+    # rolemesh_system: maintenance/resolver/DDL connections; BYPASSRLS
+    # because cross-tenant work is intentional (named via admin_conn()
+    # in code so it's grep-able). LOGIN on both — operators set passwords
+    # out-of-band via ALTER ROLE.
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_roles WHERE rolname = 'rolemesh_app'
+            ) THEN
+                CREATE ROLE rolemesh_app LOGIN NOBYPASSRLS;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_roles WHERE rolname = 'rolemesh_system'
+            ) THEN
+                CREATE ROLE rolemesh_system LOGIN BYPASSRLS;
+            END IF;
+        END $$;
+    """)
+
+    await conn.execute(
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public "
+        "TO rolemesh_app, rolemesh_system"
+    )
+    await conn.execute(
+        "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public "
+        "TO rolemesh_app, rolemesh_system"
+    )
+    await conn.execute(
+        "GRANT EXECUTE ON FUNCTION current_tenant_id() "
+        "TO rolemesh_app, rolemesh_system"
+    )
+    # external_tenant_map and tenants are owner-administered. Even
+    # under PR-D the business role must not touch them — RLS is the
+    # second layer; the GRANT is the first.
+    await conn.execute("REVOKE ALL ON external_tenant_map FROM rolemesh_app")
+    await conn.execute("REVOKE ALL ON tenants FROM rolemesh_app")
+
+    # Future tables created by migrations should inherit the same privs
+    # automatically so we don't have to remember to GRANT after each DDL.
+    await conn.execute(
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES "
+        "TO rolemesh_app, rolemesh_system"
+    )
+
+
+async def init_database(
+    database_url: str | None = None,
+    admin_database_url: str | None = None,
+) -> None:
+    """Initialize PostgreSQL pools and create schema.
+
+    ``database_url`` connects the business pool (drops to ``rolemesh_app``
+    in production after PR-D). ``admin_database_url`` connects the
+    BYPASSRLS pool used by maintenance/resolvers; if omitted, falls
+    back to ``ADMIN_DATABASE_URL`` env, then to ``database_url``.
+    """
+    global _pool, _admin_pool
     url = database_url or DATABASE_URL
+    admin_url = admin_database_url or ADMIN_DATABASE_URL or url
     _pool = await asyncpg.create_pool(url, min_size=2, max_size=10)
-    async with _pool.acquire() as conn:
+    _admin_pool = await asyncpg.create_pool(admin_url, min_size=1, max_size=3)
+    async with _admin_pool.acquire() as conn:
         await _create_schema(conn)
+    await _log_pool_identities()
 
 
-async def _init_test_database(database_url: str) -> None:
+async def _log_pool_identities() -> None:
+    """Emit one structured log line per pool with its current_user.
+
+    Lets operators verify at boot that the business pool is connected
+    as the NOBYPASSRLS role and the admin pool as the BYPASSRLS role
+    (or that they share an identity in dev/test, which is also useful
+    to see explicitly).
+    """
+    if _pool is not None:
+        async with _pool.acquire() as conn:
+            who = await conn.fetchval("SELECT current_user")
+        logger.info("DB business pool ready", current_user=who)
+    if _admin_pool is not None:
+        async with _admin_pool.acquire() as conn:
+            who = await conn.fetchval("SELECT current_user")
+        logger.info("DB admin pool ready", current_user=who)
+
+
+async def _init_test_database(
+    database_url: str, admin_database_url: str | None = None
+) -> None:
     """Initialize a test database with a fresh schema."""
-    global _pool
+    global _pool, _admin_pool
+    admin_url = admin_database_url or database_url
     _pool = await asyncpg.create_pool(database_url, min_size=2, max_size=10)
-    async with _pool.acquire() as conn:
+    _admin_pool = await asyncpg.create_pool(admin_url, min_size=1, max_size=3)
+    async with _admin_pool.acquire() as conn:
         # Drop all tables for a clean slate
         await conn.execute("DROP TABLE IF EXISTS safety_decisions CASCADE")
         await conn.execute("DROP TABLE IF EXISTS safety_rules_audit CASCADE")
@@ -843,11 +985,14 @@ async def _init_test_database(database_url: str) -> None:
 
 
 async def close_database() -> None:
-    """Close the connection pool. Call on shutdown."""
-    global _pool
+    """Close both connection pools. Call on shutdown."""
+    global _pool, _admin_pool
     if _pool:
         await _pool.close()
         _pool = None
+    if _admin_pool:
+        await _admin_pool.close()
+        _admin_pool = None
 
 
 # ---------------------------------------------------------------------------
