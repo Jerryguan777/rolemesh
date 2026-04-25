@@ -311,7 +311,7 @@ class TestHandleProposal:
         reqs = await list_approval_requests(tenant_id)
         assert len(reqs) == 1
         assert reqs[0].status == "pending"
-        audit = await list_approval_audit(reqs[0].id)
+        audit = await list_approval_audit(reqs[0].id, tenant_id=reqs[0].tenant_id)
         assert [e.action for e in audit] == ["created"]
         assert audit[0].actor_user_id == user_id, (
             "proposal 'created' audit must record the originating user"
@@ -355,7 +355,7 @@ class TestHandleProposal:
         # flow (created, approved, executing, executed). Without this
         # the auto-executed path diverges from the trail shape admins
         # would expect to reconstruct from audit_log alone.
-        audit = await list_approval_audit(reqs[0].id)
+        audit = await list_approval_audit(reqs[0].id, tenant_id=reqs[0].tenant_id)
         assert [e.action for e in audit] == ["created", "approved"]
         assert audit[0].actor_user_id == user_id
         assert audit[1].actor_user_id is None, (
@@ -418,7 +418,7 @@ class TestHandleProposal:
         reqs = await list_approval_requests(t.id)
         assert len(reqs) == 1
         assert reqs[0].status == "skipped"
-        audit = await list_approval_audit(reqs[0].id)
+        audit = await list_approval_audit(reqs[0].id, tenant_id=reqs[0].tenant_id)
         assert [e.action for e in audit] == ["created", "skipped"]
         # Originating conversation was notified of the skip.
         assert any(conv.id == c for c, _t in ch.sent)
@@ -517,7 +517,7 @@ class TestAutoIntercept:
             }
         )
         reqs = await list_approval_requests(tenant_id)
-        audit = await list_approval_audit(reqs[0].id)
+        audit = await list_approval_audit(reqs[0].id, tenant_id=reqs[0].tenant_id)
         assert audit[0].action == "created"
         assert audit[0].actor_user_id is None
 
@@ -551,13 +551,16 @@ class TestDecision:
         req = (await list_approval_requests(tenant_id))[0]
 
         updated = await engine.handle_decision(
-            request_id=req.id, action="approve", user_id=user_id
+            request_id=req.id,
+            tenant_id=req.tenant_id,
+            action="approve",
+            user_id=user_id,
         )
         assert updated.status == "approved"
         assert any(
             s == f"approval.decided.{req.id}" for s, _d in pub.publishes
         )
-        audit = await list_approval_audit(req.id)
+        audit = await list_approval_audit(req.id, tenant_id=req.tenant_id)
         assert [e.action for e in audit] == ["created", "approved"]
         assert audit[1].actor_user_id == user_id
 
@@ -588,6 +591,7 @@ class TestDecision:
 
         await engine.handle_decision(
             request_id=req.id,
+            tenant_id=req.tenant_id,
             action="reject",
             user_id=user_id,
             note="not this quarter",
@@ -622,11 +626,17 @@ class TestDecision:
         )
         req = (await list_approval_requests(tenant_id))[0]
         await engine.handle_decision(
-            request_id=req.id, action="approve", user_id=user_id
+            request_id=req.id,
+            tenant_id=req.tenant_id,
+            action="approve",
+            user_id=user_id,
         )
         with pytest.raises(ConflictError):
             await engine.handle_decision(
-                request_id=req.id, action="reject", user_id=user_id
+                request_id=req.id,
+                tenant_id=req.tenant_id,
+                action="reject",
+                user_id=user_id,
             )
 
     async def test_non_approver_decide_raises_forbidden(self) -> None:
@@ -655,7 +665,10 @@ class TestDecision:
         req = (await list_approval_requests(tenant_id))[0]
         with pytest.raises(ForbiddenError):
             await engine.handle_decision(
-                request_id=req.id, action="approve", user_id=outsider.id
+                request_id=req.id,
+                tenant_id=req.tenant_id,
+                action="approve",
+                user_id=outsider.id,
             )
 
 
@@ -691,7 +704,10 @@ class TestCancelAndMaintenance:
         # Approve one.
         first_id = reqs[0].id
         await engine.handle_decision(
-            request_id=first_id, action="approve", user_id=user_id
+            request_id=first_id,
+            tenant_id=reqs[0].tenant_id,
+            action="approve",
+            user_id=user_id,
         )
         # Cancel the job.
         await engine.cancel_for_job(job_id)
@@ -728,9 +744,9 @@ class TestCancelAndMaintenance:
         engine, _pub, _ch = _engine()
         count = await engine.expire_stale_requests()
         assert count >= 1
-        after = await get_approval_request(req.id)
+        after = await get_approval_request(req.id, tenant_id=req.tenant_id)
         assert after is not None and after.status == "expired"
-        audit = await list_approval_audit(req.id)
+        audit = await list_approval_audit(req.id, tenant_id=req.tenant_id)
         assert any(e.action == "expired" and e.actor_user_id is None for e in audit)
 
     async def test_reconcile_republishes_stuck_approved(self) -> None:
@@ -806,9 +822,9 @@ class TestCancelAndMaintenance:
             )
         engine, _pub, _ch = _engine()
         await engine.reconcile_stuck_requests()
-        after = await get_approval_request(req.id)
+        after = await get_approval_request(req.id, tenant_id=req.tenant_id)
         assert after is not None and after.status == "execution_stale"
-        audit = await list_approval_audit(req.id)
+        audit = await list_approval_audit(req.id, tenant_id=req.tenant_id)
         assert any(e.action == "execution_stale" for e in audit)
 
 

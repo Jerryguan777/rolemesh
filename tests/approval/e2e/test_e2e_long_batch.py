@@ -113,7 +113,7 @@ async def test_long_batch_does_not_redeliver_or_double_execute(
 
     # Final status: executed.
     async def _executed() -> bool:
-        fresh = await pg.get_approval_request(req.id)
+        fresh = await pg.get_approval_request(req.id, tenant_id=seed.tenant_id)
         return fresh is not None and fresh.status == "executed"
 
     await harness.wait_for(_executed, timeout=5.0)

@@ -84,7 +84,7 @@ async def test_proposal_skipped_when_no_approver_configured(
 
     # Audit chain: created + skipped (trigger writes both on initial
     # non-pending INSERT).
-    audit = [e.action for e in await pg.list_approval_audit(row.id)]
+    audit = [e.action for e in await pg.list_approval_audit(row.id, tenant_id=t.id)]
     assert audit == ["created", "skipped"], audit
 
     # Origin got a "no approver" style notification.

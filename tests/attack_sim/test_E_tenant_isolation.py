@@ -221,14 +221,18 @@ async def test_E4_cross_tenant_decide_blocked(fake_publisher, fake_channel) -> N
     )
     req_b = (await pg.list_approval_requests(tenant_b.tenant_id))[0]
 
-    # Simulate the admin endpoint's cross-tenant check:
-    req_fetch = await pg.get_approval_request(req_b.id)
-    assert req_fetch is not None
-    # Admin endpoint code: if req.tenant_id != user.tenant_id → 404.
-    # Here user is tenant A's owner but request lives in B.
-    assert req_fetch.tenant_id != tenant_a.tenant_id, (
-        "REST /decide must 404 when req.tenant_id doesn't match the caller"
+    # DB-layer tenant filter: a forged request_id from tenant B looked
+    # up under tenant A's context returns None — no leak even before the
+    # REST 404 check is reached.
+    leaked = await pg.get_approval_request(req_b.id, tenant_id=tenant_a.tenant_id)
+    assert leaked is None, (
+        "get_approval_request must reject cross-tenant lookup at the SQL "
+        "layer; if this assertion fails the REST 404 check became the "
+        "single line of defense"
     )
+    # And the legitimate read still works.
+    same_tenant = await pg.get_approval_request(req_b.id, tenant_id=tenant_b.tenant_id)
+    assert same_tenant is not None
 
 
 # ---------------------------------------------------------------------------

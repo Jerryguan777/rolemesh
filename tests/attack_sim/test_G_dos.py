@@ -139,7 +139,7 @@ async def test_G4_approval_flood_does_not_corrupt_state(
     assert len(rows) == N, f"expected {N} distinct requests, got {len(rows)}"
     # Each row has one 'created' audit entry — trigger kept up.
     for r in rows:
-        audit = await pg.list_approval_audit(r.id)
+        audit = await pg.list_approval_audit(r.id, tenant_id=victim.tenant_id)
         assert audit and audit[0].action == "created", (
             f"request {r.id} missing created audit under flood"
         )

@@ -144,14 +144,14 @@ async def _seed_two_requests(job_id: str) -> tuple[str, str, str, str, str, str]
         key=lambda r: r.actions[0]["params"]["i"],
     )
     await engine.handle_decision(
-        request_id=reqs[1].id, action="approve", user_id=u.id
+        request_id=reqs[1].id, tenant_id=t.id, action="approve", user_id=u.id
     )
     return t.id, u.id, cw.id, c.id, reqs[0].id, reqs[1].id
 
 
 async def test_stop_cascade_cancels_pending_preserves_approved() -> None:
     job_id = "job-stop-1"
-    _tenant_id, _user_id, _cw, conv_id, pending_id, approved_id = await _seed_two_requests(job_id)
+    tenant_id, _user_id, _cw, conv_id, pending_id, approved_id = await _seed_two_requests(job_id)
 
     pub = _FakePublisher()
     ch = _FakeChannel()
@@ -163,14 +163,14 @@ async def test_stop_cascade_cancels_pending_preserves_approved() -> None:
     assert pending_id in cancelled
     assert approved_id not in cancelled
 
-    pending_after = await get_approval_request(pending_id)
-    approved_after = await get_approval_request(approved_id)
+    pending_after = await get_approval_request(pending_id, tenant_id=tenant_id)
+    approved_after = await get_approval_request(approved_id, tenant_id=tenant_id)
     assert pending_after is not None and pending_after.status == "cancelled"
     assert approved_after is not None and approved_after.status == "approved"
 
     # Audit trail for the cancelled row includes a cancelled entry with
     # a NULL actor (system transition).
-    audit = await list_approval_audit(pending_id)
+    audit = await list_approval_audit(pending_id, tenant_id=tenant_id)
     cancelled_entries = [e for e in audit if e.action == "cancelled"]
     assert len(cancelled_entries) == 1
     assert cancelled_entries[0].actor_user_id is None

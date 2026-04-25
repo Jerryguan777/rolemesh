@@ -434,26 +434,67 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         "ON approval_requests(status, updated_at) WHERE status = 'executing'"
     )
 
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS approval_audit_log (
-            id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            request_id    UUID NOT NULL REFERENCES approval_requests(id) ON DELETE CASCADE,
-            action        TEXT NOT NULL
-                CHECK (action IN (
-                    'created', 'approved', 'rejected', 'expired', 'cancelled',
-                    'skipped', 'executing', 'executed',
-                    'execution_failed', 'execution_stale'
-                )),
-            actor_user_id UUID REFERENCES users(id),
-            note          TEXT,
-            metadata      JSONB,
-            created_at    TIMESTAMPTZ DEFAULT now()
+    # tenant_id is denormalised onto the audit row (the canonical value
+    # lives on approval_requests) so that cross-tenant audit reads can
+    # be rejected at the SQL layer without a JOIN. The trigger below
+    # copies tenant_id from the parent row on every INSERT, which is
+    # cheaper than the alternative of always joining at query time —
+    # audit reads happen on a hot REST path.
+    #
+    # The CREATE TABLE / column-add / backfill / SET NOT NULL block runs
+    # inside a transaction so that an in-place upgrade is atomic. Without
+    # this, a concurrent INSERT through the OLD trigger between
+    # ``ADD COLUMN`` and ``SET NOT NULL`` would leave a NULL-tenant row
+    # that fails the NOT NULL promotion. Single-instance startup makes
+    # the race unlikely, but multi-instance rolling deploys would hit it.
+    async with conn.transaction():
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS approval_audit_log (
+                id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                tenant_id     UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                request_id    UUID NOT NULL REFERENCES approval_requests(id) ON DELETE CASCADE,
+                action        TEXT NOT NULL
+                    CHECK (action IN (
+                        'created', 'approved', 'rejected', 'expired', 'cancelled',
+                        'skipped', 'executing', 'executed',
+                        'execution_failed', 'execution_stale'
+                    )),
+                actor_user_id UUID REFERENCES users(id),
+                note          TEXT,
+                metadata      JSONB,
+                created_at    TIMESTAMPTZ DEFAULT now()
+            )
+        """)
+        # In-place upgrade for databases created before tenant_id was
+        # introduced. Add nullable → backfill from parent → set NOT NULL.
+        # Idempotent against repeat startups (ADD COLUMN IF NOT EXISTS
+        # short-circuits once the column exists; the UPDATE filters
+        # WHERE tenant_id IS NULL so backfilled rows are skipped).
+        await conn.execute(
+            "ALTER TABLE approval_audit_log "
+            "ADD COLUMN IF NOT EXISTS tenant_id UUID "
+            "REFERENCES tenants(id) ON DELETE CASCADE"
         )
-    """)
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_audit_log_request "
-        "ON approval_audit_log(request_id)"
-    )
+        await conn.execute(
+            "UPDATE approval_audit_log al "
+            "SET tenant_id = ar.tenant_id "
+            "FROM approval_requests ar "
+            "WHERE al.request_id = ar.id AND al.tenant_id IS NULL"
+        )
+        await conn.execute(
+            "ALTER TABLE approval_audit_log "
+            "ALTER COLUMN tenant_id SET NOT NULL"
+        )
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_log_request "
+            "ON approval_audit_log(request_id)"
+        )
+        # Composite index keeps tenant-scoped audit reads fast: index
+        # seek on (tenant_id, request_id) then sorted scan on created_at.
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_log_tenant_request "
+            "ON approval_audit_log(tenant_id, request_id, created_at)"
+        )
 
     # ---------------------------------------------------------------------
     # Audit trigger: every INSERT or status-change UPDATE on
@@ -507,11 +548,13 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
 
             IF TG_OP = 'INSERT' THEN
                 -- Every INSERT is a "created" row, attributed to the
-                -- caller (v_actor_uuid) when provided.
+                -- caller (v_actor_uuid) when provided. tenant_id is
+                -- copied from the parent row so audit reads can filter
+                -- by tenant without a JOIN.
                 INSERT INTO approval_audit_log
-                    (request_id, action, actor_user_id, note, metadata)
+                    (tenant_id, request_id, action, actor_user_id, note, metadata)
                 VALUES
-                    (NEW.id, 'created', v_actor_uuid,
+                    (NEW.tenant_id, NEW.id, 'created', v_actor_uuid,
                      NULLIF(v_note, ''), v_meta_json);
                 -- Rows created already in a terminal-ish state (e.g.
                 -- 'skipped' when resolve_approvers returned empty) need
@@ -522,15 +565,15 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
                 -- chosen "skipped."
                 IF NEW.status <> 'pending' THEN
                     INSERT INTO approval_audit_log
-                        (request_id, action, actor_user_id, note, metadata)
+                        (tenant_id, request_id, action, actor_user_id, note, metadata)
                     VALUES
-                        (NEW.id, NEW.status, NULL, NULL, '{}'::jsonb);
+                        (NEW.tenant_id, NEW.id, NEW.status, NULL, NULL, '{}'::jsonb);
                 END IF;
             ELSIF TG_OP = 'UPDATE' AND NEW.status <> OLD.status THEN
                 INSERT INTO approval_audit_log
-                    (request_id, action, actor_user_id, note, metadata)
+                    (tenant_id, request_id, action, actor_user_id, note, metadata)
                 VALUES
-                    (NEW.id, NEW.status, v_actor_uuid,
+                    (NEW.tenant_id, NEW.id, NEW.status, v_actor_uuid,
                      NULLIF(v_note, ''), v_meta_json);
             END IF;
             RETURN NEW;
@@ -2490,11 +2533,24 @@ async def create_approval_policy(
     return _record_to_approval_policy(row)
 
 
-async def get_approval_policy(policy_id: str) -> ApprovalPolicy | None:
+async def get_approval_policy(
+    policy_id: str, *, tenant_id: str
+) -> ApprovalPolicy | None:
+    """Fetch a policy by id, scoped to ``tenant_id``.
+
+    The tenant filter is enforced at the SQL layer so a forged or
+    guessed UUID from another tenant returns None instead of leaking
+    the policy. Callers that already validated tenant ownership at
+    a higher layer can keep their existing checks; this function is
+    the lower bound, not the only line of defense.
+    """
     pool = _get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT * FROM approval_policies WHERE id = $1::uuid", policy_id
+            "SELECT * FROM approval_policies "
+            "WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            policy_id,
+            tenant_id,
         )
     if row is None:
         return None
@@ -2556,6 +2612,7 @@ async def get_enabled_policies_for_coworker(
 async def update_approval_policy(
     policy_id: str,
     *,
+    tenant_id: str,
     mcp_server_name: str | None = None,
     tool_name: str | None = None,
     condition_expr: dict[str, Any] | None = None,
@@ -2566,7 +2623,12 @@ async def update_approval_policy(
     enabled: bool | None = None,
     priority: int | None = None,
 ) -> ApprovalPolicy | None:
-    """Update selected fields on a policy; returns the new row or None."""
+    """Update selected fields on a policy; returns the new row or None.
+
+    Both the SELECT (no-fields path) and the UPDATE filter on
+    ``tenant_id``, so a forged policy_id from another tenant has no
+    effect.
+    """
     fields: list[str] = []
     values: list[Any] = []
     idx = 1
@@ -2597,14 +2659,16 @@ async def update_approval_policy(
         _push("priority = ${i}", priority)
 
     if not fields:
-        return await get_approval_policy(policy_id)
+        return await get_approval_policy(policy_id, tenant_id=tenant_id)
 
     fields.append("updated_at = now()")
     values.append(policy_id)
+    values.append(tenant_id)
     sql = (
         "UPDATE approval_policies SET "
         + ", ".join(fields)
-        + f" WHERE id = ${idx}::uuid RETURNING *"
+        + f" WHERE id = ${idx}::uuid AND tenant_id = ${idx + 1}::uuid "
+        "RETURNING *"
     )
     pool = _get_pool()
     async with pool.acquire() as conn:
@@ -2614,12 +2678,21 @@ async def update_approval_policy(
     return _record_to_approval_policy(row)
 
 
-async def delete_approval_policy(policy_id: str) -> bool:
-    """Hard-delete a policy. Returns True if a row was removed."""
+async def delete_approval_policy(policy_id: str, *, tenant_id: str) -> bool:
+    """Hard-delete a policy scoped to ``tenant_id``. Returns True if
+    a row was removed.
+
+    A delete request for a policy id that belongs to another tenant
+    returns False (no rows affected) without raising — same shape as
+    "policy id does not exist".
+    """
     pool = _get_pool()
     async with pool.acquire() as conn:
         result = await conn.execute(
-            "DELETE FROM approval_policies WHERE id = $1::uuid", policy_id
+            "DELETE FROM approval_policies "
+            "WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            policy_id,
+            tenant_id,
         )
     return result.endswith(" 1")
 
@@ -2752,11 +2825,48 @@ async def create_approval_request(
     return _record_to_approval_request(row)
 
 
-async def get_approval_request(request_id: str) -> ApprovalRequest | None:
+async def resolve_request_tenant(request_id: str) -> str | None:
+    """Look up a request's tenant_id by request_id alone.
+
+    System-only escape hatch. The single legitimate caller is the
+    approval Worker's NATS message handler, which needs to recover
+    tenant_id when processing legacy messages published before the
+    tenant-id-in-body protocol was introduced. The Worker is a trusted
+    orchestrator-internal process and the request_id is taken from
+    the orchestrator-published NATS subject, so trusting the row's
+    own tenant_id is acceptable here.
+
+    DO NOT use this from REST handlers or any code path that consumes
+    user-controlled ids. The return value carries authority — pair it
+    with a tenant-scoped get_approval_request call once you have it.
+
+    Returns None if the request_id does not exist.
+    """
     pool = _get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT * FROM approval_requests WHERE id = $1::uuid", request_id
+            "SELECT tenant_id FROM approval_requests WHERE id = $1::uuid",
+            request_id,
+        )
+    if row is None:
+        return None
+    return str(row["tenant_id"])
+
+
+async def get_approval_request(
+    request_id: str, *, tenant_id: str
+) -> ApprovalRequest | None:
+    """Fetch a request by id, scoped to ``tenant_id``.
+
+    See ``get_approval_policy`` for the tenant-filter rationale.
+    """
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM approval_requests "
+            "WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            request_id,
+            tenant_id,
         )
     if row is None:
         return None
@@ -2846,6 +2956,7 @@ class DecisionOutcome:
 async def decide_approval_request_full(
     request_id: str,
     *,
+    tenant_id: str,
     new_status: str,
     actor_user_id: str,
     note: str | None = None,
@@ -2856,6 +2967,11 @@ async def decide_approval_request_full(
     conditional UPDATE in the same statement, and return both — one
     round trip instead of two, and no race window where the status
     changes between two separate reads.
+
+    Both the pre-UPDATE SELECT and the UPDATE filter on
+    ``tenant_id``, so a forged request_id from another tenant is
+    indistinguishable from "request not found" — DecisionOutcome
+    kind="missing".
 
     Also sets the GUCs inside the same transaction so the audit trigger
     records the approver as the actor_user_id on the 'approved' /
@@ -2871,7 +2987,7 @@ async def decide_approval_request_full(
             WITH before AS (
                 SELECT id, status, resolved_approvers
                 FROM approval_requests
-                WHERE id = $2::uuid
+                WHERE id = $2::uuid AND tenant_id = $4::uuid
                 FOR UPDATE
             ),
             upd AS (
@@ -2891,6 +3007,7 @@ async def decide_approval_request_full(
             new_status,
             request_id,
             actor_user_id,
+            tenant_id,
         )
     if row is None:
         return DecisionOutcome(kind="missing")
@@ -2903,7 +3020,7 @@ async def decide_approval_request_full(
             updated_raw = json.loads(updated_raw)
         # row_to_json strips column types; fetch the real row to get
         # datetime objects decoded correctly.
-        updated = await get_approval_request(request_id)
+        updated = await get_approval_request(request_id, tenant_id=tenant_id)
         return DecisionOutcome(kind="updated", request=updated)
     if before_status != "pending":
         return DecisionOutcome(kind="conflict", current_status=before_status)
@@ -2911,8 +3028,10 @@ async def decide_approval_request_full(
     return DecisionOutcome(kind="forbidden", current_status=before_status)
 
 
-async def claim_approval_for_execution(request_id: str) -> ApprovalRequest | None:
-    """Atomic claim: approved → executing.
+async def claim_approval_for_execution(
+    request_id: str, *, tenant_id: str
+) -> ApprovalRequest | None:
+    """Atomic claim: approved → executing, scoped to ``tenant_id``.
 
     The Worker uses this to take exclusive ownership before hitting the
     MCP server. If two Workers race, only one sees the row returned; the
@@ -2932,10 +3051,13 @@ async def claim_approval_for_execution(request_id: str) -> ApprovalRequest | Non
             """
             UPDATE approval_requests
             SET status = 'executing', updated_at = now()
-            WHERE id = $1::uuid AND status = 'approved'
+            WHERE id = $1::uuid
+              AND tenant_id = $2::uuid
+              AND status = 'approved'
             RETURNING *
             """,
             request_id,
+            tenant_id,
         )
     if row is None:
         return None
@@ -2946,13 +3068,14 @@ async def set_approval_status(
     request_id: str,
     status: str,
     *,
+    tenant_id: str,
     actor_user_id: str | None = None,
     note: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> ApprovalRequest | None:
-    """Unconditional status update. Used for system transitions that do
-    not race (e.g. executing → executed by the Worker that already
-    holds the claim).
+    """Unconditional status update scoped to ``tenant_id``. Used for
+    system transitions that do not race (e.g. executing → executed
+    by the Worker that already holds the claim).
 
     ``actor_user_id`` / ``note`` / ``metadata`` flow through to the
     audit trigger's 'status-change' row.
@@ -2969,22 +3092,31 @@ async def set_approval_status(
             """
             UPDATE approval_requests
             SET status = $1, updated_at = now()
-            WHERE id = $2::uuid
+            WHERE id = $2::uuid AND tenant_id = $3::uuid
             RETURNING *
             """,
             status,
             request_id,
+            tenant_id,
         )
     if row is None:
         return None
     return _record_to_approval_request(row)
 
 
-async def cancel_pending_approvals_for_job(job_id: str) -> list[str]:
+async def cancel_pending_approvals_for_job(
+    job_id: str,
+) -> list[tuple[str, str]]:
     """Move all pending approvals for a job_id to 'cancelled'.
 
-    Returns the IDs of the rows that transitioned, so the caller can
-    write one audit row per cancellation and notify approvers.
+    Returns ``(id, tenant_id)`` tuples for each row that transitioned,
+    so the caller can re-fetch the row scoped to the right tenant and
+    notify approvers without trusting the bare request id.
+
+    job_id is globally unique (orchestrator-issued, includes coworker
+    folder + epoch), so this UPDATE remains job-scoped without an
+    explicit tenant filter; the tenant_id we return is the
+    authoritative value from the row itself.
     """
     pool = _get_pool()
     async with pool.acquire() as conn:
@@ -2993,11 +3125,11 @@ async def cancel_pending_approvals_for_job(job_id: str) -> list[str]:
             UPDATE approval_requests
             SET status = 'cancelled', updated_at = now()
             WHERE job_id = $1 AND status = 'pending'
-            RETURNING id
+            RETURNING id, tenant_id
             """,
             job_id,
         )
-    return [str(r["id"]) for r in rows]
+    return [(str(r["id"]), str(r["tenant_id"])) for r in rows]
 
 
 async def list_expired_pending_approvals() -> list[ApprovalRequest]:
@@ -3068,6 +3200,7 @@ def _record_to_audit_entry(row: asyncpg.Record) -> ApprovalAuditEntry:
         meta = json.loads(meta) if meta else {}
     return ApprovalAuditEntry(
         id=str(row["id"]),
+        tenant_id=str(row["tenant_id"]),
         request_id=str(row["request_id"]),
         action=row["action"],
         actor_user_id=str(row["actor_user_id"]) if row["actor_user_id"] else None,
@@ -3079,6 +3212,7 @@ def _record_to_audit_entry(row: asyncpg.Record) -> ApprovalAuditEntry:
 
 async def write_approval_audit(
     *,
+    tenant_id: str,
     request_id: str,
     action: str,
     actor_user_id: str | None = None,
@@ -3087,15 +3221,25 @@ async def write_approval_audit(
 ) -> ApprovalAuditEntry:
     """Append a single audit row. There is deliberately no update or
     delete counterpart — the whole point of the audit table is that
-    rows are immutable once written."""
+    rows are immutable once written.
+
+    ``tenant_id`` is required and stored on the audit row so that audit
+    reads can be filtered by tenant without a JOIN. Callers must pass
+    the parent request's tenant_id; mismatches will not be detected
+    here (FK only validates request_id existence) but reads via
+    ``list_approval_audit`` filter on tenant_id, so a mis-attributed
+    row would simply be invisible to its rightful tenant.
+    """
     pool = _get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO approval_audit_log (request_id, action, actor_user_id, note, metadata)
-            VALUES ($1::uuid, $2, $3::uuid, $4, $5::jsonb)
+            INSERT INTO approval_audit_log
+                (tenant_id, request_id, action, actor_user_id, note, metadata)
+            VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5, $6::jsonb)
             RETURNING *
             """,
+            tenant_id,
             request_id,
             action,
             actor_user_id,
@@ -3106,19 +3250,33 @@ async def write_approval_audit(
     return _record_to_audit_entry(row)
 
 
-async def list_approval_audit(request_id: str) -> list[ApprovalAuditEntry]:
+async def list_approval_audit(
+    request_id: str, *, tenant_id: str
+) -> list[ApprovalAuditEntry]:
+    """Return audit rows for a request, scoped to ``tenant_id``.
+
+    Filtering by tenant_id at the SQL layer means a forged or guessed
+    request_id from another tenant returns an empty list rather than
+    leaking audit history. The composite index
+    ``idx_audit_log_tenant_request`` keeps this fast.
+    """
     pool = _get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT * FROM approval_audit_log WHERE request_id = $1::uuid "
+            "SELECT * FROM approval_audit_log "
+            "WHERE request_id = $1::uuid AND tenant_id = $2::uuid "
             "ORDER BY created_at ASC",
             request_id,
+            tenant_id,
         )
     return [_record_to_audit_entry(r) for r in rows]
 
 
-async def expire_approval_if_pending(request_id: str) -> ApprovalRequest | None:
-    """Atomic pending → expired with the CAS guard kept in one place.
+async def expire_approval_if_pending(
+    request_id: str, *, tenant_id: str
+) -> ApprovalRequest | None:
+    """Atomic pending → expired scoped to ``tenant_id``, with the CAS
+    guard kept in one place.
 
     Separate from set_approval_status because the maintenance loop
     must not trample a concurrent decide_approval_request.
@@ -3129,10 +3287,13 @@ async def expire_approval_if_pending(request_id: str) -> ApprovalRequest | None:
             """
             UPDATE approval_requests
             SET status = 'expired', updated_at = now()
-            WHERE id = $1::uuid AND status = 'pending'
+            WHERE id = $1::uuid
+              AND tenant_id = $2::uuid
+              AND status = 'pending'
             RETURNING *
             """,
             request_id,
+            tenant_id,
         )
     if row is None:
         return None
@@ -3229,11 +3390,20 @@ async def create_safety_rule(
     return _record_to_safety_rule(row)
 
 
-async def get_safety_rule(rule_id: str) -> SafetyRule | None:
+async def get_safety_rule(
+    rule_id: str, *, tenant_id: str
+) -> SafetyRule | None:
+    """Fetch a safety rule by id, scoped to ``tenant_id``.
+
+    See ``get_approval_policy`` for the tenant-filter rationale.
+    """
     pool = _get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT * FROM safety_rules WHERE id = $1::uuid", rule_id
+            "SELECT * FROM safety_rules "
+            "WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            rule_id,
+            tenant_id,
         )
     if row is None:
         return None
@@ -3298,6 +3468,7 @@ async def list_safety_rules_for_coworker(
 async def update_safety_rule(
     rule_id: str,
     *,
+    tenant_id: str,
     stage: str | None = None,
     check_id: str | None = None,
     config: dict[str, Any] | None = None,
@@ -3346,14 +3517,16 @@ async def update_safety_rule(
         _push("description = ${i}", description)
 
     if not fields:
-        return await get_safety_rule(rule_id)
+        return await get_safety_rule(rule_id, tenant_id=tenant_id)
 
     fields.append("updated_at = now()")
     values.append(rule_id)
+    values.append(tenant_id)
     sql = (
         "UPDATE safety_rules SET "
         + ", ".join(fields)
-        + f" WHERE id = ${idx}::uuid RETURNING *"
+        + f" WHERE id = ${idx}::uuid AND tenant_id = ${idx + 1}::uuid "
+        "RETURNING *"
     )
     pool = _get_pool()
     async with pool.acquire() as conn, conn.transaction():
@@ -3365,9 +3538,10 @@ async def update_safety_rule(
 
 
 async def delete_safety_rule(
-    rule_id: str, *, actor_user_id: str | None = None
+    rule_id: str, *, tenant_id: str, actor_user_id: str | None = None
 ) -> bool:
-    """Hard-delete a rule. Returns True if a row was removed.
+    """Hard-delete a rule scoped to ``tenant_id``. Returns True if a
+    row was removed.
 
     The audit trigger captures the row's pre-delete state in
     before_state so the deleted rule is reconstructable forever.
@@ -3376,7 +3550,10 @@ async def delete_safety_rule(
     async with pool.acquire() as conn, conn.transaction():
         await _set_safety_guc(conn, actor_user_id=actor_user_id)
         result = await conn.execute(
-            "DELETE FROM safety_rules WHERE id = $1::uuid", rule_id
+            "DELETE FROM safety_rules "
+            "WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            rule_id,
+            tenant_id,
         )
     return result.endswith(" 1")
 

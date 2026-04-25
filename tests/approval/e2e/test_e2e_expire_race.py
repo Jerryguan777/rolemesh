@@ -109,10 +109,10 @@ async def test_concurrent_expire_and_approve_yield_single_terminal(
     # call sees zero rows to touch. Only the terminal DB state is
     # load-bearing for correctness.
     if decide_status == 200:
-        fresh = await pg.get_approval_request(req.id)
+        fresh = await pg.get_approval_request(req.id, tenant_id=seed.tenant_id)
         assert fresh is not None and fresh.status == "approved"
     elif decide_status == 409:
-        fresh = await pg.get_approval_request(req.id)
+        fresh = await pg.get_approval_request(req.id, tenant_id=seed.tenant_id)
         assert fresh is not None and fresh.status == "expired"
     else:
         pytest.fail(
@@ -124,7 +124,7 @@ async def test_concurrent_expire_and_approve_yield_single_terminal(
     # No matter who won, audit must contain exactly one terminal row
     # for this request.
     audit_actions = [
-        e.action for e in await pg.list_approval_audit(req.id)
+        e.action for e in await pg.list_approval_audit(req.id, tenant_id=seed.tenant_id)
     ]
     terminals = [
         a for a in audit_actions if a in ("approved", "expired", "rejected")

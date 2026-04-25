@@ -102,6 +102,7 @@ class ApprovalAuditEntry:
     """
 
     id: str
+    tenant_id: str
     request_id: str
     action: str
     actor_user_id: str | None

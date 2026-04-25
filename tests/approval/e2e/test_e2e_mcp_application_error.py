@@ -114,14 +114,14 @@ async def test_mcp_jsonrpc_error_is_recorded_as_failure(
     # Wait for the Worker to write the terminal status. Whatever it is,
     # we will now assert the correct one.
     async def _terminal() -> bool:
-        fresh = await pg.get_approval_request(req.id)
+        fresh = await pg.get_approval_request(req.id, tenant_id=seed.tenant_id)
         return fresh is not None and fresh.status in (
             "executed",
             "execution_failed",
         )
 
     await harness.wait_for(_terminal, timeout=5.0)
-    fresh = await pg.get_approval_request(req.id)
+    fresh = await pg.get_approval_request(req.id, tenant_id=seed.tenant_id)
     assert fresh is not None
 
     # THE ASSERTION: a JSON-RPC application error MUST mark the batch
@@ -136,7 +136,7 @@ async def test_mcp_jsonrpc_error_is_recorded_as_failure(
 
     # And the audit metadata should record the JSON-RPC error text so an
     # operator diagnosing the request can see what went wrong.
-    audit = await pg.list_approval_audit(req.id)
+    audit = await pg.list_approval_audit(req.id, tenant_id=seed.tenant_id)
     terminal_entry = [e for e in audit if e.action == "execution_failed"]
     assert terminal_entry, "audit should include an execution_failed row"
     results = terminal_entry[0].metadata.get("results") or []

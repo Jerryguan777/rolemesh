@@ -84,7 +84,7 @@ class TestAuditTrail:
             actor_user_id=uid,
         )
         await pg.update_safety_rule(
-            rule.id, enabled=False, actor_user_id=uid
+            rule.id, tenant_id=tid, enabled=False, actor_user_id=uid
         )
         rows = await pg.list_safety_rules_audit(
             tenant_id=tid, rule_id=rule.id
@@ -112,7 +112,9 @@ class TestAuditTrail:
         # Touch only with unchanged fields. update_safety_rule returns
         # the current row when nothing was passed — but even explicit
         # same-value assignments should be filtered.
-        await pg.update_safety_rule(rule.id, enabled=True, actor_user_id=uid)
+        await pg.update_safety_rule(
+            rule.id, tenant_id=tid, enabled=True, actor_user_id=uid
+        )
         rows = await pg.list_safety_rules_audit(
             tenant_id=tid, rule_id=rule.id
         )
@@ -130,7 +132,10 @@ class TestAuditTrail:
             description="blocks PII",
             actor_user_id=uid,
         )
-        assert await pg.delete_safety_rule(rule.id, actor_user_id=uid) is True
+        assert (
+            await pg.delete_safety_rule(rule.id, tenant_id=tid, actor_user_id=uid)
+            is True
+        )
         rows = await pg.list_safety_rules_audit(
             tenant_id=tid, rule_id=rule.id
         )
@@ -139,7 +144,7 @@ class TestAuditTrail:
         assert rows[0]["after_state"] is None
         assert rows[0]["actor_user_id"] == uid
         # The rule row is gone, but the audit row remains.
-        assert await pg.get_safety_rule(rule.id) is None
+        assert await pg.get_safety_rule(rule.id, tenant_id=tid) is None
 
     @pytest.mark.asyncio
     async def test_audit_survives_rule_hard_delete(self) -> None:
@@ -155,7 +160,7 @@ class TestAuditTrail:
             config={},
             actor_user_id=uid,
         )
-        await pg.delete_safety_rule(rule.id, actor_user_id=uid)
+        await pg.delete_safety_rule(rule.id, tenant_id=tid, actor_user_id=uid)
         rows = await pg.list_safety_rules_audit(tenant_id=tid)
         rule_ids_in_audit = {r["rule_id"] for r in rows}
         assert rule.id in rule_ids_in_audit

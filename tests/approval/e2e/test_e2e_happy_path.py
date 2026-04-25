@@ -160,12 +160,12 @@ async def test_happy_path_proposal_approve_execute_report(
 
     # 8. Final DB state + full audit chain.
     async def _executed() -> bool:
-        req = await pg.get_approval_request(pending.id)
+        req = await pg.get_approval_request(pending.id, tenant_id=seed.tenant_id)
         return req is not None and req.status == "executed"
 
     await harness.wait_for(_executed, timeout=5.0)
 
-    audit = await pg.list_approval_audit(pending.id)
+    audit = await pg.list_approval_audit(pending.id, tenant_id=seed.tenant_id)
     actions = [e.action for e in audit]
     assert actions == ["created", "approved", "executing", "executed"], (
         f"audit chain mismatch: {actions!r}"

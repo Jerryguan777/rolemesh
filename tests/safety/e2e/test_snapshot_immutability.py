@@ -106,7 +106,7 @@ class TestSnapshotImmutability:
         assert await _run_ssn_against(handler_a), "initial SSN must block"
 
         # Admin disables the rule mid-flight.
-        await pg.update_safety_rule(rule_id, enabled=False)
+        await pg.update_safety_rule(rule_id, tenant_id=tid, enabled=False)
 
         # Handler A is UNCHANGED — still blocks. This is the core
         # contract: the snapshot is immutable until container restart.
@@ -190,7 +190,7 @@ class TestSnapshotImmutability:
         snapshot = [r.to_snapshot_dict() for r in rows]
 
         # Delete the rule in DB.
-        await pg.delete_safety_rule(rule.id)
+        await pg.delete_safety_rule(rule.id, tenant_id=tenant.id)
 
         # Snapshot dicts must still carry the old data.
         assert snapshot[0]["check_id"] == "pii.regex"

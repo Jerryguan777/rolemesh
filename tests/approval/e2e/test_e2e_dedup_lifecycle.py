@@ -77,7 +77,7 @@ async def test_dedup_does_not_suppress_retry_after_rejection(
         assert r.status_code == 200
 
     async def _row1_rejected() -> bool:
-        fresh = await pg.get_approval_request(row1.id)
+        fresh = await pg.get_approval_request(row1.id, tenant_id=seed.tenant_id)
         return fresh is not None and fresh.status == "rejected"
 
     await harness.wait_for(_row1_rejected, timeout=5.0)

@@ -211,7 +211,7 @@ class TestV1Acceptance:
         )
 
         # Admin disables the rule.
-        await pg.update_safety_rule(rule.id, enabled=False)
+        await pg.update_safety_rule(rule.id, tenant_id=tenant.id, enabled=False)
 
         # Snapshot B: disabled rule, fresh Handler, SAME tool_input
         # must now be allowed through. This is the property the

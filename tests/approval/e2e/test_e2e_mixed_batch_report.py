@@ -101,14 +101,14 @@ async def test_mixed_batch_produces_readable_report(
     await harness.wait_for(_both_called, timeout=10.0)
 
     async def _terminal() -> bool:
-        fresh = await pg.get_approval_request(req.id)
+        fresh = await pg.get_approval_request(req.id, tenant_id=seed.tenant_id)
         return fresh is not None and fresh.status in (
             "executed",
             "execution_failed",
         )
 
     await harness.wait_for(_terminal, timeout=5.0)
-    fresh = await pg.get_approval_request(req.id)
+    fresh = await pg.get_approval_request(req.id, tenant_id=seed.tenant_id)
     assert fresh is not None
     assert fresh.status == "execution_failed", (
         "one HTTP 500 among the actions must flip the batch to "
@@ -117,7 +117,7 @@ async def test_mixed_batch_produces_readable_report(
 
     # The terminal audit row carries per-action results.
     audit = [
-        e for e in await pg.list_approval_audit(req.id)
+        e for e in await pg.list_approval_audit(req.id, tenant_id=seed.tenant_id)
         if e.action == "execution_failed"
     ]
     assert audit, "audit must contain execution_failed row"
