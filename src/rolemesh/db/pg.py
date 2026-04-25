@@ -908,6 +908,50 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         "TO rolemesh_app, rolemesh_system"
     )
 
+    # ----- RLS policies (PR-D) ---------------------------------------------
+    # Each table that holds tenant data gets ENABLE + FORCE + four
+    # policies. FORCE keeps the table owner (which superuser DDL flags
+    # as a bypass path) under the policy too — only roles with
+    # BYPASSRLS see across rows.
+    #
+    # Order is canary-first (small audit table) then increasing
+    # blast-radius. Per design, each table arrives in its own commit
+    # so a single-table regression is trivially revertable via
+    # ``ALTER TABLE <t> DISABLE ROW LEVEL SECURITY``.
+    await _enable_rls_on(conn, "approval_audit_log")  # D1 canary
+
+
+async def _enable_rls_on(
+    conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record], table: str
+) -> None:
+    """Enable RLS on one table with the four standard policies.
+
+    The policy names ``rls_select`` / ``rls_insert`` / ``rls_update`` /
+    ``rls_delete`` are reused across every table — they live in a
+    per-table namespace, so collisions are impossible. ``DROP POLICY
+    IF EXISTS`` keeps schema bootstrap idempotent.
+
+    Used per-table at the end of ``_create_schema``. Each row's
+    ``tenant_id`` column is matched against ``current_tenant_id()``,
+    which reads ``app.current_tenant_id`` GUC. Connections that
+    forgot to set the GUC see zero rows (fail closed).
+    """
+    await conn.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
+    await conn.execute(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
+    for op, body in (
+        ("SELECT", "USING (tenant_id = current_tenant_id())"),
+        ("INSERT", "WITH CHECK (tenant_id = current_tenant_id())"),
+        (
+            "UPDATE",
+            "USING (tenant_id = current_tenant_id()) "
+            "WITH CHECK (tenant_id = current_tenant_id())",
+        ),
+        ("DELETE", "USING (tenant_id = current_tenant_id())"),
+    ):
+        policy = f"rls_{op.lower()}"
+        await conn.execute(f"DROP POLICY IF EXISTS {policy} ON {table}")
+        await conn.execute(f"CREATE POLICY {policy} ON {table} FOR {op} {body}")
+
 
 async def init_database(
     database_url: str | None = None,
