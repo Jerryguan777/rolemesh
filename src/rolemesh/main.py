@@ -1393,7 +1393,7 @@ async def main() -> None:
     # fan-out.
     from rolemesh.approval.engine import ApprovalEngine
     from rolemesh.approval.notification import NotificationTargetResolver
-    from rolemesh.db.pg import get_conversation as _pg_get_conv
+    from rolemesh.db.pg import get_conversation_for_notification as _pg_get_conv
 
     async def _convs_for_user_and_cw(user_id: str, coworker_id: str) -> list[str]:
         # Find conversations this user can talk to this coworker in.

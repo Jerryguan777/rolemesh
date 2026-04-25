@@ -166,7 +166,7 @@ async def process_task_ipc(
         task_id_val = data.get("taskId")
         if task_id_val:
             assert isinstance(task_id_val, str)
-            task = await get_task_by_id(task_id_val)
+            task = await get_task_by_id(task_id_val, tenant_id=tenant_id)
             if task and can_manage_task(permissions, task.coworker_id, coworker_id):
                 await update_task(task_id_val, status="paused")
                 logger.info("Task paused via IPC", task_id=task_id_val, source_group=source_group)
@@ -178,7 +178,7 @@ async def process_task_ipc(
         task_id_val = data.get("taskId")
         if task_id_val:
             assert isinstance(task_id_val, str)
-            task = await get_task_by_id(task_id_val)
+            task = await get_task_by_id(task_id_val, tenant_id=tenant_id)
             if task and can_manage_task(permissions, task.coworker_id, coworker_id):
                 await update_task(task_id_val, status="active")
                 logger.info("Task resumed via IPC", task_id=task_id_val, source_group=source_group)
@@ -190,7 +190,7 @@ async def process_task_ipc(
         task_id_val = data.get("taskId")
         if task_id_val:
             assert isinstance(task_id_val, str)
-            task = await get_task_by_id(task_id_val)
+            task = await get_task_by_id(task_id_val, tenant_id=tenant_id)
             if task and can_manage_task(permissions, task.coworker_id, coworker_id):
                 await delete_task(task_id_val)
                 logger.info("Task cancelled via IPC", task_id=task_id_val, source_group=source_group)
@@ -204,7 +204,7 @@ async def process_task_ipc(
             return
         assert isinstance(task_id_val, str)
 
-        task = await get_task_by_id(task_id_val)
+        task = await get_task_by_id(task_id_val, tenant_id=tenant_id)
         if not task:
             logger.warning("Task not found for update", task_id=task_id_val, source_group=source_group)
             return

@@ -1026,7 +1026,7 @@ class TestTaskSchedulingPerCoworker:
             coworker_id=cw.id,
         )
 
-        task = await get_task_by_id(task_id)
+        task = await get_task_by_id(task_id, tenant_id=tenant.id)
         assert task is not None
         assert task.coworker_id == cw.id
         assert task.tenant_id == tenant.id

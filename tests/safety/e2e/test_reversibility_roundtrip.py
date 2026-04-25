@@ -109,7 +109,7 @@ class TestPersistenceRoundTrip:
         )
 
         # Layer 2 → 3 → 4: read coworker back, build spec, serialize.
-        fetched = await pg.get_coworker(cw.id)
+        fetched = await pg.get_coworker(cw.id, tenant_id=tenant.id)
         assert fetched is not None
         assert len(fetched.tools) == 1
         persisted_mcp = fetched.tools[0]
@@ -205,6 +205,7 @@ class TestPersistenceRoundTrip:
         # Update with a modified reversibility map.
         await pg.update_coworker(
             cw.id,
+            tenant_id=tenant.id,
             tools=[
                 McpServerConfig(
                     name="api",
@@ -218,7 +219,7 @@ class TestPersistenceRoundTrip:
                 )
             ],
         )
-        fetched = await pg.get_coworker(cw.id)
+        fetched = await pg.get_coworker(cw.id, tenant_id=tenant.id)
         assert fetched is not None
         assert fetched.tools[0].tool_reversibility == {
             "read": True,

@@ -196,7 +196,7 @@ async def test_tasks_per_coworker(e2e_env: Path) -> None:
         )
     )
 
-    task = await get_task_by_id(task_id)
+    task = await get_task_by_id(task_id, tenant_id=tenant.id)
     assert task is not None
     assert task.prompt == "Test task"
 

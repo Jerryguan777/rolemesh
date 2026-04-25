@@ -1203,14 +1203,50 @@ async def delete_user_oidc_tokens(user_id: str) -> None:
         )
 
 
-async def get_user(user_id: str) -> User | None:
-    """Get a user by ID."""
+async def get_user(user_id: str, *, tenant_id: str) -> User | None:
+    """Fetch a user by id, scoped to ``tenant_id``.
+
+    Tenant scoping is on the query (not a post-fetch check) so a guess
+    at another tenant's user_id returns None from the DB itself. The
+    REST layer maps None to 404 — indistinguishable from "doesn't
+    exist" so we don't leak UUID existence across tenants.
+    """
     pool = _get_pool()
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM users WHERE id = $1::uuid", user_id)
+        row = await conn.fetchrow(
+            "SELECT * FROM users WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            user_id,
+            tenant_id,
+        )
     if row is None:
         return None
     return _record_to_user(row)
+
+
+async def resolve_user_for_auth(user_id: str) -> tuple[str, str] | None:
+    """Look up ``(tenant_id, role)`` for a user by id alone.
+
+    System-only escape hatch. The single legitimate caller is the
+    AuthProvider's ``get_user_by_id`` (JWT resume path), which needs
+    to recover the user's tenant_id before any tenant-scoped query
+    can run. The user_id input must be from a signature-verified JWT
+    claim — never from an unauthenticated request body.
+
+    DO NOT use this from REST handlers. The return value carries
+    authority — pair it with a tenant-scoped ``get_user`` once you
+    have it.
+
+    Returns None if the user_id does not exist.
+    """
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT tenant_id, role FROM users WHERE id = $1::uuid",
+            user_id,
+        )
+    if row is None:
+        return None
+    return (str(row["tenant_id"]), str(row["role"]))
 
 
 async def get_users_for_tenant(tenant_id: str) -> list[User]:
@@ -1227,11 +1263,12 @@ async def get_users_for_tenant(tenant_id: str) -> list[User]:
 async def update_user(
     user_id: str,
     *,
+    tenant_id: str,
     name: str | None = None,
     email: str | None = None,
     role: str | None = None,
 ) -> User | None:
-    """Update selected fields on a user."""
+    """Update selected fields on a user, scoped to ``tenant_id``."""
     fields: list[str] = []
     values: list[Any] = []
     param_idx = 1
@@ -1250,13 +1287,16 @@ async def update_user(
         param_idx += 1
 
     if not fields:
-        return await get_user(user_id)
+        return await get_user(user_id, tenant_id=tenant_id)
 
     values.append(user_id)
+    values.append(tenant_id)
     pool = _get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            f"UPDATE users SET {', '.join(fields)} WHERE id = ${param_idx}::uuid RETURNING *",
+            f"UPDATE users SET {', '.join(fields)} "
+            f"WHERE id = ${param_idx}::uuid AND tenant_id = ${param_idx + 1}::uuid "
+            f"RETURNING *",
             *values,
         )
     if row is None:
@@ -1421,11 +1461,18 @@ def _record_to_coworker(row: asyncpg.Record) -> Coworker:
     )
 
 
-async def get_coworker(coworker_id: str) -> Coworker | None:
-    """Get a coworker by ID."""
+async def get_coworker(coworker_id: str, *, tenant_id: str) -> Coworker | None:
+    """Fetch a coworker by id, scoped to ``tenant_id``.
+
+    See ``get_user`` for the tenant-filter rationale.
+    """
     pool = _get_pool()
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM coworkers WHERE id = $1::uuid", coworker_id)
+        row = await conn.fetchrow(
+            "SELECT * FROM coworkers WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            coworker_id,
+            tenant_id,
+        )
     if row is None:
         return None
     return _record_to_coworker(row)
@@ -1467,6 +1514,7 @@ async def get_all_coworkers() -> list[Coworker]:
 async def update_coworker(
     coworker_id: str,
     *,
+    tenant_id: str,
     name: str | None = None,
     system_prompt: str | None = None,
     tools: list[McpServerConfig] | None = None,
@@ -1476,7 +1524,7 @@ async def update_coworker(
     agent_role: str | None = None,
     permissions: AgentPermissions | None = None,
 ) -> Coworker | None:
-    """Update selected fields on a coworker."""
+    """Update selected fields on a coworker, scoped to ``tenant_id``."""
     fields: list[str] = []
     values: list[Any] = []
     param_idx = 1
@@ -1529,13 +1577,16 @@ async def update_coworker(
         param_idx += 1
 
     if not fields:
-        return await get_coworker(coworker_id)
+        return await get_coworker(coworker_id, tenant_id=tenant_id)
 
     values.append(coworker_id)
+    values.append(tenant_id)
     pool = _get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            f"UPDATE coworkers SET {', '.join(fields)} WHERE id = ${param_idx}::uuid RETURNING *",
+            f"UPDATE coworkers SET {', '.join(fields)} "
+            f"WHERE id = ${param_idx}::uuid AND tenant_id = ${param_idx + 1}::uuid "
+            f"RETURNING *",
             *values,
         )
     if row is None:
@@ -1596,11 +1647,18 @@ def _record_to_channel_binding(row: asyncpg.Record) -> ChannelBinding:
     )
 
 
-async def get_channel_binding(binding_id: str) -> ChannelBinding | None:
-    """Get a channel binding by ID."""
+async def get_channel_binding(binding_id: str, *, tenant_id: str) -> ChannelBinding | None:
+    """Fetch a channel binding by id, scoped to ``tenant_id``.
+
+    See ``get_user`` for the tenant-filter rationale.
+    """
     pool = _get_pool()
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM channel_bindings WHERE id = $1::uuid", binding_id)
+        row = await conn.fetchrow(
+            "SELECT * FROM channel_bindings WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            binding_id,
+            tenant_id,
+        )
     if row is None:
         return None
     return _record_to_channel_binding(row)
@@ -1642,11 +1700,12 @@ async def get_channel_bindings_for_coworker(coworker_id: str) -> list[ChannelBin
 async def update_channel_binding(
     binding_id: str,
     *,
+    tenant_id: str,
     credentials: dict[str, str] | None = None,
     bot_display_name: str | None = None,
     status: str | None = None,
 ) -> ChannelBinding | None:
-    """Update selected fields on a channel binding."""
+    """Update selected fields on a channel binding, scoped to ``tenant_id``."""
     fields: list[str] = []
     values: list[Any] = []
     param_idx = 1
@@ -1665,13 +1724,16 @@ async def update_channel_binding(
         param_idx += 1
 
     if not fields:
-        return await get_channel_binding(binding_id)
+        return await get_channel_binding(binding_id, tenant_id=tenant_id)
 
     values.append(binding_id)
+    values.append(tenant_id)
     pool = _get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            f"UPDATE channel_bindings SET {', '.join(fields)} WHERE id = ${param_idx}::uuid RETURNING *",
+            f"UPDATE channel_bindings SET {', '.join(fields)} "
+            f"WHERE id = ${param_idx}::uuid AND tenant_id = ${param_idx + 1}::uuid "
+            f"RETURNING *",
             *values,
         )
     if row is None:
@@ -1739,11 +1801,44 @@ def _record_to_conversation(row: asyncpg.Record) -> Conversation:
     )
 
 
-async def get_conversation(conversation_id: str) -> Conversation | None:
-    """Get a conversation by ID."""
+async def get_conversation(conversation_id: str, *, tenant_id: str) -> Conversation | None:
+    """Fetch a conversation by id, scoped to ``tenant_id``.
+
+    See ``get_user`` for the tenant-filter rationale.
+    """
     pool = _get_pool()
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM conversations WHERE id = $1::uuid", conversation_id)
+        row = await conn.fetchrow(
+            "SELECT * FROM conversations WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            conversation_id,
+            tenant_id,
+        )
+    if row is None:
+        return None
+    return _record_to_conversation(row)
+
+
+async def get_conversation_for_notification(conversation_id: str) -> Conversation | None:
+    """Look up a conversation by id alone, intentionally cross-tenant.
+
+    System path. Called from the approval notification fan-out
+    (``_OrchestratorChannelSender`` and ``NotificationTargetResolver``)
+    where the only inputs are a ``conversation_id`` resolved by the
+    engine from an ``ApprovalRequest`` it already trusts. The
+    ``ChannelSender`` protocol carries no tenant context, so this
+    function exists as the explicit, named admin escape rather than
+    silently bypassing tenant scoping.
+
+    DO NOT use this from REST handlers — use the tenant-scoped
+    ``get_conversation`` for any path where the conversation_id can
+    come from user input.
+    """
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM conversations WHERE id = $1::uuid",
+            conversation_id,
+        )
     if row is None:
         return None
     return _record_to_conversation(row)
@@ -2049,13 +2144,17 @@ def _record_to_scheduled_task(row: asyncpg.Record) -> ScheduledTask:
     )
 
 
-async def get_task_by_id(task_id: str) -> ScheduledTask | None:
-    """Get a task by its ID, or None if not found."""
+async def get_task_by_id(task_id: str, *, tenant_id: str) -> ScheduledTask | None:
+    """Fetch a task by id, scoped to ``tenant_id``.
+
+    See ``get_user`` for the tenant-filter rationale.
+    """
     pool = _get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT * FROM scheduled_tasks WHERE id = $1::uuid",
+            "SELECT * FROM scheduled_tasks WHERE id = $1::uuid AND tenant_id = $2::uuid",
             task_id,
+            tenant_id,
         )
     if row is None:
         return None
@@ -3800,7 +3899,7 @@ async def cleanup_old_safety_approval_contexts(
 
 
 async def get_safety_decision(
-    decision_id: str, tenant_id: str
+    decision_id: str, *, tenant_id: str
 ) -> dict[str, Any] | None:
     """Fetch a single safety_decisions row, scoped to ``tenant_id``.
 

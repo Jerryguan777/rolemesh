@@ -47,7 +47,7 @@ def _resolver() -> NotificationTargetResolver:
         return []
 
     async def _conv(cid: str) -> object | None:
-        return await pg.get_conversation(cid)
+        return await pg.get_conversation_for_notification(cid)
 
     return NotificationTargetResolver(
         get_conversations_for_user_and_coworker=_convs,

@@ -201,7 +201,7 @@ class TestScenarioIPCFromContainer:
             coworker_id=cw.id,
         )
 
-        task = await get_task_by_id(task_id)
+        task = await get_task_by_id(task_id, tenant_id=t.id)
         assert task is not None
         assert task.prompt == "Daily standup summary"
         assert task.schedule_type == "cron"
@@ -440,14 +440,14 @@ class TestScenarioDatabaseOperations:
             )
         )
 
-        fetched = await get_task_by_id(task_id)
+        fetched = await get_task_by_id(task_id, tenant_id=t.id)
         assert fetched is not None
         assert fetched.prompt == "Check status"
 
         await update_task(task_id, status="paused")
-        fetched = await get_task_by_id(task_id)
+        fetched = await get_task_by_id(task_id, tenant_id=t.id)
         assert fetched is not None
         assert fetched.status == "paused"
 
         await delete_task(task_id)
-        assert await get_task_by_id(task_id) is None
+        assert await get_task_by_id(task_id, tenant_id=t.id) is None

@@ -111,14 +111,18 @@ class OIDCAuthProvider:
         Returns None if the user does not exist. external_token is not
         available because no token is presented for this lookup path.
 
-        SECURITY: This lookup is NOT tenant-scoped — the AuthProvider Protocol
-        does not pass tenant context. Callers MUST enforce tenant authorization
-        themselves before exposing the result, otherwise a holder of any user_id
-        can probe users across tenants.
+        Two-step bootstrap: ``resolve_user_for_auth`` recovers the user's
+        tenant_id from a signature-verified user_id (admin escape hatch,
+        no tenant context yet); then ``get_user`` runs the tenant-scoped
+        query that downstream RLS will enforce.
         """
-        from rolemesh.db.pg import get_user
+        from rolemesh.db.pg import get_user, resolve_user_for_auth
 
-        user = await get_user(user_id)
+        resolved = await resolve_user_for_auth(user_id)
+        if resolved is None:
+            return None
+        tenant_id, _ = resolved
+        user = await get_user(user_id, tenant_id=tenant_id)
         if user is None:
             return None
         return AuthenticatedUser(

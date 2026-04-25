@@ -167,10 +167,10 @@ async def _resolve_web_agent(agent_id: str, token: str) -> tuple[str, str] | JSO
     if user is None:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     try:
-        coworker = await pg.get_coworker(agent_id)
+        coworker = await pg.get_coworker(agent_id, tenant_id=user.tenant_id)
     except asyncpg.DataError:
         coworker = None
-    if coworker is None or coworker.tenant_id != user.tenant_id:
+    if coworker is None:
         return JSONResponse({"error": "Agent not found"}, status_code=404)
     binding = await pg.get_channel_binding_for_coworker(agent_id, "web")
     if binding is None:

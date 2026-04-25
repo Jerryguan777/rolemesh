@@ -59,10 +59,10 @@ async def handle_ws(ws: WebSocket, agent_id: str, token: str, chat_id: str = "")
 
     # 2. Look up the coworker (agent)
     try:
-        coworker = await pg.get_coworker(agent_id)
+        coworker = await pg.get_coworker(agent_id, tenant_id=user.tenant_id)
     except Exception:  # asyncpg.DataError for invalid UUID  # noqa: BLE001
         coworker = None
-    if coworker is None or coworker.tenant_id != user.tenant_id:
+    if coworker is None:
         await ws.close(code=4004, reason="Agent not found")
         return
 

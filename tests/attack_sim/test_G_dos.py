@@ -97,7 +97,7 @@ async def test_G4_approval_flood_does_not_corrupt_state(
         return []
 
     async def _resolver_get_conv(cid: str) -> object | None:
-        return await pg.get_conversation(cid)
+        return await pg.get_conversation_for_notification(cid)
 
     engine = ApprovalEngine(
         publisher=fake_publisher,
