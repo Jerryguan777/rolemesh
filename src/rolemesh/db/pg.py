@@ -924,6 +924,8 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     await _enable_rls_on(conn, "safety_rules")         # D4 (safety triplet)
     await _enable_rls_on(conn, "safety_decisions")
     await _enable_rls_on(conn, "safety_rules_audit")
+    await _enable_rls_on(conn, "scheduled_tasks")      # D5
+    await _enable_rls_on(conn, "task_run_logs")
 
 
 async def _enable_rls_on(
