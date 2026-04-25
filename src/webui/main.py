@@ -27,7 +27,7 @@ from fastapi.staticfiles import StaticFiles
 from nats.js.api import StreamConfig
 
 from rolemesh.db import pg
-from rolemesh.db.pg import _get_pool, close_database, init_database
+from rolemesh.db.pg import _get_pool, close_database, init_database, tenant_conn
 from webui import auth, ws
 from webui.admin import router as admin_router
 from webui.config import (
@@ -187,13 +187,9 @@ async def list_conversations(
     result_or_error = await _resolve_web_agent(agent_id, token)
     if isinstance(result_or_error, JSONResponse):
         return result_or_error
-    binding_id, _ = result_or_error
+    binding_id, tenant_id = result_or_error
 
-    pool = auth.get_pool()
-    if pool is None:
-        return JSONResponse({"error": "Database unavailable"}, status_code=503)
-
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(
             """
             SELECT c.channel_chat_id as chat_id,
@@ -230,13 +226,9 @@ async def get_messages(
     result_or_error = await _resolve_web_agent(agent_id, token)
     if isinstance(result_or_error, JSONResponse):
         return result_or_error
-    binding_id, _ = result_or_error
+    binding_id, tenant_id = result_or_error
 
-    pool = auth.get_pool()
-    if pool is None:
-        return JSONResponse({"error": "Database unavailable"}, status_code=503)
-
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(
             """
             SELECT m.content, m.timestamp, m.is_from_me, m.is_bot_message
