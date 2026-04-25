@@ -920,6 +920,7 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     # ``ALTER TABLE <t> DISABLE ROW LEVEL SECURITY``.
     await _enable_rls_on(conn, "approval_audit_log")  # D1 canary
     await _enable_rls_on(conn, "approval_requests")    # D2
+    await _enable_rls_on(conn, "approval_policies")    # D3
 
 
 async def _enable_rls_on(
