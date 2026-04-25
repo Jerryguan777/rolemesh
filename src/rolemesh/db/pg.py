@@ -278,6 +278,57 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         )
     """)
 
+    # PR-D D10: backfill tenant_id on oidc_user_tokens so RLS can
+    # bind it. Same pattern PR #11 used on approval_audit_log:
+    # ADD COLUMN nullable + UPDATE from parent + SET NOT NULL + FK
+    # CASCADE + composite index + BEFORE-INSERT trigger to keep new
+    # rows in sync with users.tenant_id without making every caller
+    # remember to pass it.
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'oidc_user_tokens'
+                  AND column_name = 'tenant_id'
+            ) THEN
+                ALTER TABLE oidc_user_tokens ADD COLUMN tenant_id UUID;
+                UPDATE oidc_user_tokens t
+                   SET tenant_id = u.tenant_id
+                  FROM users u
+                 WHERE u.id = t.user_id AND t.tenant_id IS NULL;
+                ALTER TABLE oidc_user_tokens
+                    ALTER COLUMN tenant_id SET NOT NULL;
+                ALTER TABLE oidc_user_tokens
+                    ADD CONSTRAINT oidc_user_tokens_tenant_fk
+                    FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+                    ON DELETE CASCADE;
+                CREATE INDEX idx_oidc_user_tokens_tenant
+                    ON oidc_user_tokens (tenant_id, user_id);
+            END IF;
+        END $$;
+    """)
+    await conn.execute("""
+        CREATE OR REPLACE FUNCTION oidc_user_tokens_set_tenant()
+        RETURNS TRIGGER AS $trigger$
+        BEGIN
+            IF NEW.tenant_id IS NULL THEN
+                SELECT tenant_id INTO NEW.tenant_id
+                  FROM users WHERE id = NEW.user_id;
+            END IF;
+            RETURN NEW;
+        END $trigger$ LANGUAGE plpgsql;
+    """)
+    await conn.execute(
+        "DROP TRIGGER IF EXISTS trg_oidc_user_tokens_set_tenant "
+        "ON oidc_user_tokens"
+    )
+    await conn.execute("""
+        CREATE TRIGGER trg_oidc_user_tokens_set_tenant
+            BEFORE INSERT ON oidc_user_tokens
+            FOR EACH ROW EXECUTE FUNCTION oidc_user_tokens_set_tenant();
+    """)
+
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS channel_bindings (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -933,6 +984,7 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     await _enable_rls_on(conn, "channel_bindings")
     await _enable_rls_on(conn, "user_agent_assignments")
     await _enable_rls_on(conn, "users")                # D9
+    await _enable_rls_on(conn, "oidc_user_tokens")     # D10 (tenant_id backfilled above)
 
 
 async def _enable_rls_on(
