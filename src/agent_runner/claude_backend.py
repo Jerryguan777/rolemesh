@@ -519,8 +519,40 @@ class ClaudeBackend:
             self._query_task = None
             self._stream = None
             self._aborting = False
-            # Stop hook: fire here for the completion/error cases. abort()
-            # fires its own with reason="aborted" after its work is done.
+            # Silent-end guard: the SDK can finish the async-for without
+            # raising AND without yielding any ResultMessage when an
+            # upstream HTTP call (egress 403, 5xx, timeout) is swallowed
+            # internally. Without this, run_prompt returns "successfully"
+            # with no ResultEvent ever published — the orchestrator sees
+            # Stop("completed") and the user sees nothing, silently.
+            #
+            # Trigger only when:
+            #   * not aborted — abort() legitimately ends a turn with
+            #     result_count==0, but emits its own StoppedEvent
+            #     separately and is not a silent failure.
+            #   * not error_raised — the except-Exception path above
+            #     already published a precise ErrorEvent; doing it again
+            #     would forward two error events for one failure.
+            #   * result_count == 0 — the contract for a healthy SDK
+            #     turn is "at least one ResultMessage per run_prompt
+            #     call". If that didn't happen, treat it as failure
+            #     even though no exception surfaced.
+            #
+            # See pi_backend.py:_handle_event for the Pi-side counterpart;
+            # Pi can identify upstream errors precisely via
+            # PromptTurnCompleteEvent.stop_reason="error", whereas the
+            # Claude SDK gives us no comparable signal — hence this
+            # coarser-grained but still load-bearing terminal invariant.
+            if not aborted and not error_raised and result_count == 0:
+                await self._emit(ErrorEvent(
+                    error=(
+                        "Claude SDK ended the query with no ResultMessage. "
+                        "This typically means an upstream HTTP error "
+                        "(egress 403, rate-limit, timeout) was swallowed "
+                        "by the SDK without surfacing as an exception."
+                    )
+                ))
+                error_raised = True
             if not aborted:
                 await self._emit_stop("error" if error_raised else "completed")
 

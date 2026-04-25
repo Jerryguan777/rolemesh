@@ -462,9 +462,65 @@ class PiBackend:
         is_final=False so the host streams every reply to the user but does
         not release idle-gating until the whole batch settles. The is_final
         marker is published by the NATS bridge after run_prompt returns.
+
+        Error path: when the upstream LLM call fails (egress 403, 5xx,
+        timeout, max_turns hit, etc.), pi.agent_loop fires a
+        PromptTurnCompleteEvent whose message has stop_reason="error" and
+        an error_message but no text content (see
+        src/pi/agent/proxy.py:413-418 plus agent_loop.py:188-192 plus the
+        "stream ended without a done event" fallback at agent_loop.py:328-337).
+        Without translating that into an ErrorEvent here, run_prompt's
+        finally would emit Stop("completed") with no ResultEvent and the
+        orchestrator would silently report a successful turn that
+        produced no reply.
+
+        Aborted path: stop_reason="aborted" can also reach this handler
+        when abort() races with a partial response. abort() emits its
+        own StoppedEvent and resets state, so this handler stays out of
+        the way — emitting a competing ErrorEvent here would fight the
+        abort flow.
+
+        Stop-hook reason caveat: emitting ErrorEvent here does NOT change
+        the eventual _emit_stop("completed") in run_prompt's finally,
+        because session.prompt() returns normally even on the error path
+        (Pi turns HTTP failures into in-stream events, not exceptions).
+        Today this asymmetry has zero observable effect — no StopHandler
+        is registered against StopEvent.reason anywhere in the repo, and
+        the orchestrator-facing truth comes from ErrorEvent →
+        ContainerOutput(status="error"), which IS emitted correctly.
+        Revisit if/when a real Stop observer is wired up.
         """
         if isinstance(event, PromptTurnCompleteEvent):
-            text = _extract_text(event.message) if getattr(event, "message", None) else ""
+            msg = getattr(event, "message", None)
+            stop_reason = getattr(msg, "stop_reason", None)
+            if stop_reason == "error":
+                # Surface BOTH the partial reply (if any) and the error.
+                # proxy.py accumulates streamed TextContent into the same
+                # AssistantMessage that ends up here on failure — losing
+                # that text would silently swallow the model's actual
+                # output up to the point of failure (common pattern: LLM
+                # streams half a paragraph, then upstream times out).
+                # Order matters: ResultEvent first so the user sees the
+                # reply, then ErrorEvent so the orchestrator records
+                # status="error" for the turn.
+                partial_text = _extract_text(msg) if msg is not None else ""
+                if partial_text:
+                    self._schedule_emit(
+                        ResultEvent(
+                            text=partial_text,
+                            new_session_id=self._session_file,
+                            is_final=False,
+                        )
+                    )
+                err = (
+                    getattr(msg, "error_message", None)
+                    or "LLM stream ended in error with no further detail"
+                )
+                self._schedule_emit(ErrorEvent(error=err))
+                return
+            if stop_reason == "aborted":
+                return
+            text = _extract_text(msg) if msg is not None else ""
             if text:
                 self._schedule_emit(
                     ResultEvent(
