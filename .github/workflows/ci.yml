@@ -1,0 +1,100 @@
+name: CI
+
+# Run on PRs against any branch and on direct pushes to the active
+# branch namespaces in this repo (main, feat/**, fix/**, safety/**,
+# ci/**). Throwaway / personal branches outside these namespaces don't
+# trigger directly — open a PR to gate them, which is the same path
+# as protected merges anyway.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "feat/**"
+      - "fix/**"
+      - "safety/**"
+      - "ci/**"
+
+# Cancel in-flight runs when a new commit arrives on the same ref.
+# Saves runner minutes and keeps the latest result authoritative.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  test:
+    name: Lint + tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # uv install + cache. astral-sh/setup-uv handles caching of the uv
+      # tool itself; the venv we cache separately below keyed off uv.lock.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      # Pin Python 3.12. Project requires >=3.12 (see pyproject.toml) and
+      # llm-guard's torch<2.6 has no Python 3.13 wheels — using 3.13 here
+      # would silently break the [safety-ml] extra. Lock to 3.12 so CI
+      # mirrors the documented dev environment.
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      # Cache the project venv keyed by uv.lock + Python version. First
+      # run installs ~50 packages including torch (~1GB); cached runs
+      # restore in seconds.
+      - name: Cache venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-py3.12-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            venv-${{ runner.os }}-py3.12-
+
+      - name: Install dependencies (dev + pi + safety-ml)
+        run: uv sync --python 3.12 --extra dev --extra pi --extra safety-ml
+
+      # spaCy en_core_web_sm is required by the safety-ml presidio.pii
+      # check. Cached separately because it's a one-time download (~13MB)
+      # bound to the spaCy version in the venv, not to uv.lock.
+      - name: Cache spaCy model
+        uses: actions/cache@v4
+        id: spacy-cache
+        with:
+          path: .venv/lib/python3.12/site-packages/en_core_web_sm
+          key: spacy-en-core-web-sm-${{ hashFiles('uv.lock') }}
+
+      - name: Download spaCy en_core_web_sm
+        if: steps.spacy-cache.outputs.cache-hit != 'true'
+        run: uv run python -m spacy download en_core_web_sm
+
+      # Ruff currently runs informationally — the project's ruff.toml
+      # selects TCH/BLE rules that have ~15 pre-existing baseline
+      # violations from before any CI gate existed. Hard-failing on them
+      # would block every PR (including this one) until a dedicated
+      # baseline-cleanup PR lands. Track that work separately; for now
+      # surface the warnings in the log so reviewers can see them, but
+      # let the run continue to pytest, which IS the load-bearing gate.
+      # Promote to hard failure (drop continue-on-error) once the
+      # baseline is clean.
+      - name: Ruff lint
+        run: uv run ruff check src/ tests/
+        continue-on-error: true
+
+      # --maxfail=10 stops cascades when one fixture bug takes out a
+      # whole subtree, so the failure list stays readable.
+      #
+      # tests/attack_sim is path-ignored: it drives a real Docker
+      # network and isn't marked with @pytest.mark.integration, so the
+      # marker filter alone wouldn't exclude it. Everything else with
+      # external-service dependencies (NATS, full e2e, multi-tenant
+      # flows) should carry the integration marker so the project's
+      # default ``addopts = "-m 'not integration'"`` from pyproject.toml
+      # deselects it automatically — that path is preferable to a
+      # growing CI-side ignore list.
+      - name: Pytest
+        run: uv run pytest tests/ --ignore=tests/attack_sim --maxfail=10 -q

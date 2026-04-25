@@ -24,6 +24,13 @@ import nats
 import pytest
 from nats.js.api import StreamConfig
 
+# Hard dependency: a real NATS server on NATS_URL (docker-compose.dev.yml).
+# Without integration marker the suite hangs in CI on `nats.connect()`
+# because the connect retries indefinitely instead of erroring out. The
+# project-wide ``addopts = "-m 'not integration'"`` deselects this file
+# from PR runs; nightly / explicit ``-m integration`` flips it on.
+pytestmark = pytest.mark.integration
+
 from agent_runner.backend import BackendEvent, ErrorEvent, ResultEvent, SessionInitEvent
 from agent_runner.main import (
     ContainerOutput,
