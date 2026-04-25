@@ -55,6 +55,7 @@ class _RecordingHookMatcher:
 claude_backend.HookMatcher = _RecordingHookMatcher  # type: ignore[assignment]
 
 
+from agent_runner.backend import SafetyBlockEvent  # noqa: E402
 from agent_runner.hooks import (  # noqa: E402
     HookRegistry,
     UserPromptEvent,
@@ -130,11 +131,13 @@ async def test_pi_allow_passes_prompt_unchanged() -> None:
     assert result == "hello"
 
 
-async def test_pi_block_emits_result_event_with_reason() -> None:
+async def test_pi_block_emits_safety_block_event_with_reason() -> None:
     """Blocking prompt -> _apply_user_prompt_hook returns None AND
-    fires one ResultEvent whose text carries the handler's reason. The
-    orchestrator's UI shows this as the reply bubble so the user
-    understands why their message wasn't answered."""
+    fires exactly one SafetyBlockEvent whose ``reason`` carries the
+    handler's reason. Pre-commit-a353381 this travelled through
+    ResultEvent.text and polluted the messages table as a fake assistant
+    reply — the dedicated SafetyBlockEvent now keeps blocks distinguishable
+    from genuine LLM output across the persistence/metrics/UI pipeline."""
 
     class _Blocker:
         async def on_user_prompt_submit(
@@ -155,16 +158,18 @@ async def test_pi_block_emits_result_event_with_reason() -> None:
     result = await backend._apply_user_prompt_hook("some question")
 
     assert result is None
-    # Exactly one ResultEvent carrying the block reason
     assert len(emitted) == 1
-    assert "off-hours" in emitted[0].text
+    event = emitted[0]
+    assert isinstance(event, SafetyBlockEvent)
+    assert event.stage == "input_prompt"
+    assert "off-hours" in event.reason
 
 
-async def test_pi_hook_crash_produces_error_result_event() -> None:
+async def test_pi_hook_crash_produces_safety_block_event() -> None:
     """Fail-close for Pi's direct emit path: handler raises ->
     _apply_user_prompt_hook returns None (do not call session.prompt)
-    AND surfaces 'Hook system error' to the UI. Mutation: if the
-    bridge swallowed the error and returned the original prompt,
+    AND surfaces 'Hook system error' via SafetyBlockEvent. Mutation:
+    if the bridge swallowed the error and returned the original prompt,
     a broken DLP validator would silently stop validating."""
 
     class _Crasher:
@@ -187,8 +192,11 @@ async def test_pi_hook_crash_produces_error_result_event() -> None:
 
     assert result is None
     assert len(emitted) == 1
-    assert "Hook system error" in emitted[0].text
-    assert "validator crashed" in emitted[0].text
+    event = emitted[0]
+    assert isinstance(event, SafetyBlockEvent)
+    assert event.stage == "input_prompt"
+    assert "Hook system error" in event.reason
+    assert "validator crashed" in event.reason
 
 
 # ---------------------------------------------------------------------------
