@@ -927,6 +927,8 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     await _enable_rls_on(conn, "scheduled_tasks")      # D5
     await _enable_rls_on(conn, "task_run_logs")
     await _enable_rls_on(conn, "messages")             # D6
+    await _enable_rls_on(conn, "conversations")        # D7
+    await _enable_rls_on(conn, "sessions")
 
 
 async def _enable_rls_on(
