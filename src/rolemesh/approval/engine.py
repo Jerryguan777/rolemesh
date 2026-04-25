@@ -377,15 +377,26 @@ class ApprovalEngine:
                 approvers=[],
             )
             if default_mode == "auto_execute":
-                await pg.set_approval_status(req.id, "approved")
-                await self._publish_decided(req.id, status="approved", note=None)
+                await pg.set_approval_status(
+                    req.id, "approved", tenant_id=req.tenant_id
+                )
+                await self._publish_decided(
+                    req.id, tenant_id=req.tenant_id, status="approved", note=None
+                )
             elif default_mode == "require_approval":
                 # Move pending → skipped (system transition). The
                 # originating conversation is notified; admins must
                 # create a policy or decide manually via a side channel.
-                await pg.set_approval_status(req.id, "skipped")
+                await pg.set_approval_status(
+                    req.id, "skipped", tenant_id=req.tenant_id
+                )
                 await self._send_to_origin(
-                    (await pg.get_approval_request(req.id)) or req,
+                    (
+                        await pg.get_approval_request(
+                            req.id, tenant_id=req.tenant_id
+                        )
+                    )
+                    or req,
                     format_skipped_message(req),
                 )
             else:  # "deny"
@@ -397,10 +408,10 @@ class ApprovalEngine:
                     "configured for deny-by-default."
                 )
                 await pg.set_approval_status(
-                    req.id, "rejected", note=note
+                    req.id, "rejected", tenant_id=req.tenant_id, note=note
                 )
                 await self._publish_decided(
-                    req.id, status="rejected", note=note
+                    req.id, tenant_id=req.tenant_id, status="rejected", note=note
                 )
             return
 
@@ -665,6 +676,7 @@ class ApprovalEngine:
         self,
         *,
         request_id: str,
+        tenant_id: str,
         action: str,
         user_id: str,
         note: str | None = None,
@@ -675,6 +687,10 @@ class ApprovalEngine:
         resolved) vs 200 (success) without a second round-trip. The audit
         row is written atomically inside the same transaction by the DB
         trigger — no "ghost decision" window.
+
+        ``tenant_id`` filters the underlying SELECT/UPDATE so a forged
+        request_id from another tenant returns "missing" rather than
+        leaking decision power.
         """
         if action not in ("approve", "reject"):
             raise ValueError(f"Unknown decision action: {action}")
@@ -682,6 +698,7 @@ class ApprovalEngine:
 
         outcome = await pg.decide_approval_request_full(
             request_id,
+            tenant_id=tenant_id,
             new_status=new_status,
             actor_user_id=user_id,
             note=note,
@@ -699,13 +716,26 @@ class ApprovalEngine:
         # approved rows + executes; for rejected it just delivers the
         # rejection notification. Splitting this way lets the WebUI REST
         # process decide without gateway access.
-        await self._publish_decided(request_id, status=new_status, note=note)
+        await self._publish_decided(
+            request_id, tenant_id=tenant_id, status=new_status, note=note
+        )
         return outcome.request
 
     async def _publish_decided(
-        self, request_id: str, *, status: str, note: str | None
+        self,
+        request_id: str,
+        *,
+        tenant_id: str,
+        status: str,
+        note: str | None,
     ) -> None:
-        body = json.dumps({"status": status, "note": note}).encode()
+        # tenant_id rides in the body so the executor can scope its
+        # subsequent get_approval_request / claim_approval calls. The
+        # subject still contains only request_id for backwards compat
+        # with subscriber filters.
+        body = json.dumps(
+            {"tenant_id": tenant_id, "status": status, "note": note}
+        ).encode()
         await self._publisher.publish(f"approval.decided.{request_id}", body)
 
     # -- Cancellation (Stop cascade) --------------------------------------
@@ -719,12 +749,12 @@ class ApprovalEngine:
         (system transition).
         """
         cancelled = await pg.cancel_pending_approvals_for_job(job_id)
-        for req_id in cancelled:
-            req = await pg.get_approval_request(req_id)
+        for req_id, tenant_id in cancelled:
+            req = await pg.get_approval_request(req_id, tenant_id=tenant_id)
             if req is None:
                 continue
             await self._send_to_origin(req, format_cancelled_message(req))
-        return cancelled
+        return [req_id for req_id, _ in cancelled]
 
     # -- Maintenance loops -----------------------------------------------
 
@@ -737,7 +767,9 @@ class ApprovalEngine:
         expired = await pg.list_expired_pending_approvals()
         count = 0
         for req in expired:
-            updated = await pg.expire_approval_if_pending(req.id)
+            updated = await pg.expire_approval_if_pending(
+                req.id, tenant_id=req.tenant_id
+            )
             if updated is None:
                 # A concurrent decide won the CAS — skip silently.
                 continue
@@ -754,12 +786,16 @@ class ApprovalEngine:
         ):
             # Republish with explicit status so the Worker's default-
             # to-approved behavior is not load-bearing here either.
-            await self._publish_decided(req.id, status="approved", note=None)
+            await self._publish_decided(
+                req.id, tenant_id=req.tenant_id, status="approved", note=None
+            )
             republished += 1
         for req in await pg.list_stuck_executing_approvals(
             older_than_seconds=_RECONCILE_EXECUTING_GRACE_S
         ):
-            transitioned = await pg.set_approval_status(req.id, "execution_stale")
+            transitioned = await pg.set_approval_status(
+                req.id, "execution_stale", tenant_id=req.tenant_id
+            )
             if transitioned is None:
                 continue
             stale += 1

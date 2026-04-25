@@ -151,11 +151,37 @@ class ApprovalWorker:
         except (UnicodeDecodeError, json.JSONDecodeError):
             body = {}
         status = str(body.get("status") or "approved")
+        # tenant_id is encoded in the publish payload by the engine so
+        # subsequent DB lookups can be tenant-scoped without trusting
+        # the bare request_id from the subject.
+        tenant_id = body.get("tenant_id")
+        if not tenant_id:
+            # Legacy message: published by the OLD orchestrator before
+            # tenant_id was added to the body. Resolve tenant_id from
+            # the row itself — the Worker is trusted code consuming
+            # orchestrator-published ids, so the row's own tenant_id
+            # is authoritative. Without this fallback, in-flight
+            # messages at upgrade time would be silently dropped and
+            # users' approved actions would never execute (eventually
+            # surfaced by the reconcile loop, but with a notification
+            # gap).
+            tenant_id = await pg.resolve_request_tenant(request_id)
+            if tenant_id is None:
+                logger.warning(
+                    "approval worker: legacy decided message references unknown request",
+                    request_id=request_id,
+                )
+                await msg.ack()
+                return
+            logger.info(
+                "approval worker: recovered tenant_id for legacy decided message",
+                request_id=request_id,
+            )
 
         if status == "rejected":
             # The engine has already written the 'rejected' state + audit.
             # We just deliver the notification.
-            req = await pg.get_approval_request(request_id)
+            req = await pg.get_approval_request(request_id, tenant_id=tenant_id)
             if req is not None and req.conversation_id:
                 try:
                     await self._channel.send_to_conversation(
@@ -177,7 +203,9 @@ class ApprovalWorker:
             return
 
         # status == "approved": claim and execute.
-        req = await pg.claim_approval_for_execution(request_id)
+        req = await pg.claim_approval_for_execution(
+            request_id, tenant_id=tenant_id
+        )
         if req is None:
             # Another Worker got it first, or the state moved on. Ack so
             # JetStream does not redeliver indefinitely.
@@ -200,7 +228,10 @@ class ApprovalWorker:
         # Pass metadata through the CRUD call so the trigger attaches it
         # to the terminal audit row in the same transaction.
         await pg.set_approval_status(
-            request_id, terminal, metadata={"results": results}
+            request_id,
+            terminal,
+            tenant_id=tenant_id,
+            metadata={"results": results},
         )
         if req.conversation_id:
             try:

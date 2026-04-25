@@ -120,14 +120,14 @@ async def test_cancel_then_late_proposal_creates_orphan_that_expires(
         )
     await harness.engine.expire_stale_requests()
 
-    fresh = await pg.get_approval_request(row.id)
+    fresh = await pg.get_approval_request(row.id, tenant_id=seed.tenant_id)
     assert fresh is not None
     assert fresh.status == "expired", (
         f"orphan pending row must be reaped by expiry; got {fresh.status!r}"
     )
     # Audit captures the expire as a system transition.
     expired_audit = [
-        e for e in await pg.list_approval_audit(row.id)
+        e for e in await pg.list_approval_audit(row.id, tenant_id=seed.tenant_id)
         if e.action == "expired"
     ]
     assert len(expired_audit) == 1

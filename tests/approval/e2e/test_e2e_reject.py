@@ -103,13 +103,13 @@ async def test_reject_delivers_note_and_never_calls_mcp(
     )
 
     audit_actions = [
-        e.action for e in await pg.list_approval_audit(req.id)
+        e.action for e in await pg.list_approval_audit(req.id, tenant_id=seed.tenant_id)
     ]
     assert audit_actions == ["created", "rejected"], (
         f"audit chain mismatch: {audit_actions!r}"
     )
     rejected_entry = [
-        e for e in await pg.list_approval_audit(req.id) if e.action == "rejected"
+        e for e in await pg.list_approval_audit(req.id, tenant_id=seed.tenant_id) if e.action == "rejected"
     ][0]
     assert rejected_entry.actor_user_id == seed.owner_user_id
     assert rejected_entry.note is not None

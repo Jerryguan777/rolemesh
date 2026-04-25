@@ -99,7 +99,7 @@ class TestPolicyCrud:
         assert p.priority == 10
         assert p.mcp_server_name == "erp"
 
-        fetched = await get_approval_policy(p.id)
+        fetched = await get_approval_policy(p.id, tenant_id=tenant_id)
         assert fetched is not None
         assert fetched.id == p.id
         assert fetched.condition_expr == {
@@ -153,7 +153,9 @@ class TestPolicyCrud:
             condition_expr={"always": True},
         )
         original_updated = p.updated_at
-        updated = await update_approval_policy(p.id, priority=99, enabled=False)
+        updated = await update_approval_policy(
+            p.id, tenant_id=tenant_id, priority=99, enabled=False
+        )
         assert updated is not None
         assert updated.priority == 99
         assert updated.enabled is False
@@ -170,8 +172,8 @@ class TestPolicyCrud:
             tool_name="refund",
             condition_expr={"always": True},
         )
-        assert await delete_approval_policy(p.id) is True
-        assert await get_approval_policy(p.id) is None
+        assert await delete_approval_policy(p.id, tenant_id=tenant_id) is True
+        assert await get_approval_policy(p.id, tenant_id=tenant_id) is None
 
     async def test_list_filters_by_coworker(self) -> None:
         tenant_id, _u, cw_id, _b, _c = await _chain()
@@ -261,10 +263,16 @@ class TestDecideAtomic:
             resolved_approvers=[user_id, other.id],
         )
         first = await decide_approval_request_full(
-            request_id, new_status="approved", actor_user_id=user_id
+            request_id,
+            tenant_id=tenant_id,
+            new_status="approved",
+            actor_user_id=user_id,
         )
         second = await decide_approval_request_full(
-            request_id, new_status="rejected", actor_user_id=other.id
+            request_id,
+            tenant_id=tenant_id,
+            new_status="rejected",
+            actor_user_id=other.id,
         )
         assert first.kind == "updated"
         assert first.request is not None and first.request.status == "approved"
@@ -289,7 +297,10 @@ class TestDecideAtomic:
             resolved_approvers=[user_id],
         )
         result = await decide_approval_request_full(
-            request_id, new_status="approved", actor_user_id=outsider.id
+            request_id,
+            tenant_id=tenant_id,
+            new_status="approved",
+            actor_user_id=outsider.id,
         )
         assert result.kind == "forbidden"
 
@@ -306,7 +317,10 @@ class TestDecideAtomic:
             status="approved",
         )
         result = await decide_approval_request_full(
-            request_id, new_status="approved", actor_user_id=user_id
+            request_id,
+            tenant_id=tenant_id,
+            new_status="approved",
+            actor_user_id=user_id,
         )
         assert result.kind == "conflict"
         assert result.current_status == "approved"
@@ -325,8 +339,8 @@ class TestClaimForExecution:
             resolved_approvers=[user_id],
             status="approved",
         )
-        first = await claim_approval_for_execution(request_id)
-        second = await claim_approval_for_execution(request_id)
+        first = await claim_approval_for_execution(request_id, tenant_id=tenant_id)
+        second = await claim_approval_for_execution(request_id, tenant_id=tenant_id)
         assert first is not None and first.status == "executing"
         assert second is None
 
@@ -342,7 +356,10 @@ class TestClaimForExecution:
             resolved_approvers=[user_id],
             status="pending",
         )
-        assert await claim_approval_for_execution(request_id) is None
+        assert (
+            await claim_approval_for_execution(request_id, tenant_id=tenant_id)
+            is None
+        )
 
 
 class TestCancelForJob:
@@ -371,8 +388,8 @@ class TestCancelForJob:
             action_hashes=["hash-2"],
         )
         cancelled = await cancel_pending_approvals_for_job("job-A")
-        assert cancelled == [pending_id]
-        after = await get_approval_request(approved_id)
+        assert cancelled == [(pending_id, tenant_id)]
+        after = await get_approval_request(approved_id, tenant_id=tenant_id)
         assert after is not None and after.status == "approved"
 
 
@@ -409,7 +426,7 @@ class TestDedupLookup:
             resolved_approvers=[user_id],
             action_hashes=["dedup-hash-2"],
         )
-        await set_approval_status(request_id, "rejected")
+        await set_approval_status(request_id, "rejected", tenant_id=tenant_id)
         found = await find_pending_request_by_action_hash(tenant_id, "dedup-hash-2")
         assert found is None
 
@@ -497,7 +514,7 @@ class TestAuditLog:
             policy_id,
             resolved_approvers=[user_id],
         )
-        entries = await list_approval_audit(request_id)
+        entries = await list_approval_audit(request_id, tenant_id=tenant_id)
         assert [e.action for e in entries] == ["created"]
 
     async def test_trigger_writes_status_change_on_update(self) -> None:
@@ -514,9 +531,13 @@ class TestAuditLog:
         # Transition pending → approved via set_approval_status; the
         # trigger writes the 'approved' row in the same transaction.
         await set_approval_status(
-            request_id, "approved", actor_user_id=user_id, note="looks good"
+            request_id,
+            "approved",
+            tenant_id=tenant_id,
+            actor_user_id=user_id,
+            note="looks good",
         )
-        entries = await list_approval_audit(request_id)
+        entries = await list_approval_audit(request_id, tenant_id=tenant_id)
         assert [e.action for e in entries] == ["created", "approved"]
         assert entries[1].actor_user_id == user_id
         assert entries[1].note == "looks good"
@@ -536,9 +557,9 @@ class TestAuditLog:
         # Worker path: executing → executed with metadata passed through.
         meta = {"results": [{"ok": True, "amount": 100}]}
         await set_approval_status(
-            request_id, "executed", metadata=meta
+            request_id, "executed", tenant_id=tenant_id, metadata=meta
         )
-        entries = await list_approval_audit(request_id)
+        entries = await list_approval_audit(request_id, tenant_id=tenant_id)
         # INSERT with status='executing' yields 2 rows (created + executing).
         # UPDATE to 'executed' yields 1 row with metadata.
         actions = [e.action for e in entries]

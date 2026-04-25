@@ -65,7 +65,7 @@ async def test_auto_execute_mode_runs_unsupervised(
     req_id = await _submit_unmatched_proposal(harness, seed)
 
     async def _executed() -> bool:
-        fresh = await pg.get_approval_request(req_id)
+        fresh = await pg.get_approval_request(req_id, tenant_id=seed.tenant_id)
         return fresh is not None and fresh.status == "executed"
 
     await harness.wait_for(_executed, timeout=10.0)
@@ -82,7 +82,7 @@ async def test_require_approval_mode_blocks_unsupervised_execution(
     req_id = await _submit_unmatched_proposal(harness, seed)
 
     async def _skipped() -> bool:
-        fresh = await pg.get_approval_request(req_id)
+        fresh = await pg.get_approval_request(req_id, tenant_id=seed.tenant_id)
         return fresh is not None and fresh.status == "skipped"
 
     await harness.wait_for(_skipped, timeout=5.0)
@@ -113,7 +113,7 @@ async def test_deny_mode_rejects_with_system_note(
     req_id = await _submit_unmatched_proposal(harness, seed)
 
     async def _rejected() -> bool:
-        fresh = await pg.get_approval_request(req_id)
+        fresh = await pg.get_approval_request(req_id, tenant_id=seed.tenant_id)
         return fresh is not None and fresh.status == "rejected"
 
     await harness.wait_for(_rejected, timeout=5.0)
@@ -123,7 +123,7 @@ async def test_deny_mode_rejects_with_system_note(
     )
     # The rejection audit row carries the system note explaining why.
     audit = [
-        e for e in await pg.list_approval_audit(req_id)
+        e for e in await pg.list_approval_audit(req_id, tenant_id=seed.tenant_id)
         if e.action == "rejected"
     ]
     assert audit, "audit must include a rejected row"

@@ -154,18 +154,18 @@ async def proxy_base():
 class TestApprovedExecution:
     async def test_execute_success_transitions_to_executed(self, proxy_base) -> None:
         base, recorder = proxy_base
-        req_id, conv_id, _user_id, _cw, _t = await _seed_request(status="approved")
+        req_id, conv_id, _user_id, _cw, tenant_id = await _seed_request(status="approved")
         ch = _FakeChannel()
         w = ApprovalWorker(js=None, channel_sender=ch, proxy_base_url=base)  # type: ignore[arg-type]
         msg = _FakeMsg(
             subject=f"approval.decided.{req_id}",
-            data=json.dumps({"status": "approved"}).encode(),
+            data=json.dumps({"status": "approved", "tenant_id": tenant_id}).encode(),
         )
         await w._handle_message(msg)
 
-        req = await get_approval_request(req_id)
+        req = await get_approval_request(req_id, tenant_id=tenant_id)
         assert req is not None and req.status == "executed"
-        audit_actions = [e.action for e in await list_approval_audit(req_id)]
+        audit_actions = [e.action for e in await list_approval_audit(req_id, tenant_id=tenant_id)]
         assert audit_actions[-2:] == ["executing", "executed"]
         # Report went to the origin conversation.
         assert any(conv_id == c for c, _t in ch.sent)
@@ -185,7 +185,7 @@ class TestApprovedExecution:
         base, recorder = proxy_base
         # Two actions; force the second server to 500.
         recorder.server_override["erp2"] = {"status": 500, "body": {"err": "boom"}}
-        req_id, _conv, _user, _cw, _t = await _seed_request(
+        req_id, _conv, _user, _cw, tenant_id = await _seed_request(
             status="approved",
             actions=[
                 {"mcp_server": "erp", "tool_name": "a", "params": {}},
@@ -196,29 +196,29 @@ class TestApprovedExecution:
         w = ApprovalWorker(js=None, channel_sender=ch, proxy_base_url=base)  # type: ignore[arg-type]
         msg = _FakeMsg(
             subject=f"approval.decided.{req_id}",
-            data=json.dumps({"status": "approved"}).encode(),
+            data=json.dumps({"status": "approved", "tenant_id": tenant_id}).encode(),
         )
         await w._handle_message(msg)
 
-        req = await get_approval_request(req_id)
+        req = await get_approval_request(req_id, tenant_id=tenant_id)
         assert req is not None and req.status == "execution_failed"
-        audit_actions = [e.action for e in await list_approval_audit(req_id)]
+        audit_actions = [e.action for e in await list_approval_audit(req_id, tenant_id=tenant_id)]
         assert "execution_failed" in audit_actions
         # Both actions were attempted (best-effort batch).
         assert len(recorder.requests) == 2
 
     async def test_duplicate_decided_does_not_double_execute(self, proxy_base) -> None:
         base, recorder = proxy_base
-        req_id, _c, _u, _cw, _t = await _seed_request(status="approved")
+        req_id, _c, _u, _cw, tenant_id = await _seed_request(status="approved")
         ch = _FakeChannel()
         w = ApprovalWorker(js=None, channel_sender=ch, proxy_base_url=base)  # type: ignore[arg-type]
         msg1 = _FakeMsg(
             subject=f"approval.decided.{req_id}",
-            data=json.dumps({"status": "approved"}).encode(),
+            data=json.dumps({"status": "approved", "tenant_id": tenant_id}).encode(),
         )
         msg2 = _FakeMsg(
             subject=f"approval.decided.{req_id}",
-            data=json.dumps({"status": "approved"}).encode(),
+            data=json.dumps({"status": "approved", "tenant_id": tenant_id}).encode(),
         )
         await w._handle_message(msg1)
         await w._handle_message(msg2)
@@ -236,12 +236,12 @@ class TestRejectionNotify:
     async def test_rejected_sends_notification_no_execute(self, proxy_base) -> None:
         base, recorder = proxy_base
         # Seed as already-rejected (engine would have set it before publish)
-        req_id, conv_id, _user, _cw, _t = await _seed_request(status="rejected")
+        req_id, conv_id, _user, _cw, tenant_id = await _seed_request(status="rejected")
         ch = _FakeChannel()
         w = ApprovalWorker(js=None, channel_sender=ch, proxy_base_url=base)  # type: ignore[arg-type]
         msg = _FakeMsg(
             subject=f"approval.decided.{req_id}",
-            data=json.dumps({"status": "rejected", "note": "no"}).encode(),
+            data=json.dumps({"status": "rejected", "note": "no", "tenant_id": tenant_id}).encode(),
         )
         await w._handle_message(msg)
         assert len(recorder.requests) == 0
@@ -285,10 +285,83 @@ class TestRejectionNotify:
         w = ApprovalWorker(js=None, channel_sender=ch, proxy_base_url=base)  # type: ignore[arg-type]
         msg = _FakeMsg(
             subject=f"approval.decided.{req.id}",
-            data=json.dumps({"status": "rejected"}).encode(),
+            data=json.dumps({"status": "rejected", "tenant_id": t.id}).encode(),
         )
         await w._handle_message(msg)  # must not raise
         assert ch.sent == []
+
+
+# ---------------------------------------------------------------------------
+# Legacy message compatibility
+# ---------------------------------------------------------------------------
+
+
+class TestLegacyMessageFallback:
+    """Pre-fix publishers omitted ``tenant_id`` from the
+    ``approval.decided.*`` body. The Worker's first contract change
+    was to drop such messages with a warning; this is a behavior
+    regression because in-flight messages at upgrade time would never
+    execute. The Worker now falls back to ``resolve_request_tenant``,
+    which is a single SELECT scoped to a known-good orchestrator-
+    issued request_id. These tests pin the fallback so a future
+    refactor cannot silently re-introduce the data-loss window."""
+
+    async def test_legacy_approved_message_recovers_tenant_and_executes(
+        self, proxy_base
+    ) -> None:
+        base, recorder = proxy_base
+        req_id, _conv, _user, _cw, tenant_id = await _seed_request(status="approved")
+        ch = _FakeChannel()
+        w = ApprovalWorker(js=None, channel_sender=ch, proxy_base_url=base)  # type: ignore[arg-type]
+        # Body lacks tenant_id — simulates a message published by the
+        # OLD orchestrator before tenant_id was added to the protocol.
+        msg = _FakeMsg(
+            subject=f"approval.decided.{req_id}",
+            data=json.dumps({"status": "approved"}).encode(),
+        )
+        await w._handle_message(msg)
+
+        req = await get_approval_request(req_id, tenant_id=tenant_id)
+        assert req is not None and req.status == "executed", (
+            "legacy decided message MUST be processed via tenant fallback, "
+            "otherwise upgrade-window approvals are silently dropped"
+        )
+        assert len(recorder.requests) == 1
+        assert msg.acks == [1]
+
+    async def test_legacy_rejected_message_recovers_tenant_and_notifies(
+        self, proxy_base
+    ) -> None:
+        base, _recorder = proxy_base
+        req_id, conv_id, _user, _cw, tenant_id = await _seed_request(status="rejected")
+        ch = _FakeChannel()
+        w = ApprovalWorker(js=None, channel_sender=ch, proxy_base_url=base)  # type: ignore[arg-type]
+        msg = _FakeMsg(
+            subject=f"approval.decided.{req_id}",
+            data=json.dumps({"status": "rejected", "note": "x"}).encode(),
+        )
+        await w._handle_message(msg)
+        assert any(c == conv_id and "rejected" in t for c, t in ch.sent), (
+            "legacy rejected message MUST surface the rejection notification"
+        )
+        assert msg.acks == [1]
+
+    async def test_legacy_message_with_unknown_request_id_is_dropped(
+        self, proxy_base
+    ) -> None:
+        base, recorder = proxy_base
+        # Don't seed any request — the request_id is bogus.
+        bogus_id = str(uuid.uuid4())
+        ch = _FakeChannel()
+        w = ApprovalWorker(js=None, channel_sender=ch, proxy_base_url=base)  # type: ignore[arg-type]
+        msg = _FakeMsg(
+            subject=f"approval.decided.{bogus_id}",
+            data=json.dumps({"status": "approved"}).encode(),
+        )
+        await w._handle_message(msg)
+        # Nothing executed, message acked so JetStream stops redelivering.
+        assert recorder.requests == []
+        assert msg.acks == [1]
 
 
 # Silence unused-import warnings.

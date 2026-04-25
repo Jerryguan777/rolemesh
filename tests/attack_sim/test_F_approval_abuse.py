@@ -119,11 +119,12 @@ async def test_F1_non_approver_cannot_decide(fake_publisher, fake_channel) -> No
     with pytest.raises(ForbiddenError):
         await engine.handle_decision(
             request_id=request_id,
+            tenant_id=victim.tenant_id,
             action="approve",
             user_id=attacker.id,
         )
 
-    fresh = await pg.get_approval_request(request_id)
+    fresh = await pg.get_approval_request(request_id, tenant_id=victim.tenant_id)
     assert fresh is not None and fresh.status == "pending"
 
 
@@ -172,10 +173,10 @@ async def test_F2_concurrent_approve_wins_once(fake_publisher, fake_channel) -> 
 
     results = await asyncio.gather(
         engine.handle_decision(
-            request_id=req.id, action="approve", user_id=victim.owner_user_id
+            request_id=req.id, tenant_id=victim.tenant_id, action="approve", user_id=victim.owner_user_id
         ),
         engine.handle_decision(
-            request_id=req.id, action="reject", user_id=other_approver.id
+            request_id=req.id, tenant_id=victim.tenant_id, action="reject", user_id=other_approver.id
         ),
         return_exceptions=True,
     )
@@ -184,7 +185,7 @@ async def test_F2_concurrent_approve_wins_once(fake_publisher, fake_channel) -> 
     assert len(successes) == 1, f"expected 1 winner; got {results}"
     assert len(conflicts) == 1, f"expected 1 conflict; got {results}"
 
-    audit = await pg.list_approval_audit(req.id)
+    audit = await pg.list_approval_audit(req.id, tenant_id=victim.tenant_id)
     terminals = [e for e in audit if e.action in ("approved", "rejected")]
     assert len(terminals) == 1, (
         "atomic CAS must emit exactly one terminal audit; got "
@@ -242,12 +243,14 @@ async def test_F3_self_promotion_cannot_reach_prior_pending(
 
     # Attacker edits the policy to add themselves.
     await pg.update_approval_policy(
-        policy.id, approver_user_ids=[original_approver, attacker.id]
+        policy.id,
+        tenant_id=victim.tenant_id,
+        approver_user_ids=[original_approver, attacker.id],
     )
 
     with pytest.raises(ForbiddenError):
         await engine.handle_decision(
-            request_id=req.id, action="approve", user_id=attacker.id
+            request_id=req.id, tenant_id=victim.tenant_id, action="approve", user_id=attacker.id
         )
 
 
@@ -269,13 +272,13 @@ async def test_F4_decided_event_replay_does_not_double_execute(
     engine = _engine(fake_publisher, fake_channel)
     request_id, approver_id = await _seed_approver_and_pending(victim, engine)
     await engine.handle_decision(
-        request_id=request_id, action="approve", user_id=approver_id
+        request_id=request_id, tenant_id=victim.tenant_id, action="approve", user_id=approver_id
     )
 
-    first = await pg.claim_approval_for_execution(request_id)
+    first = await pg.claim_approval_for_execution(request_id, tenant_id=victim.tenant_id)
     assert first is not None and first.status == "executing"
 
-    second = await pg.claim_approval_for_execution(request_id)
+    second = await pg.claim_approval_for_execution(request_id, tenant_id=victim.tenant_id)
     assert second is None, (
         "atomic claim must return None on replay — worker drops "
         "replayed messages silently"
@@ -406,7 +409,7 @@ async def test_F6_stop_race_orphan_reaped_by_expiry(
             orphan.id,
         )
     await engine.expire_stale_requests()
-    after = await pg.get_approval_request(orphan.id)
+    after = await pg.get_approval_request(orphan.id, tenant_id=victim.tenant_id)
     assert after is not None and after.status == "expired"
 
 
@@ -438,7 +441,7 @@ async def test_F7_expire_and_approve_race_wins_once(
     async def _approver() -> Exception | None:
         try:
             await engine.handle_decision(
-                request_id=request_id, action="approve", user_id=approver_id
+                request_id=request_id, tenant_id=victim.tenant_id, action="approve", user_id=approver_id
             )
             return None
         except Exception as exc:  # noqa: BLE001
@@ -447,7 +450,7 @@ async def test_F7_expire_and_approve_race_wins_once(
     approver_outcome, _ = await asyncio.gather(
         _approver(), engine.expire_stale_requests()
     )
-    fresh = await pg.get_approval_request(request_id)
+    fresh = await pg.get_approval_request(request_id, tenant_id=victim.tenant_id)
     assert fresh is not None
     assert fresh.status in ("approved", "expired")
 
@@ -456,6 +459,6 @@ async def test_F7_expire_and_approve_race_wins_once(
     else:
         assert isinstance(approver_outcome, ConflictError)
 
-    audit_actions = [e.action for e in await pg.list_approval_audit(request_id)]
+    audit_actions = [e.action for e in await pg.list_approval_audit(request_id, tenant_id=victim.tenant_id)]
     terminals = [a for a in audit_actions if a in ("approved", "expired", "rejected")]
     assert len(terminals) == 1, f"audit must have one terminal; got {audit_actions!r}"

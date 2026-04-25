@@ -689,8 +689,8 @@ async def get_approval_policy_ep(
     policy_id: str,
     user: AdminUser,
 ) -> ApprovalPolicyResponse:
-    p = await pg.get_approval_policy(policy_id)
-    if p is None or p.tenant_id != user.tenant_id:
+    p = await pg.get_approval_policy(policy_id, tenant_id=user.tenant_id)
+    if p is None:
         raise HTTPException(status_code=404, detail="Policy not found")
     return _policy_to_response(p)
 
@@ -703,11 +703,12 @@ async def update_approval_policy_ep(
     body: ApprovalPolicyUpdate,
     user: AdminUser,
 ) -> ApprovalPolicyResponse:
-    existing = await pg.get_approval_policy(policy_id)
-    if existing is None or existing.tenant_id != user.tenant_id:
+    existing = await pg.get_approval_policy(policy_id, tenant_id=user.tenant_id)
+    if existing is None:
         raise HTTPException(status_code=404, detail="Policy not found")
     updated = await pg.update_approval_policy(
         policy_id,
+        tenant_id=user.tenant_id,
         mcp_server_name=body.mcp_server_name,
         tool_name=body.tool_name,
         condition_expr=body.condition_expr,
@@ -728,10 +729,10 @@ async def delete_approval_policy_ep(
     policy_id: str,
     user: AdminUser,
 ) -> None:
-    existing = await pg.get_approval_policy(policy_id)
-    if existing is None or existing.tenant_id != user.tenant_id:
+    existing = await pg.get_approval_policy(policy_id, tenant_id=user.tenant_id)
+    if existing is None:
         raise HTTPException(status_code=404, detail="Policy not found")
-    await pg.delete_approval_policy(policy_id)
+    await pg.delete_approval_policy(policy_id, tenant_id=user.tenant_id)
 
 
 # ---------------------------------------------------------------------------
@@ -795,10 +796,10 @@ async def get_approval_ep(
     request_id: str,
     user: AuthedUser,
 ) -> ApprovalRequestDetailResponse:
-    req = await pg.get_approval_request(request_id)
-    if req is None or req.tenant_id != user.tenant_id:
+    req = await pg.get_approval_request(request_id, tenant_id=user.tenant_id)
+    if req is None:
         raise HTTPException(status_code=404, detail="Approval not found")
-    audit = await pg.list_approval_audit(request_id)
+    audit = await pg.list_approval_audit(request_id, tenant_id=user.tenant_id)
     return ApprovalRequestDetailResponse(
         **_request_to_response(req).model_dump(),
         audit_log=[_audit_to_response(e) for e in audit],
@@ -813,10 +814,10 @@ async def get_approval_audit_ep(
     request_id: str,
     user: AuthedUser,
 ) -> list[ApprovalAuditEntryResponse]:
-    req = await pg.get_approval_request(request_id)
-    if req is None or req.tenant_id != user.tenant_id:
+    req = await pg.get_approval_request(request_id, tenant_id=user.tenant_id)
+    if req is None:
         raise HTTPException(status_code=404, detail="Approval not found")
-    rows = await pg.list_approval_audit(request_id)
+    rows = await pg.list_approval_audit(request_id, tenant_id=user.tenant_id)
     return [_audit_to_response(r) for r in rows]
 
 
@@ -847,12 +848,13 @@ async def decide_approval_ep(
     user: AuthedUser,
 ) -> ApprovalRequestResponse:
     engine = _require_engine()
-    req = await pg.get_approval_request(request_id)
-    if req is None or req.tenant_id != user.tenant_id:
+    req = await pg.get_approval_request(request_id, tenant_id=user.tenant_id)
+    if req is None:
         raise HTTPException(status_code=404, detail="Approval not found")
     try:
         updated = await engine.handle_decision(
             request_id=request_id,
+            tenant_id=user.tenant_id,
             action=body.action,
             user_id=user.user_id,
             note=_sanitize_note(body.note),
@@ -1083,8 +1085,8 @@ async def get_safety_rule_ep(
     rule_id: str,
     user: AdminUser,
 ) -> SafetyRuleResponse:
-    r = await pg.get_safety_rule(rule_id)
-    if r is None or r.tenant_id != user.tenant_id:
+    r = await pg.get_safety_rule(rule_id, tenant_id=user.tenant_id)
+    if r is None:
         raise HTTPException(status_code=404, detail="Rule not found")
     return _safety_rule_to_response(r)
 
@@ -1097,8 +1099,8 @@ async def update_safety_rule_ep(
     body: SafetyRuleUpdate,
     user: AdminUser,
 ) -> SafetyRuleResponse:
-    existing = await pg.get_safety_rule(rule_id)
-    if existing is None or existing.tenant_id != user.tenant_id:
+    existing = await pg.get_safety_rule(rule_id, tenant_id=user.tenant_id)
+    if existing is None:
         raise HTTPException(status_code=404, detail="Rule not found")
 
     # Re-validate when either check_id or stage changes: the stage must
@@ -1119,6 +1121,7 @@ async def update_safety_rule_ep(
 
     updated = await pg.update_safety_rule(
         rule_id,
+        tenant_id=user.tenant_id,
         stage=body.stage,
         check_id=body.check_id,
         config=body.config,
@@ -1138,10 +1141,12 @@ async def delete_safety_rule_ep(
     rule_id: str,
     user: AdminUser,
 ) -> None:
-    existing = await pg.get_safety_rule(rule_id)
-    if existing is None or existing.tenant_id != user.tenant_id:
+    existing = await pg.get_safety_rule(rule_id, tenant_id=user.tenant_id)
+    if existing is None:
         raise HTTPException(status_code=404, detail="Rule not found")
-    await pg.delete_safety_rule(rule_id, actor_user_id=user.user_id)
+    await pg.delete_safety_rule(
+        rule_id, tenant_id=user.tenant_id, actor_user_id=user.user_id
+    )
     await _publish_rule_changed("deleted", existing)
 
 

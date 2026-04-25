@@ -267,7 +267,7 @@ class TestRuleAuditEndpoint:
         )
         # Edit the rule to produce an 'updated' audit row.
         await update_safety_rule(
-            rule.id, enabled=False, actor_user_id=actor.id
+            rule.id, tenant_id=tenant.id, enabled=False, actor_user_id=actor.id
         )
         app = _build_app(user)
         async with _client(app) as client:

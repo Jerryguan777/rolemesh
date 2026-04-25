@@ -50,7 +50,7 @@ class TestSafetyRules:
         assert rule.enabled is True
         assert rule.description == "block SSN"
 
-        got = await pg.get_safety_rule(rule.id)
+        got = await pg.get_safety_rule(rule.id, tenant_id=tid)
         assert got is not None
         assert got.id == rule.id
 
@@ -131,7 +131,7 @@ class TestSafetyRules:
             enabled=True, priority=50,
         )
         updated = await pg.update_safety_rule(
-            rule.id, enabled=False, priority=75
+            rule.id, tenant_id=tid, enabled=False, priority=75
         )
         assert updated is not None
         assert updated.enabled is False
@@ -143,8 +143,15 @@ class TestSafetyRules:
 
     @pytest.mark.asyncio
     async def test_update_missing_returns_none(self) -> None:
+        # Random tenant_id ensures the WHERE id = ... AND tenant_id = ...
+        # finds nothing — that's the case under test (UPDATE matches no
+        # row), regardless of which axis fails to match.
         assert (
-            await pg.update_safety_rule(str(uuid.uuid4()), enabled=False)
+            await pg.update_safety_rule(
+                str(uuid.uuid4()),
+                tenant_id=str(uuid.uuid4()),
+                enabled=False,
+            )
         ) is None
 
     @pytest.mark.asyncio
@@ -154,9 +161,9 @@ class TestSafetyRules:
             tenant_id=tid, stage="pre_tool_call",
             check_id="pii.regex", config={},
         )
-        assert await pg.delete_safety_rule(rule.id) is True
-        assert await pg.get_safety_rule(rule.id) is None
-        assert await pg.delete_safety_rule(rule.id) is False
+        assert await pg.delete_safety_rule(rule.id, tenant_id=tid) is True
+        assert await pg.get_safety_rule(rule.id, tenant_id=tid) is None
+        assert await pg.delete_safety_rule(rule.id, tenant_id=tid) is False
 
 
 class TestSafetyDecisions:
