@@ -103,7 +103,7 @@ class TestScenarioFirstTimeUser:
 
         # Set and get session
         await set_session(conv.id, t.id, cw.id, "sess-001")
-        assert await get_session(conv.id) == "sess-001"
+        assert await get_session(conv.id, tenant_id=t.id) == "sess-001"
 
         # Verify all fields
         assert cw.agent_role == "super_agent"
@@ -444,10 +444,10 @@ class TestScenarioDatabaseOperations:
         assert fetched is not None
         assert fetched.prompt == "Check status"
 
-        await update_task(task_id, status="paused")
+        await update_task(task_id, tenant_id=t.id, status="paused")
         fetched = await get_task_by_id(task_id, tenant_id=t.id)
         assert fetched is not None
         assert fetched.status == "paused"
 
-        await delete_task(task_id)
+        await delete_task(task_id, tenant_id=t.id)
         assert await get_task_by_id(task_id, tenant_id=t.id) is None

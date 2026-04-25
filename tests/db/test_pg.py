@@ -177,11 +177,11 @@ async def test_conversation_crud() -> None:
     assert conv.channel_chat_id == "12345"
     assert conv.requires_trigger is True
 
-    by_bc = await get_conversation_by_binding_and_chat(bid, "12345")
+    by_bc = await get_conversation_by_binding_and_chat(bid, "12345", tenant_id=_tid)
     assert by_bc is not None
     assert by_bc.id == convid
 
-    await update_conversation_last_invocation(convid, "2024-06-01T12:00:00+00:00")
+    await update_conversation_last_invocation(convid, "2024-06-01T12:00:00+00:00", tenant_id=_tid)
     updated = await get_conversation(convid, tenant_id=_tid)
     assert updated is not None
     assert updated.last_agent_invocation is not None
@@ -194,9 +194,9 @@ async def test_conversation_crud() -> None:
 
 async def test_sessions_per_conversation() -> None:
     tid, cwid, _, convid = await _create_chain()
-    assert await get_session(convid) is None
+    assert await get_session(convid, tenant_id=tid) is None
     await set_session(convid, tid, cwid, "sess-abc")
-    assert await get_session(convid) == "sess-abc"
+    assert await get_session(convid, tenant_id=tid) == "sess-abc"
 
     sessions = await get_all_sessions()
     assert convid in sessions
@@ -274,18 +274,18 @@ async def test_task_crud() -> None:
     assert retrieved is not None
     assert retrieved.prompt == "Do something"
 
-    tasks = await get_tasks_for_coworker(cwid)
+    tasks = await get_tasks_for_coworker(cwid, tenant_id=tid)
     assert len(tasks) == 1
 
     all_tasks = await get_all_tasks(tid)
     assert len(all_tasks) == 1
 
-    await update_task(task_id, prompt="Updated prompt")
+    await update_task(task_id, tenant_id=tid, prompt="Updated prompt")
     updated = await get_task_by_id(task_id, tenant_id=tid)
     assert updated is not None
     assert updated.prompt == "Updated prompt"
 
-    await delete_task(task_id)
+    await delete_task(task_id, tenant_id=tid)
     assert await get_task_by_id(task_id, tenant_id=tid) is None
 
 
@@ -325,7 +325,7 @@ async def test_update_task_after_run() -> None:
             status="active",
         )
     )
-    await update_task_after_run(task_id, "2024-01-03T09:00:00+00:00", "Done")
+    await update_task_after_run(task_id, "2024-01-03T09:00:00+00:00", "Done", tenant_id=tid)
     updated = await get_task_by_id(task_id, tenant_id=tid)
     assert updated is not None
     assert "Done" in (updated.last_result or "")

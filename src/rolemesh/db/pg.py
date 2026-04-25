@@ -1117,9 +1117,8 @@ async def get_all_tenants() -> list[Tenant]:
 
 async def update_tenant_message_cursor(tenant_id: str, cursor: str) -> None:
     """Update the last_message_cursor for a tenant."""
-    pool = _get_pool()
     ts = datetime.fromisoformat(cursor) if cursor else None
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         await conn.execute(
             "UPDATE tenants SET last_message_cursor = $1 WHERE id = $2::uuid",
             ts,
@@ -1430,11 +1429,14 @@ async def update_user(
     return _record_to_user(row)
 
 
-async def delete_user(user_id: str) -> bool:
-    """Delete a user by ID."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
-        result = await conn.execute("DELETE FROM users WHERE id = $1::uuid", user_id)
+async def delete_user(user_id: str, *, tenant_id: str) -> bool:
+    """Delete a user by ID, scoped to ``tenant_id``."""
+    async with tenant_conn(tenant_id) as conn:
+        result = await conn.execute(
+            "DELETE FROM users WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            user_id,
+            tenant_id,
+        )
     return result == "DELETE 1"
 
 
@@ -1714,11 +1716,15 @@ async def update_coworker(
     return _record_to_coworker(row)
 
 
-async def delete_coworker(coworker_id: str) -> bool:
-    """Delete a coworker by ID. CASCADE handles dependent tables."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
-        result = await conn.execute("DELETE FROM coworkers WHERE id = $1::uuid", coworker_id)
+async def delete_coworker(coworker_id: str, *, tenant_id: str) -> bool:
+    """Delete a coworker by ID, scoped to ``tenant_id``. CASCADE handles
+    dependent tables."""
+    async with tenant_conn(tenant_id) as conn:
+        result = await conn.execute(
+            "DELETE FROM coworkers WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            coworker_id,
+            tenant_id,
+        )
     return result == "DELETE 1"
 
 
@@ -1782,14 +1788,18 @@ async def get_channel_binding(binding_id: str, *, tenant_id: str) -> ChannelBind
     return _record_to_channel_binding(row)
 
 
-async def get_channel_binding_for_coworker(coworker_id: str, channel_type: str) -> ChannelBinding | None:
+async def get_channel_binding_for_coworker(
+    coworker_id: str, channel_type: str, *, tenant_id: str
+) -> ChannelBinding | None:
     """Get the channel binding for a coworker and channel type."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
-            "SELECT * FROM channel_bindings WHERE coworker_id = $1::uuid AND channel_type = $2",
+            "SELECT * FROM channel_bindings "
+            "WHERE coworker_id = $1::uuid AND channel_type = $2 "
+            "AND tenant_id = $3::uuid",
             coworker_id,
             channel_type,
+            tenant_id,
         )
     if row is None:
         return None
@@ -1803,13 +1813,16 @@ async def get_all_channel_bindings() -> list[ChannelBinding]:
     return [_record_to_channel_binding(row) for row in rows]
 
 
-async def get_channel_bindings_for_coworker(coworker_id: str) -> list[ChannelBinding]:
+async def get_channel_bindings_for_coworker(
+    coworker_id: str, *, tenant_id: str
+) -> list[ChannelBinding]:
     """Get all channel bindings for a coworker."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(
-            "SELECT * FROM channel_bindings WHERE coworker_id = $1::uuid",
+            "SELECT * FROM channel_bindings "
+            "WHERE coworker_id = $1::uuid AND tenant_id = $2::uuid",
             coworker_id,
+            tenant_id,
         )
     return [_record_to_channel_binding(row) for row in rows]
 
@@ -1857,11 +1870,14 @@ async def update_channel_binding(
     return _record_to_channel_binding(row)
 
 
-async def delete_channel_binding(binding_id: str) -> bool:
-    """Delete a channel binding by ID."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
-        result = await conn.execute("DELETE FROM channel_bindings WHERE id = $1::uuid", binding_id)
+async def delete_channel_binding(binding_id: str, *, tenant_id: str) -> bool:
+    """Delete a channel binding by ID, scoped to ``tenant_id``."""
+    async with tenant_conn(tenant_id) as conn:
+        result = await conn.execute(
+            "DELETE FROM channel_bindings WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            binding_id,
+            tenant_id,
+        )
     return result == "DELETE 1"
 
 
@@ -1957,13 +1973,17 @@ async def get_conversation_for_notification(conversation_id: str) -> Conversatio
     return _record_to_conversation(row)
 
 
-async def get_conversations_for_coworker(coworker_id: str) -> list[Conversation]:
+async def get_conversations_for_coworker(
+    coworker_id: str, *, tenant_id: str
+) -> list[Conversation]:
     """Get all conversations for a coworker."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(
-            "SELECT * FROM conversations WHERE coworker_id = $1::uuid ORDER BY created_at",
+            "SELECT * FROM conversations "
+            "WHERE coworker_id = $1::uuid AND tenant_id = $2::uuid "
+            "ORDER BY created_at",
             coworker_id,
+            tenant_id,
         )
     return [_record_to_conversation(row) for row in rows]
 
@@ -1975,44 +1995,55 @@ async def get_all_conversations() -> list[Conversation]:
     return [_record_to_conversation(row) for row in rows]
 
 
-async def get_conversation_by_binding_and_chat(channel_binding_id: str, channel_chat_id: str) -> Conversation | None:
+async def get_conversation_by_binding_and_chat(
+    channel_binding_id: str, channel_chat_id: str, *, tenant_id: str
+) -> Conversation | None:
     """Get a conversation by binding and chat ID."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
-            "SELECT * FROM conversations WHERE channel_binding_id = $1::uuid AND channel_chat_id = $2",
+            "SELECT * FROM conversations "
+            "WHERE channel_binding_id = $1::uuid AND channel_chat_id = $2 "
+            "AND tenant_id = $3::uuid",
             channel_binding_id,
             channel_chat_id,
+            tenant_id,
         )
     if row is None:
         return None
     return _record_to_conversation(row)
 
 
-async def delete_conversation(conversation_id: str) -> bool:
-    """Delete a conversation by ID."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
-        result = await conn.execute("DELETE FROM conversations WHERE id = $1::uuid", conversation_id)
+async def delete_conversation(conversation_id: str, *, tenant_id: str) -> bool:
+    """Delete a conversation by ID, scoped to ``tenant_id``."""
+    async with tenant_conn(tenant_id) as conn:
+        result = await conn.execute(
+            "DELETE FROM conversations WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            conversation_id,
+            tenant_id,
+        )
     return result == "DELETE 1"
 
 
-async def update_conversation_last_invocation(conversation_id: str, timestamp: str) -> None:
+async def update_conversation_last_invocation(
+    conversation_id: str, timestamp: str, *, tenant_id: str
+) -> None:
     """Update the last_agent_invocation timestamp for a conversation."""
-    pool = _get_pool()
     ts = datetime.fromisoformat(timestamp) if timestamp else None
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         await conn.execute(
-            "UPDATE conversations SET last_agent_invocation = $1 WHERE id = $2::uuid",
+            "UPDATE conversations SET last_agent_invocation = $1 "
+            "WHERE id = $2::uuid AND tenant_id = $3::uuid",
             ts,
             conversation_id,
+            tenant_id,
         )
 
 
-async def update_conversation_user_id(conversation_id: str, user_id: str) -> None:
+async def update_conversation_user_id(
+    conversation_id: str, user_id: str, *, tenant_id: str
+) -> None:
     """Set the user_id on a conversation (binds a user to a web conversation)."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         await conn.execute(
             "UPDATE conversations SET user_id = $1::uuid WHERE id = $2::uuid",
             user_id,
@@ -2025,13 +2056,14 @@ async def update_conversation_user_id(conversation_id: str, user_id: str) -> Non
 # ---------------------------------------------------------------------------
 
 
-async def get_session(conversation_id: str) -> str | None:
-    """Get the session ID for a conversation."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+async def get_session(conversation_id: str, *, tenant_id: str) -> str | None:
+    """Get the session ID for a conversation, scoped to ``tenant_id``."""
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
-            "SELECT session_id FROM sessions WHERE conversation_id = $1::uuid",
+            "SELECT session_id FROM sessions "
+            "WHERE conversation_id = $1::uuid AND tenant_id = $2::uuid",
             conversation_id,
+            tenant_id,
         )
     if row is None:
         return None
@@ -2123,10 +2155,9 @@ async def get_messages_since(
     chat_jid: str = "",
 ) -> list[NewMessage]:
     """Get messages since a timestamp for a specific conversation."""
-    pool = _get_pool()
     # Handle empty timestamp by using epoch
     ts = since_timestamp if since_timestamp else "1970-01-01T00:00:00+00:00"
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(
             """
             SELECT * FROM (
@@ -2161,9 +2192,8 @@ async def get_new_messages_for_conversations(
     """
     if not conversation_ids:
         return []
-    pool = _get_pool()
     ts = since_timestamp if since_timestamp else "1970-01-01T00:00:00+00:00"
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         placeholders = ", ".join(f"${i + 3}::uuid" for i in range(len(conversation_ids)))
         sql = f"""
             SELECT * FROM (
@@ -2210,8 +2240,7 @@ async def get_new_messages_for_conversations(
 
 async def create_task(task: ScheduledTask) -> None:
     """Create a new scheduled task."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(task.tenant_id) as conn:
         await conn.execute(
             """
             INSERT INTO scheduled_tasks (id, tenant_id, coworker_id, conversation_id, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at)
@@ -2269,13 +2298,17 @@ async def get_task_by_id(task_id: str, *, tenant_id: str) -> ScheduledTask | Non
     return _record_to_scheduled_task(row)
 
 
-async def get_tasks_for_coworker(coworker_id: str) -> list[ScheduledTask]:
+async def get_tasks_for_coworker(
+    coworker_id: str, *, tenant_id: str
+) -> list[ScheduledTask]:
     """Get all tasks for a specific coworker."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(
-            "SELECT * FROM scheduled_tasks WHERE coworker_id = $1::uuid ORDER BY created_at DESC",
+            "SELECT * FROM scheduled_tasks "
+            "WHERE coworker_id = $1::uuid AND tenant_id = $2::uuid "
+            "ORDER BY created_at DESC",
             coworker_id,
+            tenant_id,
         )
     return [_record_to_scheduled_task(row) for row in rows]
 
@@ -2296,13 +2329,14 @@ async def get_all_tasks(tenant_id: str | None = None) -> list[ScheduledTask]:
 async def update_task(
     task_id: str,
     *,
+    tenant_id: str,
     prompt: str | None = None,
     schedule_type: str | None = None,
     schedule_value: str | None = None,
     next_run: str | None = None,
     status: str | None = None,
 ) -> None:
-    """Update selected fields on a scheduled task."""
+    """Update selected fields on a scheduled task, scoped to ``tenant_id``."""
     fields: list[str] = []
     values: list[Any] = []
     param_idx = 1
@@ -2332,26 +2366,31 @@ async def update_task(
         return
 
     values.append(task_id)
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    values.append(tenant_id)
+    async with tenant_conn(tenant_id) as conn:
         await conn.execute(
-            f"UPDATE scheduled_tasks SET {', '.join(fields)} WHERE id = ${param_idx}::uuid",
+            f"UPDATE scheduled_tasks SET {', '.join(fields)} "
+            f"WHERE id = ${param_idx}::uuid AND tenant_id = ${param_idx + 1}::uuid",
             *values,
         )
 
 
-async def delete_task(task_id: str) -> None:
+async def delete_task(task_id: str, *, tenant_id: str) -> None:
     """Delete a task and its run logs (CASCADE handles task_run_logs)."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM scheduled_tasks WHERE id = $1::uuid", task_id)
+    async with tenant_conn(tenant_id) as conn:
+        await conn.execute(
+            "DELETE FROM scheduled_tasks WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            task_id,
+            tenant_id,
+        )
 
 
 async def get_due_tasks(tenant_id: str | None = None) -> list[ScheduledTask]:
     """Get all active tasks whose next_run is in the past."""
-    pool = _get_pool()
     now = datetime.now(UTC)
-    async with pool.acquire() as conn:
+    async with (
+        tenant_conn(tenant_id) if tenant_id is not None else admin_conn()
+    ) as conn:
         if tenant_id:
             rows = await conn.fetch(
                 """
@@ -2378,31 +2417,32 @@ async def update_task_after_run(
     task_id: str,
     next_run: str | None,
     last_result: str,
+    *,
+    tenant_id: str,
 ) -> None:
     """Update task state after execution."""
-    pool = _get_pool()
     now = datetime.now(UTC)
     new_status = "completed" if next_run is None else None
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         await conn.execute(
             """
             UPDATE scheduled_tasks
             SET next_run = $1, last_run = $2, last_result = $3,
                 status = COALESCE($4::text, status)
-            WHERE id = $5::uuid
+            WHERE id = $5::uuid AND tenant_id = $6::uuid
             """,
             _to_dt(next_run),
             now,
             last_result[:500] if last_result else last_result,
             new_status,
             task_id,
+            tenant_id,
         )
 
 
 async def log_task_run(log: TaskRunLog) -> None:
     """Insert a task run log entry."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(log.tenant_id) as conn:
         await conn.execute(
             """
             INSERT INTO task_run_logs (tenant_id, task_id, run_at, duration_ms, status, result, error)
@@ -2609,45 +2649,49 @@ async def assign_agent_to_user(user_id: str, coworker_id: str, tenant_id: str) -
         )
 
 
-async def unassign_agent_from_user(user_id: str, coworker_id: str) -> None:
+async def unassign_agent_from_user(
+    user_id: str, coworker_id: str, *, tenant_id: str
+) -> None:
     """Remove a coworker assignment from a user."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         await conn.execute(
-            "DELETE FROM user_agent_assignments WHERE user_id = $1::uuid AND coworker_id = $2::uuid",
+            "DELETE FROM user_agent_assignments "
+            "WHERE user_id = $1::uuid AND coworker_id = $2::uuid "
+            "AND tenant_id = $3::uuid",
             user_id,
             coworker_id,
+            tenant_id,
         )
 
 
-async def get_agents_for_user(user_id: str) -> list[Coworker]:
-    """Get all coworkers assigned to a user."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+async def get_agents_for_user(user_id: str, *, tenant_id: str) -> list[Coworker]:
+    """Get all coworkers assigned to a user, scoped to ``tenant_id``."""
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(
             """
             SELECT c.* FROM coworkers c
             JOIN user_agent_assignments uaa ON c.id = uaa.coworker_id
-            WHERE uaa.user_id = $1::uuid
+            WHERE uaa.user_id = $1::uuid AND uaa.tenant_id = $2::uuid
             ORDER BY c.name
             """,
             user_id,
+            tenant_id,
         )
     return [_record_to_coworker(row) for row in rows]
 
 
-async def get_users_for_agent(coworker_id: str) -> list[User]:
-    """Get all users assigned to a coworker."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+async def get_users_for_agent(coworker_id: str, *, tenant_id: str) -> list[User]:
+    """Get all users assigned to a coworker, scoped to ``tenant_id``."""
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(
             """
             SELECT u.* FROM users u
             JOIN user_agent_assignments uaa ON u.id = uaa.user_id
-            WHERE uaa.coworker_id = $1::uuid
+            WHERE uaa.coworker_id = $1::uuid AND uaa.tenant_id = $2::uuid
             ORDER BY u.name
             """,
             coworker_id,
+            tenant_id,
         )
     return [_record_to_user(row) for row in rows]
 
@@ -2699,9 +2743,8 @@ async def create_approval_policy(
     priority: int = 0,
 ) -> ApprovalPolicy:
     """Insert a new approval policy and return the stored row."""
-    pool = _get_pool()
     approvers = approver_user_ids or []
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO approval_policies (
@@ -2762,7 +2805,6 @@ async def list_approval_policies(
     enabled: bool | None = None,
 ) -> list[ApprovalPolicy]:
     """List policies for a tenant, optionally filtered by coworker and state."""
-    pool = _get_pool()
     clauses = ["tenant_id = $1::uuid"]
     params: list[Any] = [tenant_id]
     if coworker_id is not None:
@@ -2776,7 +2818,7 @@ async def list_approval_policies(
         + " AND ".join(clauses)
         + " ORDER BY priority DESC, updated_at DESC"
     )
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(sql, *params)
     return [_record_to_approval_policy(r) for r in rows]
 
@@ -3072,7 +3114,6 @@ async def list_approval_requests(
     coworker_id: str | None = None,
     limit: int = 100,
 ) -> list[ApprovalRequest]:
-    pool = _get_pool()
     clauses = ["tenant_id = $1::uuid"]
     params: list[Any] = [tenant_id]
     if status is not None:
@@ -3087,7 +3128,7 @@ async def list_approval_requests(
         + " AND ".join(clauses)
         + f" ORDER BY created_at DESC LIMIT ${len(params)}"
     )
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(sql, *params)
     return [_record_to_approval_request(r) for r in rows]
 
@@ -3597,7 +3638,6 @@ async def list_safety_rules(
     enabled: bool | None = None,
 ) -> list[SafetyRule]:
     """List rules for a tenant, optionally filtered."""
-    pool = _get_pool()
     clauses = ["tenant_id = $1::uuid"]
     params: list[Any] = [tenant_id]
     if coworker_id is not None:
@@ -3614,7 +3654,7 @@ async def list_safety_rules(
         + " AND ".join(clauses)
         + " ORDER BY priority DESC, updated_at DESC"
     )
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(sql, *params)
     return [_record_to_safety_rule(r) for r in rows]
 
@@ -3747,7 +3787,6 @@ async def list_safety_rules_audit(
     V2 admin UI will surface this as a timeline. Test fixture uses it
     to pin actor/action correctness.
     """
-    pool = _get_pool()
     clauses = ["tenant_id = $1::uuid"]
     params: list[Any] = [tenant_id]
     if rule_id is not None:
@@ -3759,7 +3798,7 @@ async def list_safety_rules_audit(
         + " AND ".join(clauses)
         + f" ORDER BY created_at DESC LIMIT ${len(params)}"
     )
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(sql, *params)
     result: list[dict[str, Any]] = []
     for r in rows:
@@ -3868,7 +3907,6 @@ async def stream_safety_decisions(
     Malformed timestamps raise at query time (psycopg surface) which
     the REST layer turns into 422.
     """
-    pool = _get_pool()
     clauses = ["tenant_id = $1::uuid"]
     params: list[Any] = [tenant_id]
     if from_ts is not None:
@@ -3894,7 +3932,7 @@ async def stream_safety_decisions(
         + " AND ".join(clauses)
         + " ORDER BY created_at DESC"
     )
-    async with pool.acquire() as conn, conn.transaction():
+    async with tenant_conn(tenant_id) as conn:
         cur = await conn.cursor(sql, *params)
         while True:
             rows = await cur.fetch(chunk_size)

@@ -490,8 +490,8 @@ class TestSessionIsolation:
         # Sessions should be different
         from rolemesh.db.pg import get_session
 
-        sess_a = await get_session(convs[0].id)
-        sess_b = await get_session(convs[1].id)
+        sess_a = await get_session(convs[0].id, tenant_id=tenant.id)
+        sess_b = await get_session(convs[1].id, tenant_id=tenant.id)
         assert sess_a is not None
         assert sess_b is not None
         assert sess_a != sess_b
@@ -828,7 +828,7 @@ class TestMigration:
         assert main_conv.requires_trigger is False
 
         # Session migrated
-        sess = await get_session(main_conv.id)
+        sess = await get_session(main_conv.id, tenant_id=tenant.id)
         assert sess == "sess-legacy-001"
 
         # Filesystem migrated (tenant already in scope from above)

@@ -172,7 +172,7 @@ async def _resolve_web_agent(agent_id: str, token: str) -> tuple[str, str] | JSO
         coworker = None
     if coworker is None:
         return JSONResponse({"error": "Agent not found"}, status_code=404)
-    binding = await pg.get_channel_binding_for_coworker(agent_id, "web")
+    binding = await pg.get_channel_binding_for_coworker(agent_id, "web", tenant_id=user.tenant_id)
     if binding is None:
         return JSONResponse({"error": "Web binding not found"}, status_code=404)
     return binding.id, user.tenant_id

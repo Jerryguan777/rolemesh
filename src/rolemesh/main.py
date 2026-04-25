@@ -412,7 +412,9 @@ async def _auto_create_web_conversation(
                 # ws.py may have already created the conversation before the
                 # NATS message reaches the orchestrator. Check DB first to
                 # avoid a UniqueViolationError on (binding_id, chat_id).
-                conv = await get_conversation_by_binding_and_chat(binding_id, chat_id)
+                conv = await get_conversation_by_binding_and_chat(
+                    binding_id, chat_id, tenant_id=cw.config.tenant_id
+                )
                 if conv is None:
                     conv = await create_conversation(
                         tenant_id=cw.config.tenant_id,
@@ -575,7 +577,9 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
 
     previous_cursor = conv_state.last_agent_timestamp
     conv_state.last_agent_timestamp = missed_messages[-1].timestamp
-    await update_conversation_last_invocation(conv.id, missed_messages[-1].timestamp)
+    await update_conversation_last_invocation(
+        conv.id, missed_messages[-1].timestamp, tenant_id=conv.tenant_id
+    )
 
     logger.info("Processing messages", coworker=config.name, message_count=len(missed_messages))
 
@@ -759,7 +763,9 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
             )
             return True
         conv_state.last_agent_timestamp = previous_cursor
-        await update_conversation_last_invocation(conv.id, previous_cursor)
+        await update_conversation_last_invocation(
+            conv.id, previous_cursor, tenant_id=conv.tenant_id
+        )
         logger.warning("Agent error, rolled back message cursor for retry", coworker=config.name)
         return False
 
@@ -1122,7 +1128,9 @@ async def _message_loop(shutdown_event: asyncio.Event) -> None:
                         if _queue.send_message(conv_id, formatted):
                             logger.debug("Piped messages to active container", conv_id=conv_id)
                             conv_state.last_agent_timestamp = all_pending[-1].timestamp
-                            await update_conversation_last_invocation(conv.id, all_pending[-1].timestamp)
+                            await update_conversation_last_invocation(
+                                conv.id, all_pending[-1].timestamp, tenant_id=conv.tenant_id
+                            )
 
                             ch_type = _get_channel_type_for_conv(cw_state, conv)
                             binding = cw_state.channel_bindings.get(ch_type)

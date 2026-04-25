@@ -268,7 +268,7 @@ async def _run_task(
         result_summary = result[:200]
     else:
         result_summary = "Completed"
-    await update_task_after_run(task.id, next_run, result_summary)
+    await update_task_after_run(task.id, next_run, result_summary, tenant_id=task.tenant_id)
 
 
 _scheduler_running: bool = False

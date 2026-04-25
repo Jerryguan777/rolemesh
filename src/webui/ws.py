@@ -68,14 +68,14 @@ async def handle_ws(ws: WebSocket, agent_id: str, token: str, chat_id: str = "")
 
     # 3. Check assignment — owners/admins can access any agent
     if user.role not in ("owner", "admin"):
-        assigned = await pg.get_agents_for_user(user.user_id)
+        assigned = await pg.get_agents_for_user(user.user_id, tenant_id=user.tenant_id)
         assigned_ids = {c.id for c in assigned}
         if coworker.id not in assigned_ids:
             await ws.close(code=4003, reason="Not assigned to this agent")
             return
 
     # 4. Look up web binding for this coworker
-    binding = await pg.get_channel_binding_for_coworker(agent_id, "web")
+    binding = await pg.get_channel_binding_for_coworker(agent_id, "web", tenant_id=user.tenant_id)
     if binding is None:
         await ws.close(code=4004, reason="Web binding not found")
         return
@@ -92,7 +92,7 @@ async def handle_ws(ws: WebSocket, agent_id: str, token: str, chat_id: str = "")
     sender_id = user.user_id if user.user_id != BOOTSTRAP_USER_ID else f"web-user-{chat_id[:8]}"
 
     # 5. Find or create conversation
-    conv = await pg.get_conversation_by_binding_and_chat(binding_id, chat_id)
+    conv = await pg.get_conversation_by_binding_and_chat(binding_id, chat_id, tenant_id=user.tenant_id)
     if conv is None:
         conv = await pg.create_conversation(
             tenant_id=user.tenant_id,
@@ -106,7 +106,7 @@ async def handle_ws(ws: WebSocket, agent_id: str, token: str, chat_id: str = "")
             requires_trigger=False,
         )
     elif conv.user_id is None and user.user_id != BOOTSTRAP_USER_ID:
-        await pg.update_conversation_user_id(conv.id, user.user_id)
+        await pg.update_conversation_user_id(conv.id, user.user_id, tenant_id=user.tenant_id)
 
     # Send session info (include binding_id for NATS subscription subjects)
     await ws.send_json({"type": "session", "chatId": chat_id, "bindingId": binding_id})

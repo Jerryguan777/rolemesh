@@ -124,9 +124,9 @@ async def test_session_per_conversation(e2e_env: Path) -> None:
         channel_chat_id="999",
     )
 
-    assert await get_session(conv.id) is None
+    assert await get_session(conv.id, tenant_id=tenant.id) is None
     await set_session(conv.id, tenant.id, cw.id, "sess-123")
-    assert await get_session(conv.id) == "sess-123"
+    assert await get_session(conv.id, tenant_id=tenant.id) == "sess-123"
 
 
 async def test_messages_per_conversation(e2e_env: Path) -> None:
@@ -200,7 +200,7 @@ async def test_tasks_per_coworker(e2e_env: Path) -> None:
     assert task is not None
     assert task.prompt == "Test task"
 
-    tasks = await get_tasks_for_coworker(cw.id)
+    tasks = await get_tasks_for_coworker(cw.id, tenant_id=tenant.id)
     assert len(tasks) == 1
 
 
