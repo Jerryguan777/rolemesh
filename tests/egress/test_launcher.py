@@ -207,3 +207,80 @@ class TestWaitForGatewayReady:
                 attempts=3,
                 interval_s=0.0,
             )
+
+
+# ---------------------------------------------------------------------------
+# _rewrite_loopback_to_host_gateway — universal loopback rewrite
+# ---------------------------------------------------------------------------
+
+
+class TestRewriteLoopbackToHostGateway:
+    """Originally gated on platform.system()=='Linux' via ``_extra_hosts()``;
+    fixed to rewrite unconditionally because container-internal
+    ``localhost`` is never the host on any platform.
+
+    These cases lock in the contract from both sides — what must
+    rewrite, what must NOT rewrite — so a future revert to the
+    platform-gated logic shows up here rather than in a runtime
+    "Name or service not known" error on macOS only.
+    """
+
+    def test_localhost_in_authority_is_rewritten(self) -> None:
+        from rolemesh.egress.launcher import _rewrite_loopback_to_host_gateway
+
+        assert _rewrite_loopback_to_host_gateway("nats://localhost:4222") == (
+            "nats://host.docker.internal:4222"
+        )
+
+    def test_127_0_0_1_is_rewritten(self) -> None:
+        from rolemesh.egress.launcher import _rewrite_loopback_to_host_gateway
+
+        assert _rewrite_loopback_to_host_gateway("nats://127.0.0.1:4222") == (
+            "nats://host.docker.internal:4222"
+        )
+
+    def test_already_host_docker_internal_is_idempotent(self) -> None:
+        # Belt-and-braces: if a deploy already crafted the right URL
+        # (e.g. via NATS_URL env override), running the rewrite a
+        # second time must not corrupt it.
+        from rolemesh.egress.launcher import _rewrite_loopback_to_host_gateway
+
+        assert _rewrite_loopback_to_host_gateway(
+            "nats://host.docker.internal:4222"
+        ) == "nats://host.docker.internal:4222"
+
+    def test_external_hostname_is_left_alone(self) -> None:
+        # An operator pointing the gateway at a remote NATS cluster
+        # should NOT see their hostname mangled. The rewrite scopes
+        # itself with the ``://`` prefix to avoid eating
+        # ``mylocalhost.example.com`` style bystanders.
+        from rolemesh.egress.launcher import _rewrite_loopback_to_host_gateway
+
+        assert _rewrite_loopback_to_host_gateway(
+            "nats://nats.cluster.internal:4222"
+        ) == "nats://nats.cluster.internal:4222"
+
+    def test_substring_localhost_in_path_is_left_alone(self) -> None:
+        # Hardening against naive ``localhost`` substring replacement.
+        # The colon after the prefix anchors it to the authority
+        # component, so a path-side ``localhost`` (unusual but legal)
+        # stays intact.
+        from rolemesh.egress.launcher import _rewrite_loopback_to_host_gateway
+
+        # Token "localhost" *not* followed by a port colon -> not
+        # touched. ``://localhost:`` is the only rewrite trigger.
+        assert _rewrite_loopback_to_host_gateway(
+            "https://nats.example.com/path/localhost/x"
+        ) == "https://nats.example.com/path/localhost/x"
+
+    def test_rewrites_irrespective_of_platform(self) -> None:
+        # Direct regression for the macOS bug: previously the rewrite
+        # was no-op when ``_extra_hosts()`` returned empty (i.e. on
+        # any non-Linux host). Patch it to empty here and assert the
+        # rewrite still fires.
+        from rolemesh.egress import launcher
+
+        with patch.object(launcher, "_extra_hosts", return_value={}):
+            assert launcher._rewrite_loopback_to_host_gateway(
+                "nats://localhost:4222"
+            ) == "nats://host.docker.internal:4222"
