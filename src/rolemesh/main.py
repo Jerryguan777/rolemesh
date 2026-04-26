@@ -1632,6 +1632,19 @@ async def main() -> None:
     mcp_sub = await subscribe_mcp_changes(_transport.nc)
     egress_responder_subs.append(mcp_sub)
 
+    # Token vault RPC: gateway's RemoteTokenVault forwards each
+    # user-mode MCP request here so we can decrypt + refresh tokens
+    # using THIS process's TokenVault (which holds the DB conn and
+    # the IdP refresh path). Only wire the responder when the vault
+    # is configured — without OIDC there are no tokens to serve and
+    # the gateway's RemoteTokenVault will time out to None, which
+    # already maps to "skip Bearer injection" upstream.
+    if _vault is not None:
+        from rolemesh.egress.orch_glue import start_token_responder
+
+        token_sub = await start_token_responder(_transport.nc, vault=_vault)
+        egress_responder_subs.append(token_sub)
+
     # Launch the egress gateway now that the snapshot responders are
     # registered. Moved here from _ensure_container_system_running()
     # because otherwise the gateway NATS-requests the snapshot before

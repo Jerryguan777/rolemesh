@@ -50,6 +50,7 @@ from .mcp_cache import (  # noqa: E402
     entry_to_dict,
 )
 from .policy_cache import RULE_CHANGED_SUBJECT, SNAPSHOT_REQUEST_SUBJECT  # noqa: E402
+from .remote_token_vault import TOKEN_ACCESS_REQUEST_SUBJECT  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +301,76 @@ async def fetch_all_mcp_servers() -> list[McpEntry]:
             )
         )
     return out
+
+
+async def start_token_responder(
+    nc: nats.aio.client.Client,
+    *,
+    vault: Any,
+) -> object:
+    """Subscribe to ``egress.token.access.request`` and serve fresh
+    access tokens out of the orchestrator's local TokenVault.
+
+    The egress gateway runs without DB access; it can't decrypt or
+    refresh OIDC tokens itself. The gateway's
+    ``RemoteTokenVault.get_fresh_access_token`` forwards each request
+    to this subject. The orchestrator already has a real
+    ``TokenVault`` (built from env via ``create_vault_from_env``); we
+    just plumb each RPC into it.
+
+    ``vault`` is typed ``Any`` so this module doesn't import the real
+    ``TokenVault`` (transitively pulls in ``rolemesh.db.pg``); the
+    duck-typed call is ``vault.get_fresh_access_token(user_id)``.
+
+    Returns the subscription handle; caller is responsible for
+    ``await sub.unsubscribe()`` at shutdown — same pattern as
+    ``start_responders``.
+    """
+    async def _handler(msg: object) -> None:
+        try:
+            payload = json.loads(msg.data)  # type: ignore[attr-defined]
+        except (ValueError, AttributeError) as exc:
+            logger.warning("token responder: non-JSON request", error=str(exc))
+            await _respond(msg, {"access_token": None, "error": "bad_json"})
+            return
+        if not isinstance(payload, dict):
+            await _respond(msg, {"access_token": None, "error": "bad_payload"})
+            return
+        user_id = payload.get("user_id")
+        if not isinstance(user_id, str) or not user_id:
+            await _respond(msg, {"access_token": None, "error": "missing_user_id"})
+            return
+
+        try:
+            access_token = await vault.get_fresh_access_token(user_id)
+        except Exception as exc:  # noqa: BLE001
+            # vault.get_fresh_access_token already swallows IdP /
+            # transport errors and returns None; this catch is for
+            # programming errors so the subscriber loop survives.
+            logger.error(
+                "token responder: vault raised", user_id=user_id, error=str(exc)
+            )
+            await _respond(msg, {"access_token": None, "error": "vault_error"})
+            return
+
+        await _respond(msg, {"access_token": access_token})
+
+    sub = await nc.subscribe(TOKEN_ACCESS_REQUEST_SUBJECT, cb=_handler)
+    logger.info(
+        "token responder subscribed",
+        subject=TOKEN_ACCESS_REQUEST_SUBJECT,
+    )
+    return sub
+
+
+async def _respond(msg: object, payload: dict[str, Any]) -> None:
+    """Best-effort respond helper for token RPCs. A failure to
+    respond degrades to a gateway-side timeout, which already maps
+    to ``access_token=None`` (see RemoteTokenVault docstring), so
+    we suppress the exception to keep the subscriber alive."""
+    body = json.dumps(payload).encode("utf-8")
+    with contextlib.suppress(Exception):
+        await msg.respond(body)  # type: ignore[attr-defined]
 
 
 async def fetch_all_egress_rules() -> list[dict[str, Any]]:

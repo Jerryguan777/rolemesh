@@ -69,7 +69,8 @@ from .policy_cache import (
     fetch_snapshot_via_nats,
     subscribe_rule_changes,
 )
-from .reverse_proxy import start_credential_proxy
+from .remote_token_vault import RemoteTokenVault
+from .reverse_proxy import set_token_vault, start_credential_proxy
 from .safety_call import AuditPublisher, EgressSafetyCaller
 
 logger = get_logger()
@@ -222,6 +223,19 @@ async def main() -> None:
             )
         mcp_sub = await subscribe_mcp_changes(nats_client)
         stack.push_async_callback(mcp_sub.unsubscribe)  # type: ignore[attr-defined]
+
+        # --- Token vault: forward per-user MCP token requests --------
+        # The orchestrator owns the DB-backed TokenVault (refresh
+        # tokens live encrypted in oidc_user_tokens, IdP credentials
+        # live in env on the orchestrator's filesystem). The gateway
+        # carries a ``RemoteTokenVault`` that forwards every
+        # ``get_fresh_access_token(user_id)`` over NATS RPC instead.
+        # Wired unconditionally — when OIDC isn't configured the
+        # orchestrator-side responder is absent, the RPC times out,
+        # and the proxy degrades to ""skip Bearer injection"" — the
+        # same posture as if ``_token_vault`` were None.
+        set_token_vault(RemoteTokenVault(nats_client))
+        logger.info("gateway: RemoteTokenVault wired")
 
         # --- Reverse proxy (port 3001) -------------------------------
         reverse_runner = await start_credential_proxy(
