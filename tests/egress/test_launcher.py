@@ -332,3 +332,76 @@ class TestGatewayEnvBaseUrlRewrite:
             raise AssertionError(
                 f"NATS_URL not rewritten: {env['NATS_URL']!r}"
             )
+
+
+# ---------------------------------------------------------------------------
+# _FORWARDABLE spec contract — single-source-of-truth structural tests
+# ---------------------------------------------------------------------------
+
+
+class TestForwardableSpec:
+    """``_FORWARDABLE`` is the single source of truth for "what crosses
+    the gateway env boundary AND which entries need loopback rewrite".
+    These tests pin the structural contract so a future refactor can't
+    silently drop the rewrite flag from a URL forwarder (re-introducing
+    the Bug 5 family).
+    """
+
+    def test_every_base_url_key_is_marked_url(self) -> None:
+        # Heuristic but load-bearing: any key matching ``*_BASE_URL``
+        # MUST have ``is_url=True``. This catches the most common
+        # drift mode — adding a new ``MISTRAL_BASE_URL`` forwarder
+        # but forgetting to flip the flag.
+        from rolemesh.egress.launcher import _FORWARDABLE
+
+        offenders = [
+            spec for spec in _FORWARDABLE
+            if spec.key.endswith("_BASE_URL") and not spec.is_url
+        ]
+        assert offenders == [], (
+            f"_FORWARDABLE entries match *_BASE_URL but is_url=False: "
+            f"{[s.key for s in offenders]}. Loopback rewrite will not "
+            f"fire for these — Bug 5 family will return."
+        )
+
+    def test_no_token_key_is_marked_url(self) -> None:
+        # Inverse of the above: ``API_KEY`` / ``OAUTH_TOKEN`` /
+        # ``AUTH_TOKEN`` shaped keys must NEVER carry ``is_url=True``,
+        # because string.replace on a secret could corrupt it.
+        from rolemesh.egress.launcher import _FORWARDABLE
+
+        token_suffixes = ("_API_KEY", "_OAUTH_TOKEN", "_AUTH_TOKEN")
+        offenders = [
+            spec for spec in _FORWARDABLE
+            if any(spec.key.endswith(s) for s in token_suffixes)
+            and spec.is_url
+        ]
+        assert offenders == [], (
+            f"_FORWARDABLE marks token-shaped keys as URLs: "
+            f"{[s.key for s in offenders]}. Tokens must never go through "
+            f"loopback rewrite — string.replace could corrupt the secret."
+        )
+
+    def test_keys_are_unique(self) -> None:
+        # Cheap sanity: spec is a tuple, so duplicates wouldn't error
+        # at construction. A duplicate would emit the env var twice in
+        # the gateway container (last write wins) and obscure intent.
+        from rolemesh.egress.launcher import _FORWARDABLE
+
+        keys = [spec.key for spec in _FORWARDABLE]
+        assert len(keys) == len(set(keys)), (
+            f"_FORWARDABLE has duplicate keys: {keys}"
+        )
+
+    def test_known_url_forwarders_carry_is_url_true(self) -> None:
+        # Direct positive coverage of the three known URL forwarders
+        # at the time of this PR. New URL forwarders should be added
+        # here as they ship.
+        from rolemesh.egress.launcher import _FORWARDABLE
+
+        url_keys = {spec.key for spec in _FORWARDABLE if spec.is_url}
+        assert {
+            "ANTHROPIC_BASE_URL",
+            "OPENAI_BASE_URL",
+            "GOOGLE_BASE_URL",
+        }.issubset(url_keys)
