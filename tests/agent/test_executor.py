@@ -189,3 +189,112 @@ def test_agent_backend_config_frozen() -> None:
         raise AssertionError("Should have raised")
     except AttributeError:
         pass
+
+
+# ---------------------------------------------------------------------------
+# _pi_extra_env — Bedrock injection (placeholder + synthesized URL)
+# ---------------------------------------------------------------------------
+
+
+import pytest
+
+from rolemesh.agent.executor import _pi_extra_env
+
+
+class TestPiExtraEnvBedrock:
+    """The Bedrock branch in ``_pi_extra_env`` is the security boundary
+    for "the real ABSK token never enters an agent container".
+    These cases verify the contract from both sides — what MUST land
+    in the container env (placeholders + the proxy URL) and what MUST
+    NOT (the literal host token, raw ``localhost`` URL the operator
+    might have stashed in ``.env``).
+    """
+
+    def test_no_pi_model_id_only_returns_backend_marker(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("PI_MODEL_ID", raising=False)
+        env = _pi_extra_env()
+        assert env == {"AGENT_BACKEND": "pi"}
+
+    def test_non_bedrock_model_id_does_not_inject_aws_env(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Anthropic-direct or OpenAI Pi model ids must NOT spuriously
+        # inject AWS_BEARER_TOKEN_BEDROCK / BEDROCK_BASE_URL — those
+        # only make sense on the Bedrock route.
+        monkeypatch.setenv("PI_MODEL_ID", "anthropic/claude-3-5-sonnet")
+        # Even with a real-looking host token set, a non-bedrock
+        # model must not pull it / a placeholder into the container.
+        monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "ABSKsecret")
+        env = _pi_extra_env()
+        assert "AWS_BEARER_TOKEN_BEDROCK" not in env
+        assert "BEDROCK_BASE_URL" not in env
+
+    def test_bedrock_model_id_injects_placeholder_not_host_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Critical: the host's real token must NEVER appear in the
+        # container env. Set a recognizable host token, then assert
+        # the container sees only the placeholder.
+        monkeypatch.setenv(
+            "PI_MODEL_ID", "amazon-bedrock/us.anthropic.claude-sonnet-4-6"
+        )
+        monkeypatch.setenv(
+            "AWS_BEARER_TOKEN_BEDROCK", "ABSKreal-host-secret-do-not-leak"
+        )
+        env = _pi_extra_env()
+        token_in_env = env.get("AWS_BEARER_TOKEN_BEDROCK", "")
+        assert "ABSKreal-host-secret" not in token_in_env, (
+            "host's real Bedrock token leaked into agent container env"
+        )
+        assert token_in_env  # but placeholder MUST be set
+        assert "placeholder" in token_in_env.lower()
+
+    def test_bedrock_model_id_synthesises_proxy_url_with_host_docker_internal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Bug 5 family: even if the operator stashed
+        # BEDROCK_BASE_URL=http://localhost:... in .env, the
+        # container must always see host.docker.internal because
+        # localhost inside a container is the container itself.
+        monkeypatch.setenv("PI_MODEL_ID", "amazon-bedrock/anything")
+        monkeypatch.setenv("BEDROCK_BASE_URL", "http://localhost:9999/wrong")
+        env = _pi_extra_env()
+        url = env["BEDROCK_BASE_URL"]
+        assert url.startswith("http://host.docker.internal:")
+        assert url.endswith("/proxy/bedrock")
+        # The wrong .env value must not have leaked through.
+        assert "localhost" not in url
+        assert "9999" not in url  # operator's wrong port not pasted in
+
+    def test_bedrock_url_is_synthesised_even_without_env_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Regular case: operator did NOT set BEDROCK_BASE_URL. Helper
+        # must still inject the synthesized one — this is the
+        # "operators don't have to remember a third env var" property
+        # that the design depends on.
+        monkeypatch.setenv("PI_MODEL_ID", "amazon-bedrock/foo")
+        monkeypatch.delenv("BEDROCK_BASE_URL", raising=False)
+        env = _pi_extra_env()
+        assert env["BEDROCK_BASE_URL"].startswith(
+            "http://host.docker.internal:"
+        )
+        assert env["BEDROCK_BASE_URL"].endswith("/proxy/bedrock")
+
+    def test_bedrock_default_region_is_us_east_1(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PI_MODEL_ID", "amazon-bedrock/foo")
+        monkeypatch.delenv("AWS_REGION", raising=False)
+        env = _pi_extra_env()
+        assert env["AWS_REGION"] == "us-east-1"
+
+    def test_bedrock_region_propagates_when_host_sets_it(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PI_MODEL_ID", "amazon-bedrock/foo")
+        monkeypatch.setenv("AWS_REGION", "us-west-2")
+        env = _pi_extra_env()
+        assert env["AWS_REGION"] == "us-west-2"

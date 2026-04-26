@@ -105,9 +105,20 @@ def _pi_extra_env() -> dict[str, str]:
     """Build extra env for Pi backend — model selection only.
 
     API keys are NOT injected here; all LLM requests go through the
-    credential proxy which injects real keys at the HTTP level.
+    credential proxy which injects real keys at the HTTP level. For
+    Bedrock specifically, we additionally inject a placeholder
+    ``AWS_BEARER_TOKEN_BEDROCK`` (so boto3 doesn't refuse to send) and
+    a synthesized ``BEDROCK_BASE_URL`` pointing at the host's
+    credential proxy. ``BEDROCK_BASE_URL`` is ALWAYS computed here
+    rather than read from ``os.environ`` so an operator setting
+    ``BEDROCK_BASE_URL=http://localhost:...`` in ``.env`` can't
+    accidentally bake the orchestrator-process loopback into the
+    container (that's the Bug 5 family).
     """
     import os
+
+    from rolemesh.container.runtime import rewrite_loopback_to_host_gateway
+    from rolemesh.core.config import CREDENTIAL_PROXY_PORT
 
     # .env loading is handled at process entry by
     # ``rolemesh.bootstrap``; reading from os.environ here works
@@ -117,6 +128,25 @@ def _pi_extra_env() -> dict[str, str]:
     model_id = os.environ.get("PI_MODEL_ID", "")
     if model_id:
         env["PI_MODEL_ID"] = model_id
+
+    # Bedrock wiring — only meaningful when the host has the bearer
+    # token configured AND the model id targets Bedrock. We still
+    # inject the placeholder unconditionally on the Bedrock path so
+    # boto3 client init doesn't raise; the proxy is the real
+    # credential gate.
+    if model_id.startswith("amazon-bedrock/"):
+        env["AWS_BEARER_TOKEN_BEDROCK"] = "placeholder-proxy-replaces-this"
+        # Region picks the model's region context inside boto3 (model
+        # ARNs are region-scoped). Default matches the upstream URL
+        # default in ``_build_provider_registry``.
+        env["AWS_REGION"] = os.environ.get("AWS_REGION", "") or "us-east-1"
+        # Synthesize the proxy URL with localhost rewriting so the
+        # container always sees host.docker.internal regardless of
+        # what the operator wrote in ``.env``.
+        env["BEDROCK_BASE_URL"] = rewrite_loopback_to_host_gateway(
+            f"http://localhost:{CREDENTIAL_PROXY_PORT}/proxy/bedrock"
+        )
+
     return env
 
 

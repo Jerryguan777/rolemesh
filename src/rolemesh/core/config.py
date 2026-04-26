@@ -164,6 +164,14 @@ CONTAINER_ENV_ALLOWLIST: frozenset[str] = frozenset({
     "CLAUDE_CONFIG_DIR",
     "HOME",
     "PI_MODEL_ID",
+    # Bedrock — only the placeholder bearer + synthesized proxy URL
+    # ever reach the container. The real ``ABSK...`` token lives on
+    # the host and is overwritten on every request by the credential
+    # proxy (see ``rolemesh.egress.reverse_proxy._build_provider_registry``).
+    # ``AWS_REGION`` is needed by boto3 to construct model ARNs.
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "AWS_REGION",
+    "BEDROCK_BASE_URL",
 })
 
 # Agent backend: "claude" or "pi"

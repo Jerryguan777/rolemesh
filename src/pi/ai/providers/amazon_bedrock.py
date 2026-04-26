@@ -113,13 +113,32 @@ def stream_bedrock(
             )
 
             client_kwargs: dict[str, Any] = {"region_name": region}
+
+            # ``BEDROCK_BASE_URL`` redirects boto3 to the host-side
+            # credential proxy when set (rolemesh agent containers
+            # have it injected by ``rolemesh.agent.executor._pi_extra_env``).
+            # The proxy holds the real ``AWS_BEARER_TOKEN_BEDROCK``
+            # and overwrites the Authorization header on every
+            # request, so whatever boto3 signs locally is moot — the
+            # placeholder env (see below) just keeps boto3 from
+            # raising ``NoCredentialsError`` before it even sends.
+            base_url = os.environ.get("BEDROCK_BASE_URL", "")
+            if base_url:
+                client_kwargs["endpoint_url"] = base_url
+
             if options.profile:
                 session = botocore.session.Session(profile=options.profile)
                 boto3_session = boto3.session.Session(botocore_session=session)
                 client = boto3_session.client("bedrock-runtime", **client_kwargs)
             else:
-                # Support proxies that don't need authentication
-                if os.environ.get("AWS_BEDROCK_SKIP_AUTH") == "1":
+                # When routed through the rolemesh credential proxy,
+                # boto3 still wants *some* credentials before it will
+                # construct a request — even though the proxy will
+                # replace the Authorization header. Ship dummy SigV4
+                # creds so boto3 1.x (no Bearer support) sails through;
+                # boto3 1.42+ that honours ``AWS_BEARER_TOKEN_BEDROCK``
+                # also continues to work because the proxy still wins.
+                if base_url:
                     client_kwargs["aws_access_key_id"] = "dummy-access-key"
                     client_kwargs["aws_secret_access_key"] = "dummy-secret-key"
                 client = boto3.client("bedrock-runtime", **client_kwargs)
@@ -612,9 +631,27 @@ def _convert_tool_config(
     tools: list[Tool] | None,
     tool_choice: Literal["auto", "any", "none"] | dict[str, str] | None,
 ) -> dict[str, Any] | None:
-    """Convert tools and tool_choice to Bedrock ToolConfiguration format."""
+    """Convert tools and tool_choice to Bedrock ToolConfiguration format.
+
+    Bedrock Converse caps tool names at 64 characters, while Anthropic
+    native and OpenAI accept up to 128. We do NOT silently truncate
+    here — a hidden mapping layer would just defer the failure to a
+    confusing point downstream (the agent would call a name that no
+    longer matches its tool registry). Fail loudly with the offending
+    name so operators know to apply the short-prefix MCP naming
+    scheme upstream.
+    """
     if not tools or tool_choice == "none":
         return None
+
+    for tool in tools:
+        if len(tool.name) > 64:
+            raise ValueError(
+                f"Bedrock Converse: tool name {tool.name!r} is "
+                f"{len(tool.name)} chars; max 64. Apply the upstream "
+                f"short-prefix MCP naming scheme before sending to "
+                f"this provider."
+            )
 
     bedrock_tools: list[dict[str, Any]] = [
         {
