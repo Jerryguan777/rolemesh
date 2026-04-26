@@ -9,7 +9,7 @@ backend produced them.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if TYPE_CHECKING:
     from rolemesh.ipc.protocol import AgentInitData, McpServerSpec
@@ -21,6 +21,89 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # Events emitted by backends
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class UsageSnapshot:
+    """Per-turn LLM usage attached to terminal backend events.
+
+    Carried on ResultEvent / ErrorEvent / StoppedEvent / SafetyBlockEvent so
+    downstream consumers can persist what a turn cost in tokens and USD.
+    The *_tokens suffix is intentional — it keeps the field names from
+    being confused with a USD amount.
+
+    cost_usd is None whenever the backend can't attribute cost for this
+    turn (model not in the price registry, custom proxy that doesn't
+    compute pricing, exception path that lost the snapshot). When it IS
+    populated, ``cost_source`` distinguishes the provenance.
+
+    cost_source documents where the cost number originated:
+      * "sdk"      — Claude Agent SDK's total_cost_usd (authoritative for
+                     subscription billing; computed inside the SDK).
+      * "provider" — Pi backend's per-provider price-table calculation
+                     (``pi.ai.models.calculate_cost``). Subject to the
+                     known limitations of the upstream price table:
+                     no long-context tier pricing, single ``cache_write``
+                     rate that under-bills 1-hour TTL caches, and
+                     un-registered custom models that produce cost=None.
+      * None       — cost_usd is None.
+
+    model_id identifies which model produced this turn (informative when a
+    Coworker fans out across providers; for Pi it's the dominant model in
+    the prompt by output_tokens — see _PromptUsageAccumulator).
+
+    Failed and aborted turns still populate this — LLM tokens spent before
+    a turn was cancelled or rejected are not refunded by the provider, so
+    only attaching usage to ResultEvent would systematically under-count.
+    """
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    cost_usd: float | None = None
+    model_id: str | None = None
+    cost_source: Literal["sdk", "provider"] | None = None
+
+    def to_metadata(self) -> dict[str, Any]:
+        """Serialize to the wire dict carried inside ContainerOutput.metadata.
+
+        Kept symmetric with from_metadata. Keys mirror the field names so the
+        DB-side decoding stays a one-line dict lookup; cost_usd / model_id /
+        cost_source serialize as None when unset (rather than being omitted)
+        so the receiver can tell "backend reported zero" apart from "backend
+        did not report".
+        """
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_write_tokens": self.cache_write_tokens,
+            "cost_usd": self.cost_usd,
+            "model_id": self.model_id,
+            "cost_source": self.cost_source,
+        }
+
+    @classmethod
+    def from_metadata(cls, data: dict[str, Any]) -> UsageSnapshot:
+        cost_source_raw = data.get("cost_source")
+        cost_source: Literal["sdk", "provider"] | None
+        cost_source = (
+            cost_source_raw if cost_source_raw in ("sdk", "provider") else None
+        )
+        cost_usd_raw = data.get("cost_usd")
+        cost_usd = float(cost_usd_raw) if isinstance(cost_usd_raw, (int, float)) else None
+        model_id_raw = data.get("model_id")
+        model_id = model_id_raw if isinstance(model_id_raw, str) else None
+        return cls(
+            input_tokens=int(data.get("input_tokens", 0) or 0),
+            output_tokens=int(data.get("output_tokens", 0) or 0),
+            cache_read_tokens=int(data.get("cache_read_tokens", 0) or 0),
+            cache_write_tokens=int(data.get("cache_write_tokens", 0) or 0),
+            cost_usd=cost_usd,
+            model_id=model_id,
+            cost_source=cost_source,
+        )
 
 
 @dataclass(frozen=True)
@@ -38,6 +121,7 @@ class ResultEvent:
     text: str | None
     new_session_id: str | None = None
     is_final: bool = True
+    usage: UsageSnapshot | None = None
 
 
 @dataclass(frozen=True)
@@ -57,9 +141,17 @@ class CompactionEvent:
 
 @dataclass(frozen=True)
 class ErrorEvent:
-    """Emitted on unrecoverable backend errors."""
+    """Emitted on unrecoverable backend errors.
+
+    ``usage`` carries the tokens already burned on the failed turn — most
+    LLM providers bill prompt tokens even on partial completions, so
+    leaving it blank would systematically under-report cost. Backends
+    that can't recover usage on the failure path (e.g. the Claude SDK
+    has no per-turn usage on its exception path) leave it None.
+    """
 
     error: str
+    usage: UsageSnapshot | None = None
 
 
 @dataclass(frozen=True)
@@ -82,7 +174,13 @@ class StoppedEvent:
     Sent as confirmation to the UI so the Stop button can exit the
     'stopping' transitional state. The container remains alive and
     ready to receive the next prompt.
+
+    ``usage`` carries the tokens spent on the aborted turn so cost
+    accounting doesn't lose them. None when the backend cannot recover
+    a usage snapshot at abort time.
     """
+
+    usage: UsageSnapshot | None = None
 
 
 @dataclass(frozen=True)
@@ -107,6 +205,11 @@ class SafetyBlockEvent:
     stage: str
     reason: str
     rule_id: str | None = None
+    # Pre-LLM blocks (stage="input_prompt") leave usage None — no model
+    # call happened. Output-stage blocks ("model_output") emit usage with
+    # the tokens the LLM call consumed before its output was rejected, so
+    # billing telemetry doesn't lose those tokens to the safety pipeline.
+    usage: UsageSnapshot | None = None
 
 
 BackendEvent = (

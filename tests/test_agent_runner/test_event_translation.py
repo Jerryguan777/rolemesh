@@ -16,9 +16,11 @@ from agent_runner.backend import (
     ErrorEvent,
     ResultEvent,
     RunningEvent,
+    SafetyBlockEvent,
     SessionInitEvent,
     StoppedEvent,
     ToolUseEvent,
+    UsageSnapshot,
     tool_input_preview,
 )
 from agent_runner.main import ContainerOutput
@@ -281,3 +283,115 @@ class TestToolInputPreview:
         # tool_input_preview should not crash if a dict has a non-str value
         out = tool_input_preview("Task", {"description": 42})
         assert out == "42"
+
+
+class TestUsagePropagationThroughBridge:
+    """Pin down the bridge's metadata.usage placement for all four
+    terminal events. The orchestrator's _extract_usage(metadata) keys
+    off the literal ``usage`` subkey — any drift here silently breaks
+    DB persistence."""
+
+    @staticmethod
+    def _bridge_translate(event: Any, session_id: str | None = None) -> ContainerOutput | None:
+        """Replicate run_query_loop.on_event for the four terminal
+        events. Kept inline because the real on_event needs a NATS
+        connection."""
+        usage = getattr(event, "usage", None)
+        if isinstance(event, ResultEvent):
+            metadata = {"usage": usage.to_metadata()} if usage is not None else None
+            return ContainerOutput(
+                status="success",
+                result=event.text,
+                new_session_id=event.new_session_id or session_id,
+                is_final=event.is_final,
+                metadata=metadata,
+            )
+        if isinstance(event, ErrorEvent):
+            metadata = {"usage": usage.to_metadata()} if usage is not None else None
+            return ContainerOutput(
+                status="error",
+                result=None,
+                error=event.error,
+                metadata=metadata,
+            )
+        if isinstance(event, StoppedEvent):
+            metadata = {"usage": usage.to_metadata()} if usage is not None else None
+            return ContainerOutput(
+                status="stopped",
+                result=None,
+                new_session_id=session_id,
+                metadata=metadata,
+            )
+        if isinstance(event, SafetyBlockEvent):
+            md: dict[str, Any] = {"stage": event.stage}
+            if event.rule_id is not None:
+                md["rule_id"] = event.rule_id
+            if usage is not None:
+                md["usage"] = usage.to_metadata()
+            return ContainerOutput(
+                status="safety_blocked",
+                result=event.reason,
+                metadata=md,
+            )
+        return None
+
+    def test_result_event_with_usage_lands_in_metadata(self) -> None:
+        snap = UsageSnapshot(
+            input_tokens=100,
+            output_tokens=50,
+            cost_usd=0.001,
+            model_id="claude-sonnet-4-6",
+            cost_source="sdk",
+        )
+        out = self._bridge_translate(ResultEvent(text="hi", usage=snap))
+        assert out is not None
+        assert out.metadata is not None
+        assert out.metadata["usage"]["input_tokens"] == 100
+        assert out.metadata["usage"]["cost_source"] == "sdk"
+
+    def test_error_event_with_usage_carries_burnt_tokens(self) -> None:
+        snap = UsageSnapshot(input_tokens=200, output_tokens=10)
+        out = self._bridge_translate(ErrorEvent(error="boom", usage=snap))
+        assert out is not None
+        assert out.metadata is not None
+        assert out.metadata["usage"]["input_tokens"] == 200
+
+    def test_stopped_event_with_usage_carries_aborted_tokens(self) -> None:
+        snap = UsageSnapshot(input_tokens=300, output_tokens=20)
+        out = self._bridge_translate(StoppedEvent(usage=snap))
+        assert out is not None
+        assert out.metadata is not None
+        assert out.metadata["usage"]["input_tokens"] == 300
+
+    def test_safety_block_with_usage_keeps_stage_and_usage(self) -> None:
+        """Output-stage block: stage AND usage must coexist in
+        metadata, neither overwriting the other."""
+        snap = UsageSnapshot(input_tokens=50, output_tokens=5)
+        out = self._bridge_translate(
+            SafetyBlockEvent(
+                stage="model_output", reason="rule fired",
+                rule_id="r-1", usage=snap,
+            )
+        )
+        assert out is not None
+        assert out.metadata is not None
+        assert out.metadata["stage"] == "model_output"
+        assert out.metadata["rule_id"] == "r-1"
+        assert out.metadata["usage"]["input_tokens"] == 50
+
+    def test_result_event_without_usage_omits_metadata(self) -> None:
+        """The byte-equality property: an event with usage=None
+        produces no metadata key at all."""
+        out = self._bridge_translate(ResultEvent(text="hi", usage=None))
+        assert out is not None
+        assert out.metadata is None
+        assert "metadata" not in out.to_dict()
+
+    def test_safety_block_without_usage_keeps_legacy_stage_only_metadata(self) -> None:
+        """Input-stage block (no LLM call → no usage). The wire
+        metadata is the legacy stage-only dict, exactly as before."""
+        out = self._bridge_translate(
+            SafetyBlockEvent(stage="input_prompt", reason="blocked")
+        )
+        assert out is not None
+        assert out.metadata == {"stage": "input_prompt"}

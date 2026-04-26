@@ -136,6 +136,67 @@ _gateways: dict[str, ChannelGateway] = {}
 _queue: GroupQueue = GroupQueue()
 
 
+@dataclass(frozen=True)
+class _UsageFields:
+    """Container for the six message-token columns.
+
+    All fields are Optional because the metadata may be absent (legacy
+    container, error path that didn't carry usage). Treat absent fields
+    as NULL DB rows — distinct from "backend reported zero tokens".
+    """
+
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    cost_usd: float | None = None
+    model_id: str | None = None
+
+
+def _extract_usage(metadata: dict[str, object] | None) -> _UsageFields:
+    """Pull the wire-format ``usage`` payload into the DB-row shape.
+
+    Parses the same wire format ``UsageSnapshot.from_metadata`` produces,
+    but yields a ``_UsageFields`` record purpose-shaped for the DB write
+    path: every field is Optional and None maps to a NULL column.
+    UsageSnapshot defaults int tokens to 0, which would conflate
+    "unknown" with "literally zero" in sum-of-tokens analytics.
+
+    Trust boundary: this is the orchestrator's gate against malformed
+    metadata coming off NATS. Wrong shape (string instead of dict,
+    missing keys, garbage in optional fields) yields all-None
+    _UsageFields rather than raising — a single rogue container must
+    not be able to crash the message-storage path for sibling
+    conversations.
+
+    Note that ``cost_source`` from the wire is intentionally dropped
+    here — there is no DB column for it. If/when one is added,
+    extend ``_UsageFields`` and read it through.
+    """
+    if not isinstance(metadata, dict):
+        return _UsageFields()
+    usage = metadata.get("usage")
+    if not isinstance(usage, dict):
+        return _UsageFields()
+
+    def _int(key: str) -> int | None:
+        val = usage.get(key)
+        return int(val) if isinstance(val, (int, float)) else None
+
+    cost_raw = usage.get("cost_usd")
+    cost = float(cost_raw) if isinstance(cost_raw, (int, float)) else None
+    model_raw = usage.get("model_id")
+    model = model_raw if isinstance(model_raw, str) else None
+    return _UsageFields(
+        input_tokens=_int("input_tokens"),
+        output_tokens=_int("output_tokens"),
+        cache_read_tokens=_int("cache_read_tokens"),
+        cache_write_tokens=_int("cache_write_tokens"),
+        cost_usd=cost,
+        model_id=model,
+    )
+
+
 def _coworker_from_state(cw_state: CoworkerState) -> Coworker:
     """Build a full Coworker dataclass from runtime CoworkerState."""
     c = cw_state.config
@@ -696,6 +757,14 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
                 text = safety_result.text
                 if isinstance(gw, WebNatsGateway):
                     await gw.send_stream_chunk(binding.id, conv.channel_chat_id, text)
+                    # Pull token usage off the wire metadata for persistence.
+                    # The container side (agent_runner.main on_event) puts
+                    # the snapshot under metadata["usage"] using the
+                    # UsageSnapshot.to_metadata wire format. Unknown / older
+                    # containers leave it absent and all six DB columns
+                    # stay NULL. Cost arrives as float; asyncpg coerces to
+                    # NUMERIC(10,6) without us needing a Decimal.
+                    usage = _extract_usage(result.metadata)
                     # Store assistant response for web history
                     await db_store_message(
                         tenant_id=conv.tenant_id,
@@ -707,6 +776,12 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
                         timestamp=datetime.now(UTC).isoformat(),
                         is_from_me=True,
                         is_bot_message=True,
+                        input_tokens=usage.input_tokens,
+                        output_tokens=usage.output_tokens,
+                        cache_read_tokens=usage.cache_read_tokens,
+                        cache_write_tokens=usage.cache_write_tokens,
+                        cost_usd=usage.cost_usd,
+                        model_id=usage.model_id,
                     )
                 elif gw:
                     await gw.send_message(binding.id, conv.channel_chat_id, text)
