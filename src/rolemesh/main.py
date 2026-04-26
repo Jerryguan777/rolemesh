@@ -1612,6 +1612,7 @@ async def main() -> None:
     # for a rule snapshot at startup and the identity map on demand;
     # without these responders the gateway fails closed (blocks every
     # request) and agents on the internal bridge lose egress.
+    from rolemesh.egress.mcp_cache import subscribe_mcp_changes
     from rolemesh.egress.orch_glue import fetch_all_egress_rules, start_responders
 
     egress_responder_subs = await start_responders(
@@ -1619,6 +1620,17 @@ async def main() -> None:
         state=_state,
         rules_fetcher=fetch_all_egress_rules,
     )
+
+    # Mirror MCP registry deltas into THIS process. The webui process
+    # is the one that publishes ``egress.mcp.changed`` (admin REST
+    # edits coworker.tools), but our in-process ``_mcp_registry`` is
+    # also the source the snapshot responder serves to the gateway.
+    # Without this subscription, an admin tools edit would land on the
+    # gateway via the broadcast yet leave the orchestrator's view
+    # stale; the next gateway restart would then re-fetch a snapshot
+    # that's missing the edit.
+    mcp_sub = await subscribe_mcp_changes(_transport.nc)
+    egress_responder_subs.append(mcp_sub)
 
     # Launch the egress gateway now that the snapshot responders are
     # registered. Moved here from _ensure_container_system_running()
