@@ -59,6 +59,11 @@ from .identity import (
     fetch_identity_snapshot_via_nats,
     subscribe_lifecycle,
 )
+from .mcp_cache import (
+    apply_snapshot_to_registry,
+    fetch_mcp_snapshot_via_nats,
+    subscribe_mcp_changes,
+)
 from .policy_cache import (
     PolicyCache,
     fetch_snapshot_via_nats,
@@ -192,6 +197,31 @@ async def main() -> None:
             checks=check_map,
             audit_publisher=audit,
         )
+
+        # --- MCP server registry: snapshot + hot reload --------------
+        # The MCP registry has to be seeded BEFORE start_credential_proxy
+        # binds — otherwise a client request that lands during the boot
+        # window between bind and snapshot-arrival sees the registry as
+        # empty and gets a 404 it shouldn't have. Snapshot failure is
+        # fail-soft (log + continue with empty registry); subsequent
+        # ``egress.mcp.changed`` events still fill it in as the
+        # orchestrator publishes them, and the operator sees the warning
+        # instead of crash-looping the gateway over a transient NATS
+        # blip on the orchestrator side.
+        try:
+            mcp_entries = await fetch_mcp_snapshot_via_nats(
+                nats_client, timeout_s=_SNAPSHOT_TIMEOUT_S
+            )
+            apply_snapshot_to_registry(mcp_entries)
+            logger.info("gateway: MCP registry seeded", count=len(mcp_entries))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "gateway: MCP snapshot fetch failed — continuing with empty "
+                "registry; live change events will refill",
+                error=str(exc),
+            )
+        mcp_sub = await subscribe_mcp_changes(nats_client)
+        stack.push_async_callback(mcp_sub.unsubscribe)  # type: ignore[attr-defined]
 
         # --- Reverse proxy (port 3001) -------------------------------
         reverse_runner = await start_credential_proxy(
