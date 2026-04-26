@@ -32,7 +32,7 @@ with positional args identical to pre-EC-2 behaviour.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 from urllib.parse import urlparse
 
 from aiohttp import ClientSession, web
@@ -42,22 +42,41 @@ from rolemesh.core.logger import get_logger
 from .safety_call import EgressRequest
 
 if TYPE_CHECKING:
-    from rolemesh.auth.token_vault import TokenVault
-
     from .identity import IdentityResolver
     from .safety_call import EgressSafetyCaller
 
 logger = get_logger()
 
+
+class TokenVaultProtocol(Protocol):
+    """Minimal vault interface the reverse-proxy actually consumes.
+
+    Both ``rolemesh.auth.token_vault.TokenVault`` (DB-backed, used by
+    orchestrator + webui processes) and ``rolemesh.egress.remote_token_vault.
+    RemoteTokenVault`` (NATS-RPC-backed, used by the gateway container)
+    satisfy this. Keeping the protocol here rather than importing
+    ``TokenVault`` lets the gateway image stay free of ``rolemesh.db``
+    transitively — the gateway never persists or decrypts tokens
+    locally.
+    """
+
+    async def get_fresh_access_token(self, user_id: str) -> str | None: ...
+
+
 # Module-level TokenVault for per-user IdP token forwarding to MCP servers
-_token_vault: TokenVault | None = None
+_token_vault: TokenVaultProtocol | None = None
 
 # The only identity header containers send.
 _USER_ID_HEADER = "X-RoleMesh-User-Id"
 
 
-def set_token_vault(vault: TokenVault) -> None:
-    """Set the TokenVault instance for per-user MCP token forwarding."""
+def set_token_vault(vault: TokenVaultProtocol) -> None:
+    """Set the TokenVault instance for per-user MCP token forwarding.
+
+    Accepts any object satisfying ``TokenVaultProtocol`` — the
+    DB-backed ``TokenVault`` in orchestrator/webui or the
+    NATS-RPC ``RemoteTokenVault`` in the egress gateway.
+    """
     global _token_vault
     _token_vault = vault
     logger.info("TokenVault configured for MCP user token forwarding")
