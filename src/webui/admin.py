@@ -114,6 +114,19 @@ async def _publish_mcp_for_coworker(action: str, cw: Coworker) -> None:
     one event per tool (not a single batched event) so the
     gateway-side ``apply_change_event`` stays trivial — the same
     handler shape works for boot snapshot + live deltas.
+
+    NAMING-COLLISION CAVEAT: the gateway / orchestrator MCP registry
+    is keyed by tool ``name`` alone, NOT by ``(coworker_id, name)``.
+    If two coworkers configure a tool with the same ``name`` but
+    different URLs, every PATCH against either coworker republishes
+    its own URL and overwrites the other's entry on every gateway
+    that receives the event. Pre-PR-2 this only collided once at
+    orchestrator boot ("last writer wins"); after PR-2 it collides
+    on every admin edit. The proper fix is to re-key the registry on
+    ``(tenant_id, name)`` (operator scope) or ``(coworker_id, name)``
+    (per-agent scope) — tracked as a follow-up. Until then, document
+    in the operator playbook that tool names should be unique within
+    a tenant.
     """
     if _mcp_publisher is None:
         return
@@ -483,6 +496,12 @@ async def update_agent(
     # in the PATCH (``body.tools is not None``). A PATCH that only
     # touches name/permissions/etc. shouldn't generate spurious
     # mcp.changed traffic.
+    #
+    # NOTE: if any of the new tools share a ``name`` with a tool on
+    # another coworker, this broadcast will overwrite that other
+    # coworker's URL on the gateway because the registry is name-
+    # keyed. See ``_publish_mcp_for_coworker`` docstring for the
+    # follow-up plan.
     if body.tools is not None:
         await _publish_mcp_for_coworker("updated", updated)
     return _coworker_to_response(updated)
