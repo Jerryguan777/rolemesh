@@ -211,17 +211,33 @@ def _extra_hosts() -> dict[str, str]:
 
 
 def _rewrite_loopback_to_host_gateway(url: str) -> str:
-    """Rewrite ``localhost``/``127.0.0.1`` in a URL to ``host.docker.internal``.
+    """Rewrite ``localhost`` / ``127.0.0.1`` in a URL to ``host.docker.internal``.
 
-    The orchestrator runs on the host and its ``NATS_URL`` typically points
-    at ``localhost:4222``. Inside the gateway container ``localhost`` is the
-    container itself, so a verbatim copy breaks the NATS connection. Rewrite
-    only on Linux (where ``host.docker.internal`` needs the ExtraHosts entry
-    we just added); on Docker Desktop the name already resolves and the
-    rewrite would still work but is unnecessary.
+    Required on every platform — inside the gateway container,
+    ``localhost`` resolves to the container's own loopback, not the
+    host. The orchestrator's ``NATS_URL`` typically points at
+    ``localhost:4222`` (the host's NATS), so a verbatim copy makes
+    the gateway dial itself and the NATS connection fails with
+    ``Name or service not known`` / ``Connection refused``.
+
+    Two ways ``host.docker.internal`` is made resolvable, both
+    converging at this rewrite:
+
+      - Linux: ``create_egress_gateway`` adds an ExtraHosts entry
+        (``host.docker.internal:host-gateway``) via
+        ``get_host_gateway_extra_hosts``. Docker Engine does not
+        provide the alias automatically.
+      - Docker Desktop (macOS / Windows / WSL): the name is built
+        into the platform's embedded DNS resolver. No ExtraHosts
+        entry is needed (and the helper above returns an empty
+        dict).
+
+    The previous implementation gated the rewrite on
+    ``_extra_hosts()`` being non-empty, which conflated "do we
+    need ExtraHosts?" (platform-specific) with "do we need to
+    rewrite?" (universal). On macOS the gate skipped the rewrite
+    and the gateway shipped with a broken ``NATS_URL``.
     """
-    if not _extra_hosts():
-        return url
     return url.replace("://localhost:", "://host.docker.internal:").replace(
         "://127.0.0.1:", "://host.docker.internal:"
     )
