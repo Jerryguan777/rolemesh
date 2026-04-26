@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -213,6 +214,50 @@ def _extra_hosts() -> dict[str, str]:
     return get_host_gateway_extra_hosts()
 
 
+# ---------------------------------------------------------------------------
+# Forwardable env spec — single source of truth for "what env reaches
+# the gateway container, and which ones are URLs that need loopback
+# rewrite at the publish boundary"
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _ForwardSpec:
+    """One env var to forward into the gateway container.
+
+    ``key`` is the variable name. ``is_url`` flags values that need
+    ``rewrite_loopback_to_host_gateway`` applied at the publish
+    boundary (Bug 5 family — container-internal ``localhost`` is
+    the container's loopback, not the host).
+
+    Token-shaped specs leave ``is_url=False`` and are forwarded
+    verbatim. We deliberately do NOT run ``string.replace`` on
+    every value: a secret that happens to contain ``://localhost:``
+    bytes would otherwise be silently corrupted.
+    """
+
+    key: str
+    is_url: bool = False
+
+
+# Forward-only allowlist. MUST mirror the keys
+# ``reverse_proxy.start_credential_proxy`` reads from os.environ — a
+# divergence shows up here in code review rather than at runtime.
+# Adding a new forwarder is one line; flipping ``is_url`` to True is
+# the only thing needed to wire the loopback rewrite for URLs.
+_FORWARDABLE: tuple[_ForwardSpec, ...] = (
+    _ForwardSpec("EGRESS_UPSTREAM_DNS"),
+    _ForwardSpec("ANTHROPIC_API_KEY"),
+    _ForwardSpec("CLAUDE_CODE_OAUTH_TOKEN"),
+    _ForwardSpec("ANTHROPIC_AUTH_TOKEN"),
+    _ForwardSpec("ANTHROPIC_BASE_URL", is_url=True),
+    _ForwardSpec("PI_OPENAI_API_KEY"),
+    _ForwardSpec("OPENAI_BASE_URL", is_url=True),
+    _ForwardSpec("PI_GOOGLE_API_KEY"),
+    _ForwardSpec("GOOGLE_BASE_URL", is_url=True),
+)
+
+
 def _gateway_env() -> list[str]:
     """Build the Env block for the gateway container.
 
@@ -225,9 +270,10 @@ def _gateway_env() -> list[str]:
     environment variables the reverse-proxy path will actually
     consume.
 
-    The allowlist below MUST mirror the keys ``rolemesh.core.env``'s
-    .env-fallback path looks for via ``reverse_proxy.start_credential_proxy``;
-    a missing pair silently produces an unconfigured provider.
+    Forwarder spec lives in ``_FORWARDABLE`` (module-level) — single
+    source of truth for both "which env vars cross the boundary" AND
+    "which ones need loopback rewrite". See ``_ForwardSpec`` for the
+    rationale.
     """
     import os as _os
 
@@ -235,20 +281,11 @@ def _gateway_env() -> list[str]:
 
     env_pairs: list[str] = [f"NATS_URL={rewrite_loopback_to_host_gateway(_NATS_URL)}"]
 
-    # Forward-only allowlist of variables the gateway might need.
-    # Declared close to the consumer (reverse_proxy's secret list) so
-    # a divergence is caught in code review rather than at runtime.
-    forwardable_keys = (
-        "EGRESS_UPSTREAM_DNS",
-        "ANTHROPIC_API_KEY",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "ANTHROPIC_AUTH_TOKEN",
-        "ANTHROPIC_BASE_URL",
-        "PI_OPENAI_API_KEY",
-        "PI_GOOGLE_API_KEY",
-    )
-    for key in forwardable_keys:
-        value = _os.environ.get(key)
-        if value:
-            env_pairs.append(f"{key}={value}")
+    for spec in _FORWARDABLE:
+        value = _os.environ.get(spec.key)
+        if not value:
+            continue
+        if spec.is_url:
+            value = rewrite_loopback_to_host_gateway(value)
+        env_pairs.append(f"{spec.key}={value}")
     return env_pairs

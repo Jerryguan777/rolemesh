@@ -214,3 +214,194 @@ class TestWaitForGatewayReady:
 # tests/container/test_runtime.py. The launcher only references the
 # helper at one site (NATS_URL injection) and the integration is
 # exercised by tests/egress/integration.
+
+
+# ---------------------------------------------------------------------------
+# _gateway_env — base-URL loopback rewrite + token pass-through
+# ---------------------------------------------------------------------------
+
+
+class TestGatewayEnvBaseUrlRewrite:
+    """Bug-5 family: every URL forwarded into the gateway container's
+    Env block must go through ``rewrite_loopback_to_host_gateway``,
+    because container-internal ``localhost`` is the container's own
+    loopback. Tokens forwarded alongside must NOT be touched — string
+    ``replace`` on a secret could silently corrupt it.
+    """
+
+    def _env_dict(self, env_pairs: list[str]) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for pair in env_pairs:
+            k, _, v = pair.partition("=")
+            out[k] = v
+        return out
+
+    def test_anthropic_base_url_localhost_is_rewritten(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Direct regression for the bug: operator pointed Anthropic
+        # at a local proxy; without rewrite, the gateway dials its
+        # own loopback and the entire Anthropic path 503s.
+        from rolemesh.egress.launcher import _gateway_env
+
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://localhost:11434")
+        env = self._env_dict(_gateway_env())
+        assert env["ANTHROPIC_BASE_URL"] == "http://host.docker.internal:11434"
+
+    def test_openai_base_url_localhost_is_rewritten(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Same bug class, different forwarder. Must apply to every
+        # *_BASE_URL key, not just Anthropic.
+        from rolemesh.egress.launcher import _gateway_env
+
+        monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:8080/v1")
+        env = self._env_dict(_gateway_env())
+        assert env["OPENAI_BASE_URL"] == "http://host.docker.internal:8080/v1"
+
+    def test_google_base_url_localhost_is_rewritten(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from rolemesh.egress.launcher import _gateway_env
+
+        monkeypatch.setenv("GOOGLE_BASE_URL", "http://localhost:9000")
+        env = self._env_dict(_gateway_env())
+        assert env["GOOGLE_BASE_URL"] == "http://host.docker.internal:9000"
+
+    def test_remote_base_url_is_left_alone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Negative case: production URLs (api.anthropic.com etc.)
+        # must pass through unchanged.
+        from rolemesh.egress.launcher import _gateway_env
+
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+        env = self._env_dict(_gateway_env())
+        assert env["ANTHROPIC_BASE_URL"] == "https://api.anthropic.com"
+
+    def test_token_with_localhost_substring_is_NOT_rewritten(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Tokens are forwarded verbatim — the rewrite path is opt-in
+        # via _URL_FORWARDABLE_KEYS, NOT a blanket replace. This test
+        # pins the asymmetry contract so a future "let's just rewrite
+        # every value" refactor doesn't quietly mangle a secret.
+        # (Concrete token strings shouldn't contain "://localhost:"
+        # in practice; this test forces the case to lock the contract.)
+        from rolemesh.egress.launcher import _gateway_env
+
+        weird_token = "sk-prefix-://localhost:1234-suffix"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", weird_token)
+        env = self._env_dict(_gateway_env())
+        assert env["ANTHROPIC_API_KEY"] == weird_token
+
+    def test_unset_base_url_is_not_emitted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Empty string shouldn't pollute the container Env. The
+        # registry on the gateway side falls back to the public URL
+        # default when *_BASE_URL is absent.
+        from rolemesh.egress.launcher import _gateway_env
+
+        for key in (
+            "ANTHROPIC_BASE_URL",
+            "OPENAI_BASE_URL",
+            "GOOGLE_BASE_URL",
+        ):
+            monkeypatch.delenv(key, raising=False)
+        env = self._env_dict(_gateway_env())
+        for key in (
+            "ANTHROPIC_BASE_URL",
+            "OPENAI_BASE_URL",
+            "GOOGLE_BASE_URL",
+        ):
+            assert key not in env
+
+    def test_nats_url_still_rewritten_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # NATS_URL has its own line of code (not in forwardable_keys
+        # because it's required, not optional). Sanity-check the
+        # refactor didn't break it.
+        from rolemesh.egress.launcher import _gateway_env
+
+        env = self._env_dict(_gateway_env())
+        assert "NATS_URL" in env
+        # Default is nats://localhost:4222 in dev → must be rewritten.
+        if "localhost" in env["NATS_URL"] or "127.0.0.1" in env["NATS_URL"]:
+            raise AssertionError(
+                f"NATS_URL not rewritten: {env['NATS_URL']!r}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# _FORWARDABLE spec contract — single-source-of-truth structural tests
+# ---------------------------------------------------------------------------
+
+
+class TestForwardableSpec:
+    """``_FORWARDABLE`` is the single source of truth for "what crosses
+    the gateway env boundary AND which entries need loopback rewrite".
+    These tests pin the structural contract so a future refactor can't
+    silently drop the rewrite flag from a URL forwarder (re-introducing
+    the Bug 5 family).
+    """
+
+    def test_every_base_url_key_is_marked_url(self) -> None:
+        # Heuristic but load-bearing: any key matching ``*_BASE_URL``
+        # MUST have ``is_url=True``. This catches the most common
+        # drift mode — adding a new ``MISTRAL_BASE_URL`` forwarder
+        # but forgetting to flip the flag.
+        from rolemesh.egress.launcher import _FORWARDABLE
+
+        offenders = [
+            spec for spec in _FORWARDABLE
+            if spec.key.endswith("_BASE_URL") and not spec.is_url
+        ]
+        assert offenders == [], (
+            f"_FORWARDABLE entries match *_BASE_URL but is_url=False: "
+            f"{[s.key for s in offenders]}. Loopback rewrite will not "
+            f"fire for these — Bug 5 family will return."
+        )
+
+    def test_no_token_key_is_marked_url(self) -> None:
+        # Inverse of the above: ``API_KEY`` / ``OAUTH_TOKEN`` /
+        # ``AUTH_TOKEN`` shaped keys must NEVER carry ``is_url=True``,
+        # because string.replace on a secret could corrupt it.
+        from rolemesh.egress.launcher import _FORWARDABLE
+
+        token_suffixes = ("_API_KEY", "_OAUTH_TOKEN", "_AUTH_TOKEN")
+        offenders = [
+            spec for spec in _FORWARDABLE
+            if any(spec.key.endswith(s) for s in token_suffixes)
+            and spec.is_url
+        ]
+        assert offenders == [], (
+            f"_FORWARDABLE marks token-shaped keys as URLs: "
+            f"{[s.key for s in offenders]}. Tokens must never go through "
+            f"loopback rewrite — string.replace could corrupt the secret."
+        )
+
+    def test_keys_are_unique(self) -> None:
+        # Cheap sanity: spec is a tuple, so duplicates wouldn't error
+        # at construction. A duplicate would emit the env var twice in
+        # the gateway container (last write wins) and obscure intent.
+        from rolemesh.egress.launcher import _FORWARDABLE
+
+        keys = [spec.key for spec in _FORWARDABLE]
+        assert len(keys) == len(set(keys)), (
+            f"_FORWARDABLE has duplicate keys: {keys}"
+        )
+
+    def test_known_url_forwarders_carry_is_url_true(self) -> None:
+        # Direct positive coverage of the three known URL forwarders
+        # at the time of this PR. New URL forwarders should be added
+        # here as they ship.
+        from rolemesh.egress.launcher import _FORWARDABLE
+
+        url_keys = {spec.key for spec in _FORWARDABLE if spec.is_url}
+        assert {
+            "ANTHROPIC_BASE_URL",
+            "OPENAI_BASE_URL",
+            "GOOGLE_BASE_URL",
+        }.issubset(url_keys)
