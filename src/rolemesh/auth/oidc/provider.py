@@ -178,9 +178,15 @@ class OIDCAuthProvider:
 
         existing = await get_user_by_external_sub(external_sub)
         if existing is not None:
-            # Sync changeable fields
+            # Sync changeable fields. ``existing.tenant_id`` is the
+            # authoritative tenant binding from the OIDC mapping —
+            # passing it (rather than the function-arg ``tenant_id``)
+            # protects against an IdP that mutates its tenant claim
+            # mid-session: we keep updating the user under their
+            # original tenant rather than silently moving them.
             updated = await update_user(
                 existing.id,
+                tenant_id=existing.tenant_id,
                 name=str(name) if name != existing.name else None,
                 email=str(email) if email and email != existing.email else None,
                 role=role if role != existing.role else None,
