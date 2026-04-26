@@ -228,6 +228,17 @@ def _gateway_env() -> list[str]:
     The allowlist below MUST mirror the keys ``rolemesh.core.env``'s
     .env-fallback path looks for via ``reverse_proxy.start_credential_proxy``;
     a missing pair silently produces an unconfigured provider.
+
+    Loopback-rewrite contract (Bug 5 family): every forwarded value
+    that holds a URL must be passed through
+    ``rewrite_loopback_to_host_gateway`` because container-internal
+    ``localhost`` is the container's loopback, not the host. The
+    set ``_URL_FORWARDABLE_KEYS`` declares which forwardable keys
+    are URL-typed and need this treatment; everything else (tokens,
+    DNS server lists) is forwarded verbatim. Token-shaped values
+    are intentionally NOT rewritten because string ``replace`` on a
+    secret could silently corrupt it on the (rare) chance the
+    bytes contain ``://localhost:``.
     """
     import os as _os
 
@@ -245,10 +256,24 @@ def _gateway_env() -> list[str]:
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_BASE_URL",
         "PI_OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
         "PI_GOOGLE_API_KEY",
+        "GOOGLE_BASE_URL",
     )
+    # Subset of ``forwardable_keys`` that hold URLs and therefore
+    # need loopback rewrite at the publish boundary. Adding a new
+    # base-URL forwarder is two lines: one in ``forwardable_keys``,
+    # one here.
+    _URL_FORWARDABLE_KEYS = frozenset({
+        "ANTHROPIC_BASE_URL",
+        "OPENAI_BASE_URL",
+        "GOOGLE_BASE_URL",
+    })
     for key in forwardable_keys:
         value = _os.environ.get(key)
-        if value:
-            env_pairs.append(f"{key}={value}")
+        if not value:
+            continue
+        if key in _URL_FORWARDABLE_KEYS:
+            value = rewrite_loopback_to_host_gateway(value)
+        env_pairs.append(f"{key}={value}")
     return env_pairs

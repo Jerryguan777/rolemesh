@@ -136,7 +136,7 @@ def _build_provider_registry(
     openai_key = secrets.get("PI_OPENAI_API_KEY", "")
     if openai_key:
         registry["openai"] = _ProviderConfig(
-            upstream="https://api.openai.com/v1",
+            upstream=secrets.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
             secret_key=openai_key,
             header_name="authorization",
             header_format="Bearer {key}",
@@ -145,7 +145,9 @@ def _build_provider_registry(
     google_key = secrets.get("PI_GOOGLE_API_KEY", "")
     if google_key:
         registry["google"] = _ProviderConfig(
-            upstream="https://generativelanguage.googleapis.com",
+            upstream=secrets.get(
+                "GOOGLE_BASE_URL", "https://generativelanguage.googleapis.com"
+            ),
             secret_key=google_key,
             header_name="x-goog-api-key",
             header_format="{key}",
@@ -269,7 +271,9 @@ async def start_credential_proxy(
                 "ANTHROPIC_AUTH_TOKEN",
                 "ANTHROPIC_BASE_URL",
                 "PI_OPENAI_API_KEY",
+                "OPENAI_BASE_URL",
                 "PI_GOOGLE_API_KEY",
+                "GOOGLE_BASE_URL",
             )
         )
         if v
