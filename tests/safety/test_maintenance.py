@@ -86,7 +86,7 @@ class TestCleanupOldApprovalContexts:
             retention_hours=24
         )
         assert cleared == 1
-        row = await pg.get_safety_decision(old_id, tid)
+        row = await pg.get_safety_decision(old_id, tenant_id=tid)
         assert row is not None
         assert row["approval_context"] is None
 
@@ -106,7 +106,7 @@ class TestCleanupOldApprovalContexts:
             retention_hours=24
         )
         assert cleared == 0
-        row = await pg.get_safety_decision(recent_id, tid)
+        row = await pg.get_safety_decision(recent_id, tenant_id=tid)
         assert row is not None
         assert row["approval_context"] is not None
 
@@ -150,8 +150,8 @@ class TestCleanupOldApprovalContexts:
             retention_hours=24
         )
         assert cleared == 1
-        young_row = await pg.get_safety_decision(a_young, tid)
-        old_row = await pg.get_safety_decision(a_old, tid)
+        young_row = await pg.get_safety_decision(a_young, tenant_id=tid)
+        old_row = await pg.get_safety_decision(a_old, tenant_id=tid)
         assert young_row is not None
         assert old_row is not None
         assert young_row["approval_context"] is not None

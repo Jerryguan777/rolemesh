@@ -111,14 +111,18 @@ class OIDCAuthProvider:
         Returns None if the user does not exist. external_token is not
         available because no token is presented for this lookup path.
 
-        SECURITY: This lookup is NOT tenant-scoped — the AuthProvider Protocol
-        does not pass tenant context. Callers MUST enforce tenant authorization
-        themselves before exposing the result, otherwise a holder of any user_id
-        can probe users across tenants.
+        Two-step bootstrap: ``resolve_user_for_auth`` recovers the user's
+        tenant_id from a signature-verified user_id (admin escape hatch,
+        no tenant context yet); then ``get_user`` runs the tenant-scoped
+        query that downstream RLS will enforce.
         """
-        from rolemesh.db.pg import get_user
+        from rolemesh.db.pg import get_user, resolve_user_for_auth
 
-        user = await get_user(user_id)
+        resolved = await resolve_user_for_auth(user_id)
+        if resolved is None:
+            return None
+        tenant_id, _ = resolved
+        user = await get_user(user_id, tenant_id=tenant_id)
         if user is None:
             return None
         return AuthenticatedUser(
@@ -174,9 +178,15 @@ class OIDCAuthProvider:
 
         existing = await get_user_by_external_sub(external_sub)
         if existing is not None:
-            # Sync changeable fields
+            # Sync changeable fields. ``existing.tenant_id`` is the
+            # authoritative tenant binding from the OIDC mapping —
+            # passing it (rather than the function-arg ``tenant_id``)
+            # protects against an IdP that mutates its tenant claim
+            # mid-session: we keep updating the user under their
+            # original tenant rather than silently moving them.
             updated = await update_user(
                 existing.id,
+                tenant_id=existing.tenant_id,
                 name=str(name) if name != existing.name else None,
                 email=str(email) if email and email != existing.email else None,
                 role=role if role != existing.role else None,

@@ -268,7 +268,7 @@ async def _run_task(
         result_summary = result[:200]
     else:
         result_summary = "Completed"
-    await update_task_after_run(task.id, next_run, result_summary)
+    await update_task_after_run(task.id, next_run, result_summary, tenant_id=task.tenant_id)
 
 
 _scheduler_running: bool = False
@@ -294,7 +294,7 @@ def start_scheduler_loop(deps: SchedulerDependencies) -> asyncio.Task[None]:
                     logger.info("Found due tasks", count=len(due_tasks))
 
                 for task in due_tasks:
-                    current_task = await get_task_by_id(task.id)
+                    current_task = await get_task_by_id(task.id, tenant_id=task.tenant_id)
                     if not current_task or current_task.status != "active":
                         continue
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -12,7 +13,7 @@ if TYPE_CHECKING:
 import asyncpg
 
 from rolemesh.auth.permissions import AgentPermissions
-from rolemesh.core.config import DATABASE_URL
+from rolemesh.core.config import ADMIN_DATABASE_URL, DATABASE_URL
 from rolemesh.core.group_folder import is_valid_group_folder
 from rolemesh.core.logger import get_logger
 from rolemesh.core.types import (
@@ -48,6 +49,7 @@ def _to_dt(ts: str | None) -> datetime | None:
 
 
 _pool: asyncpg.Pool[asyncpg.Record] | None = None
+_admin_pool: asyncpg.Pool[asyncpg.Record] | None = None
 DEFAULT_TENANT: str = "default"
 
 
@@ -55,6 +57,64 @@ def _get_pool() -> asyncpg.Pool[asyncpg.Record]:
     """Return the module-level connection pool, asserting it is initialized."""
     assert _pool is not None, "Database not initialized. Call await init_database() first."
     return _pool
+
+
+def _get_admin_pool() -> asyncpg.Pool[asyncpg.Record]:
+    """Return the BYPASSRLS admin pool used by cross-tenant maintenance,
+    resolvers, and DDL.
+
+    Asserts the pool was initialised. The previous version silently
+    fell back to the business pool when ``_admin_pool`` was None so
+    dev/test wouldn't have to set ``ADMIN_DATABASE_URL`` — but that
+    fallback also masks a real misconfiguration in prod (admin path
+    suddenly running under ``rolemesh_app`` NOBYPASSRLS, every
+    cross-tenant query returns zero rows). Both ``init_database``
+    and ``_init_test_database`` already create ``_admin_pool``
+    unconditionally (with a DSN fallback to ``DATABASE_URL`` when
+    ``ADMIN_DATABASE_URL`` is unset), so dev convenience is
+    preserved without the silent-fallback hazard.
+    """
+    assert _admin_pool is not None, (
+        "Admin pool not initialised. Call await init_database() first."
+    )
+    return _admin_pool
+
+
+@asynccontextmanager
+async def tenant_conn(
+    tenant_id: str,
+) -> AsyncIterator[asyncpg.pool.PoolConnectionProxy[asyncpg.Record]]:
+    """Acquire a business connection bound to ``tenant_id``.
+
+    Sets ``app.current_tenant_id`` GUC inside an explicit transaction so
+    the value is wiped when the transaction commits/rolls back. RLS
+    policies (added in PR-D) read it via ``current_tenant_id()``.
+
+    Use ``set_config(name, value, is_local=true)`` rather than
+    ``SET LOCAL`` so the value can be parameterised — string-concat'd
+    SET LOCAL would be a SQL injection foothold.
+    """
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT set_config('app.current_tenant_id', $1, true)",
+                str(tenant_id),
+            )
+            yield conn
+
+
+@asynccontextmanager
+async def admin_conn() -> AsyncIterator[asyncpg.pool.PoolConnectionProxy[asyncpg.Record]]:
+    """Acquire a BYPASSRLS connection for cross-tenant maintenance.
+
+    Callers must justify cross-tenant scope in their docstring (see the
+    classification in the RLS design: B = list_*/cleanup_*, C =
+    resolve_*, D = init_*/_create_*). Never use this from REST handlers.
+    """
+    pool = _get_admin_pool()
+    async with pool.acquire() as conn:
+        yield conn
 
 
 # ---------------------------------------------------------------------------
@@ -228,6 +288,57 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             access_token_expires_at TIMESTAMPTZ,
             updated_at TIMESTAMPTZ DEFAULT now()
         )
+    """)
+
+    # PR-D D10: backfill tenant_id on oidc_user_tokens so RLS can
+    # bind it. Same pattern PR #11 used on approval_audit_log:
+    # ADD COLUMN nullable + UPDATE from parent + SET NOT NULL + FK
+    # CASCADE + composite index + BEFORE-INSERT trigger to keep new
+    # rows in sync with users.tenant_id without making every caller
+    # remember to pass it.
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'oidc_user_tokens'
+                  AND column_name = 'tenant_id'
+            ) THEN
+                ALTER TABLE oidc_user_tokens ADD COLUMN tenant_id UUID;
+                UPDATE oidc_user_tokens t
+                   SET tenant_id = u.tenant_id
+                  FROM users u
+                 WHERE u.id = t.user_id AND t.tenant_id IS NULL;
+                ALTER TABLE oidc_user_tokens
+                    ALTER COLUMN tenant_id SET NOT NULL;
+                ALTER TABLE oidc_user_tokens
+                    ADD CONSTRAINT oidc_user_tokens_tenant_fk
+                    FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+                    ON DELETE CASCADE;
+                CREATE INDEX idx_oidc_user_tokens_tenant
+                    ON oidc_user_tokens (tenant_id, user_id);
+            END IF;
+        END $$;
+    """)
+    await conn.execute("""
+        CREATE OR REPLACE FUNCTION oidc_user_tokens_set_tenant()
+        RETURNS TRIGGER AS $trigger$
+        BEGIN
+            IF NEW.tenant_id IS NULL THEN
+                SELECT tenant_id INTO NEW.tenant_id
+                  FROM users WHERE id = NEW.user_id;
+            END IF;
+            RETURN NEW;
+        END $trigger$ LANGUAGE plpgsql;
+    """)
+    await conn.execute(
+        "DROP TRIGGER IF EXISTS trg_oidc_user_tokens_set_tenant "
+        "ON oidc_user_tokens"
+    )
+    await conn.execute("""
+        CREATE TRIGGER trg_oidc_user_tokens_set_tenant
+            BEFORE INSERT ON oidc_user_tokens
+            FOR EACH ROW EXECUTE FUNCTION oidc_user_tokens_set_tenant();
     """)
 
     await conn.execute("""
@@ -826,21 +937,174 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         """
     )
 
+    # ----- RLS infrastructure (PR-B) ---------------------------------------
+    # current_tenant_id() reads the per-connection GUC set by
+    # tenant_conn(). Returns NULL when unset → policies of the form
+    # ``USING (tenant_id = current_tenant_id())`` evaluate to NULL,
+    # which the planner treats as "row excluded" (fail-closed). STABLE
+    # lets PG cache the result within a single statement.
+    await conn.execute("""
+        CREATE OR REPLACE FUNCTION current_tenant_id() RETURNS UUID
+        LANGUAGE sql STABLE AS $$
+            SELECT NULLIF(current_setting('app.current_tenant_id', true), '')::uuid
+        $$
+    """)
 
-async def init_database(database_url: str | None = None) -> None:
-    """Initialize PostgreSQL connection pool and create schema."""
-    global _pool
+    # rolemesh_app: business connections; NOBYPASSRLS so policies bind.
+    # rolemesh_system: maintenance/resolver/DDL connections; BYPASSRLS
+    # because cross-tenant work is intentional (named via admin_conn()
+    # in code so it's grep-able). LOGIN on both — operators set passwords
+    # out-of-band via ALTER ROLE.
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_roles WHERE rolname = 'rolemesh_app'
+            ) THEN
+                CREATE ROLE rolemesh_app LOGIN NOBYPASSRLS;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_roles WHERE rolname = 'rolemesh_system'
+            ) THEN
+                CREATE ROLE rolemesh_system LOGIN BYPASSRLS;
+            END IF;
+        END $$;
+    """)
+
+    await conn.execute(
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public "
+        "TO rolemesh_app, rolemesh_system"
+    )
+    await conn.execute(
+        "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public "
+        "TO rolemesh_app, rolemesh_system"
+    )
+    await conn.execute(
+        "GRANT EXECUTE ON FUNCTION current_tenant_id() "
+        "TO rolemesh_app, rolemesh_system"
+    )
+    # external_tenant_map and tenants are owner-administered. Even
+    # under PR-D the business role must not touch them — RLS is the
+    # second layer; the GRANT is the first.
+    await conn.execute("REVOKE ALL ON external_tenant_map FROM rolemesh_app")
+    await conn.execute("REVOKE ALL ON tenants FROM rolemesh_app")
+
+    # Future tables created by migrations should inherit the same privs
+    # automatically so we don't have to remember to GRANT after each DDL.
+    await conn.execute(
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+        "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES "
+        "TO rolemesh_app, rolemesh_system"
+    )
+
+    # ----- RLS policies (PR-D) ---------------------------------------------
+    # Each table that holds tenant data gets ENABLE + FORCE + four
+    # policies. FORCE keeps the table owner (which superuser DDL flags
+    # as a bypass path) under the policy too — only roles with
+    # BYPASSRLS see across rows.
+    #
+    # Order is canary-first (small audit table) then increasing
+    # blast-radius. Per design, each table arrives in its own commit
+    # so a single-table regression is trivially revertable via
+    # ``ALTER TABLE <t> DISABLE ROW LEVEL SECURITY``.
+    await _enable_rls_on(conn, "approval_audit_log")  # D1 canary
+    await _enable_rls_on(conn, "approval_requests")    # D2
+    await _enable_rls_on(conn, "approval_policies")    # D3
+    await _enable_rls_on(conn, "safety_rules")         # D4 (safety triplet)
+    await _enable_rls_on(conn, "safety_decisions")
+    await _enable_rls_on(conn, "safety_rules_audit")
+    await _enable_rls_on(conn, "scheduled_tasks")      # D5
+    await _enable_rls_on(conn, "task_run_logs")
+    await _enable_rls_on(conn, "messages")             # D6
+    await _enable_rls_on(conn, "conversations")        # D7
+    await _enable_rls_on(conn, "sessions")
+    await _enable_rls_on(conn, "coworkers")            # D8
+    await _enable_rls_on(conn, "channel_bindings")
+    await _enable_rls_on(conn, "user_agent_assignments")
+    await _enable_rls_on(conn, "users")                # D9
+    await _enable_rls_on(conn, "oidc_user_tokens")     # D10 (tenant_id backfilled above)
+
+
+async def _enable_rls_on(
+    conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record], table: str
+) -> None:
+    """Enable RLS on one table with the four standard policies.
+
+    The policy names ``rls_select`` / ``rls_insert`` / ``rls_update`` /
+    ``rls_delete`` are reused across every table — they live in a
+    per-table namespace, so collisions are impossible. ``DROP POLICY
+    IF EXISTS`` keeps schema bootstrap idempotent.
+
+    Used per-table at the end of ``_create_schema``. Each row's
+    ``tenant_id`` column is matched against ``current_tenant_id()``,
+    which reads ``app.current_tenant_id`` GUC. Connections that
+    forgot to set the GUC see zero rows (fail closed).
+    """
+    await conn.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
+    await conn.execute(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
+    for op, body in (
+        ("SELECT", "USING (tenant_id = current_tenant_id())"),
+        ("INSERT", "WITH CHECK (tenant_id = current_tenant_id())"),
+        (
+            "UPDATE",
+            "USING (tenant_id = current_tenant_id()) "
+            "WITH CHECK (tenant_id = current_tenant_id())",
+        ),
+        ("DELETE", "USING (tenant_id = current_tenant_id())"),
+    ):
+        policy = f"rls_{op.lower()}"
+        await conn.execute(f"DROP POLICY IF EXISTS {policy} ON {table}")
+        await conn.execute(f"CREATE POLICY {policy} ON {table} FOR {op} {body}")
+
+
+async def init_database(
+    database_url: str | None = None,
+    admin_database_url: str | None = None,
+) -> None:
+    """Initialize PostgreSQL pools and create schema.
+
+    ``database_url`` connects the business pool (drops to ``rolemesh_app``
+    in production after PR-D). ``admin_database_url`` connects the
+    BYPASSRLS pool used by maintenance/resolvers; if omitted, falls
+    back to ``ADMIN_DATABASE_URL`` env, then to ``database_url``.
+    """
+    global _pool, _admin_pool
     url = database_url or DATABASE_URL
+    admin_url = admin_database_url or ADMIN_DATABASE_URL or url
     _pool = await asyncpg.create_pool(url, min_size=2, max_size=10)
-    async with _pool.acquire() as conn:
+    _admin_pool = await asyncpg.create_pool(admin_url, min_size=1, max_size=3)
+    async with _admin_pool.acquire() as conn:
         await _create_schema(conn)
+    await _log_pool_identities()
 
 
-async def _init_test_database(database_url: str) -> None:
+async def _log_pool_identities() -> None:
+    """Emit one structured log line per pool with its current_user.
+
+    Lets operators verify at boot that the business pool is connected
+    as the NOBYPASSRLS role and the admin pool as the BYPASSRLS role
+    (or that they share an identity in dev/test, which is also useful
+    to see explicitly).
+    """
+    if _pool is not None:
+        async with _pool.acquire() as conn:
+            who = await conn.fetchval("SELECT current_user")
+        logger.info("DB business pool ready", current_user=who)
+    if _admin_pool is not None:
+        async with _admin_pool.acquire() as conn:
+            who = await conn.fetchval("SELECT current_user")
+        logger.info("DB admin pool ready", current_user=who)
+
+
+async def _init_test_database(
+    database_url: str, admin_database_url: str | None = None
+) -> None:
     """Initialize a test database with a fresh schema."""
-    global _pool
+    global _pool, _admin_pool
+    admin_url = admin_database_url or database_url
     _pool = await asyncpg.create_pool(database_url, min_size=2, max_size=10)
-    async with _pool.acquire() as conn:
+    _admin_pool = await asyncpg.create_pool(admin_url, min_size=1, max_size=3)
+    async with _admin_pool.acquire() as conn:
         # Drop all tables for a clean slate
         await conn.execute("DROP TABLE IF EXISTS safety_decisions CASCADE")
         await conn.execute("DROP TABLE IF EXISTS safety_rules_audit CASCADE")
@@ -869,11 +1133,14 @@ async def _init_test_database(database_url: str) -> None:
 
 
 async def close_database() -> None:
-    """Close the connection pool. Call on shutdown."""
-    global _pool
+    """Close both connection pools. Call on shutdown."""
+    global _pool, _admin_pool
     if _pool:
         await _pool.close()
         _pool = None
+    if _admin_pool:
+        await _admin_pool.close()
+        _admin_pool = None
 
 
 # ---------------------------------------------------------------------------
@@ -888,8 +1155,7 @@ async def create_tenant(
     max_concurrent_containers: int = 5,
 ) -> Tenant:
     """Create a new tenant and return it."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO tenants (slug, name, plan, max_concurrent_containers)
@@ -929,8 +1195,7 @@ def _record_to_tenant(row: asyncpg.Record) -> Tenant:
 
 async def get_tenant(tenant_id: str) -> Tenant | None:
     """Get a tenant by ID."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         row = await conn.fetchrow("SELECT * FROM tenants WHERE id = $1::uuid", tenant_id)
     if row is None:
         return None
@@ -972,8 +1237,7 @@ async def update_tenant(
         return await get_tenant(tenant_id)
 
     values.append(tenant_id)
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         row = await conn.fetchrow(
             f"UPDATE tenants SET {', '.join(fields)} WHERE id = ${param_idx}::uuid RETURNING *",
             *values,
@@ -985,8 +1249,7 @@ async def update_tenant(
 
 async def get_tenant_by_slug(slug: str) -> Tenant | None:
     """Get a tenant by slug."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         row = await conn.fetchrow("SELECT * FROM tenants WHERE slug = $1", slug)
     if row is None:
         return None
@@ -995,17 +1258,15 @@ async def get_tenant_by_slug(slug: str) -> Tenant | None:
 
 async def get_all_tenants() -> list[Tenant]:
     """Get all tenants."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         rows = await conn.fetch("SELECT * FROM tenants ORDER BY created_at")
     return [_record_to_tenant(row) for row in rows]
 
 
 async def update_tenant_message_cursor(tenant_id: str, cursor: str) -> None:
     """Update the last_message_cursor for a tenant."""
-    pool = _get_pool()
     ts = datetime.fromisoformat(cursor) if cursor else None
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         await conn.execute(
             "UPDATE tenants SET last_message_cursor = $1 WHERE id = $2::uuid",
             ts,
@@ -1026,8 +1287,7 @@ async def create_user(
     channel_ids: dict[str, str] | None = None,
 ) -> User:
     """Create a new user."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO users (tenant_id, name, email, role, channel_ids)
@@ -1060,8 +1320,7 @@ def _record_to_user(row: asyncpg.Record) -> User:
 
 async def get_user_by_external_sub(external_sub: str) -> User | None:
     """Look up a user by their external OIDC subject identifier."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         row = await conn.fetchrow("SELECT * FROM users WHERE external_sub = $1", external_sub)
     if row is None:
         return None
@@ -1076,8 +1335,7 @@ async def create_user_with_external_sub(
     external_sub: str,
 ) -> User:
     """Create a user linked to an external OIDC subject."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO users (tenant_id, name, email, role, channel_ids, external_sub)
@@ -1096,8 +1354,7 @@ async def create_user_with_external_sub(
 
 async def get_local_tenant_id(provider: str, external_tenant_id: str) -> str | None:
     """Look up the local tenant ID for an external IdP tenant."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         row = await conn.fetchrow(
             "SELECT local_tenant_id FROM external_tenant_map WHERE provider = $1 AND external_tenant_id = $2",
             provider,
@@ -1114,8 +1371,7 @@ async def create_external_tenant_mapping(
     local_tenant_id: str,
 ) -> None:
     """Create a mapping between an external IdP tenant and a local tenant."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         await conn.execute(
             """
             INSERT INTO external_tenant_map (provider, external_tenant_id, local_tenant_id)
@@ -1140,8 +1396,7 @@ async def upsert_user_oidc_tokens(
     access_token_expires_at: datetime | None,
 ) -> None:
     """Insert or replace the encrypted token row for a user."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         await conn.execute(
             """
             INSERT INTO oidc_user_tokens (
@@ -1166,8 +1421,7 @@ async def get_user_oidc_tokens(
     user_id: str,
 ) -> tuple[bytes, bytes | None, datetime | None] | None:
     """Return (refresh_token_enc, access_token_enc, expires_at) or None."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         row = await conn.fetchrow(
             "SELECT refresh_token_encrypted, access_token_encrypted, access_token_expires_at "
             "FROM oidc_user_tokens WHERE user_id = $1::uuid",
@@ -1188,8 +1442,7 @@ async def update_user_access_token(
     access_token_expires_at: datetime,
 ) -> None:
     """Update only the cached access_token (after refresh)."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         await conn.execute(
             """
             UPDATE oidc_user_tokens
@@ -1209,8 +1462,7 @@ async def update_user_refresh_token(
     refresh_token_encrypted: bytes,
 ) -> None:
     """Update only the refresh_token (after IdP rotation)."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         await conn.execute(
             "UPDATE oidc_user_tokens SET refresh_token_encrypted = $1, updated_at = now() "
             "WHERE user_id = $2::uuid",
@@ -1221,28 +1473,60 @@ async def update_user_refresh_token(
 
 async def delete_user_oidc_tokens(user_id: str) -> None:
     """Remove a user's stored OIDC tokens (logout / refresh failure)."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         await conn.execute(
             "DELETE FROM oidc_user_tokens WHERE user_id = $1::uuid",
             user_id,
         )
 
 
-async def get_user(user_id: str) -> User | None:
-    """Get a user by ID."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM users WHERE id = $1::uuid", user_id)
+async def get_user(user_id: str, *, tenant_id: str) -> User | None:
+    """Fetch a user by id, scoped to ``tenant_id``.
+
+    Tenant scoping is on the query (not a post-fetch check) so a guess
+    at another tenant's user_id returns None from the DB itself. The
+    REST layer maps None to 404 — indistinguishable from "doesn't
+    exist" so we don't leak UUID existence across tenants.
+    """
+    async with tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM users WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            user_id,
+            tenant_id,
+        )
     if row is None:
         return None
     return _record_to_user(row)
 
 
+async def resolve_user_for_auth(user_id: str) -> tuple[str, str] | None:
+    """Look up ``(tenant_id, role)`` for a user by id alone.
+
+    System-only escape hatch. The single legitimate caller is the
+    AuthProvider's ``get_user_by_id`` (JWT resume path), which needs
+    to recover the user's tenant_id before any tenant-scoped query
+    can run. The user_id input must be from a signature-verified JWT
+    claim — never from an unauthenticated request body.
+
+    DO NOT use this from REST handlers. The return value carries
+    authority — pair it with a tenant-scoped ``get_user`` once you
+    have it.
+
+    Returns None if the user_id does not exist.
+    """
+    async with admin_conn() as conn:
+        row = await conn.fetchrow(
+            "SELECT tenant_id, role FROM users WHERE id = $1::uuid",
+            user_id,
+        )
+    if row is None:
+        return None
+    return (str(row["tenant_id"]), str(row["role"]))
+
+
 async def get_users_for_tenant(tenant_id: str) -> list[User]:
     """Get all users for a tenant."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(
             "SELECT * FROM users WHERE tenant_id = $1::uuid ORDER BY name",
             tenant_id,
@@ -1253,11 +1537,12 @@ async def get_users_for_tenant(tenant_id: str) -> list[User]:
 async def update_user(
     user_id: str,
     *,
+    tenant_id: str,
     name: str | None = None,
     email: str | None = None,
     role: str | None = None,
 ) -> User | None:
-    """Update selected fields on a user."""
+    """Update selected fields on a user, scoped to ``tenant_id``."""
     fields: list[str] = []
     values: list[Any] = []
     param_idx = 1
@@ -1276,13 +1561,15 @@ async def update_user(
         param_idx += 1
 
     if not fields:
-        return await get_user(user_id)
+        return await get_user(user_id, tenant_id=tenant_id)
 
     values.append(user_id)
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    values.append(tenant_id)
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
-            f"UPDATE users SET {', '.join(fields)} WHERE id = ${param_idx}::uuid RETURNING *",
+            f"UPDATE users SET {', '.join(fields)} "
+            f"WHERE id = ${param_idx}::uuid AND tenant_id = ${param_idx + 1}::uuid "
+            f"RETURNING *",
             *values,
         )
     if row is None:
@@ -1290,11 +1577,14 @@ async def update_user(
     return _record_to_user(row)
 
 
-async def delete_user(user_id: str) -> bool:
-    """Delete a user by ID."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
-        result = await conn.execute("DELETE FROM users WHERE id = $1::uuid", user_id)
+async def delete_user(user_id: str, *, tenant_id: str) -> bool:
+    """Delete a user by ID, scoped to ``tenant_id``."""
+    async with tenant_conn(tenant_id) as conn:
+        result = await conn.execute(
+            "DELETE FROM users WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            user_id,
+            tenant_id,
+        )
     return result == "DELETE 1"
 
 
@@ -1352,8 +1642,7 @@ async def create_coworker(
             }
         )
     effective_perms = permissions or AgentPermissions.for_role(agent_role)
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO coworkers (tenant_id, name, folder, agent_backend, system_prompt,
@@ -1447,11 +1736,17 @@ def _record_to_coworker(row: asyncpg.Record) -> Coworker:
     )
 
 
-async def get_coworker(coworker_id: str) -> Coworker | None:
-    """Get a coworker by ID."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM coworkers WHERE id = $1::uuid", coworker_id)
+async def get_coworker(coworker_id: str, *, tenant_id: str) -> Coworker | None:
+    """Fetch a coworker by id, scoped to ``tenant_id``.
+
+    See ``get_user`` for the tenant-filter rationale.
+    """
+    async with tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM coworkers WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            coworker_id,
+            tenant_id,
+        )
     if row is None:
         return None
     return _record_to_coworker(row)
@@ -1459,8 +1754,7 @@ async def get_coworker(coworker_id: str) -> Coworker | None:
 
 async def get_coworker_by_folder(tenant_id: str, folder: str) -> Coworker | None:
     """Get a coworker by tenant and folder."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
             "SELECT * FROM coworkers WHERE tenant_id = $1::uuid AND folder = $2",
             tenant_id,
@@ -1473,8 +1767,7 @@ async def get_coworker_by_folder(tenant_id: str, folder: str) -> Coworker | None
 
 async def get_coworkers_for_tenant(tenant_id: str) -> list[Coworker]:
     """Get all coworkers for a tenant."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(
             "SELECT * FROM coworkers WHERE tenant_id = $1::uuid ORDER BY name",
             tenant_id,
@@ -1484,8 +1777,7 @@ async def get_coworkers_for_tenant(tenant_id: str) -> list[Coworker]:
 
 async def get_all_coworkers() -> list[Coworker]:
     """Get all coworkers."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         rows = await conn.fetch("SELECT * FROM coworkers ORDER BY tenant_id, name")
     return [_record_to_coworker(row) for row in rows]
 
@@ -1493,6 +1785,7 @@ async def get_all_coworkers() -> list[Coworker]:
 async def update_coworker(
     coworker_id: str,
     *,
+    tenant_id: str,
     name: str | None = None,
     system_prompt: str | None = None,
     tools: list[McpServerConfig] | None = None,
@@ -1502,7 +1795,7 @@ async def update_coworker(
     agent_role: str | None = None,
     permissions: AgentPermissions | None = None,
 ) -> Coworker | None:
-    """Update selected fields on a coworker."""
+    """Update selected fields on a coworker, scoped to ``tenant_id``."""
     fields: list[str] = []
     values: list[Any] = []
     param_idx = 1
@@ -1555,13 +1848,15 @@ async def update_coworker(
         param_idx += 1
 
     if not fields:
-        return await get_coworker(coworker_id)
+        return await get_coworker(coworker_id, tenant_id=tenant_id)
 
     values.append(coworker_id)
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    values.append(tenant_id)
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
-            f"UPDATE coworkers SET {', '.join(fields)} WHERE id = ${param_idx}::uuid RETURNING *",
+            f"UPDATE coworkers SET {', '.join(fields)} "
+            f"WHERE id = ${param_idx}::uuid AND tenant_id = ${param_idx + 1}::uuid "
+            f"RETURNING *",
             *values,
         )
     if row is None:
@@ -1569,11 +1864,15 @@ async def update_coworker(
     return _record_to_coworker(row)
 
 
-async def delete_coworker(coworker_id: str) -> bool:
-    """Delete a coworker by ID. CASCADE handles dependent tables."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
-        result = await conn.execute("DELETE FROM coworkers WHERE id = $1::uuid", coworker_id)
+async def delete_coworker(coworker_id: str, *, tenant_id: str) -> bool:
+    """Delete a coworker by ID, scoped to ``tenant_id``. CASCADE handles
+    dependent tables."""
+    async with tenant_conn(tenant_id) as conn:
+        result = await conn.execute(
+            "DELETE FROM coworkers WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            coworker_id,
+            tenant_id,
+        )
     return result == "DELETE 1"
 
 
@@ -1590,8 +1889,7 @@ async def create_channel_binding(
     bot_display_name: str | None = None,
 ) -> ChannelBinding:
     """Create a channel binding."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO channel_bindings (coworker_id, tenant_id, channel_type, credentials, bot_display_name)
@@ -1622,24 +1920,34 @@ def _record_to_channel_binding(row: asyncpg.Record) -> ChannelBinding:
     )
 
 
-async def get_channel_binding(binding_id: str) -> ChannelBinding | None:
-    """Get a channel binding by ID."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM channel_bindings WHERE id = $1::uuid", binding_id)
+async def get_channel_binding(binding_id: str, *, tenant_id: str) -> ChannelBinding | None:
+    """Fetch a channel binding by id, scoped to ``tenant_id``.
+
+    See ``get_user`` for the tenant-filter rationale.
+    """
+    async with tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM channel_bindings WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            binding_id,
+            tenant_id,
+        )
     if row is None:
         return None
     return _record_to_channel_binding(row)
 
 
-async def get_channel_binding_for_coworker(coworker_id: str, channel_type: str) -> ChannelBinding | None:
+async def get_channel_binding_for_coworker(
+    coworker_id: str, channel_type: str, *, tenant_id: str
+) -> ChannelBinding | None:
     """Get the channel binding for a coworker and channel type."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
-            "SELECT * FROM channel_bindings WHERE coworker_id = $1::uuid AND channel_type = $2",
+            "SELECT * FROM channel_bindings "
+            "WHERE coworker_id = $1::uuid AND channel_type = $2 "
+            "AND tenant_id = $3::uuid",
             coworker_id,
             channel_type,
+            tenant_id,
         )
     if row is None:
         return None
@@ -1648,19 +1956,21 @@ async def get_channel_binding_for_coworker(coworker_id: str, channel_type: str) 
 
 async def get_all_channel_bindings() -> list[ChannelBinding]:
     """Get all channel bindings."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         rows = await conn.fetch("SELECT * FROM channel_bindings ORDER BY tenant_id, coworker_id")
     return [_record_to_channel_binding(row) for row in rows]
 
 
-async def get_channel_bindings_for_coworker(coworker_id: str) -> list[ChannelBinding]:
+async def get_channel_bindings_for_coworker(
+    coworker_id: str, *, tenant_id: str
+) -> list[ChannelBinding]:
     """Get all channel bindings for a coworker."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(
-            "SELECT * FROM channel_bindings WHERE coworker_id = $1::uuid",
+            "SELECT * FROM channel_bindings "
+            "WHERE coworker_id = $1::uuid AND tenant_id = $2::uuid",
             coworker_id,
+            tenant_id,
         )
     return [_record_to_channel_binding(row) for row in rows]
 
@@ -1668,11 +1978,12 @@ async def get_channel_bindings_for_coworker(coworker_id: str) -> list[ChannelBin
 async def update_channel_binding(
     binding_id: str,
     *,
+    tenant_id: str,
     credentials: dict[str, str] | None = None,
     bot_display_name: str | None = None,
     status: str | None = None,
 ) -> ChannelBinding | None:
-    """Update selected fields on a channel binding."""
+    """Update selected fields on a channel binding, scoped to ``tenant_id``."""
     fields: list[str] = []
     values: list[Any] = []
     param_idx = 1
@@ -1691,13 +2002,15 @@ async def update_channel_binding(
         param_idx += 1
 
     if not fields:
-        return await get_channel_binding(binding_id)
+        return await get_channel_binding(binding_id, tenant_id=tenant_id)
 
     values.append(binding_id)
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    values.append(tenant_id)
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
-            f"UPDATE channel_bindings SET {', '.join(fields)} WHERE id = ${param_idx}::uuid RETURNING *",
+            f"UPDATE channel_bindings SET {', '.join(fields)} "
+            f"WHERE id = ${param_idx}::uuid AND tenant_id = ${param_idx + 1}::uuid "
+            f"RETURNING *",
             *values,
         )
     if row is None:
@@ -1705,11 +2018,14 @@ async def update_channel_binding(
     return _record_to_channel_binding(row)
 
 
-async def delete_channel_binding(binding_id: str) -> bool:
-    """Delete a channel binding by ID."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
-        result = await conn.execute("DELETE FROM channel_bindings WHERE id = $1::uuid", binding_id)
+async def delete_channel_binding(binding_id: str, *, tenant_id: str) -> bool:
+    """Delete a channel binding by ID, scoped to ``tenant_id``."""
+    async with tenant_conn(tenant_id) as conn:
+        result = await conn.execute(
+            "DELETE FROM channel_bindings WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            binding_id,
+            tenant_id,
+        )
     return result == "DELETE 1"
 
 
@@ -1728,8 +2044,7 @@ async def create_conversation(
     user_id: str | None = None,
 ) -> Conversation:
     """Create a conversation."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO conversations (tenant_id, coworker_id, channel_binding_id, channel_chat_id, name, requires_trigger, user_id)
@@ -1765,77 +2080,124 @@ def _record_to_conversation(row: asyncpg.Record) -> Conversation:
     )
 
 
-async def get_conversation(conversation_id: str) -> Conversation | None:
-    """Get a conversation by ID."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM conversations WHERE id = $1::uuid", conversation_id)
+async def get_conversation(conversation_id: str, *, tenant_id: str) -> Conversation | None:
+    """Fetch a conversation by id, scoped to ``tenant_id``.
+
+    See ``get_user`` for the tenant-filter rationale.
+    """
+    async with tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM conversations WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            conversation_id,
+            tenant_id,
+        )
     if row is None:
         return None
     return _record_to_conversation(row)
 
 
-async def get_conversations_for_coworker(coworker_id: str) -> list[Conversation]:
+async def get_conversation_for_notification(conversation_id: str) -> Conversation | None:
+    """Look up a conversation by id alone, intentionally cross-tenant.
+
+    System path. Called from the approval notification fan-out
+    (``_OrchestratorChannelSender`` and ``NotificationTargetResolver``)
+    where the only inputs are a ``conversation_id`` resolved by the
+    engine from an ``ApprovalRequest`` it already trusts. The
+    ``ChannelSender`` protocol carries no tenant context, so this
+    function exists as the explicit, named admin escape rather than
+    silently bypassing tenant scoping.
+
+    DO NOT use this from REST handlers — use the tenant-scoped
+    ``get_conversation`` for any path where the conversation_id can
+    come from user input.
+    """
+    async with admin_conn() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM conversations WHERE id = $1::uuid",
+            conversation_id,
+        )
+    if row is None:
+        return None
+    return _record_to_conversation(row)
+
+
+async def get_conversations_for_coworker(
+    coworker_id: str, *, tenant_id: str
+) -> list[Conversation]:
     """Get all conversations for a coworker."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(
-            "SELECT * FROM conversations WHERE coworker_id = $1::uuid ORDER BY created_at",
+            "SELECT * FROM conversations "
+            "WHERE coworker_id = $1::uuid AND tenant_id = $2::uuid "
+            "ORDER BY created_at",
             coworker_id,
+            tenant_id,
         )
     return [_record_to_conversation(row) for row in rows]
 
 
 async def get_all_conversations() -> list[Conversation]:
     """Get all conversations."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         rows = await conn.fetch("SELECT * FROM conversations ORDER BY tenant_id, coworker_id")
     return [_record_to_conversation(row) for row in rows]
 
 
-async def get_conversation_by_binding_and_chat(channel_binding_id: str, channel_chat_id: str) -> Conversation | None:
+async def get_conversation_by_binding_and_chat(
+    channel_binding_id: str, channel_chat_id: str, *, tenant_id: str
+) -> Conversation | None:
     """Get a conversation by binding and chat ID."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
-            "SELECT * FROM conversations WHERE channel_binding_id = $1::uuid AND channel_chat_id = $2",
+            "SELECT * FROM conversations "
+            "WHERE channel_binding_id = $1::uuid AND channel_chat_id = $2 "
+            "AND tenant_id = $3::uuid",
             channel_binding_id,
             channel_chat_id,
+            tenant_id,
         )
     if row is None:
         return None
     return _record_to_conversation(row)
 
 
-async def delete_conversation(conversation_id: str) -> bool:
-    """Delete a conversation by ID."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
-        result = await conn.execute("DELETE FROM conversations WHERE id = $1::uuid", conversation_id)
+async def delete_conversation(conversation_id: str, *, tenant_id: str) -> bool:
+    """Delete a conversation by ID, scoped to ``tenant_id``."""
+    async with tenant_conn(tenant_id) as conn:
+        result = await conn.execute(
+            "DELETE FROM conversations WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            conversation_id,
+            tenant_id,
+        )
     return result == "DELETE 1"
 
 
-async def update_conversation_last_invocation(conversation_id: str, timestamp: str) -> None:
+async def update_conversation_last_invocation(
+    conversation_id: str, timestamp: str, *, tenant_id: str
+) -> None:
     """Update the last_agent_invocation timestamp for a conversation."""
-    pool = _get_pool()
     ts = datetime.fromisoformat(timestamp) if timestamp else None
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         await conn.execute(
-            "UPDATE conversations SET last_agent_invocation = $1 WHERE id = $2::uuid",
+            "UPDATE conversations SET last_agent_invocation = $1 "
+            "WHERE id = $2::uuid AND tenant_id = $3::uuid",
             ts,
             conversation_id,
+            tenant_id,
         )
 
 
-async def update_conversation_user_id(conversation_id: str, user_id: str) -> None:
+async def update_conversation_user_id(
+    conversation_id: str, user_id: str, *, tenant_id: str
+) -> None:
     """Set the user_id on a conversation (binds a user to a web conversation)."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         await conn.execute(
-            "UPDATE conversations SET user_id = $1::uuid WHERE id = $2::uuid",
+            "UPDATE conversations SET user_id = $1::uuid "
+            "WHERE id = $2::uuid AND tenant_id = $3::uuid",
             user_id,
             conversation_id,
+            tenant_id,
         )
 
 
@@ -1844,13 +2206,14 @@ async def update_conversation_user_id(conversation_id: str, user_id: str) -> Non
 # ---------------------------------------------------------------------------
 
 
-async def get_session(conversation_id: str) -> str | None:
-    """Get the session ID for a conversation."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+async def get_session(conversation_id: str, *, tenant_id: str) -> str | None:
+    """Get the session ID for a conversation, scoped to ``tenant_id``."""
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
-            "SELECT session_id FROM sessions WHERE conversation_id = $1::uuid",
+            "SELECT session_id FROM sessions "
+            "WHERE conversation_id = $1::uuid AND tenant_id = $2::uuid",
             conversation_id,
+            tenant_id,
         )
     if row is None:
         return None
@@ -1859,8 +2222,7 @@ async def get_session(conversation_id: str) -> str | None:
 
 async def set_session(conversation_id: str, tenant_id: str, coworker_id: str, session_id: str) -> None:
     """Set the session ID for a conversation."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         await conn.execute(
             """
             INSERT INTO sessions (conversation_id, tenant_id, coworker_id, session_id)
@@ -1876,8 +2238,7 @@ async def set_session(conversation_id: str, tenant_id: str, coworker_id: str, se
 
 async def get_all_sessions() -> dict[str, str]:
     """Get all session mappings (conversation_id -> session_id)."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         rows = await conn.fetch("SELECT conversation_id, session_id FROM sessions")
     return {str(row["conversation_id"]): row["session_id"] for row in rows}
 
@@ -1915,8 +2276,7 @@ async def store_message(
     the inbound path) must not blank out usage that an earlier write
     already recorded.
     """
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         await conn.execute(
             """
             INSERT INTO messages (
@@ -1973,10 +2333,9 @@ async def get_messages_since(
     chat_jid: str = "",
 ) -> list[NewMessage]:
     """Get messages since a timestamp for a specific conversation."""
-    pool = _get_pool()
     # Handle empty timestamp by using epoch
     ts = since_timestamp if since_timestamp else "1970-01-01T00:00:00+00:00"
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(
             """
             SELECT * FROM (
@@ -2011,9 +2370,8 @@ async def get_new_messages_for_conversations(
     """
     if not conversation_ids:
         return []
-    pool = _get_pool()
     ts = since_timestamp if since_timestamp else "1970-01-01T00:00:00+00:00"
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         placeholders = ", ".join(f"${i + 3}::uuid" for i in range(len(conversation_ids)))
         sql = f"""
             SELECT * FROM (
@@ -2060,8 +2418,7 @@ async def get_new_messages_for_conversations(
 
 async def create_task(task: ScheduledTask) -> None:
     """Create a new scheduled task."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(task.tenant_id) as conn:
         await conn.execute(
             """
             INSERT INTO scheduled_tasks (id, tenant_id, coworker_id, conversation_id, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at)
@@ -2103,54 +2460,78 @@ def _record_to_scheduled_task(row: asyncpg.Record) -> ScheduledTask:
     )
 
 
-async def get_task_by_id(task_id: str) -> ScheduledTask | None:
-    """Get a task by its ID, or None if not found."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+async def get_task_by_id(task_id: str, *, tenant_id: str) -> ScheduledTask | None:
+    """Fetch a task by id, scoped to ``tenant_id``.
+
+    See ``get_user`` for the tenant-filter rationale.
+    """
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
-            "SELECT * FROM scheduled_tasks WHERE id = $1::uuid",
+            "SELECT * FROM scheduled_tasks WHERE id = $1::uuid AND tenant_id = $2::uuid",
             task_id,
+            tenant_id,
         )
     if row is None:
         return None
     return _record_to_scheduled_task(row)
 
 
-async def get_tasks_for_coworker(coworker_id: str) -> list[ScheduledTask]:
+async def get_tasks_for_coworker(
+    coworker_id: str, *, tenant_id: str
+) -> list[ScheduledTask]:
     """Get all tasks for a specific coworker."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(
-            "SELECT * FROM scheduled_tasks WHERE coworker_id = $1::uuid ORDER BY created_at DESC",
+            "SELECT * FROM scheduled_tasks "
+            "WHERE coworker_id = $1::uuid AND tenant_id = $2::uuid "
+            "ORDER BY created_at DESC",
             coworker_id,
+            tenant_id,
         )
     return [_record_to_scheduled_task(row) for row in rows]
 
 
 async def get_all_tasks(tenant_id: str | None = None) -> list[ScheduledTask]:
-    """Get all scheduled tasks, optionally filtered by tenant."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
-        if tenant_id:
+    """Get all scheduled tasks, optionally filtered by tenant.
+
+    Treats both ``None`` and ``""`` as "no tenant scope" so callers
+    that build the parameter from an admin REST query string don't
+    accidentally pass an empty value into ``tenant_conn`` and trigger
+    fail-closed (current_tenant_id = NULL → RLS drops every row).
+    """
+    if tenant_id:
+        async with tenant_conn(tenant_id) as conn:
             rows = await conn.fetch(
-                "SELECT * FROM scheduled_tasks WHERE tenant_id = $1::uuid ORDER BY created_at DESC",
+                "SELECT * FROM scheduled_tasks "
+                "WHERE tenant_id = $1::uuid ORDER BY created_at DESC",
                 tenant_id,
             )
-        else:
-            rows = await conn.fetch("SELECT * FROM scheduled_tasks ORDER BY created_at DESC")
+    else:
+        async with admin_conn() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM scheduled_tasks ORDER BY created_at DESC"
+            )
     return [_record_to_scheduled_task(row) for row in rows]
 
 
 async def update_task(
     task_id: str,
     *,
+    tenant_id: str,
     prompt: str | None = None,
     schedule_type: str | None = None,
     schedule_value: str | None = None,
     next_run: str | None = None,
     status: str | None = None,
-) -> None:
-    """Update selected fields on a scheduled task."""
+) -> ScheduledTask | None:
+    """Update selected fields on a scheduled task, scoped to ``tenant_id``.
+
+    Mirrors ``update_user`` / ``update_coworker``: when no fields are
+    supplied, returns the current row instead of silently doing
+    nothing — keeps PATCH-style callers consistent across resources.
+    Returns ``None`` if the row doesn't exist or belongs to another
+    tenant.
+    """
     fields: list[str] = []
     values: list[Any] = []
     param_idx = 1
@@ -2177,44 +2558,59 @@ async def update_task(
         param_idx += 1
 
     if not fields:
-        return
+        return await get_task_by_id(task_id, tenant_id=tenant_id)
 
     values.append(task_id)
-    pool = _get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            f"UPDATE scheduled_tasks SET {', '.join(fields)} WHERE id = ${param_idx}::uuid",
+    values.append(tenant_id)
+    async with tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow(
+            f"UPDATE scheduled_tasks SET {', '.join(fields)} "
+            f"WHERE id = ${param_idx}::uuid AND tenant_id = ${param_idx + 1}::uuid "
+            f"RETURNING *",
             *values,
+        )
+    if row is None:
+        return None
+    return _record_to_scheduled_task(row)
+
+
+async def delete_task(task_id: str, *, tenant_id: str) -> None:
+    """Delete a task and its run logs (CASCADE handles task_run_logs)."""
+    async with tenant_conn(tenant_id) as conn:
+        await conn.execute(
+            "DELETE FROM scheduled_tasks WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            task_id,
+            tenant_id,
         )
 
 
-async def delete_task(task_id: str) -> None:
-    """Delete a task and its run logs (CASCADE handles task_run_logs)."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute("DELETE FROM scheduled_tasks WHERE id = $1::uuid", task_id)
-
-
 async def get_due_tasks(tenant_id: str | None = None) -> list[ScheduledTask]:
-    """Get all active tasks whose next_run is in the past."""
-    pool = _get_pool()
+    """Get all active tasks whose next_run is in the past.
+
+    Treats both ``None`` and ``""`` as "global scheduler scan" so an
+    empty string from a misconfigured caller doesn't enter
+    ``tenant_conn`` and silently filter every row to zero.
+    """
     now = datetime.now(UTC)
-    async with pool.acquire() as conn:
-        if tenant_id:
+    if tenant_id:
+        async with tenant_conn(tenant_id) as conn:
             rows = await conn.fetch(
                 """
                 SELECT * FROM scheduled_tasks
-                WHERE tenant_id = $1::uuid AND status = 'active' AND next_run IS NOT NULL AND next_run <= $2
+                WHERE tenant_id = $1::uuid AND status = 'active'
+                  AND next_run IS NOT NULL AND next_run <= $2
                 ORDER BY next_run
                 """,
                 tenant_id,
                 now,
             )
-        else:
+    else:
+        async with admin_conn() as conn:
             rows = await conn.fetch(
                 """
                 SELECT * FROM scheduled_tasks
-                WHERE status = 'active' AND next_run IS NOT NULL AND next_run <= $1
+                WHERE status = 'active' AND next_run IS NOT NULL
+                  AND next_run <= $1
                 ORDER BY next_run
                 """,
                 now,
@@ -2226,31 +2622,32 @@ async def update_task_after_run(
     task_id: str,
     next_run: str | None,
     last_result: str,
+    *,
+    tenant_id: str,
 ) -> None:
     """Update task state after execution."""
-    pool = _get_pool()
     now = datetime.now(UTC)
     new_status = "completed" if next_run is None else None
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         await conn.execute(
             """
             UPDATE scheduled_tasks
             SET next_run = $1, last_run = $2, last_result = $3,
                 status = COALESCE($4::text, status)
-            WHERE id = $5::uuid
+            WHERE id = $5::uuid AND tenant_id = $6::uuid
             """,
             _to_dt(next_run),
             now,
             last_result[:500] if last_result else last_result,
             new_status,
             task_id,
+            tenant_id,
         )
 
 
 async def log_task_run(log: TaskRunLog) -> None:
     """Insert a task run log entry."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(log.tenant_id) as conn:
         await conn.execute(
             """
             INSERT INTO task_run_logs (tenant_id, task_id, run_at, duration_ms, status, result, error)
@@ -2315,8 +2712,7 @@ async def set_registered_group(jid: str, group: RegisteredGroup) -> None:
             }
         )
 
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         await conn.execute(
             """
             INSERT INTO registered_groups (tenant_id, jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main)
@@ -2344,8 +2740,7 @@ async def set_registered_group(jid: str, group: RegisteredGroup) -> None:
 
 async def get_all_registered_groups() -> dict[str, RegisteredGroup]:
     """Get all registered groups as a dict keyed by JID."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         rows = await conn.fetch(
             "SELECT * FROM registered_groups WHERE tenant_id = $1",
             DEFAULT_TENANT,
@@ -2365,8 +2760,7 @@ async def get_all_registered_groups() -> dict[str, RegisteredGroup]:
 
 async def get_session_legacy(group_folder: str) -> str | None:
     """Get session from legacy sessions table (old 'sessions' or 'sessions_legacy')."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         # Try the old sessions table first (pre-migration)
         has_old = await conn.fetchval(
             "SELECT EXISTS(SELECT 1 FROM information_schema.columns "
@@ -2385,8 +2779,7 @@ async def get_session_legacy(group_folder: str) -> str | None:
 
 async def set_session_legacy(group_folder: str, session_id: str) -> None:
     """Set session in legacy sessions table."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         has_old = await conn.fetchval(
             "SELECT EXISTS(SELECT 1 FROM information_schema.columns "
             "WHERE table_name='sessions' AND column_name='group_folder')"
@@ -2405,8 +2798,7 @@ async def set_session_legacy(group_folder: str, session_id: str) -> None:
 
 async def get_all_sessions_legacy() -> dict[str, str]:
     """Get all legacy session mappings (group_folder -> session_id)."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         has_old = await conn.fetchval(
             "SELECT EXISTS(SELECT 1 FROM information_schema.columns "
             "WHERE table_name='sessions' AND column_name='group_folder')"
@@ -2426,8 +2818,7 @@ async def get_all_sessions_legacy() -> dict[str, str]:
 
 async def drop_legacy_tables() -> None:
     """Drop legacy tables and recreate shared tables in new format."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         # Drop legacy-only tables
         await conn.execute("DROP TABLE IF EXISTS router_state CASCADE")
         await conn.execute("DROP TABLE IF EXISTS registered_groups CASCADE")
@@ -2450,8 +2841,7 @@ async def drop_legacy_tables() -> None:
 
 async def assign_agent_to_user(user_id: str, coworker_id: str, tenant_id: str) -> None:
     """Assign a coworker (agent) to a user."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         await conn.execute(
             """
             INSERT INTO user_agent_assignments (user_id, coworker_id, tenant_id)
@@ -2464,45 +2854,49 @@ async def assign_agent_to_user(user_id: str, coworker_id: str, tenant_id: str) -
         )
 
 
-async def unassign_agent_from_user(user_id: str, coworker_id: str) -> None:
+async def unassign_agent_from_user(
+    user_id: str, coworker_id: str, *, tenant_id: str
+) -> None:
     """Remove a coworker assignment from a user."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         await conn.execute(
-            "DELETE FROM user_agent_assignments WHERE user_id = $1::uuid AND coworker_id = $2::uuid",
+            "DELETE FROM user_agent_assignments "
+            "WHERE user_id = $1::uuid AND coworker_id = $2::uuid "
+            "AND tenant_id = $3::uuid",
             user_id,
             coworker_id,
+            tenant_id,
         )
 
 
-async def get_agents_for_user(user_id: str) -> list[Coworker]:
-    """Get all coworkers assigned to a user."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+async def get_agents_for_user(user_id: str, *, tenant_id: str) -> list[Coworker]:
+    """Get all coworkers assigned to a user, scoped to ``tenant_id``."""
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(
             """
             SELECT c.* FROM coworkers c
             JOIN user_agent_assignments uaa ON c.id = uaa.coworker_id
-            WHERE uaa.user_id = $1::uuid
+            WHERE uaa.user_id = $1::uuid AND uaa.tenant_id = $2::uuid
             ORDER BY c.name
             """,
             user_id,
+            tenant_id,
         )
     return [_record_to_coworker(row) for row in rows]
 
 
-async def get_users_for_agent(coworker_id: str) -> list[User]:
-    """Get all users assigned to a coworker."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+async def get_users_for_agent(coworker_id: str, *, tenant_id: str) -> list[User]:
+    """Get all users assigned to a coworker, scoped to ``tenant_id``."""
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(
             """
             SELECT u.* FROM users u
             JOIN user_agent_assignments uaa ON u.id = uaa.user_id
-            WHERE uaa.coworker_id = $1::uuid
+            WHERE uaa.coworker_id = $1::uuid AND uaa.tenant_id = $2::uuid
             ORDER BY u.name
             """,
             coworker_id,
+            tenant_id,
         )
     return [_record_to_user(row) for row in rows]
 
@@ -2554,9 +2948,8 @@ async def create_approval_policy(
     priority: int = 0,
 ) -> ApprovalPolicy:
     """Insert a new approval policy and return the stored row."""
-    pool = _get_pool()
     approvers = approver_user_ids or []
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO approval_policies (
@@ -2598,8 +2991,7 @@ async def get_approval_policy(
     a higher layer can keep their existing checks; this function is
     the lower bound, not the only line of defense.
     """
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
             "SELECT * FROM approval_policies "
             "WHERE id = $1::uuid AND tenant_id = $2::uuid",
@@ -2618,7 +3010,6 @@ async def list_approval_policies(
     enabled: bool | None = None,
 ) -> list[ApprovalPolicy]:
     """List policies for a tenant, optionally filtered by coworker and state."""
-    pool = _get_pool()
     clauses = ["tenant_id = $1::uuid"]
     params: list[Any] = [tenant_id]
     if coworker_id is not None:
@@ -2632,7 +3023,7 @@ async def list_approval_policies(
         + " AND ".join(clauses)
         + " ORDER BY priority DESC, updated_at DESC"
     )
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(sql, *params)
     return [_record_to_approval_policy(r) for r in rows]
 
@@ -2647,8 +3038,7 @@ async def get_enabled_policies_for_coworker(
     rows — container snapshots never carry disabled policies, and
     neither does the engine's dedup/match path.
     """
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(
             """
             SELECT * FROM approval_policies
@@ -2724,8 +3114,7 @@ async def update_approval_policy(
         + f" WHERE id = ${idx}::uuid AND tenant_id = ${idx + 1}::uuid "
         "RETURNING *"
     )
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(sql, *values)
     if row is None:
         return None
@@ -2740,8 +3129,7 @@ async def delete_approval_policy(policy_id: str, *, tenant_id: str) -> bool:
     returns False (no rows affected) without raising — same shape as
     "policy id does not exist".
     """
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         result = await conn.execute(
             "DELETE FROM approval_policies "
             "WHERE id = $1::uuid AND tenant_id = $2::uuid",
@@ -2838,8 +3226,7 @@ async def create_approval_request(
     ``actor_user_id`` is recorded by the audit trigger on the 'created'
     row. None ⇒ audit 'created' row has NULL actor (system-initiated).
     """
-    pool = _get_pool()
-    async with pool.acquire() as conn, conn.transaction():
+    async with tenant_conn(tenant_id) as conn:
         await _set_approval_guc(
             conn, actor_user_id=actor_user_id, note=None, metadata=None
         )
@@ -2896,8 +3283,7 @@ async def resolve_request_tenant(request_id: str) -> str | None:
 
     Returns None if the request_id does not exist.
     """
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         row = await conn.fetchrow(
             "SELECT tenant_id FROM approval_requests WHERE id = $1::uuid",
             request_id,
@@ -2914,8 +3300,7 @@ async def get_approval_request(
 
     See ``get_approval_policy`` for the tenant-filter rationale.
     """
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
             "SELECT * FROM approval_requests "
             "WHERE id = $1::uuid AND tenant_id = $2::uuid",
@@ -2934,7 +3319,6 @@ async def list_approval_requests(
     coworker_id: str | None = None,
     limit: int = 100,
 ) -> list[ApprovalRequest]:
-    pool = _get_pool()
     clauses = ["tenant_id = $1::uuid"]
     params: list[Any] = [tenant_id]
     if status is not None:
@@ -2949,7 +3333,7 @@ async def list_approval_requests(
         + " AND ".join(clauses)
         + f" ORDER BY created_at DESC LIMIT ${len(params)}"
     )
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(sql, *params)
     return [_record_to_approval_request(r) for r in rows]
 
@@ -2964,8 +3348,7 @@ async def find_pending_request_by_action_hash(
     This prevents the hook chain from creating two pending requests
     when an agent retries the same blocked tool call seconds apart.
     """
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
             """
             SELECT * FROM approval_requests
@@ -3031,8 +3414,7 @@ async def decide_approval_request_full(
     records the approver as the actor_user_id on the 'approved' /
     'rejected' row.
     """
-    pool = _get_pool()
-    async with pool.acquire() as conn, conn.transaction():
+    async with tenant_conn(tenant_id) as conn:
         await _set_approval_guc(
             conn, actor_user_id=actor_user_id, note=note, metadata=None
         )
@@ -3094,8 +3476,7 @@ async def claim_approval_for_execution(
     The audit trigger writes the 'executing' audit row with NULL actor
     (system transition).
     """
-    pool = _get_pool()
-    async with pool.acquire() as conn, conn.transaction():
+    async with tenant_conn(tenant_id) as conn:
         # No actor: the Worker is a system process, so the trigger writes
         # executing with NULL actor.
         await _set_approval_guc(
@@ -3134,8 +3515,7 @@ async def set_approval_status(
     ``actor_user_id`` / ``note`` / ``metadata`` flow through to the
     audit trigger's 'status-change' row.
     """
-    pool = _get_pool()
-    async with pool.acquire() as conn, conn.transaction():
+    async with tenant_conn(tenant_id) as conn:
         await _set_approval_guc(
             conn,
             actor_user_id=actor_user_id,
@@ -3172,8 +3552,7 @@ async def cancel_pending_approvals_for_job(
     explicit tenant filter; the tenant_id we return is the
     authoritative value from the row itself.
     """
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         rows = await conn.fetch(
             """
             UPDATE approval_requests
@@ -3187,8 +3566,7 @@ async def cancel_pending_approvals_for_job(
 
 
 async def list_expired_pending_approvals() -> list[ApprovalRequest]:
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         rows = await conn.fetch(
             """
             SELECT * FROM approval_requests
@@ -3206,8 +3584,7 @@ async def list_stuck_approved_approvals(
     claimed by a Worker — either the Worker missed the NATS publish or
     the orchestrator restarted mid-flight. The reconciler republishes
     these."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         rows = await conn.fetch(
             """
             SELECT * FROM approval_requests
@@ -3227,8 +3604,7 @@ async def list_stuck_executing_approvals(
     after claiming but before writing the terminal status. The reconciler
     marks them execution_stale rather than retrying, because we cannot
     tell whether the MCP-side work partially completed."""
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         rows = await conn.fetch(
             """
             SELECT * FROM approval_requests
@@ -3284,8 +3660,7 @@ async def write_approval_audit(
     ``list_approval_audit`` filter on tenant_id, so a mis-attributed
     row would simply be invisible to its rightful tenant.
     """
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO approval_audit_log
@@ -3314,8 +3689,7 @@ async def list_approval_audit(
     leaking audit history. The composite index
     ``idx_audit_log_tenant_request`` keeps this fast.
     """
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(
             "SELECT * FROM approval_audit_log "
             "WHERE request_id = $1::uuid AND tenant_id = $2::uuid "
@@ -3335,8 +3709,7 @@ async def expire_approval_if_pending(
     Separate from set_approval_status because the maintenance loop
     must not trample a concurrent decide_approval_request.
     """
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
             """
             UPDATE approval_requests
@@ -3416,8 +3789,7 @@ async def create_safety_rule(
     trigger. ``None`` is a legitimate value for bulk imports / migration
     scripts where no user is the actor — the audit row carries NULL.
     """
-    pool = _get_pool()
-    async with pool.acquire() as conn, conn.transaction():
+    async with tenant_conn(tenant_id) as conn:
         await _set_safety_guc(conn, actor_user_id=actor_user_id)
         row = await conn.fetchrow(
             """
@@ -3451,8 +3823,7 @@ async def get_safety_rule(
 
     See ``get_approval_policy`` for the tenant-filter rationale.
     """
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
             "SELECT * FROM safety_rules "
             "WHERE id = $1::uuid AND tenant_id = $2::uuid",
@@ -3472,7 +3843,6 @@ async def list_safety_rules(
     enabled: bool | None = None,
 ) -> list[SafetyRule]:
     """List rules for a tenant, optionally filtered."""
-    pool = _get_pool()
     clauses = ["tenant_id = $1::uuid"]
     params: list[Any] = [tenant_id]
     if coworker_id is not None:
@@ -3489,7 +3859,7 @@ async def list_safety_rules(
         + " AND ".join(clauses)
         + " ORDER BY priority DESC, updated_at DESC"
     )
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(sql, *params)
     return [_record_to_safety_rule(r) for r in rows]
 
@@ -3503,8 +3873,7 @@ async def list_safety_rules_for_coworker(
     only enabled rows are returned, and a NULL ``coworker_id`` means the
     rule applies to every coworker in the tenant.
     """
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(
             """
             SELECT * FROM safety_rules
@@ -3582,8 +3951,7 @@ async def update_safety_rule(
         + f" WHERE id = ${idx}::uuid AND tenant_id = ${idx + 1}::uuid "
         "RETURNING *"
     )
-    pool = _get_pool()
-    async with pool.acquire() as conn, conn.transaction():
+    async with tenant_conn(tenant_id) as conn:
         await _set_safety_guc(conn, actor_user_id=actor_user_id)
         row = await conn.fetchrow(sql, *values)
     if row is None:
@@ -3600,8 +3968,7 @@ async def delete_safety_rule(
     The audit trigger captures the row's pre-delete state in
     before_state so the deleted rule is reconstructable forever.
     """
-    pool = _get_pool()
-    async with pool.acquire() as conn, conn.transaction():
+    async with tenant_conn(tenant_id) as conn:
         await _set_safety_guc(conn, actor_user_id=actor_user_id)
         result = await conn.execute(
             "DELETE FROM safety_rules "
@@ -3625,7 +3992,6 @@ async def list_safety_rules_audit(
     V2 admin UI will surface this as a timeline. Test fixture uses it
     to pin actor/action correctness.
     """
-    pool = _get_pool()
     clauses = ["tenant_id = $1::uuid"]
     params: list[Any] = [tenant_id]
     if rule_id is not None:
@@ -3637,7 +4003,7 @@ async def list_safety_rules_audit(
         + " AND ".join(clauses)
         + f" ORDER BY created_at DESC LIMIT ${len(params)}"
     )
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(sql, *params)
     result: list[dict[str, Any]] = []
     for r in rows:
@@ -3691,8 +4057,7 @@ async def insert_safety_decision(
     caller passes None and the column stays NULL. See the 24-hour
     cleanup task note in the ``safety_decisions`` schema block.
     """
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO safety_decisions (
@@ -3747,7 +4112,6 @@ async def stream_safety_decisions(
     Malformed timestamps raise at query time (psycopg surface) which
     the REST layer turns into 422.
     """
-    pool = _get_pool()
     clauses = ["tenant_id = $1::uuid"]
     params: list[Any] = [tenant_id]
     if from_ts is not None:
@@ -3773,7 +4137,7 @@ async def stream_safety_decisions(
         + " AND ".join(clauses)
         + " ORDER BY created_at DESC"
     )
-    async with pool.acquire() as conn, conn.transaction():
+    async with tenant_conn(tenant_id) as conn:
         cur = await conn.cursor(sql, *params)
         while True:
             rows = await cur.fetch(chunk_size)
@@ -3834,8 +4198,7 @@ async def cleanup_old_safety_approval_contexts(
     own history via ``approval_audit_log``, so nothing is lost by
     clearing the safety-side copy.
     """
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with admin_conn() as conn:
         row = await conn.fetchval(
             """
             WITH cleared AS (
@@ -3854,7 +4217,7 @@ async def cleanup_old_safety_approval_contexts(
 
 
 async def get_safety_decision(
-    decision_id: str, tenant_id: str
+    decision_id: str, *, tenant_id: str
 ) -> dict[str, Any] | None:
     """Fetch a single safety_decisions row, scoped to ``tenant_id``.
 
@@ -3864,8 +4227,7 @@ async def get_safety_decision(
     None to 404 — indistinguishable from "doesn't exist" so we don't
     leak UUID existence across tenants.
     """
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
             "SELECT * FROM safety_decisions WHERE id = $1::uuid "
             "AND tenant_id = $2::uuid",
@@ -3957,8 +4319,7 @@ async def count_safety_decisions(
         from_ts=from_ts,
         to_ts=to_ts,
     )
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchval(
             f"SELECT COUNT(*) FROM safety_decisions WHERE {where}",
             *params,
@@ -3999,8 +4360,7 @@ async def list_safety_decisions(
         f"ORDER BY created_at DESC LIMIT ${len(params) - 1} "
         f"OFFSET ${len(params)}"
     )
-    pool = _get_pool()
-    async with pool.acquire() as conn:
+    async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(sql, *params)
     result: list[dict[str, Any]] = []
     for r in rows:

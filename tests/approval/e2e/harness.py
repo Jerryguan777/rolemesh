@@ -378,7 +378,9 @@ async def orchestrator_harness(
         return []
 
     async def _get_conv(conv_id: str) -> object | None:
-        return await pg.get_conversation(conv_id)
+        # Mirror main.py: notification path needs an unscoped lookup
+        # because the ChannelSender protocol carries no tenant context.
+        return await pg.get_conversation_for_notification(conv_id)
 
     resolver = NotificationTargetResolver(
         get_conversations_for_user_and_coworker=_no_convs,
@@ -419,14 +421,27 @@ async def orchestrator_harness(
             try:
                 data = json.loads(msg.data)
                 # Mirror main._handle_tasks: look up coworker, override
-                # tenant_id with the trusted value.
+                # tenant_id with the trusted value. Production resolves
+                # via in-memory _state.coworkers; the e2e harness has no
+                # such state, so we hit the DB directly using the raw
+                # pool (this is a system-level dispatch lookup, not a
+                # tenant-scoped business call).
                 claimed_cw = data.get("coworkerId", "")
-                source_cw = None
+                source_tenant: str | None = None
+                source_id: str | None = None
                 if claimed_cw:
-                    source_cw = await pg.get_coworker(claimed_cw)
-                if source_cw is not None:
-                    tenant_id = source_cw.tenant_id
-                    coworker_id = source_cw.id
+                    pool = pg._get_pool()
+                    async with pool.acquire() as conn:
+                        row = await conn.fetchrow(
+                            "SELECT id, tenant_id FROM coworkers WHERE id = $1::uuid",
+                            claimed_cw,
+                        )
+                    if row is not None:
+                        source_tenant = str(row["tenant_id"])
+                        source_id = str(row["id"])
+                if source_tenant is not None and source_id is not None:
+                    tenant_id = source_tenant
+                    coworker_id = source_id
                 else:
                     tenant_id = data.get("tenantId", "")
                     coworker_id = claimed_cw

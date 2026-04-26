@@ -103,7 +103,7 @@ class TestScenarioFirstTimeUser:
 
         # Set and get session
         await set_session(conv.id, t.id, cw.id, "sess-001")
-        assert await get_session(conv.id) == "sess-001"
+        assert await get_session(conv.id, tenant_id=t.id) == "sess-001"
 
         # Verify all fields
         assert cw.agent_role == "super_agent"
@@ -201,7 +201,7 @@ class TestScenarioIPCFromContainer:
             coworker_id=cw.id,
         )
 
-        task = await get_task_by_id(task_id)
+        task = await get_task_by_id(task_id, tenant_id=t.id)
         assert task is not None
         assert task.prompt == "Daily standup summary"
         assert task.schedule_type == "cron"
@@ -440,14 +440,14 @@ class TestScenarioDatabaseOperations:
             )
         )
 
-        fetched = await get_task_by_id(task_id)
+        fetched = await get_task_by_id(task_id, tenant_id=t.id)
         assert fetched is not None
         assert fetched.prompt == "Check status"
 
-        await update_task(task_id, status="paused")
-        fetched = await get_task_by_id(task_id)
+        await update_task(task_id, tenant_id=t.id, status="paused")
+        fetched = await get_task_by_id(task_id, tenant_id=t.id)
         assert fetched is not None
         assert fetched.status == "paused"
 
-        await delete_task(task_id)
-        assert await get_task_by_id(task_id) is None
+        await delete_task(task_id, tenant_id=t.id)
+        assert await get_task_by_id(task_id, tenant_id=t.id) is None

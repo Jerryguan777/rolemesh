@@ -29,6 +29,12 @@ GROUPS_DIR: Path = PROJECT_ROOT / "groups"
 DATA_DIR: Path = PROJECT_ROOT / "data"
 
 DATABASE_URL: str = os.environ.get("DATABASE_URL", "postgresql://rolemesh:rolemesh@localhost:5432/rolemesh")
+# RLS rollout (PR-B): a separate pool for cross-tenant maintenance,
+# resolvers, and DDL connects under a BYPASSRLS role. In production
+# this is its own DSN so the business pool can drop privileges. If
+# unset, falls back to ``DATABASE_URL`` (acceptable for dev/test where
+# the bootstrap user is also used for admin work).
+ADMIN_DATABASE_URL: str = os.environ.get("ADMIN_DATABASE_URL", "")
 NATS_URL: str = os.environ.get("NATS_URL", "nats://localhost:4222")
 
 CONTAINER_IMAGE: str = os.environ.get("CONTAINER_IMAGE", "rolemesh-agent:latest")

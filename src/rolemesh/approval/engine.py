@@ -816,7 +816,7 @@ class ApprovalEngine:
         """Fallback chain: policy → assigned users → tenant owners."""
         if policy.approver_user_ids:
             return list(policy.approver_user_ids)
-        assigned = await pg.get_users_for_agent(coworker_id)
+        assigned = await pg.get_users_for_agent(coworker_id, tenant_id=tenant_id)
         if assigned:
             return [u.id for u in assigned]
         return await _tenant_owner_ids(tenant_id)

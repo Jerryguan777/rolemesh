@@ -201,8 +201,8 @@ def _task_to_response(t: ScheduledTask) -> TaskResponse:
 
 async def _get_agent_or_404(agent_id: str, tenant_id: str) -> Coworker:
     """Fetch a coworker, raising 404 if not found or cross-tenant."""
-    cw = await pg.get_coworker(agent_id)
-    if cw is None or cw.tenant_id != tenant_id:
+    cw = await pg.get_coworker(agent_id, tenant_id=tenant_id)
+    if cw is None:
         raise HTTPException(status_code=404, detail="Agent not found")
     return cw
 
@@ -294,10 +294,10 @@ async def get_user_detail(
     user_id: str,
     user: UserManager,
 ) -> UserDetailResponse:
-    target = await pg.get_user(user_id)
-    if target is None or target.tenant_id != user.tenant_id:
+    target = await pg.get_user(user_id, tenant_id=user.tenant_id)
+    if target is None:
         raise HTTPException(status_code=404, detail="User not found")
-    agents = await pg.get_agents_for_user(user_id)
+    agents = await pg.get_agents_for_user(user_id, tenant_id=user.tenant_id)
     resp = UserDetailResponse(
         **_user_to_response(target).model_dump(),
         assigned_agents=[_coworker_to_summary(a) for a in agents],
@@ -311,12 +311,18 @@ async def update_user(
     body: UserUpdate,
     user: UserManager,
 ) -> UserResponse:
-    target = await pg.get_user(user_id)
-    if target is None or target.tenant_id != user.tenant_id:
+    target = await pg.get_user(user_id, tenant_id=user.tenant_id)
+    if target is None:
         raise HTTPException(status_code=404, detail="User not found")
     if body.role == "owner" and user.role != "owner":
         raise HTTPException(status_code=403, detail="Only owners can assign owner role")
-    updated = await pg.update_user(user_id, name=body.name, email=body.email, role=body.role)
+    updated = await pg.update_user(
+        user_id,
+        tenant_id=user.tenant_id,
+        name=body.name,
+        email=body.email,
+        role=body.role,
+    )
     if updated is None:
         raise HTTPException(status_code=404, detail="User not found")
     return _user_to_response(updated)
@@ -329,10 +335,10 @@ async def delete_user(
 ) -> None:
     if user_id == user.user_id:
         raise HTTPException(status_code=400, detail="Cannot delete yourself")
-    target = await pg.get_user(user_id)
-    if target is None or target.tenant_id != user.tenant_id:
+    target = await pg.get_user(user_id, tenant_id=user.tenant_id)
+    if target is None:
         raise HTTPException(status_code=404, detail="User not found")
-    await pg.delete_user(user_id)
+    await pg.delete_user(user_id, tenant_id=user.tenant_id)
 
 
 # ---------------------------------------------------------------------------
@@ -379,8 +385,8 @@ async def get_agent_detail(
     user: AdminUser,
 ) -> AgentDetailResponse:
     cw = await _get_agent_or_404(agent_id, user.tenant_id)
-    bindings = await pg.get_channel_bindings_for_coworker(agent_id)
-    conversations = await pg.get_conversations_for_coworker(agent_id)
+    bindings = await pg.get_channel_bindings_for_coworker(agent_id, tenant_id=user.tenant_id)
+    conversations = await pg.get_conversations_for_coworker(agent_id, tenant_id=user.tenant_id)
     return AgentDetailResponse(
         **_coworker_to_response(cw).model_dump(),
         bindings=[_binding_to_response(b) for b in bindings],
@@ -399,6 +405,7 @@ async def update_agent(
     permissions = _parse_permissions(body.permissions)
     updated = await pg.update_coworker(
         agent_id,
+        tenant_id=user.tenant_id,
         name=body.name,
         system_prompt=body.system_prompt,
         tools=tools,
@@ -419,7 +426,7 @@ async def delete_agent(
     user: AdminUser,
 ) -> None:
     await _get_agent_or_404(agent_id, user.tenant_id)
-    await pg.delete_coworker(agent_id)
+    await pg.delete_coworker(agent_id, tenant_id=user.tenant_id)
 
 
 # ---------------------------------------------------------------------------
@@ -433,7 +440,7 @@ async def list_assigned_users(
     user: AdminUser,
 ) -> list[UserResponse]:
     await _get_agent_or_404(agent_id, user.tenant_id)
-    users = await pg.get_users_for_agent(agent_id)
+    users = await pg.get_users_for_agent(agent_id, tenant_id=user.tenant_id)
     return [_user_to_response(u) for u in users]
 
 
@@ -444,8 +451,8 @@ async def assign_agent(
     user: AdminUser,
 ) -> None:
     await _get_agent_or_404(agent_id, user.tenant_id)
-    target = await pg.get_user(body.user_id)
-    if target is None or target.tenant_id != user.tenant_id:
+    target = await pg.get_user(body.user_id, tenant_id=user.tenant_id)
+    if target is None:
         raise HTTPException(status_code=404, detail="User not found")
     await pg.assign_agent_to_user(body.user_id, agent_id, user.tenant_id)
 
@@ -457,10 +464,10 @@ async def unassign_agent(
     user: AdminUser,
 ) -> None:
     await _get_agent_or_404(agent_id, user.tenant_id)
-    target = await pg.get_user(user_id)
-    if target is None or target.tenant_id != user.tenant_id:
+    target = await pg.get_user(user_id, tenant_id=user.tenant_id)
+    if target is None:
         raise HTTPException(status_code=404, detail="User not found")
-    await pg.unassign_agent_from_user(user_id, agent_id)
+    await pg.unassign_agent_from_user(user_id, agent_id, tenant_id=user.tenant_id)
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +481,7 @@ async def list_bindings(
     user: AdminUser,
 ) -> list[BindingResponse]:
     await _get_agent_or_404(agent_id, user.tenant_id)
-    bindings = await pg.get_channel_bindings_for_coworker(agent_id)
+    bindings = await pg.get_channel_bindings_for_coworker(agent_id, tenant_id=user.tenant_id)
     return [_binding_to_response(b) for b in bindings]
 
 
@@ -506,11 +513,12 @@ async def update_binding(
     user: AdminUser,
 ) -> BindingResponse:
     await _get_agent_or_404(agent_id, user.tenant_id)
-    binding = await pg.get_channel_binding(binding_id)
+    binding = await pg.get_channel_binding(binding_id, tenant_id=user.tenant_id)
     if binding is None or binding.coworker_id != agent_id:
         raise HTTPException(status_code=404, detail="Binding not found")
     updated = await pg.update_channel_binding(
         binding_id,
+        tenant_id=user.tenant_id,
         credentials=body.credentials,
         bot_display_name=body.bot_display_name,
         status=body.status,
@@ -527,10 +535,10 @@ async def delete_binding(
     user: AdminUser,
 ) -> None:
     await _get_agent_or_404(agent_id, user.tenant_id)
-    binding = await pg.get_channel_binding(binding_id)
+    binding = await pg.get_channel_binding(binding_id, tenant_id=user.tenant_id)
     if binding is None or binding.coworker_id != agent_id:
         raise HTTPException(status_code=404, detail="Binding not found")
-    await pg.delete_channel_binding(binding_id)
+    await pg.delete_channel_binding(binding_id, tenant_id=user.tenant_id)
 
 
 # ---------------------------------------------------------------------------
@@ -544,7 +552,7 @@ async def list_conversations(
     user: AdminUser,
 ) -> list[ConversationResponse]:
     await _get_agent_or_404(agent_id, user.tenant_id)
-    conversations = await pg.get_conversations_for_coworker(agent_id)
+    conversations = await pg.get_conversations_for_coworker(agent_id, tenant_id=user.tenant_id)
     return [_conversation_to_response(c) for c in conversations]
 
 
@@ -556,7 +564,7 @@ async def create_conversation(
 ) -> ConversationResponse:
     await _get_agent_or_404(agent_id, user.tenant_id)
     # Verify the binding belongs to this agent
-    binding = await pg.get_channel_binding(body.channel_binding_id)
+    binding = await pg.get_channel_binding(body.channel_binding_id, tenant_id=user.tenant_id)
     if binding is None or binding.coworker_id != agent_id:
         raise HTTPException(status_code=400, detail="Binding does not belong to this agent")
     conv = await pg.create_conversation(
@@ -577,10 +585,10 @@ async def delete_conversation(
     user: AdminUser,
 ) -> None:
     await _get_agent_or_404(agent_id, user.tenant_id)
-    conv = await pg.get_conversation(conversation_id)
+    conv = await pg.get_conversation(conversation_id, tenant_id=user.tenant_id)
     if conv is None or conv.coworker_id != agent_id:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    await pg.delete_conversation(conversation_id)
+    await pg.delete_conversation(conversation_id, tenant_id=user.tenant_id)
 
 
 # ---------------------------------------------------------------------------
@@ -600,7 +608,7 @@ async def list_agent_tasks(
     user: AdminUser,
 ) -> list[TaskResponse]:
     await _get_agent_or_404(agent_id, user.tenant_id)
-    tasks = await pg.get_tasks_for_coworker(agent_id)
+    tasks = await pg.get_tasks_for_coworker(agent_id, tenant_id=user.tenant_id)
     return [_task_to_response(t) for t in tasks]
 
 
@@ -609,14 +617,10 @@ async def delete_task(
     task_id: str,
     user: AdminUser,
 ) -> None:
-    task = await pg.get_task_by_id(task_id)
+    task = await pg.get_task_by_id(task_id, tenant_id=user.tenant_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    # Verify the task's agent belongs to user's tenant
-    cw = await pg.get_coworker(task.coworker_id)
-    if cw is None or cw.tenant_id != user.tenant_id:
-        raise HTTPException(status_code=404, detail="Task not found")
-    await pg.delete_task(task_id)
+    await pg.delete_task(task_id, tenant_id=user.tenant_id)
 
 
 # ---------------------------------------------------------------------------
@@ -993,8 +997,8 @@ async def _validate_safety_rule_body(
     ):
         coworkers: list[object] = []
         if coworker_id is not None:
-            cw = await pg.get_coworker(coworker_id)
-            if cw is not None and cw.tenant_id == tenant_id:
+            cw = await pg.get_coworker(coworker_id, tenant_id=tenant_id)
+            if cw is not None:
                 coworkers.append(cw)
         else:
             coworkers.extend(await pg.get_coworkers_for_tenant(tenant_id))
@@ -1279,7 +1283,7 @@ async def get_safety_decision_ep(
     """
     if tid != user.tenant_id:
         raise HTTPException(status_code=404, detail="decision not found")
-    row = await pg.get_safety_decision(decision_id, tid)
+    row = await pg.get_safety_decision(decision_id, tenant_id=tid)
     if row is None:
         raise HTTPException(status_code=404, detail="decision not found")
     return row
