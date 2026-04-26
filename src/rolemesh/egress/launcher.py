@@ -230,6 +230,12 @@ class _ForwardSpec:
     boundary (Bug 5 family — container-internal ``localhost`` is
     the container's loopback, not the host).
 
+    ``requires`` makes the forward conditional on another host env
+    var being set — used to avoid leaking generic AWS context (e.g.
+    ``AWS_REGION`` set for ``aws cli`` use) into the gateway when
+    Bedrock is not actually configured. Defaults to ``None``
+    (unconditional).
+
     Token-shaped specs leave ``is_url=False`` and are forwarded
     verbatim. We deliberately do NOT run ``string.replace`` on
     every value: a secret that happens to contain ``://localhost:``
@@ -238,6 +244,7 @@ class _ForwardSpec:
 
     key: str
     is_url: bool = False
+    requires: str | None = None
 
 
 # Forward-only allowlist. MUST mirror the keys
@@ -255,6 +262,22 @@ _FORWARDABLE: tuple[_ForwardSpec, ...] = (
     _ForwardSpec("OPENAI_BASE_URL", is_url=True),
     _ForwardSpec("PI_GOOGLE_API_KEY"),
     _ForwardSpec("GOOGLE_BASE_URL", is_url=True),
+    # Bedrock — both forward verbatim. The bearer token is a secret
+    # string (NEVER a URL — keep is_url=False so loopback rewrite
+    # cannot corrupt it). The region is also plain text
+    # ("us-east-1" etc.); the gateway reads it back in
+    # ``_build_provider_registry`` to pick the regional
+    # ``bedrock-runtime.{region}.amazonaws.com`` upstream. Without
+    # these two forwards, the gateway container's reverse proxy
+    # would never register a ``bedrock`` provider entry — every
+    # ``/proxy/bedrock/...`` request from agents would 404.
+    #
+    # ``AWS_REGION`` is gated on ``AWS_BEARER_TOKEN_BEDROCK`` so an
+    # operator who has ``AWS_REGION`` set for ``aws cli`` (or any
+    # other non-Bedrock AWS use) does NOT leak it into the gateway
+    # container's env unless they're actually running Bedrock.
+    _ForwardSpec("AWS_BEARER_TOKEN_BEDROCK"),
+    _ForwardSpec("AWS_REGION", requires="AWS_BEARER_TOKEN_BEDROCK"),
 )
 
 
@@ -284,6 +307,8 @@ def _gateway_env() -> list[str]:
     for spec in _FORWARDABLE:
         value = _os.environ.get(spec.key)
         if not value:
+            continue
+        if spec.requires and not _os.environ.get(spec.requires):
             continue
         if spec.is_url:
             value = rewrite_loopback_to_host_gateway(value)

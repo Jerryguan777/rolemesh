@@ -153,6 +153,30 @@ def _build_provider_registry(
             header_format="{key}",
         )
 
+    # AWS Bedrock — long-term API key (Bearer ABSK...). The token is
+    # held on the host; agent containers see only a placeholder env
+    # var and route their boto3 client at this proxy via
+    # ``BEDROCK_BASE_URL``. Whatever Authorization header boto3
+    # synthesises (SigV4 signature in older releases, Bearer in
+    # boto3 1.42+) gets overwritten by ``handle_provider_proxy`` —
+    # the proxy is the authoritative authn injector.
+    #
+    # Region is locked at registry-build time. Multi-region deploys
+    # would need to encode region in the proxy path
+    # (``/proxy/bedrock/{region}/...``); not in scope for the
+    # initial Sonnet/Opus 4.6 use case.
+    bedrock_token = secrets.get("AWS_BEARER_TOKEN_BEDROCK", "")
+    if bedrock_token:
+        from rolemesh.core.config import BEDROCK_DEFAULT_REGION
+
+        bedrock_region = secrets.get("AWS_REGION", "") or BEDROCK_DEFAULT_REGION
+        registry["bedrock"] = _ProviderConfig(
+            upstream=f"https://bedrock-runtime.{bedrock_region}.amazonaws.com",
+            secret_key=bedrock_token,
+            header_name="authorization",
+            header_format="Bearer {key}",
+        )
+
     return registry
 
 
@@ -274,6 +298,12 @@ async def start_credential_proxy(
                 "OPENAI_BASE_URL",
                 "PI_GOOGLE_API_KEY",
                 "GOOGLE_BASE_URL",
+                # Bedrock — long-term API key (Bearer ABSK...). Held
+                # only on the host; agents see a placeholder
+                # (see ``rolemesh.agent.executor._pi_extra_env``).
+                # Region picks the regional endpoint upstream URL.
+                "AWS_BEARER_TOKEN_BEDROCK",
+                "AWS_REGION",
             )
         )
         if v

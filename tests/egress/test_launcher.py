@@ -405,3 +405,111 @@ class TestForwardableSpec:
             "OPENAI_BASE_URL",
             "GOOGLE_BASE_URL",
         }.issubset(url_keys)
+
+
+# ---------------------------------------------------------------------------
+# AWS forwarders (Bedrock) — host → gateway secrets propagation
+# ---------------------------------------------------------------------------
+
+
+class TestAwsBedrockForwarders:
+    """``_build_provider_registry`` reads ``AWS_BEARER_TOKEN_BEDROCK``
+    and ``AWS_REGION`` from the gateway-process os.environ. Without
+    forwarding these from the orchestrator host, the gateway-side
+    registry would never include a bedrock entry → every
+    ``/proxy/bedrock/...`` request from agents 404s. These tests
+    pin the forwarding contract."""
+
+    def _env_dict(self, env_pairs: list[str]) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for pair in env_pairs:
+            k, _, v = pair.partition("=")
+            out[k] = v
+        return out
+
+    def test_aws_bearer_token_forwarded_verbatim(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from rolemesh.egress.launcher import _gateway_env
+
+        # The token shape AWS uses for long-term Bedrock API keys.
+        # Forwarded verbatim — must NOT go through loopback rewrite,
+        # because string.replace on a secret could corrupt it on the
+        # rare chance the bytes contain ``://localhost:``.
+        monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "ABSKtokenXYZ")
+        env = self._env_dict(_gateway_env())
+        assert env["AWS_BEARER_TOKEN_BEDROCK"] == "ABSKtokenXYZ"
+
+    def test_aws_region_forwarded_verbatim(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from rolemesh.egress.launcher import _gateway_env
+
+        # AWS_REGION is gated on AWS_BEARER_TOKEN_BEDROCK (see
+        # ``_FORWARDABLE`` ``requires=`` clause), so set both — that
+        # is the operator-Bedrock-on configuration this test
+        # represents.
+        monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "ABSKtokenXYZ")
+        monkeypatch.setenv("AWS_REGION", "eu-west-1")
+        env = self._env_dict(_gateway_env())
+        assert env["AWS_REGION"] == "eu-west-1"
+
+    def test_aws_region_skipped_without_bedrock_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Operators set ``AWS_REGION`` for plenty of non-Bedrock
+        # reasons (``aws cli``, the awscli docker image,
+        # ``terraform``). When Bedrock is NOT configured for
+        # rolemesh, that region must NOT leak into the gateway
+        # container's Env — keeping the gateway's AWS context
+        # surface scoped to the only AWS service we actually proxy.
+        from rolemesh.egress.launcher import _gateway_env
+
+        monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+        monkeypatch.setenv("AWS_REGION", "eu-west-1")
+        env = self._env_dict(_gateway_env())
+        assert "AWS_REGION" not in env
+
+    def test_aws_keys_are_not_marked_url(self) -> None:
+        # Belt-and-braces: token + region are plain strings, NOT
+        # URLs. The ``test_no_token_key_is_marked_url`` heuristic
+        # only catches names ending in ``_API_KEY`` / ``_OAUTH_TOKEN``
+        # / ``_AUTH_TOKEN`` — explicitly assert AWS_BEARER_TOKEN_BEDROCK
+        # and AWS_REGION too so a future "let's just rewrite every
+        # value" refactor can't quietly mangle them.
+        from rolemesh.egress.launcher import _FORWARDABLE
+
+        by_key = {spec.key: spec for spec in _FORWARDABLE}
+        assert by_key["AWS_BEARER_TOKEN_BEDROCK"].is_url is False
+        assert by_key["AWS_REGION"].is_url is False
+
+    def test_aws_region_requires_bedrock_token_in_spec(self) -> None:
+        # Pin the gating: AWS_REGION's ``requires`` MUST point at
+        # AWS_BEARER_TOKEN_BEDROCK. A future refactor that drops
+        # the gate would silently re-leak AWS_REGION into the
+        # gateway env on every host that has it set.
+        from rolemesh.egress.launcher import _FORWARDABLE
+
+        by_key = {spec.key: spec for spec in _FORWARDABLE}
+        assert by_key["AWS_REGION"].requires == "AWS_BEARER_TOKEN_BEDROCK"
+        # And the token itself must NOT be gated on anything —
+        # accidentally adding a self-cycle (``requires="AWS_REGION"``)
+        # would 100%-break Bedrock for operators who don't set
+        # AWS_REGION explicitly and rely on the BEDROCK_DEFAULT_REGION
+        # fallback.
+        assert by_key["AWS_BEARER_TOKEN_BEDROCK"].requires is None
+
+    def test_unset_aws_env_does_not_emit_keys(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Operator without Bedrock setup → no AWS keys leak into the
+        # gateway container's Env block (cleaner gateway env, smaller
+        # blast radius if someone later adds an exfil path that
+        # iterates env vars).
+        from rolemesh.egress.launcher import _gateway_env
+
+        monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+        monkeypatch.delenv("AWS_REGION", raising=False)
+        env = self._env_dict(_gateway_env())
+        assert "AWS_BEARER_TOKEN_BEDROCK" not in env
+        assert "AWS_REGION" not in env

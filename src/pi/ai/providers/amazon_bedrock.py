@@ -113,13 +113,37 @@ def stream_bedrock(
             )
 
             client_kwargs: dict[str, Any] = {"region_name": region}
-            if options.profile:
+
+            # ``BEDROCK_BASE_URL`` redirects boto3 to the host-side
+            # credential proxy when set (rolemesh agent containers
+            # have it injected by ``rolemesh.agent.executor._pi_extra_env``).
+            # The proxy holds the real ``AWS_BEARER_TOKEN_BEDROCK``
+            # and overwrites the Authorization header on every
+            # request, so whatever boto3 signs locally is moot — the
+            # placeholder env (see below) just keeps boto3 from
+            # raising ``NoCredentialsError`` before it even sends.
+            base_url = os.environ.get("BEDROCK_BASE_URL", "")
+            if base_url:
+                client_kwargs["endpoint_url"] = base_url
+
+            # Profile path is bypassed when going through the rolemesh
+            # proxy: the proxy is the authoritative authn injector, so
+            # SigV4-signing with real long-term creds from a profile
+            # would (a) leak them across the local network as a
+            # signature and (b) be discarded anyway.
+            if options.profile and not base_url:
                 session = botocore.session.Session(profile=options.profile)
                 boto3_session = boto3.session.Session(botocore_session=session)
                 client = boto3_session.client("bedrock-runtime", **client_kwargs)
             else:
-                # Support proxies that don't need authentication
-                if os.environ.get("AWS_BEDROCK_SKIP_AUTH") == "1":
+                # When routed through the rolemesh credential proxy,
+                # boto3 still wants *some* credentials before it will
+                # construct a request — even though the proxy will
+                # replace the Authorization header. Ship dummy SigV4
+                # creds so boto3 1.x (no Bearer support) sails through;
+                # boto3 1.42+ that honours ``AWS_BEARER_TOKEN_BEDROCK``
+                # also continues to work because the proxy still wins.
+                if base_url:
                     client_kwargs["aws_access_key_id"] = "dummy-access-key"
                     client_kwargs["aws_secret_access_key"] = "dummy-secret-key"
                 client = boto3.client("bedrock-runtime", **client_kwargs)
@@ -608,13 +632,47 @@ def _convert_messages(
     return result
 
 
+# Bedrock Converse tool-name contract:
+#   - max 64 chars
+#   - first char a letter, then letters/digits/underscore/hyphen only
+# Source: AWS Bedrock Runtime API ToolSpecification.name documentation.
+# We validate both shape AND length client-side so the failure surfaces
+# in rolemesh's stack with our error message, not as an opaque
+# Bedrock 400 with AWS-flavoured wording. Anthropic / OpenAI / Google
+# providers do their own thing — this is a Bedrock-only contract.
+_BEDROCK_TOOL_NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,63}$")
+
+
 def _convert_tool_config(
     tools: list[Tool] | None,
     tool_choice: Literal["auto", "any", "none"] | dict[str, str] | None,
 ) -> dict[str, Any] | None:
-    """Convert tools and tool_choice to Bedrock ToolConfiguration format."""
+    """Convert tools and tool_choice to Bedrock ToolConfiguration format.
+
+    Bedrock Converse imposes both a 64-char cap and a restricted
+    character set (``^[a-zA-Z][a-zA-Z0-9_-]*$``). Anthropic native
+    and OpenAI accept names up to 128 chars and a wider charset.
+
+    We do NOT silently truncate / sanitise here — a hidden mapping
+    layer would just defer the failure to a confusing point
+    downstream (the agent would call a name that no longer matches
+    its tool registry). Fail loudly with the offending name so
+    operators know to apply the short-prefix MCP naming scheme (and
+    avoid disallowed characters) upstream.
+    """
     if not tools or tool_choice == "none":
         return None
+
+    for tool in tools:
+        if not _BEDROCK_TOOL_NAME_RE.match(tool.name):
+            raise ValueError(
+                f"Bedrock Converse: tool name {tool.name!r} is invalid "
+                f"(len={len(tool.name)}). Must match "
+                f"^[a-zA-Z][a-zA-Z0-9_-]{{0,63}}$ — at most 64 chars, "
+                f"start with an ASCII letter, then letters/digits/"
+                f"underscore/hyphen only. Apply the upstream short-prefix "
+                f"MCP naming scheme before sending to this provider."
+            )
 
     bedrock_tools: list[dict[str, Any]] = [
         {

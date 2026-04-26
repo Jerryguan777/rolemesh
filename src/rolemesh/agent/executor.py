@@ -9,6 +9,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
+from rolemesh.core.logger import get_logger
+
+logger = get_logger()
+
 
 @dataclass(frozen=True)
 class AgentInput:
@@ -102,12 +106,28 @@ CLAUDE_CODE_BACKEND = AgentBackendConfig(
 )
 
 def _pi_extra_env() -> dict[str, str]:
-    """Build extra env for Pi backend — model selection only.
+    """Build extra env for Pi backend — model selection + boto3
+    placeholders.
 
     API keys are NOT injected here; all LLM requests go through the
-    credential proxy which injects real keys at the HTTP level.
+    credential proxy which injects real keys at the HTTP level. For
+    Bedrock specifically, we inject a placeholder
+    ``AWS_BEARER_TOKEN_BEDROCK`` (so boto3 doesn't raise
+    ``NoCredentialsError`` before it even sends) and an
+    ``AWS_REGION`` so boto3's model-ARN resolution lines up with
+    the upstream URL the credential proxy bound (single-source via
+    ``BEDROCK_DEFAULT_REGION``).
+
+    ``BEDROCK_BASE_URL`` is intentionally NOT set here — it lives
+    in ``rolemesh.container.runner.build_container_spec`` alongside
+    ``ANTHROPIC_BASE_URL`` / ``OPENAI_BASE_URL`` because it depends
+    on per-spawn ``proxy_base`` (egress-gateway under EC-2,
+    host.docker.internal under rollback). Computing it here would
+    bake module-load-time hosting into a per-spawn decision.
     """
     import os
+
+    from rolemesh.core.config import BEDROCK_DEFAULT_REGION
 
     # .env loading is handled at process entry by
     # ``rolemesh.bootstrap``; reading from os.environ here works
@@ -117,6 +137,39 @@ def _pi_extra_env() -> dict[str, str]:
     model_id = os.environ.get("PI_MODEL_ID", "")
     if model_id:
         env["PI_MODEL_ID"] = model_id
+
+    # Bedrock wiring — only meaningful when the host has the bearer
+    # token configured AND the model id targets Bedrock. We still
+    # inject the placeholder unconditionally on the Bedrock path so
+    # boto3 client init doesn't raise; the proxy is the real
+    # credential gate.
+    if model_id.startswith("amazon-bedrock/"):
+        # Diagnostic guard: if the host doesn't actually have the
+        # bearer token set, the credential proxy will not register a
+        # ``bedrock`` provider entry and every container request will
+        # surface as a 404 from the proxy, with no obvious link back
+        # to "you forgot to set AWS_BEARER_TOKEN_BEDROCK in .env".
+        # Warn at container-spec build time so the misconfiguration
+        # is visible in the orchestrator log instead of as an
+        # opaque mid-turn error.
+        if not os.environ.get("AWS_BEARER_TOKEN_BEDROCK"):
+            logger.warning(
+                "Pi backend uses a Bedrock model id but host has no "
+                "AWS_BEARER_TOKEN_BEDROCK set; the credential proxy "
+                "will not register a bedrock provider, and every "
+                "tool call will return 404 from the proxy. Set "
+                "AWS_BEARER_TOKEN_BEDROCK in .env to fix.",
+                model_id=model_id,
+            )
+
+        env["AWS_BEARER_TOKEN_BEDROCK"] = "placeholder-proxy-replaces-this"
+        # Region picks the model's region context inside boto3 (model
+        # ARNs are region-scoped). Single source of truth in
+        # ``rolemesh.core.config.BEDROCK_DEFAULT_REGION``; the
+        # credential proxy uses the same fallback so endpoint URL
+        # and model ARN resolution stay in the same region.
+        env["AWS_REGION"] = os.environ.get("AWS_REGION", "") or BEDROCK_DEFAULT_REGION
+
     return env
 
 

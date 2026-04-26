@@ -164,14 +164,24 @@ class TestBuildContainerSpec:
         assert "NATS_URL" in spec.env
 
     def test_spec_env_routes_llm_through_egress_gateway(self) -> None:
-        """EC-1: ANTHROPIC_BASE_URL / OPENAI_BASE_URL point at the gateway
-        by service name, never at host.docker.internal."""
+        """EC-1: ANTHROPIC_BASE_URL / OPENAI_BASE_URL / BEDROCK_BASE_URL
+        point at the gateway by service name, never at
+        host.docker.internal."""
         with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
             spec = build_container_spec([], "c", "j")
         assert "egress-gateway" in spec.env["ANTHROPIC_BASE_URL"]
         assert "egress-gateway" in spec.env["OPENAI_BASE_URL"]
+        # Bedrock — same proxy_base; agents on Internal=true bridge
+        # cannot resolve host.docker.internal, so this MUST be the
+        # gateway service name. Pre-fix it was synthesised in
+        # ``_pi_extra_env`` and hard-coded to host.docker.internal,
+        # which 100%-broke Bedrock under EC-2.
+        assert spec.env["BEDROCK_BASE_URL"] == (
+            "http://egress-gateway:3001/proxy/bedrock"
+        )
         # Regression: the old host.docker.internal escape hatch is gone.
         assert "host.docker.internal" not in spec.env["ANTHROPIC_BASE_URL"]
+        assert "host.docker.internal" not in spec.env["BEDROCK_BASE_URL"]
 
     def test_spec_env_injects_http_proxy(self) -> None:
         """EC-1: standard proxy env is set on every agent container so
@@ -248,6 +258,13 @@ class TestBuildContainerSpec:
         assert "host.docker.internal" in spec.env["ANTHROPIC_BASE_URL"]
         assert "egress-gateway" not in spec.env["ANTHROPIC_BASE_URL"]
         assert "host.docker.internal" in spec.env["OPENAI_BASE_URL"]
+        # Bedrock follows the same per-spawn ``proxy_base`` decision —
+        # under rollback it routes through host.docker.internal. Pin
+        # the value to lock the rollback path's behaviour separately
+        # from the EC-2 path.
+        assert spec.env["BEDROCK_BASE_URL"] == (
+            "http://host.docker.internal:3001/proxy/bedrock"
+        )
 
         # Forward-proxy env must NOT be injected — no gateway exists.
         assert "HTTP_PROXY" not in spec.env

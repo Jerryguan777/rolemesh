@@ -164,7 +164,28 @@ CONTAINER_ENV_ALLOWLIST: frozenset[str] = frozenset({
     "CLAUDE_CONFIG_DIR",
     "HOME",
     "PI_MODEL_ID",
+    # Bedrock — only the placeholder bearer + synthesized proxy URL
+    # ever reach the container. The real ``ABSK...`` token lives on
+    # the host and is overwritten on every request by the credential
+    # proxy (see ``rolemesh.egress.reverse_proxy._build_provider_registry``).
+    # ``AWS_REGION`` is needed by boto3 to construct model ARNs.
+    # ``BEDROCK_BASE_URL`` is written directly in
+    # ``runner.build_container_spec`` and bypasses the filter today;
+    # listed here as a guard if a future refactor moves URL synthesis
+    # back into ``backend_config.extra_env``.
+    "AWS_BEARER_TOKEN_BEDROCK",
+    "AWS_REGION",
+    "BEDROCK_BASE_URL",
 })
+
+# Default AWS region for Bedrock when ``AWS_REGION`` is unset on the
+# host. Single source of truth: the credential proxy uses it to build
+# the upstream URL (``bedrock-runtime.{region}.amazonaws.com``) and
+# ``_pi_extra_env`` uses the same fallback when synthesising the
+# container's ``AWS_REGION`` env so boto3 model-ARN resolution lines
+# up with the proxy's endpoint. Drift between the two would resolve
+# model ARNs in one region while routing requests to another.
+BEDROCK_DEFAULT_REGION: str = "us-east-1"
 
 # Agent backend: "claude" or "pi"
 AGENT_BACKEND_DEFAULT: str = os.environ.get("ROLEMESH_AGENT_BACKEND", "claude")
