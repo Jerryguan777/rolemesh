@@ -297,6 +297,32 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         await conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(tenant_id, conversation_id, timestamp)"
         )
+    # Token usage columns on messages — applied unconditionally (outside
+    # the legacy branch above) so existing deployments running on the
+    # already-migrated schema also get the new columns. Idempotent ADD
+    # COLUMN IF NOT EXISTS keeps repeat startups a no-op. NUMERIC(10,6)
+    # for cost_usd: 6-digit precision matches the smallest sub-cent
+    # increment ($0.000001) Claude SDK reports, and avoids the floating-
+    # point accumulation drift that would bite when summing per-tenant.
+    await conn.execute(
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS input_tokens INTEGER"
+    )
+    await conn.execute(
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS output_tokens INTEGER"
+    )
+    await conn.execute(
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS cache_read_tokens INTEGER"
+    )
+    await conn.execute(
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS cache_write_tokens INTEGER"
+    )
+    await conn.execute(
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS cost_usd NUMERIC(10,6)"
+    )
+    await conn.execute(
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS model_id TEXT"
+    )
+    if not legacy_exists:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS scheduled_tasks (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1828,14 +1854,36 @@ async def store_message(
     timestamp: str,
     is_from_me: bool = False,
     is_bot_message: bool = False,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cache_read_tokens: int | None = None,
+    cache_write_tokens: int | None = None,
+    cost_usd: float | None = None,
+    model_id: str | None = None,
 ) -> None:
-    """Store a message."""
+    """Store a message.
+
+    Token-usage parameters are optional; legacy callers (user-side
+    messages on inbound channels, channels without a usage carrier)
+    leave them None and the corresponding columns stay NULL. Only
+    assistant replies coming back from a backend with a usage snapshot
+    populate them. The ON CONFLICT branch deliberately leaves the token
+    columns alone — a re-store of the same message id (e.g. a retry on
+    the inbound path) must not blank out usage that an earlier write
+    already recorded.
+    """
     pool = _get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO messages (tenant_id, conversation_id, id, sender, sender_name, content, timestamp, is_from_me, is_bot_message)
-            VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9)
+            INSERT INTO messages (
+                tenant_id, conversation_id, id, sender, sender_name,
+                content, timestamp, is_from_me, is_bot_message,
+                input_tokens, output_tokens, cache_read_tokens,
+                cache_write_tokens, cost_usd, model_id
+            )
+            VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9,
+                    $10, $11, $12, $13, $14, $15)
             ON CONFLICT (tenant_id, id, conversation_id) DO UPDATE SET
                 content = EXCLUDED.content,
                 timestamp = EXCLUDED.timestamp
@@ -1849,6 +1897,12 @@ async def store_message(
             _to_dt(timestamp),
             is_from_me,
             is_bot_message,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            cost_usd,
+            model_id,
         )
 
 

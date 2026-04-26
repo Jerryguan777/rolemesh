@@ -184,11 +184,28 @@ async def run_query_loop(
     # Track session ID from backend events
     session_id: str | None = init.session_id
 
+    def _usage_meta(event: BackendEvent) -> dict[str, Any] | None:
+        """Extract the wire-format ``usage`` payload from a backend event.
+
+        Centralizes the metadata key choice so all four event branches
+        below stay in lock-step: status="success" / "error" / "stopped"
+        / "safety_blocked" all serialize usage under the same metadata
+        key, and consumers don't have to special-case per status.
+        Returns None when the event has no usage so legacy wire bytes
+        stay byte-equal — see ContainerOutput.to_dict for the rest of
+        the no-op invariant.
+        """
+        usage = getattr(event, "usage", None)
+        if usage is None:
+            return None
+        return {"usage": usage.to_metadata()}
+
     async def on_event(event: BackendEvent) -> None:
         nonlocal session_id
         if isinstance(event, ResultEvent):
             if event.new_session_id:
                 session_id = event.new_session_id
+            metadata = _usage_meta(event)
             await publish_output(
                 js, job_id,
                 ContainerOutput(
@@ -196,6 +213,7 @@ async def run_query_loop(
                     result=event.text,
                     new_session_id=session_id,
                     is_final=event.is_final,
+                    metadata=metadata,
                 ),
             )
         elif isinstance(event, RunningEvent):
@@ -215,7 +233,12 @@ async def run_query_loop(
         elif isinstance(event, StoppedEvent):
             await publish_output(
                 js, job_id,
-                ContainerOutput(status="stopped", result=None, new_session_id=session_id),
+                ContainerOutput(
+                    status="stopped",
+                    result=None,
+                    new_session_id=session_id,
+                    metadata=_usage_meta(event),
+                ),
             )
             # Approval cancel cascade. Best-effort publish — the approval
             # stream may not exist at all in deployments without the
@@ -249,16 +272,18 @@ async def run_query_loop(
             # triggering the scheduler's retry loop indefinitely. Pi
             # backend tracks session differently (session_file written
             # eagerly) so this concern is Claude-specific.
-            metadata: dict[str, Any] = {"stage": event.stage}
+            block_metadata: dict[str, Any] = {"stage": event.stage}
             if event.rule_id is not None:
-                metadata["rule_id"] = event.rule_id
+                block_metadata["rule_id"] = event.rule_id
+            if event.usage is not None:
+                block_metadata["usage"] = event.usage.to_metadata()
             await publish_output(
                 js, job_id,
                 ContainerOutput(
                     status="safety_blocked",
                     result=event.reason,
                     new_session_id=None,
-                    metadata=metadata,
+                    metadata=block_metadata,
                 ),
             )
         elif isinstance(event, ErrorEvent):
@@ -279,6 +304,7 @@ async def run_query_loop(
                     result=None,
                     new_session_id=None,
                     error=event.error,
+                    metadata=_usage_meta(event),
                 ),
             )
 

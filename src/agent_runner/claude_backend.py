@@ -35,6 +35,7 @@ from .backend import (
     SessionInitEvent,
     StoppedEvent,
     ToolUseEvent,
+    UsageSnapshot,
     tool_input_preview,
 )
 from .hooks import (
@@ -59,6 +60,42 @@ def _field(data: Any, key: str) -> Any:
     if isinstance(data, dict):
         return data.get(key)
     return getattr(data, key, None)
+
+
+def _build_usage_snapshot(message: Any, model_id: str | None) -> UsageSnapshot | None:
+    """Pluck token usage + total_cost_usd off a Claude SDK ResultMessage.
+
+    ``message.usage`` is a dict whose keys vary slightly across SDK
+    versions (newer builds add ``cache_creation`` ephemeral / 1h
+    sub-buckets, older ones keep just the four headline counters).
+    Defensive ``.get(key, 0)`` on each field is the contract: a
+    missing key counts as zero, and a missing ``usage`` dict drops the
+    whole snapshot rather than emitting a dangerously-half-populated
+    one. Without this defence a single SDK bump could either crash the
+    backend or silently start under-counting cache writes.
+
+    ``total_cost_usd`` similarly disappears when the SDK is configured
+    against a key that doesn't compute pricing (rare but possible
+    custom proxies). cost_usd=None is preferred over 0.0 so downstream
+    can tell "no cost reported" from "free turn".
+    """
+    usage_raw = getattr(message, "usage", None)
+    if not isinstance(usage_raw, dict):
+        return None
+    cost_raw = getattr(message, "total_cost_usd", None)
+    cost_usd = float(cost_raw) if isinstance(cost_raw, (int, float)) else None
+    # Prefer the per-message model attribute when the SDK provides one;
+    # otherwise fall back to whatever was captured at SystemMessage(init).
+    msg_model = getattr(message, "model", None)
+    return UsageSnapshot(
+        input_tokens=int(usage_raw.get("input_tokens", 0) or 0),
+        output_tokens=int(usage_raw.get("output_tokens", 0) or 0),
+        cache_read_tokens=int(usage_raw.get("cache_read_input_tokens", 0) or 0),
+        cache_write_tokens=int(usage_raw.get("cache_creation_input_tokens", 0) or 0),
+        cost_usd=cost_usd,
+        model_id=msg_model if isinstance(msg_model, str) and msg_model else model_id,
+        cost_source="sdk",
+    )
 
 
 def _tool_response_text(response: Any) -> tuple[str, bool]:
@@ -417,13 +454,19 @@ class ClaudeBackend:
         message_count = 0
         result_count = 0
         error_raised = False
+        # Captured from SystemMessage(init).data["model"] and reused when
+        # the ResultMessage itself doesn't carry a model attribute.
+        # Older SDK builds put the model only on the init system message;
+        # newer ones replicate it on each AssistantMessage. Both end up
+        # surfacing through this single capture.
+        active_model_id: str | None = None
 
         # Run the async-for over the SDK stream inside a dedicated task so
         # abort() can cancel it. A bare `async for ...: ...` can't be
         # interrupted from another coroutine — cancelling run_prompt's own
         # task would also tear down the outer bridge loop.
         async def _consume_query() -> None:
-            nonlocal message_count, result_count
+            nonlocal message_count, result_count, active_model_id
             # Guard against two races abort() can't fix with task.cancel() alone:
             #   1. Pre-task race: abort() arrives between run_prompt's first
             #      await (RunningEvent emit) and the task being created —
@@ -453,6 +496,10 @@ class ClaudeBackend:
                             await self._emit(SessionInitEvent(session_id=sid))
                             await self._emit(RunningEvent())
                             _log(f"Session initialized: {sid}")
+                        if isinstance(data, dict):
+                            init_model = data.get("model")
+                            if isinstance(init_model, str) and init_model:
+                                active_model_id = init_model
                     elif subtype == "task_notification":
                         _log(f"Task notification: {data}" if not isinstance(data, dict) else
                              f"Task notification: task={data.get('task_id')} status={data.get('status')}")
@@ -488,10 +535,12 @@ class ClaudeBackend:
                     # stream. Mark these intermediate so the host streams them
                     # to the UI without releasing idle-gating; the NATS bridge
                     # publishes the batch-final marker after run_prompt returns.
+                    usage = _build_usage_snapshot(message, active_model_id)
                     await self._emit(ResultEvent(
                         text=text_result or None,
                         new_session_id=self._session_id,
                         is_final=False,
+                        usage=usage,
                     ))
 
         aborted = False
