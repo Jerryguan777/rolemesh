@@ -32,7 +32,10 @@ import aiodocker
 import aiodocker.exceptions
 
 from rolemesh.container.network import verify_egress_gateway_reachable
-from rolemesh.container.runtime import get_host_gateway_extra_hosts
+from rolemesh.container.runtime import (
+    get_host_gateway_extra_hosts,
+    rewrite_loopback_to_host_gateway,
+)
 from rolemesh.core.config import (
     CREDENTIAL_PROXY_PORT,
     EGRESS_GATEWAY_CONTAINER_NAME,
@@ -210,39 +213,6 @@ def _extra_hosts() -> dict[str, str]:
     return get_host_gateway_extra_hosts()
 
 
-def _rewrite_loopback_to_host_gateway(url: str) -> str:
-    """Rewrite ``localhost`` / ``127.0.0.1`` in a URL to ``host.docker.internal``.
-
-    Required on every platform — inside the gateway container,
-    ``localhost`` resolves to the container's own loopback, not the
-    host. The orchestrator's ``NATS_URL`` typically points at
-    ``localhost:4222`` (the host's NATS), so a verbatim copy makes
-    the gateway dial itself and the NATS connection fails with
-    ``Name or service not known`` / ``Connection refused``.
-
-    Two ways ``host.docker.internal`` is made resolvable, both
-    converging at this rewrite:
-
-      - Linux: ``create_egress_gateway`` adds an ExtraHosts entry
-        (``host.docker.internal:host-gateway``) via
-        ``get_host_gateway_extra_hosts``. Docker Engine does not
-        provide the alias automatically.
-      - Docker Desktop (macOS / Windows / WSL): the name is built
-        into the platform's embedded DNS resolver. No ExtraHosts
-        entry is needed (and the helper above returns an empty
-        dict).
-
-    The previous implementation gated the rewrite on
-    ``_extra_hosts()`` being non-empty, which conflated "do we
-    need ExtraHosts?" (platform-specific) with "do we need to
-    rewrite?" (universal). On macOS the gate skipped the rewrite
-    and the gateway shipped with a broken ``NATS_URL``.
-    """
-    return url.replace("://localhost:", "://host.docker.internal:").replace(
-        "://127.0.0.1:", "://host.docker.internal:"
-    )
-
-
 def _gateway_env() -> list[str]:
     """Build the Env block for the gateway container.
 
@@ -263,7 +233,7 @@ def _gateway_env() -> list[str]:
 
     from rolemesh.core.config import NATS_URL as _NATS_URL
 
-    env_pairs: list[str] = [f"NATS_URL={_rewrite_loopback_to_host_gateway(_NATS_URL)}"]
+    env_pairs: list[str] = [f"NATS_URL={rewrite_loopback_to_host_gateway(_NATS_URL)}"]
 
     # Forward-only allowlist of variables the gateway might need.
     # Declared close to the consumer (reverse_proxy's secret list) so

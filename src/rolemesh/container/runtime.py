@@ -197,6 +197,45 @@ def get_host_gateway_extra_hosts() -> dict[str, str]:
     return {}
 
 
+def rewrite_loopback_to_host_gateway(url: str) -> str:
+    """Rewrite ``localhost`` / ``127.0.0.1`` in a URL's authority to
+    ``host.docker.internal``.
+
+    Required at every boundary that hands a URL from the orchestrator
+    (running on the host) to a process running inside a container —
+    inside the container, ``localhost`` resolves to the container's
+    own loopback, not the host. Examples:
+
+      * ``NATS_URL`` injected into the egress-gateway's environment.
+      * MCP server origins serialised into ``egress.mcp.changed``
+        events / ``egress.mcp.snapshot.request`` replies — the
+        gateway stores them verbatim and dials directly.
+
+    The rewrite is universal across platforms because
+    ``host.docker.internal`` is resolvable on every platform we
+    support:
+
+      * Linux: via the ``ExtraHosts: host-gateway`` mapping
+        ``create_host_config`` adds (see ``get_host_gateway_extra_hosts``).
+      * macOS / Windows / WSL (Docker Desktop): built into the
+        platform's embedded DNS resolver.
+
+    Anchors on ``://...:`` so paths or hostnames containing the
+    substring ``localhost`` (e.g. ``mylocalhost.example.com``) are
+    not touched.
+
+    Note: do NOT use this on the orchestrator's own in-process
+    registries. There, ``localhost`` legitimately means "the host"
+    (because the orchestrator IS on the host) and rewriting would
+    redirect intra-host calls through Docker's DNS for no reason.
+    The right place is at every IPC boundary where a URL leaves
+    the orchestrator process.
+    """
+    return url.replace("://localhost:", "://host.docker.internal:").replace(
+        "://127.0.0.1:", "://host.docker.internal:"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------

@@ -287,7 +287,17 @@ async def fetch_all_mcp_servers() -> list[McpEntry]:
     re-walking the DB because the dict is the authoritative
     "what has the orchestrator registered" view that future hot-reload
     publishers will keep in lockstep.
+
+    Bug 5 (2026-04-26): rewrite ``localhost`` / ``127.0.0.1`` in each
+    URL to ``host.docker.internal`` BEFORE serialising. The
+    orchestrator stores raw origins (``localhost`` legitimately means
+    the host inside this process), but the gateway running in a
+    container will dial its own loopback if it sees the literal
+    string. Rewrite at the publish boundary so the in-process
+    registry stays useful for the rollback / pre-EC-1 path that
+    proxies through the host's credential proxy.
     """
+    from rolemesh.container.runtime import rewrite_loopback_to_host_gateway
     from rolemesh.egress.reverse_proxy import get_mcp_registry
 
     out: list[McpEntry] = []
@@ -295,7 +305,7 @@ async def fetch_all_mcp_servers() -> list[McpEntry]:
         out.append(
             McpEntry(
                 name=name,
-                url=url,
+                url=rewrite_loopback_to_host_gateway(url),
                 headers=dict(headers),
                 auth_mode=auth_mode,
             )
