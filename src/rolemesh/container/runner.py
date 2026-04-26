@@ -486,6 +486,15 @@ def build_container_spec(
         "ANTHROPIC_BASE_URL": proxy_base,
         # Multi-provider proxy URLs for Pi backend (each SDK reads its own env var)
         "OPENAI_BASE_URL": f"{proxy_base}/proxy/openai",
+        # Bedrock — boto3 honours ``BEDROCK_BASE_URL`` as ``endpoint_url``.
+        # Same per-spawn ``proxy_base`` as Anthropic/OpenAI so EC-2
+        # (agent on Internal=true bridge) and rollback (agent on host
+        # bridge) both resolve a reachable address. Setting this here
+        # rather than in ``_pi_extra_env`` is deliberate — that helper
+        # runs at module load time, before CONTAINER_NETWORK_NAME is
+        # decided per spawn, and would have to reimplement the EC-2
+        # branching that already lives above (proxy_base).
+        "BEDROCK_BASE_URL": f"{proxy_base}/proxy/bedrock",
         # Redirect Claude Code CLI's .claude.json writes into the per-coworker
         # writable bind mount at /home/agent/.claude. Without this, the CLI
         # tries to write /home/agent/.claude.json on the readonly rootfs and

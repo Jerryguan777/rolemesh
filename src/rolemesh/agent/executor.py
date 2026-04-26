@@ -106,23 +106,28 @@ CLAUDE_CODE_BACKEND = AgentBackendConfig(
 )
 
 def _pi_extra_env() -> dict[str, str]:
-    """Build extra env for Pi backend — model selection only.
+    """Build extra env for Pi backend — model selection + boto3
+    placeholders.
 
     API keys are NOT injected here; all LLM requests go through the
     credential proxy which injects real keys at the HTTP level. For
-    Bedrock specifically, we additionally inject a placeholder
-    ``AWS_BEARER_TOKEN_BEDROCK`` (so boto3 doesn't refuse to send) and
-    a synthesized ``BEDROCK_BASE_URL`` pointing at the host's
-    credential proxy. ``BEDROCK_BASE_URL`` is ALWAYS computed here
-    rather than read from ``os.environ`` so an operator setting
-    ``BEDROCK_BASE_URL=http://localhost:...`` in ``.env`` can't
-    accidentally bake the orchestrator-process loopback into the
-    container (that's the Bug 5 family).
+    Bedrock specifically, we inject a placeholder
+    ``AWS_BEARER_TOKEN_BEDROCK`` (so boto3 doesn't raise
+    ``NoCredentialsError`` before it even sends) and an
+    ``AWS_REGION`` so boto3's model-ARN resolution lines up with
+    the upstream URL the credential proxy bound (single-source via
+    ``BEDROCK_DEFAULT_REGION``).
+
+    ``BEDROCK_BASE_URL`` is intentionally NOT set here — it lives
+    in ``rolemesh.container.runner.build_container_spec`` alongside
+    ``ANTHROPIC_BASE_URL`` / ``OPENAI_BASE_URL`` because it depends
+    on per-spawn ``proxy_base`` (egress-gateway under EC-2,
+    host.docker.internal under rollback). Computing it here would
+    bake module-load-time hosting into a per-spawn decision.
     """
     import os
 
-    from rolemesh.container.runtime import rewrite_loopback_to_host_gateway
-    from rolemesh.core.config import BEDROCK_DEFAULT_REGION, CREDENTIAL_PROXY_PORT
+    from rolemesh.core.config import BEDROCK_DEFAULT_REGION
 
     # .env loading is handled at process entry by
     # ``rolemesh.bootstrap``; reading from os.environ here works
@@ -164,12 +169,6 @@ def _pi_extra_env() -> dict[str, str]:
         # credential proxy uses the same fallback so endpoint URL
         # and model ARN resolution stay in the same region.
         env["AWS_REGION"] = os.environ.get("AWS_REGION", "") or BEDROCK_DEFAULT_REGION
-        # Synthesize the proxy URL with localhost rewriting so the
-        # container always sees host.docker.internal regardless of
-        # what the operator wrote in ``.env``.
-        env["BEDROCK_BASE_URL"] = rewrite_loopback_to_host_gateway(
-            f"http://localhost:{CREDENTIAL_PROXY_PORT}/proxy/bedrock"
-        )
 
     return env
 

@@ -255,6 +255,17 @@ _FORWARDABLE: tuple[_ForwardSpec, ...] = (
     _ForwardSpec("OPENAI_BASE_URL", is_url=True),
     _ForwardSpec("PI_GOOGLE_API_KEY"),
     _ForwardSpec("GOOGLE_BASE_URL", is_url=True),
+    # Bedrock — both forward verbatim. The bearer token is a secret
+    # string (NEVER a URL — keep is_url=False so loopback rewrite
+    # cannot corrupt it). The region is also plain text
+    # ("us-east-1" etc.); the gateway reads it back in
+    # ``_build_provider_registry`` to pick the regional
+    # ``bedrock-runtime.{region}.amazonaws.com`` upstream. Without
+    # these two forwards, the gateway container's reverse proxy
+    # would never register a ``bedrock`` provider entry — every
+    # ``/proxy/bedrock/...`` request from agents would 404.
+    _ForwardSpec("AWS_BEARER_TOKEN_BEDROCK"),
+    _ForwardSpec("AWS_REGION"),
 )
 
 

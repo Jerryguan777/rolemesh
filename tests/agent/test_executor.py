@@ -251,37 +251,25 @@ class TestPiExtraEnvBedrock:
         assert token_in_env  # but placeholder MUST be set
         assert "placeholder" in token_in_env.lower()
 
-    def test_bedrock_model_id_synthesises_proxy_url_with_host_docker_internal(
+    def test_bedrock_url_NOT_set_in_pi_extra_env(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Bug 5 family: even if the operator stashed
-        # BEDROCK_BASE_URL=http://localhost:... in .env, the
-        # container must always see host.docker.internal because
-        # localhost inside a container is the container itself.
+        # Architectural pin: ``BEDROCK_BASE_URL`` belongs in
+        # ``container.runner.build_container_spec`` alongside the
+        # other base URLs (Anthropic / OpenAI / Google) because it
+        # depends on the per-spawn ``proxy_base`` decision (EC-2 →
+        # ``egress-gateway``; rollback → ``host.docker.internal``).
+        # Setting it from ``_pi_extra_env`` (module-load time) baked
+        # the rollback-path host into a per-spawn value and made the
+        # Bedrock path silently broken under EC-2. This test pins the
+        # invariant so a future refactor doesn't put it back.
         monkeypatch.setenv("PI_MODEL_ID", "amazon-bedrock/anything")
         monkeypatch.setenv("BEDROCK_BASE_URL", "http://localhost:9999/wrong")
         env = _pi_extra_env()
-        url = env["BEDROCK_BASE_URL"]
-        assert url.startswith("http://host.docker.internal:")
-        assert url.endswith("/proxy/bedrock")
-        # The wrong .env value must not have leaked through.
-        assert "localhost" not in url
-        assert "9999" not in url  # operator's wrong port not pasted in
-
-    def test_bedrock_url_is_synthesised_even_without_env_override(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # Regular case: operator did NOT set BEDROCK_BASE_URL. Helper
-        # must still inject the synthesized one — this is the
-        # "operators don't have to remember a third env var" property
-        # that the design depends on.
-        monkeypatch.setenv("PI_MODEL_ID", "amazon-bedrock/foo")
-        monkeypatch.delenv("BEDROCK_BASE_URL", raising=False)
-        env = _pi_extra_env()
-        assert env["BEDROCK_BASE_URL"].startswith(
-            "http://host.docker.internal:"
+        assert "BEDROCK_BASE_URL" not in env, (
+            "BEDROCK_BASE_URL must be set in build_container_spec, "
+            "not _pi_extra_env"
         )
-        assert env["BEDROCK_BASE_URL"].endswith("/proxy/bedrock")
 
     def test_bedrock_default_region_is_us_east_1(
         self, monkeypatch: pytest.MonkeyPatch
