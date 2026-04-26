@@ -2155,9 +2155,11 @@ async def update_conversation_user_id(
     """Set the user_id on a conversation (binds a user to a web conversation)."""
     async with tenant_conn(tenant_id) as conn:
         await conn.execute(
-            "UPDATE conversations SET user_id = $1::uuid WHERE id = $2::uuid",
+            "UPDATE conversations SET user_id = $1::uuid "
+            "WHERE id = $2::uuid AND tenant_id = $3::uuid",
             user_id,
             conversation_id,
+            tenant_id,
         )
 
 
@@ -2424,15 +2426,25 @@ async def get_tasks_for_coworker(
 
 
 async def get_all_tasks(tenant_id: str | None = None) -> list[ScheduledTask]:
-    """Get all scheduled tasks, optionally filtered by tenant."""
-    async with (tenant_conn(tenant_id) if tenant_id is not None else admin_conn()) as conn:
-        if tenant_id:
+    """Get all scheduled tasks, optionally filtered by tenant.
+
+    Treats both ``None`` and ``""`` as "no tenant scope" so callers
+    that build the parameter from an admin REST query string don't
+    accidentally pass an empty value into ``tenant_conn`` and trigger
+    fail-closed (current_tenant_id = NULL → RLS drops every row).
+    """
+    if tenant_id:
+        async with tenant_conn(tenant_id) as conn:
             rows = await conn.fetch(
-                "SELECT * FROM scheduled_tasks WHERE tenant_id = $1::uuid ORDER BY created_at DESC",
+                "SELECT * FROM scheduled_tasks "
+                "WHERE tenant_id = $1::uuid ORDER BY created_at DESC",
                 tenant_id,
             )
-        else:
-            rows = await conn.fetch("SELECT * FROM scheduled_tasks ORDER BY created_at DESC")
+    else:
+        async with admin_conn() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM scheduled_tasks ORDER BY created_at DESC"
+            )
     return [_record_to_scheduled_task(row) for row in rows]
 
 
@@ -2496,26 +2508,32 @@ async def delete_task(task_id: str, *, tenant_id: str) -> None:
 
 
 async def get_due_tasks(tenant_id: str | None = None) -> list[ScheduledTask]:
-    """Get all active tasks whose next_run is in the past."""
+    """Get all active tasks whose next_run is in the past.
+
+    Treats both ``None`` and ``""`` as "global scheduler scan" so an
+    empty string from a misconfigured caller doesn't enter
+    ``tenant_conn`` and silently filter every row to zero.
+    """
     now = datetime.now(UTC)
-    async with (
-        tenant_conn(tenant_id) if tenant_id is not None else admin_conn()
-    ) as conn:
-        if tenant_id:
+    if tenant_id:
+        async with tenant_conn(tenant_id) as conn:
             rows = await conn.fetch(
                 """
                 SELECT * FROM scheduled_tasks
-                WHERE tenant_id = $1::uuid AND status = 'active' AND next_run IS NOT NULL AND next_run <= $2
+                WHERE tenant_id = $1::uuid AND status = 'active'
+                  AND next_run IS NOT NULL AND next_run <= $2
                 ORDER BY next_run
                 """,
                 tenant_id,
                 now,
             )
-        else:
+    else:
+        async with admin_conn() as conn:
             rows = await conn.fetch(
                 """
                 SELECT * FROM scheduled_tasks
-                WHERE status = 'active' AND next_run IS NOT NULL AND next_run <= $1
+                WHERE status = 'active' AND next_run IS NOT NULL
+                  AND next_run <= $1
                 ORDER BY next_run
                 """,
                 now,
