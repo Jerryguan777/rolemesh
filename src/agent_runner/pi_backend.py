@@ -44,14 +44,16 @@ import logging
 import os
 import sys
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from pi.agent.types import (
+    MessageEndEvent,
     PromptTurnCompleteEvent,
     ToolExecutionStartEvent,
 )
-from pi.ai.types import TextContent
+from pi.ai.types import AssistantMessage, TextContent
 from pi.coding_agent.core.agent_session import AgentSession, AgentSessionEvent
 from pi.coding_agent.core.extensions.loader import create_extension_runtime
 from pi.coding_agent.core.extensions.runner import ExtensionRunner
@@ -71,6 +73,7 @@ from .backend import (
     SessionInitEvent,
     StoppedEvent,
     ToolUseEvent,
+    UsageSnapshot,
     tool_input_preview,
 )
 from .hooks import (
@@ -233,6 +236,138 @@ def _build_bridge_extension(hooks: HookRegistry) -> Extension:
     return extension
 
 
+@dataclass
+class _PromptUsageAccumulator:
+    """Sums Pi AssistantMessage.usage across the LLM calls in one user prompt.
+
+    Pi emits a MessageEndEvent per LLM call (each tool-using turn produces
+    one) and a PromptTurnCompleteEvent at the end of a user-visible prompt
+    answer. Accumulating at message_end and flushing at prompt_turn_complete
+    gives a per-prompt UsageSnapshot that survives multi-turn tool loops.
+
+    Why "dominant model" by output tokens: a single user prompt can fan out
+    across providers (e.g. main reasoning on Claude, a tool that itself
+    queries gpt-4o). Picking the model that produced the most output tokens
+    is a stable, deterministic, single-string label that's still meaningful
+    when the prompt was effectively single-model. Joined-string formats
+    ("claude+gpt-4o") were rejected because they encode poorly in a TEXT
+    column for analytics and force consumers to learn a sub-format.
+
+    Reset between prompts is mandatory: a single PiBackend instance answers
+    many prompts in its container's lifetime, and leaving residue from
+    prompt N would silently inflate prompt N+1's usage row.
+
+    USD cost: Pi providers call ``pi.ai.models.calculate_cost(model, usage)``
+    inside their stream loop right before yielding DoneEvent, mutating
+    ``usage.cost.{input,output,cache_read,cache_write,total}`` in place.
+    By the time MessageEndEvent reaches us, the total is ready — we just
+    sum it across calls. _cost_seen distinguishes "no provider populated
+    cost" (custom model not in registry → cost_usd=None on the snapshot,
+    same semantics as Claude SDK with no total_cost_usd) from "provider
+    populated zero cost" (would be indistinguishable, but practically
+    impossible because every model in the price table has at least one
+    non-zero rate).
+
+    Known limitations of the upstream price table that this accumulator
+    inherits without correction:
+      * No tiered long-context pricing — Anthropic's >200K input
+        premium and similar OpenAI long-context tiers are NOT modelled.
+        Pi under-bills prompts that cross the tier boundary.
+      * Single ``cache_write`` field — Anthropic's 1-hour cache TTL
+        costs 2x the 5-min TTL the table encodes. 1h-cache writes are
+        under-billed ~60%.
+      * Models registered out-of-band (operator-supplied via
+        register_models) without ModelCost will skip calculate_cost
+        entirely → snapshot.cost_usd=None, matching the "unknown cost"
+        contract.
+    """
+
+    input: int = 0
+    output: int = 0
+    cache_read: int = 0
+    cache_write: int = 0
+    by_model: dict[str, int] = field(default_factory=dict)
+    cost_usd: float = 0.0
+    # True once at least one message contributed positive cost. Used to
+    # distinguish "we summed across N calls and got 0" (impossible in
+    # practice — see class docstring) from "no calculate_cost ever ran"
+    # (custom model). Without this, a fully-zero accumulator on snapshot
+    # couldn't tell the two cases apart and we'd have to choose between
+    # always-emit-zero (overstates known coverage) and always-emit-None
+    # (loses real-zero data, also impossible in practice).
+    _cost_seen: bool = False
+
+    def add(self, msg: AssistantMessage) -> None:
+        usage = getattr(msg, "usage", None)
+        if usage is None:
+            return
+        self.input += int(getattr(usage, "input", 0) or 0)
+        self.output += int(getattr(usage, "output", 0) or 0)
+        self.cache_read += int(getattr(usage, "cache_read", 0) or 0)
+        self.cache_write += int(getattr(usage, "cache_write", 0) or 0)
+        # USD cost: read the in-place mutation calculate_cost left on
+        # usage.cost.total. Defensive on shape — usage.cost is a
+        # UsageCost dataclass today but a future Pi refactor could
+        # restructure it; falling back to None on an unexpected layout
+        # is preferred over crashing the agent loop.
+        cost_obj = getattr(usage, "cost", None)
+        cost_total = getattr(cost_obj, "total", None) if cost_obj is not None else None
+        if isinstance(cost_total, (int, float)) and cost_total > 0:
+            self.cost_usd += float(cost_total)
+            self._cost_seen = True
+        # Prefer the explicit model id (e.g. "claude-sonnet-4-6"); fall
+        # back to api ("anthropic-messages") only when model is empty,
+        # so a Pi build that forgets to populate model still attributes
+        # the tokens to a stable string instead of "".
+        model_label = ""
+        for attr in ("model", "api"):
+            val = getattr(msg, attr, "")
+            if isinstance(val, str) and val:
+                model_label = val
+                break
+        if model_label:
+            output_tokens = int(getattr(usage, "output", 0) or 0)
+            self.by_model[model_label] = self.by_model.get(model_label, 0) + output_tokens
+
+    def is_empty(self) -> bool:
+        return self.input == 0 and self.output == 0 and not self.by_model
+
+    def to_snapshot(self) -> UsageSnapshot | None:
+        """Return the accumulated snapshot, or None when nothing was recorded.
+
+        None is returned for a fully-empty accumulator so that
+        downstream code can keep ``usage=None`` on events that never
+        saw an LLM call (e.g. an abort that fired before the first
+        message_end). An accumulator that saw a turn but reported all
+        zeros (rare; some providers stream usage only on the final
+        chunk) still yields a snapshot — we want to record "we know
+        the cost was zero" distinctly from "we don't know the cost".
+        """
+        if self.is_empty():
+            return None
+        model_id: str | None = None
+        if self.by_model:
+            model_id = max(self.by_model.items(), key=lambda kv: kv[1])[0]
+        return UsageSnapshot(
+            input_tokens=self.input,
+            output_tokens=self.output,
+            cache_read_tokens=self.cache_read,
+            cache_write_tokens=self.cache_write,
+            cost_usd=self.cost_usd if self._cost_seen else None,
+            model_id=model_id,
+            cost_source="provider" if self._cost_seen else None,
+        )
+
+    def reset(self) -> None:
+        self.input = 0
+        self.output = 0
+        self.cache_read = 0
+        self.cache_write = 0
+        self.by_model.clear()
+        self.cost_usd = 0.0
+        self._cost_seen = False
+
+
 class PiBackend:
     """AgentBackend implementation wrapping Pi's AgentSession."""
 
@@ -243,6 +378,13 @@ class PiBackend:
         self._unsubscribe: Callable[[], None] | None = None
         self._mcp_connections: list[McpServerConnection] = []
         self._bg_tasks: set[asyncio.Task[None]] = set()
+        # Accumulates token usage across the LLM calls of the currently-
+        # answering prompt. Reset at each PromptTurnCompleteEvent so a
+        # follow-up question doesn't double-count the previous prompt.
+        # Field on PiBackend rather than a per-run_prompt local because
+        # _handle_event is a sync subscription to AgentSession events
+        # and has no closure access to run_prompt's locals.
+        self._usage_acc: _PromptUsageAccumulator = _PromptUsageAccumulator()
         # Set True for the duration of abort() so handle_follow_up rejects
         # late-arriving follow-ups that would otherwise land on Pi's
         # follow_up_queue — mirrors the guard Claude's backend added in
@@ -490,6 +632,16 @@ class PiBackend:
         ContainerOutput(status="error"), which IS emitted correctly.
         Revisit if/when a real Stop observer is wired up.
         """
+        if isinstance(event, MessageEndEvent):
+            # Accumulate per-LLM-call usage. Pi fires MessageEndEvent at
+            # the close of every assistant message — both intermediate
+            # tool-using turns and the final one. A user prompt that
+            # invoked tools 3 times produces 4 message_end events; all
+            # four contribute to the same prompt-level snapshot.
+            msg = getattr(event, "message", None)
+            if isinstance(msg, AssistantMessage):
+                self._usage_acc.add(msg)
+            return
         if isinstance(event, PromptTurnCompleteEvent):
             msg = getattr(event, "message", None)
             stop_reason = getattr(msg, "stop_reason", None)
@@ -504,29 +656,60 @@ class PiBackend:
                 # reply, then ErrorEvent so the orchestrator records
                 # status="error" for the turn.
                 partial_text = _extract_text(msg) if msg is not None else ""
+                # MessageEndEvent already fired before this PromptTurnCompleteEvent
+                # in the error case (proxy.py finalizes the partial AssistantMessage
+                # before yielding done), so the acc has the partial-turn tokens.
+                # Ship them on whichever event the orchestrator persists; we
+                # attach to the partial ResultEvent first (so the user-facing
+                # row gets cost) and reset the acc here so neither the trailing
+                # ErrorEvent nor a subsequent successful prompt double-counts.
+                snap = self._usage_acc.to_snapshot()
+                self._usage_acc.reset()
                 if partial_text:
                     self._schedule_emit(
                         ResultEvent(
                             text=partial_text,
                             new_session_id=self._session_file,
                             is_final=False,
+                            usage=snap,
                         )
                     )
+                    snap_for_error = None
+                else:
+                    snap_for_error = snap
                 err = (
                     getattr(msg, "error_message", None)
                     or "LLM stream ended in error with no further detail"
                 )
-                self._schedule_emit(ErrorEvent(error=err))
+                self._schedule_emit(ErrorEvent(error=err, usage=snap_for_error))
                 return
             if stop_reason == "aborted":
+                # abort() emits its own StoppedEvent with the snapshot
+                # (see PiBackend.abort). Reset here so a follow-up
+                # prompt after the abort starts with a clean acc — if
+                # the abort path raced and didn't reach abort()'s
+                # snapshot grab, leaving residue would taint the next
+                # prompt instead of being lost.
+                self._usage_acc.reset()
                 return
             text = _extract_text(msg) if msg is not None else ""
+            snap = self._usage_acc.to_snapshot()
+            self._usage_acc.reset()
+            # Only emit ResultEvent when there is text — but ALWAYS
+            # reset (above) so token accounting doesn't silently
+            # accumulate across an empty turn. An empty-text prompt
+            # completion (e.g. a turn that produced only tool calls
+            # and nothing visible) currently drops the usage; this is
+            # acceptable because such a turn produces no message row
+            # to attach the tokens to. If/when we add a per-turn
+            # token telemetry stream, revisit this branch.
             if text:
                 self._schedule_emit(
                     ResultEvent(
                         text=text,
                         new_session_id=self._session_file,
                         is_final=False,
+                        usage=snap,
                     )
                 )
         elif isinstance(event, ToolExecutionStartEvent):
@@ -606,7 +789,14 @@ class PiBackend:
             await self._session.prompt(prompt_text)
         except Exception as exc:
             error_raised = True
-            await self._emit(ErrorEvent(error=str(exc)))
+            # Carry whatever tokens were burned before the exception.
+            # Pi exceptions on this path mean session.prompt itself
+            # raised — usually a programming error rather than an LLM
+            # error; the acc may or may not have content depending on
+            # how far the loop progressed.
+            snap = self._usage_acc.to_snapshot()
+            self._usage_acc.reset()
+            await self._emit(ErrorEvent(error=str(exc), usage=snap))
             raise
         finally:
             # Drain any ResultEvent/ToolUseEvent publishes scheduled synchronously
@@ -670,7 +860,14 @@ class PiBackend:
         try:
             if self._session is not None:
                 await self._session.abort()
-            await self._emit(StoppedEvent())
+            # Snapshot whatever tokens have already accumulated for the
+            # in-flight turn before resetting the acc. Without this,
+            # an LLM call that streamed half a response and was then
+            # cancelled would lose its prompt+partial-output tokens
+            # entirely — but the provider already billed for them.
+            snap = self._usage_acc.to_snapshot()
+            self._usage_acc.reset()
+            await self._emit(StoppedEvent(usage=snap))
         finally:
             self._aborting = False
         # Stop hook emission — AFTER StoppedEvent so the UI exits the
