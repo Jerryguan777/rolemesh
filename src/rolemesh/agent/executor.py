@@ -9,6 +9,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
+from rolemesh.core.logger import get_logger
+
+logger = get_logger()
+
 
 @dataclass(frozen=True)
 class AgentInput:
@@ -118,7 +122,7 @@ def _pi_extra_env() -> dict[str, str]:
     import os
 
     from rolemesh.container.runtime import rewrite_loopback_to_host_gateway
-    from rolemesh.core.config import CREDENTIAL_PROXY_PORT
+    from rolemesh.core.config import BEDROCK_DEFAULT_REGION, CREDENTIAL_PROXY_PORT
 
     # .env loading is handled at process entry by
     # ``rolemesh.bootstrap``; reading from os.environ here works
@@ -135,11 +139,31 @@ def _pi_extra_env() -> dict[str, str]:
     # boto3 client init doesn't raise; the proxy is the real
     # credential gate.
     if model_id.startswith("amazon-bedrock/"):
+        # Diagnostic guard: if the host doesn't actually have the
+        # bearer token set, the credential proxy will not register a
+        # ``bedrock`` provider entry and every container request will
+        # surface as a 404 from the proxy, with no obvious link back
+        # to "you forgot to set AWS_BEARER_TOKEN_BEDROCK in .env".
+        # Warn at container-spec build time so the misconfiguration
+        # is visible in the orchestrator log instead of as an
+        # opaque mid-turn error.
+        if not os.environ.get("AWS_BEARER_TOKEN_BEDROCK"):
+            logger.warning(
+                "Pi backend uses a Bedrock model id but host has no "
+                "AWS_BEARER_TOKEN_BEDROCK set; the credential proxy "
+                "will not register a bedrock provider, and every "
+                "tool call will return 404 from the proxy. Set "
+                "AWS_BEARER_TOKEN_BEDROCK in .env to fix.",
+                model_id=model_id,
+            )
+
         env["AWS_BEARER_TOKEN_BEDROCK"] = "placeholder-proxy-replaces-this"
         # Region picks the model's region context inside boto3 (model
-        # ARNs are region-scoped). Default matches the upstream URL
-        # default in ``_build_provider_registry``.
-        env["AWS_REGION"] = os.environ.get("AWS_REGION", "") or "us-east-1"
+        # ARNs are region-scoped). Single source of truth in
+        # ``rolemesh.core.config.BEDROCK_DEFAULT_REGION``; the
+        # credential proxy uses the same fallback so endpoint URL
+        # and model ARN resolution stay in the same region.
+        env["AWS_REGION"] = os.environ.get("AWS_REGION", "") or BEDROCK_DEFAULT_REGION
         # Synthesize the proxy URL with localhost rewriting so the
         # container always sees host.docker.internal regardless of
         # what the operator wrote in ``.env``.

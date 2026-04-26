@@ -167,7 +167,9 @@ def _build_provider_registry(
     # initial Sonnet/Opus 4.6 use case.
     bedrock_token = secrets.get("AWS_BEARER_TOKEN_BEDROCK", "")
     if bedrock_token:
-        bedrock_region = secrets.get("AWS_REGION", "") or "us-east-1"
+        from rolemesh.core.config import BEDROCK_DEFAULT_REGION
+
+        bedrock_region = secrets.get("AWS_REGION", "") or BEDROCK_DEFAULT_REGION
         registry["bedrock"] = _ProviderConfig(
             upstream=f"https://bedrock-runtime.{bedrock_region}.amazonaws.com",
             secret_key=bedrock_token,

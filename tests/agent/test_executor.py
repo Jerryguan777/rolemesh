@@ -298,3 +298,62 @@ class TestPiExtraEnvBedrock:
         monkeypatch.setenv("AWS_REGION", "us-west-2")
         env = _pi_extra_env()
         assert env["AWS_REGION"] == "us-west-2"
+
+    def test_warns_when_host_lacks_bedrock_token(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # P1 ergonomics: an operator who set
+        # ``PI_MODEL_ID=amazon-bedrock/...`` but forgot
+        # ``AWS_BEARER_TOKEN_BEDROCK`` would otherwise hit a runtime
+        # 404 from the credential proxy with no obvious cause.
+        # Validate the warning fires at container-spec-build time
+        # so the misconfiguration is visible up front.
+        #
+        # rolemesh uses structlog (not stdlib logging), so caplog can't
+        # observe it; spy on the logger directly instead.
+        from rolemesh.agent import executor as executor_mod
+
+        captured: list[tuple[str, dict[str, object]]] = []
+
+        def _spy(msg: str, **kwargs: object) -> None:
+            captured.append((msg, kwargs))
+
+        monkeypatch.setattr(executor_mod.logger, "warning", _spy)
+        monkeypatch.setenv("PI_MODEL_ID", "amazon-bedrock/foo")
+        monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+
+        env = executor_mod._pi_extra_env()
+
+        # Container env still gets the placeholder — we degrade
+        # gracefully rather than refuse to spawn.
+        assert env["AWS_BEARER_TOKEN_BEDROCK"] == "placeholder-proxy-replaces-this"
+        # And we logged a warning naming the symptom + fix, with the
+        # offending model_id attached for log-search ergonomics.
+        assert len(captured) == 1
+        msg, kwargs = captured[0]
+        assert "AWS_BEARER_TOKEN_BEDROCK" in msg
+        assert kwargs.get("model_id") == "amazon-bedrock/foo"
+
+    def test_no_warning_when_host_has_bedrock_token(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from rolemesh.agent import executor as executor_mod
+
+        captured: list[tuple[str, dict[str, object]]] = []
+
+        def _spy(msg: str, **kwargs: object) -> None:
+            captured.append((msg, kwargs))
+
+        monkeypatch.setattr(executor_mod.logger, "warning", _spy)
+        monkeypatch.setenv("PI_MODEL_ID", "amazon-bedrock/foo")
+        monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "ABSKtoken")
+
+        executor_mod._pi_extra_env()
+
+        # Quiet path — host configured correctly, no nag.
+        bedrock_warnings = [
+            (m, k) for m, k in captured if "AWS_BEARER_TOKEN_BEDROCK" in m
+        ]
+        assert bedrock_warnings == []

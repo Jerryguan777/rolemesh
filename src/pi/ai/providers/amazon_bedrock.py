@@ -627,30 +627,46 @@ def _convert_messages(
     return result
 
 
+# Bedrock Converse tool-name contract:
+#   - max 64 chars
+#   - first char a letter, then letters/digits/underscore/hyphen only
+# Source: AWS Bedrock Runtime API ToolSpecification.name documentation.
+# We validate both shape AND length client-side so the failure surfaces
+# in rolemesh's stack with our error message, not as an opaque
+# Bedrock 400 with AWS-flavoured wording. Anthropic / OpenAI / Google
+# providers do their own thing — this is a Bedrock-only contract.
+_BEDROCK_TOOL_NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,63}$")
+
+
 def _convert_tool_config(
     tools: list[Tool] | None,
     tool_choice: Literal["auto", "any", "none"] | dict[str, str] | None,
 ) -> dict[str, Any] | None:
     """Convert tools and tool_choice to Bedrock ToolConfiguration format.
 
-    Bedrock Converse caps tool names at 64 characters, while Anthropic
-    native and OpenAI accept up to 128. We do NOT silently truncate
-    here — a hidden mapping layer would just defer the failure to a
-    confusing point downstream (the agent would call a name that no
-    longer matches its tool registry). Fail loudly with the offending
-    name so operators know to apply the short-prefix MCP naming
-    scheme upstream.
+    Bedrock Converse imposes both a 64-char cap and a restricted
+    character set (``^[a-zA-Z][a-zA-Z0-9_-]*$``). Anthropic native
+    and OpenAI accept names up to 128 chars and a wider charset.
+
+    We do NOT silently truncate / sanitise here — a hidden mapping
+    layer would just defer the failure to a confusing point
+    downstream (the agent would call a name that no longer matches
+    its tool registry). Fail loudly with the offending name so
+    operators know to apply the short-prefix MCP naming scheme (and
+    avoid disallowed characters) upstream.
     """
     if not tools or tool_choice == "none":
         return None
 
     for tool in tools:
-        if len(tool.name) > 64:
+        if not _BEDROCK_TOOL_NAME_RE.match(tool.name):
             raise ValueError(
-                f"Bedrock Converse: tool name {tool.name!r} is "
-                f"{len(tool.name)} chars; max 64. Apply the upstream "
-                f"short-prefix MCP naming scheme before sending to "
-                f"this provider."
+                f"Bedrock Converse: tool name {tool.name!r} is invalid "
+                f"(len={len(tool.name)}). Must match "
+                f"^[a-zA-Z][a-zA-Z0-9_-]{{0,63}}$ — at most 64 chars, "
+                f"start with an ASCII letter, then letters/digits/"
+                f"underscore/hyphen only. Apply the upstream short-prefix "
+                f"MCP naming scheme before sending to this provider."
             )
 
     bedrock_tools: list[dict[str, Any]] = [

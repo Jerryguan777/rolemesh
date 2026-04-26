@@ -59,6 +59,60 @@ def test_realistic_long_mcp_name_raises() -> None:
         _convert_tool_config([_tool(bad)], "auto")
 
 
+# ---------------------------------------------------------------------------
+# Character set (added P2-#3): Bedrock requires
+# ^[a-zA-Z][a-zA-Z0-9_-]{0,63}$ — a starting letter, then letters /
+# digits / underscore / hyphen only. Other LLM providers accept a
+# wider charset; we validate ONLY for Bedrock to keep the rolemesh
+# error story specific to "this is a Bedrock constraint".
+# ---------------------------------------------------------------------------
+
+
+def test_dot_in_name_raises() -> None:
+    # ``.`` is common in MCP server names (``github.search``) but
+    # Bedrock rejects it. Surface the error in our layer rather
+    # than as a 400 ValidationException from AWS.
+    with pytest.raises(ValueError, match="Bedrock Converse"):
+        _convert_tool_config([_tool("github.search")], "auto")
+
+
+def test_slash_in_name_raises() -> None:
+    with pytest.raises(ValueError, match="Bedrock Converse"):
+        _convert_tool_config([_tool("scope/tool")], "auto")
+
+
+def test_at_sign_in_name_raises() -> None:
+    with pytest.raises(ValueError, match="Bedrock Converse"):
+        _convert_tool_config([_tool("scope@v1")], "auto")
+
+
+def test_starting_digit_raises() -> None:
+    # First char must be a letter — ``[a-zA-Z]``. Names like
+    # ``2fa_setup`` would slip past a length-only check.
+    with pytest.raises(ValueError, match="Bedrock Converse"):
+        _convert_tool_config([_tool("2fa_setup")], "auto")
+
+
+def test_starting_underscore_raises() -> None:
+    with pytest.raises(ValueError, match="Bedrock Converse"):
+        _convert_tool_config([_tool("_private_tool")], "auto")
+
+
+def test_double_underscore_mcp_style_is_accepted() -> None:
+    # Real-world: rolemesh's MCP tools use ``mcp__server__tool``.
+    # Double underscore must NOT trip the validator — that pattern
+    # is what makes operator-side short-prefix scheme practical.
+    cfg = _convert_tool_config([_tool("mcp__github__search")], "auto")
+    assert cfg is not None
+    assert cfg["tools"][0]["toolSpec"]["name"] == "mcp__github__search"
+
+
+def test_hyphenated_name_is_accepted() -> None:
+    # Common in OpenAPI-derived MCP servers.
+    cfg = _convert_tool_config([_tool("get-user-by-id")], "auto")
+    assert cfg is not None
+
+
 def test_no_tools_short_circuits_without_check() -> None:
     # Empty tools list => no validation runs; mirrors the upstream
     # ``if not tools or tool_choice == "none"`` early return.

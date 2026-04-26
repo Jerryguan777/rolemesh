@@ -174,6 +174,15 @@ CONTAINER_ENV_ALLOWLIST: frozenset[str] = frozenset({
     "BEDROCK_BASE_URL",
 })
 
+# Default AWS region for Bedrock when ``AWS_REGION`` is unset on the
+# host. Single source of truth: the credential proxy uses it to build
+# the upstream URL (``bedrock-runtime.{region}.amazonaws.com``) and
+# ``_pi_extra_env`` uses the same fallback when synthesising the
+# container's ``AWS_REGION`` env so boto3 model-ARN resolution lines
+# up with the proxy's endpoint. Drift between the two would resolve
+# model ARNs in one region while routing requests to another.
+BEDROCK_DEFAULT_REGION: str = "us-east-1"
+
 # Agent backend: "claude" or "pi"
 AGENT_BACKEND_DEFAULT: str = os.environ.get("ROLEMESH_AGENT_BACKEND", "claude")
 
