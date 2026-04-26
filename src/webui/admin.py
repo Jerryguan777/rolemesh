@@ -83,6 +83,76 @@ def _require_engine() -> ApprovalEngine:
         raise HTTPException(status_code=503, detail="Approval engine not configured")
     return _approval_engine
 
+
+# Module-level NATS client used to publish ``egress.mcp.changed``
+# deltas after an admin edits a coworker's MCP tools. Set from the
+# WebUI bootstrap; ``None`` means MCP hot-reload broadcasts are off
+# (the gateway still gets a current snapshot at orchestrator boot,
+# so functionality degrades gracefully — operators just need to wait
+# for a gateway restart for tool edits to land).
+_mcp_publisher: Any = None
+
+
+def set_mcp_publisher(nc: Any) -> None:
+    """Attach or detach the process-wide NATS client used for MCP
+    registry-change broadcasts.
+
+    Type stays ``Any`` here to avoid pulling ``nats`` types into the
+    admin module's import surface; the caller in ``webui.main``
+    already has the typed handle.
+    """
+    global _mcp_publisher
+    _mcp_publisher = nc
+
+
+async def _publish_mcp_for_coworker(action: str, cw: Coworker) -> None:
+    """Broadcast one ``egress.mcp.changed`` event per tool on the
+    coworker. Best-effort — a NATS hiccup must not break the admin
+    REST response, so the publisher itself swallows errors.
+
+    Used after create / update of a coworker's tools list. We send
+    one event per tool (not a single batched event) so the
+    gateway-side ``apply_change_event`` stays trivial — the same
+    handler shape works for boot snapshot + live deltas.
+
+    NAMING-COLLISION CAVEAT: the gateway / orchestrator MCP registry
+    is keyed by tool ``name`` alone, NOT by ``(coworker_id, name)``.
+    If two coworkers configure a tool with the same ``name`` but
+    different URLs, every PATCH against either coworker republishes
+    its own URL and overwrites the other's entry on every gateway
+    that receives the event. Pre-PR-2 this only collided once at
+    orchestrator boot ("last writer wins"); after PR-2 it collides
+    on every admin edit. The proper fix is to re-key the registry on
+    ``(tenant_id, name)`` (operator scope) or ``(coworker_id, name)``
+    (per-agent scope) — tracked as a follow-up. Until then, document
+    in the operator playbook that tool names should be unique within
+    a tenant.
+    """
+    if _mcp_publisher is None:
+        return
+    from urllib.parse import urlparse
+
+    from rolemesh.egress.mcp_cache import McpEntry
+    from rolemesh.egress.orch_glue import publish_mcp_registry_changed
+
+    for tool in cw.tools:
+        # Same origin computation the orchestrator's bootstrap
+        # register_mcp_server walk uses (rolemesh/main.py); keep the
+        # two paths aligned so the gateway never sees a tool URL the
+        # snapshot would have stored differently.
+        parsed = urlparse(tool.url)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        entry = McpEntry(
+            name=tool.name,
+            url=origin,
+            headers=dict(tool.headers or {}),
+            auth_mode=tool.auth_mode,
+        )
+        await publish_mcp_registry_changed(
+            _mcp_publisher, action=action, entry=entry
+        )
+
+
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
@@ -376,6 +446,11 @@ async def create_agent(
         )
     except asyncpg.UniqueViolationError as exc:
         raise HTTPException(status_code=409, detail="Agent with this folder already exists in tenant") from exc
+    # Notify the egress gateway of the freshly-registered MCP tools
+    # so it doesn't have to wait for an orchestrator restart to route
+    # them. Best-effort; the snapshot path on gateway boot still
+    # recovers full state if the broadcast misses.
+    await _publish_mcp_for_coworker("created", cw)
     return _coworker_to_response(cw)
 
 
@@ -417,6 +492,18 @@ async def update_agent(
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="Agent not found")
+    # Hot-reload MCP routes only when tools were actually included
+    # in the PATCH (``body.tools is not None``). A PATCH that only
+    # touches name/permissions/etc. shouldn't generate spurious
+    # mcp.changed traffic.
+    #
+    # NOTE: if any of the new tools share a ``name`` with a tool on
+    # another coworker, this broadcast will overwrite that other
+    # coworker's URL on the gateway because the registry is name-
+    # keyed. See ``_publish_mcp_for_coworker`` docstring for the
+    # follow-up plan.
+    if body.tools is not None:
+        await _publish_mcp_for_coworker("updated", updated)
     return _coworker_to_response(updated)
 
 

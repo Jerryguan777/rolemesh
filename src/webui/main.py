@@ -127,9 +127,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
     )
 
+    # Wire the MCP-registry hot-reload publisher. When an admin
+    # creates/updates an agent's tools, the PATCH handler emits one
+    # ``egress.mcp.changed`` event per tool so the gateway can update
+    # routes without an orchestrator restart. Uses core NATS (not
+    # JetStream) — the broadcast is at-most-once but the gateway's
+    # snapshot fetch on boot handles missed deltas as a backstop.
+    _admin.set_mcp_publisher(_nc)
+
     yield
 
     # Shutdown
+    _admin.set_mcp_publisher(None)
     await auth.close_auth()
     await _close_db()
     if _nc is not None:
