@@ -153,6 +153,21 @@ def register_mcp_server(
     logger.info("MCP server registered", name=name, url=url, auth_mode=auth_mode)
 
 
+def unregister_mcp_server(name: str) -> bool:
+    """Remove an MCP server from the registry. Returns True if it was present.
+
+    Used by the gateway-side hot-reload subscriber when the orchestrator
+    publishes ``egress.mcp.changed action=deleted``. Idempotent: a
+    redundant delete (e.g. the same broadcast arriving twice) returns
+    False rather than raising.
+    """
+    removed = _mcp_registry.pop(name, None)
+    if removed is None:
+        return False
+    logger.info("MCP server unregistered", name=name)
+    return True
+
+
 def get_mcp_registry() -> dict[str, tuple[str, dict[str, str], str]]:
     return dict(_mcp_registry)
 
@@ -473,6 +488,7 @@ __all__ = [
     "register_mcp_server",
     "set_token_vault",
     "start_credential_proxy",
+    "unregister_mcp_server",
 ]
 
 

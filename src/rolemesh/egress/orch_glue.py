@@ -43,6 +43,12 @@ logger = get_logger()
 # so there's a single authoritative string for each subject. Duplicate
 # definitions would drift.
 from .identity import IDENTITY_SNAPSHOT_SUBJECT, LIFECYCLE_SUBJECT  # noqa: E402
+from .mcp_cache import (  # noqa: E402
+    MCP_CHANGED_SUBJECT,
+    MCP_SNAPSHOT_REQUEST_SUBJECT,
+    McpEntry,
+    entry_to_dict,
+)
 from .policy_cache import RULE_CHANGED_SUBJECT, SNAPSHOT_REQUEST_SUBJECT  # noqa: E402
 
 
@@ -133,6 +139,45 @@ async def publish_lifecycle_stopped(
         logger.warning("lifecycle publish failed (stopped)", error=str(exc))
 
 
+async def publish_mcp_registry_changed(
+    nc: nats.aio.client.Client,
+    *,
+    action: str,
+    entry: McpEntry | None = None,
+    name: str | None = None,
+) -> None:
+    """Push a single MCP registry delta to the gateway.
+
+    For ``created`` / ``updated``: pass ``entry`` with the full payload.
+    For ``deleted``: pass ``name`` (the only field the consumer needs).
+
+    Best-effort publish: a failure here means the gateway misses one
+    delta, but its next snapshot fetch on restart still recovers full
+    state.
+    """
+    if action == "deleted":
+        if not name:
+            logger.warning("mcp_registry publish: deleted without name")
+            return
+        payload: dict[str, Any] = {"action": "deleted", "name": name}
+    else:
+        if entry is None:
+            logger.warning(
+                "mcp_registry publish: missing entry",
+                action=action,
+            )
+            return
+        payload = {"action": action, **entry_to_dict(entry)}
+    try:
+        await nc.publish(MCP_CHANGED_SUBJECT, json.dumps(payload).encode("utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "mcp_registry publish failed",
+            error=str(exc),
+            action=action,
+        )
+
+
 async def publish_rule_changed(
     nc: nats.aio.client.Client,
     *,
@@ -164,8 +209,9 @@ async def start_responders(
     *,
     state: OrchestratorState,
     rules_fetcher: Callable[[], Awaitable[list[dict[str, Any]]]],
+    mcp_fetcher: Callable[[], Awaitable[list[McpEntry]]] | None = None,
 ) -> list[object]:
-    """Subscribe to both snapshot-request subjects and return sub handles.
+    """Subscribe to all snapshot-request subjects and return sub handles.
 
     Caller is responsible for ``await sub.unsubscribe()`` at shutdown.
     Kept fire-and-forget rather than using JetStream: these are
@@ -174,8 +220,17 @@ async def start_responders(
 
     ``rules_fetcher`` is injected so tests can feed a canned list
     without standing up the DB. Production wires it to
-    ``_fetch_all_egress_rules`` below.
+    ``fetch_all_egress_rules`` below.
+
+    ``mcp_fetcher`` defaults to ``fetch_all_mcp_servers``, which
+    reads the orchestrator's process-local ``_mcp_registry``. Tests
+    can pass a stub. ``None`` (default) wires the production fetcher
+    rather than skipping the responder, because a missing responder
+    would cause every gateway boot to time out.
     """
+    if mcp_fetcher is None:
+        mcp_fetcher = fetch_all_mcp_servers
+
     async def _rules_handler(msg: object) -> None:
         try:
             rules = await rules_fetcher()
@@ -196,13 +251,55 @@ async def start_responders(
         with contextlib.suppress(Exception):
             await msg.respond(body)  # type: ignore[attr-defined]
 
+    async def _mcp_handler(msg: object) -> None:
+        try:
+            entries = await mcp_fetcher()
+            body = json.dumps(
+                {"entries": [entry_to_dict(e) for e in entries]}
+            ).encode("utf-8")
+        except Exception as exc:  # noqa: BLE001
+            logger.error("mcp snapshot fetch failed", error=str(exc))
+            body = json.dumps({"entries": [], "error": str(exc)}).encode("utf-8")
+        with contextlib.suppress(Exception):
+            await msg.respond(body)  # type: ignore[attr-defined]
+
     rules_sub = await nc.subscribe(SNAPSHOT_REQUEST_SUBJECT, cb=_rules_handler)
     identity_sub = await nc.subscribe(IDENTITY_SNAPSHOT_SUBJECT, cb=_identity_handler)
+    mcp_sub = await nc.subscribe(MCP_SNAPSHOT_REQUEST_SUBJECT, cb=_mcp_handler)
     logger.info(
         "egress responders subscribed",
-        subjects=[SNAPSHOT_REQUEST_SUBJECT, IDENTITY_SNAPSHOT_SUBJECT],
+        subjects=[
+            SNAPSHOT_REQUEST_SUBJECT,
+            IDENTITY_SNAPSHOT_SUBJECT,
+            MCP_SNAPSHOT_REQUEST_SUBJECT,
+        ],
     )
-    return [rules_sub, identity_sub]
+    return [rules_sub, identity_sub, mcp_sub]
+
+
+async def fetch_all_mcp_servers() -> list[McpEntry]:
+    """Production MCP fetcher: snapshot the orchestrator's in-process
+    ``_mcp_registry``.
+
+    The orchestrator already populates this dict in ``main`` by walking
+    ``coworker.tools`` at startup. We read the dict directly rather than
+    re-walking the DB because the dict is the authoritative
+    "what has the orchestrator registered" view that future hot-reload
+    publishers will keep in lockstep.
+    """
+    from rolemesh.egress.reverse_proxy import get_mcp_registry
+
+    out: list[McpEntry] = []
+    for name, (url, headers, auth_mode) in get_mcp_registry().items():
+        out.append(
+            McpEntry(
+                name=name,
+                url=url,
+                headers=dict(headers),
+                auth_mode=auth_mode,
+            )
+        )
+    return out
 
 
 async def fetch_all_egress_rules() -> list[dict[str, Any]]:
