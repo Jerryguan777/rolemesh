@@ -61,11 +61,23 @@ def _get_pool() -> asyncpg.Pool[asyncpg.Record]:
 
 def _get_admin_pool() -> asyncpg.Pool[asyncpg.Record]:
     """Return the BYPASSRLS admin pool used by cross-tenant maintenance,
-    resolvers, and DDL. Falls back to the business pool if no separate
-    admin DSN was configured (dev/test convenience)."""
-    if _admin_pool is not None:
-        return _admin_pool
-    return _get_pool()
+    resolvers, and DDL.
+
+    Asserts the pool was initialised. The previous version silently
+    fell back to the business pool when ``_admin_pool`` was None so
+    dev/test wouldn't have to set ``ADMIN_DATABASE_URL`` — but that
+    fallback also masks a real misconfiguration in prod (admin path
+    suddenly running under ``rolemesh_app`` NOBYPASSRLS, every
+    cross-tenant query returns zero rows). Both ``init_database``
+    and ``_init_test_database`` already create ``_admin_pool``
+    unconditionally (with a DSN fallback to ``DATABASE_URL`` when
+    ``ADMIN_DATABASE_URL`` is unset), so dev convenience is
+    preserved without the silent-fallback hazard.
+    """
+    assert _admin_pool is not None, (
+        "Admin pool not initialised. Call await init_database() first."
+    )
+    return _admin_pool
 
 
 @asynccontextmanager
@@ -2457,8 +2469,15 @@ async def update_task(
     schedule_value: str | None = None,
     next_run: str | None = None,
     status: str | None = None,
-) -> None:
-    """Update selected fields on a scheduled task, scoped to ``tenant_id``."""
+) -> ScheduledTask | None:
+    """Update selected fields on a scheduled task, scoped to ``tenant_id``.
+
+    Mirrors ``update_user`` / ``update_coworker``: when no fields are
+    supplied, returns the current row instead of silently doing
+    nothing — keeps PATCH-style callers consistent across resources.
+    Returns ``None`` if the row doesn't exist or belongs to another
+    tenant.
+    """
     fields: list[str] = []
     values: list[Any] = []
     param_idx = 1
@@ -2485,16 +2504,20 @@ async def update_task(
         param_idx += 1
 
     if not fields:
-        return
+        return await get_task_by_id(task_id, tenant_id=tenant_id)
 
     values.append(task_id)
     values.append(tenant_id)
     async with tenant_conn(tenant_id) as conn:
-        await conn.execute(
+        row = await conn.fetchrow(
             f"UPDATE scheduled_tasks SET {', '.join(fields)} "
-            f"WHERE id = ${param_idx}::uuid AND tenant_id = ${param_idx + 1}::uuid",
+            f"WHERE id = ${param_idx}::uuid AND tenant_id = ${param_idx + 1}::uuid "
+            f"RETURNING *",
             *values,
         )
+    if row is None:
+        return None
+    return _record_to_scheduled_task(row)
 
 
 async def delete_task(task_id: str, *, tenant_id: str) -> None:

@@ -1420,6 +1420,28 @@ async def main() -> None:
         return ranked
 
     class _OrchestratorChannelSender:
+        """ChannelSender adapter for the approval notification path.
+
+        SECURITY CONTRACT — ``conversation_id`` MUST come from a
+        tenant-scoped DB lookup that the caller has already trusted
+        (in practice: ``ApprovalRequest.conversation_id`` from a row
+        the engine fetched via ``get_approval_request(tenant_id=...)``,
+        OR a conversation_id rotated through
+        ``NotificationTargetResolver`` which the engine bound to the
+        request's tenant). The ``get_conversation_for_notification``
+        lookup below is intentionally cross-tenant (no GUC), so a
+        forged or mis-routed conversation_id would happily resolve
+        to *another* tenant's chat and we would publish the approval
+        prompt there.
+
+        Adding a defence-in-depth ``conv.tenant_id == request.tenant_id``
+        check here would require threading the request's tenant
+        through ChannelSender — left as a follow-up rather than
+        widened in this PR. Until then: callers must not pass an
+        unvalidated conversation_id (e.g. from user input) to this
+        sender.
+        """
+
         async def send_to_conversation(
             self, conversation_id: str, text: str
         ) -> None:
