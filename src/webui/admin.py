@@ -132,6 +132,7 @@ async def _publish_mcp_for_coworker(action: str, cw: Coworker) -> None:
         return
     from urllib.parse import urlparse
 
+    from rolemesh.container.runtime import rewrite_loopback_to_host_gateway
     from rolemesh.egress.mcp_cache import McpEntry
     from rolemesh.egress.orch_glue import publish_mcp_registry_changed
 
@@ -140,11 +141,19 @@ async def _publish_mcp_for_coworker(action: str, cw: Coworker) -> None:
         # register_mcp_server walk uses (rolemesh/main.py); keep the
         # two paths aligned so the gateway never sees a tool URL the
         # snapshot would have stored differently.
+        #
+        # Bug 5 (2026-04-26): rewrite localhost → host.docker.internal
+        # at the publish boundary. The gateway dials this URL
+        # verbatim from inside its container; the literal "localhost"
+        # would resolve to the gateway's own loopback. The orchestrator
+        # process keeps the unrewritten URL in its in-process
+        # registry because the rollback / pre-EC-1 path proxies
+        # through it on the host (where ``localhost`` IS the host).
         parsed = urlparse(tool.url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
         entry = McpEntry(
             name=tool.name,
-            url=origin,
+            url=rewrite_loopback_to_host_gateway(origin),
             headers=dict(tool.headers or {}),
             auth_mode=tool.auth_mode,
         )

@@ -207,3 +207,71 @@ async def test_publish_swallows_nats_errors() -> None:
     )
     # Must not raise.
     await admin_mod._publish_mcp_for_coworker("updated", cw)
+
+
+# ---------------------------------------------------------------------------
+# Bug 5 (2026-04-26): publish must rewrite localhost; in-process
+# register must NOT (orchestrator's rollback proxy still needs to
+# dial the host's loopback)
+# ---------------------------------------------------------------------------
+
+
+class TestLoopbackRewriteAtPublishBoundary:
+    @pytest.mark.asyncio
+    async def test_localhost_url_is_rewritten_in_published_event(self) -> None:
+        nc = _FakeNats()
+        admin_mod.set_mcp_publisher(nc)
+
+        cw = _coworker_with_tools(
+            [
+                McpServerConfig(
+                    name="tropos-mcp",
+                    type="http",
+                    url="https://localhost:8509/mcp",
+                )
+            ]
+        )
+        await admin_mod._publish_mcp_for_coworker("updated", cw)
+
+        payload = json.loads(nc.published[0].body)
+        # The exact regression that caused Bug 5: gateway-bound event
+        # must carry host.docker.internal, not the literal localhost.
+        assert payload["url"] == "https://host.docker.internal:8509"
+
+    @pytest.mark.asyncio
+    async def test_127_0_0_1_url_is_rewritten_in_published_event(self) -> None:
+        nc = _FakeNats()
+        admin_mod.set_mcp_publisher(nc)
+
+        cw = _coworker_with_tools(
+            [
+                McpServerConfig(
+                    name="local-mcp",
+                    type="http",
+                    url="http://127.0.0.1:9100/mcp/",
+                )
+            ]
+        )
+        await admin_mod._publish_mcp_for_coworker("updated", cw)
+        payload = json.loads(nc.published[0].body)
+        assert payload["url"] == "http://host.docker.internal:9100"
+
+    @pytest.mark.asyncio
+    async def test_external_host_url_is_not_rewritten(self) -> None:
+        # Negative case: only loopback gets rewritten. An operator
+        # pointing at a remote MCP cluster sees their hostname intact.
+        nc = _FakeNats()
+        admin_mod.set_mcp_publisher(nc)
+
+        cw = _coworker_with_tools(
+            [
+                McpServerConfig(
+                    name="github",
+                    type="http",
+                    url="https://api.github.com/mcp",
+                )
+            ]
+        )
+        await admin_mod._publish_mcp_for_coworker("updated", cw)
+        payload = json.loads(nc.published[0].body)
+        assert payload["url"] == "https://api.github.com"
