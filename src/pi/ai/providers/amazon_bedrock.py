@@ -126,7 +126,12 @@ def stream_bedrock(
             if base_url:
                 client_kwargs["endpoint_url"] = base_url
 
-            if options.profile:
+            # Profile path is bypassed when going through the rolemesh
+            # proxy: the proxy is the authoritative authn injector, so
+            # SigV4-signing with real long-term creds from a profile
+            # would (a) leak them across the local network as a
+            # signature and (b) be discarded anyway.
+            if options.profile and not base_url:
                 session = botocore.session.Session(profile=options.profile)
                 boto3_session = boto3.session.Session(botocore_session=session)
                 client = boto3_session.client("bedrock-runtime", **client_kwargs)

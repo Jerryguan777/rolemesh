@@ -169,6 +169,10 @@ CONTAINER_ENV_ALLOWLIST: frozenset[str] = frozenset({
     # the host and is overwritten on every request by the credential
     # proxy (see ``rolemesh.egress.reverse_proxy._build_provider_registry``).
     # ``AWS_REGION`` is needed by boto3 to construct model ARNs.
+    # ``BEDROCK_BASE_URL`` is written directly in
+    # ``runner.build_container_spec`` and bypasses the filter today;
+    # listed here as a guard if a future refactor moves URL synthesis
+    # back into ``backend_config.extra_env``.
     "AWS_BEARER_TOKEN_BEDROCK",
     "AWS_REGION",
     "BEDROCK_BASE_URL",
