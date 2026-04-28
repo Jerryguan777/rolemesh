@@ -110,7 +110,7 @@ async def test_projects_to_pi_path_for_pi_backend() -> None:
     try:
         mount = await materialize_skills_for_spawn(coworker, job_id, backend="pi")
         assert mount is not None
-        assert mount.container_path == "/home/agent/.pi/agent/skills"
+        assert mount.container_path == "/home/agent/.pi/skills"
     finally:
         cleanup_spawn_skills(job_id)
 
@@ -613,7 +613,7 @@ def test_container_targets_match_design_doc() -> None:
     """
     assert CONTAINER_TARGETS["claude"] == "/home/agent/.claude/skills"
     assert CONTAINER_TARGETS["claude-code"] == "/home/agent/.claude/skills"
-    assert CONTAINER_TARGETS["pi"] == "/home/agent/.pi/agent/skills"
+    assert CONTAINER_TARGETS["pi"] == "/home/agent/.pi/skills"
 
 
 # ---------------------------------------------------------------------------

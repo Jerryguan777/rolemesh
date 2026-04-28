@@ -20,7 +20,7 @@ The flow is described in detail in docs/skills-architecture.md
 The mount target inside the container depends on the backend:
 
 * ``claude`` / ``claude-code`` → ``/home/agent/.claude/skills``
-* ``pi``                       → ``/home/agent/.pi/agent/skills``
+* ``pi``                       → ``/home/agent/.pi/skills``
 """
 
 from __future__ import annotations
@@ -53,10 +53,33 @@ logger = get_logger()
 # (one per agent invocation) gets its own subtree keyed by job_id.
 SPAWN_ROOT: Path = DATA_DIR / "spawns"
 
+# Per-backend skill mount targets inside the agent container.
+#
+# Constraint discovered the hard way: the bind mount path must be a
+# DIRECT CHILD of a directory whose ownership matches the agent UID
+# at the time the container starts.
+#
+# When Docker prepares a bind mount at depth 2+ on a tmpfs (e.g. the
+# original ``/home/agent/.pi/agent/skills``), it has to mkdir the
+# intermediate path (``.pi/agent/``) on tmpfs. The tmpfs ``uid=1000``
+# mount option only covers the tmpfs ROOT — Docker's mkdir of the
+# intermediate runs as root and the new directory is owned root:root.
+# The agent process can no longer write SIBLINGS of skills (e.g.
+# Pi's ``.pi/agent/sessions/``) inside that root-owned intermediate
+# and crashes at startup with EACCES.
+#
+# Fix: keep the skill mount at depth 1 in the tmpfs / writable bind.
+# Then any root-owned dir Docker creates is a leaf (the bind target
+# itself, fully overlaid by the read-only mount), not a chokepoint
+# for sibling writes. ``.claude/skills`` already follows this pattern
+# because ``.claude`` is a writable bind mount (host source is
+# orchestrator-created and agent-owned). Pi must follow the same
+# discipline — see docs/skills-architecture.md "Pi backend mount
+# strategy" for the full reasoning.
 CONTAINER_TARGETS: dict[str, str] = {
     "claude": "/home/agent/.claude/skills",
     "claude-code": "/home/agent/.claude/skills",
-    "pi": "/home/agent/.pi/agent/skills",
+    "pi": "/home/agent/.pi/skills",
 }
 
 

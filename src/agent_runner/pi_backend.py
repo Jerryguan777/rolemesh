@@ -486,11 +486,21 @@ class PiBackend:
             else:
                 append_system_prompt = md_content
 
-        # Build resource loader with system prompt injection
+        # Build resource loader with system prompt injection.
+        #
+        # ``additional_skill_paths`` points the loader at the skill
+        # bind mount that the orchestrator's projector emits — the
+        # path is fixed by ``CONTAINER_TARGETS["pi"]`` in
+        # ``rolemesh.container.skill_projection``. Pi's default scan
+        # path (``agent_dir / "skills"`` = ``~/.pi/agent/skills``)
+        # was deliberately abandoned in favor of ``.pi/skills`` to
+        # avoid the depth-2-on-tmpfs ownership trap; see the comment
+        # block above ``CONTAINER_TARGETS`` for the full rationale.
         resource_loader = DefaultResourceLoader(
             DefaultResourceLoaderOptions(
                 cwd=cwd,
                 agent_dir=str(Path.home() / ".pi" / "agent"),
+                additional_skill_paths=[str(Path.home() / ".pi" / "skills")],
                 system_prompt=custom_system_prompt,
                 append_system_prompt=append_system_prompt,
             )

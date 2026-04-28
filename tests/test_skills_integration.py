@@ -237,7 +237,7 @@ async def test_rest_to_projection_pi_backend() -> None:
             coworker, job_id, backend="pi"
         )
         assert mount is not None
-        assert mount.container_path == "/home/agent/.pi/agent/skills"
+        assert mount.container_path == "/home/agent/.pi/skills"
 
         skill_md_out = (Path(mount.host_path) / "echo" / "SKILL.md").read_text()
         _, fm_block, _ = skill_md_out.split("---\n", 2)
