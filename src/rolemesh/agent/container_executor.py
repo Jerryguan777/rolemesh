@@ -23,6 +23,10 @@ from rolemesh.container.runner import (
     build_container_spec,
     build_volume_mounts,
 )
+from rolemesh.container.skill_projection import (
+    cleanup_spawn_skills,
+    materialize_skills_for_spawn,
+)
 from rolemesh.container.runtime import CONTAINER_HOST_GATEWAY
 from rolemesh.core.config import (
     CONTAINER_MAX_OUTPUT_SIZE,
@@ -147,6 +151,27 @@ class ContainerAgentExecutor:
             coworker, tenant_id, conversation_id,
             permissions=permissions, backend_config=self._config,
         )
+
+        # Materialize per-coworker skills to a per-spawn build dir
+        # and bind-mount it read-only at the backend's skill path.
+        # Returns None if there are no enabled skills, in which case
+        # we skip the mount entirely. Cleanup happens in the finally
+        # below — including on exceptions raised before the
+        # container is even started.
+        try:
+            skill_mount = await materialize_skills_for_spawn(
+                coworker, job_id, backend=self._config.name,
+            )
+        except Exception as exc:  # noqa: BLE001 — projection bugs must not crash spawn
+            logger.warning(
+                "Skill projection failed; spawning without skills",
+                coworker=coworker.name,
+                job_id=job_id,
+                error=str(exc),
+            )
+            skill_mount = None
+        if skill_mount is not None:
+            mounts.append(skill_mount)
         safe_name = re.sub(r"[^a-zA-Z0-9-]", "-", inp.group_folder)
         container_name = f"rolemesh-{safe_name}-{start_epoch_ms}"
 
@@ -493,6 +518,7 @@ class ContainerAgentExecutor:
                     duration=duration_ms,
                     code=code,
                 )
+                cleanup_spawn_skills(job_id)
                 return AgentOutput(
                     status="success",
                     result=None,
@@ -506,6 +532,7 @@ class ContainerAgentExecutor:
                 duration=duration_ms,
                 code=code,
             )
+            cleanup_spawn_skills(job_id)
             return AgentOutput(
                 status="error",
                 result=None,
@@ -570,6 +597,7 @@ class ContainerAgentExecutor:
                 stderr=stderr_buf,
                 log_file=str(log_file),
             )
+            cleanup_spawn_skills(job_id)
             return AgentOutput(
                 status="error",
                 result=None,
@@ -582,6 +610,7 @@ class ContainerAgentExecutor:
             duration=duration_ms,
             new_session_id=new_session_id,
         )
+        cleanup_spawn_skills(job_id)
         return AgentOutput(
             status="success",
             result=None,
