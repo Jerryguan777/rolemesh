@@ -357,6 +357,48 @@ class TestUpdate:
         assert set(r2.json()["files"]) == {"SKILL.md", "new.md"}
 
     @pytest.mark.asyncio
+    async def test_clear_backend_overrides_with_empty_dict(self) -> None:
+        """PATCH with ``frontmatter_backend: {}`` must clear the dict,
+        not silently keep the existing one. Caused by the previous
+        ``body.frontmatter_backend or existing.frontmatter_backend``
+        which treated an explicit empty dict as falsy.
+        """
+        tid, uid, aid = await _seed()
+        app = _build_app(_authed_user(tid, uid))
+        async with _client(app) as c:
+            r = await c.post(
+                f"/api/admin/agents/{aid}/skills",
+                json={
+                    "name": "with-overrides",
+                    "files": {
+                        "SKILL.md": (
+                            "---\nname: with-overrides\n"
+                            f"description: {_GOOD_DESC}\n"
+                            "argument-hint: '[before]'\n"
+                            "---\nbody\n"
+                        ),
+                    },
+                },
+            )
+            assert r.status_code == 201
+            sid = r.json()["id"]
+            # Confirm Claude override is currently set.
+            assert r.json()["frontmatter_backend"] == {
+                "claude": {"argument-hint": "[before]"}
+            }
+
+            # Now PATCH with an explicit empty dict — must wipe.
+            r2 = await c.patch(
+                f"/api/admin/agents/{aid}/skills/{sid}",
+                json={"frontmatter_backend": {}},
+            )
+            assert r2.status_code == 200, r2.text
+            assert r2.json()["frontmatter_backend"] == {}, (
+                "explicit empty frontmatter_backend should clear, "
+                "not silently keep existing"
+            )
+
+    @pytest.mark.asyncio
     async def test_replace_files_must_include_skill_md(self) -> None:
         tid, uid, aid = await _seed()
         app = _build_app(_authed_user(tid, uid))

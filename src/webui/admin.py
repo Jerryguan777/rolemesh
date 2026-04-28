@@ -1744,13 +1744,28 @@ async def update_skill(
             # text from the stored SKILL.md row to feed the splitter.
             current_md = existing.files.get("SKILL.md")
             current_body = current_md.content if current_md else ""
+            # Important: ``A or B`` treats an explicitly-empty dict as
+            # "not provided" because ``{}`` is falsy. Use ``is not None``
+            # so a caller can clear all backend overrides by sending
+            # ``frontmatter_backend: {}`` rather than silently keeping
+            # the existing dict. Same applies to common.
+            common_override = (
+                body.frontmatter_common
+                if body.frontmatter_common is not None
+                else {}
+            )
+            backend_override = (
+                body.frontmatter_backend
+                if body.frontmatter_backend is not None
+                else existing.frontmatter_backend
+            )
             parsed_common, parsed_backend, _ = parse_inbound_skill_md(
                 current_body,
-                frontmatter_common_override=(
-                    {**existing.frontmatter_common, **(body.frontmatter_common or {})}
-                ),
-                frontmatter_backend_override=body.frontmatter_backend
-                or existing.frontmatter_backend,
+                frontmatter_common_override={
+                    **existing.frontmatter_common,
+                    **common_override,
+                },
+                frontmatter_backend_override=backend_override,
                 expected_skill_name=existing.name,
             )
             common, backend = parsed_common, parsed_backend
