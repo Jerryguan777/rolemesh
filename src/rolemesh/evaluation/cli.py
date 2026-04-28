@@ -266,12 +266,24 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     # so we only pay the Docker import when actually running. The CLI's
     # other subcommands (list / show) don't need this.
     from rolemesh.container.runtime import get_runtime
+    from rolemesh.egress.bootstrap import ensure_gateway_running_and_register_dns
     from rolemesh.evaluation.inspect_glue import build_eval_task
     from rolemesh.evaluation.runner import EvalRunner
     from rolemesh.ipc.nats_transport import NatsTransport
 
     runtime = get_runtime()
     await runtime.ensure_available()
+
+    # In EC-2 mode the agent containers want their DNS pointed at the
+    # egress gateway so DNS-exfil filtering applies. The orchestrator
+    # daemon registers the gateway IP at startup; when eval runs as a
+    # standalone CLI process it has its own runner module and would
+    # otherwise spawn containers with Docker's default resolver,
+    # silently losing DNS-level egress protection. The helper is
+    # idempotent — reuses a running gateway, only relaunches if none
+    # exists — so calling it alongside a live orchestrator is safe.
+    # Returns None silently when EC-2 isn't active (rollback mode).
+    await ensure_gateway_running_and_register_dns(runtime)
 
     transport = NatsTransport(NATS_URL)
     try:
