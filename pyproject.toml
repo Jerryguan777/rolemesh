@@ -24,8 +24,14 @@ dependencies = [
 [project.scripts]
 rolemesh = "rolemesh.main:main_sync"
 rolemesh-webui = "webui.main:main"
+rolemesh-eval = "rolemesh.evaluation.cli:main"
 
 [project.optional-dependencies]
+# Evaluation framework — Inspect AI based, manual / nightly only.
+# Not pulled into the main runtime so a stock `uv sync` stays slim.
+eval = [
+    "inspect-ai>=0.3",
+]
 pi = [
     "anthropic>=0.49",
     "openai>=1.60",
@@ -128,6 +134,8 @@ omit = [
     "*/rolemesh/channels/telegram.py",
     "*/rolemesh/agent/container_executor.py",
     "*/rolemesh/container/docker_runtime.py",
+    "*/rolemesh/evaluation/cli.py",
+    "*/rolemesh/evaluation/runner.py",
 ]
 
 [tool.coverage.report]
