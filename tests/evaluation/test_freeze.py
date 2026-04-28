@@ -3,23 +3,28 @@
 Cover the contract:
   * canonical hashing — re-freezing produces the same sha256
   * order-independence — skill files / tools sorted before hashing
-  * skills tables missing → empty list, no crash (parallel-worktree
-    safety)
+  * disabled skills excluded
   * unknown coworker → LookupError (RLS reduces wrong-tenant to
     not-found, which the CLI surfaces)
+
+Skills are seeded via the production ``create_skill`` / ``update_skill``
+helpers rather than raw SQL — that keeps the test honest against the
+same path admin REST and the orchestrator use, including the CHECK
+constraints and SECURITY DEFINER trigger.
 """
 
 from __future__ import annotations
 
-import json
 import uuid
 
 import pytest
 
+from rolemesh.core.types import SkillFile
 from rolemesh.db.pg import (
-    admin_conn,
     create_coworker,
+    create_skill,
     create_tenant,
+    update_skill,
 )
 from rolemesh.evaluation.freeze import freeze_coworker_config
 
@@ -31,38 +36,29 @@ async def _seed_skill(
     files: dict[str, str], frontmatter_common: dict | None = None,
     enabled: bool = True,
 ) -> str:
-    async with admin_conn() as conn:
-        skill_id = await conn.fetchval(
-            """
-            INSERT INTO skills (
-                tenant_id, coworker_id, name,
-                frontmatter_common, frontmatter_backend, enabled
-            )
-            VALUES ($1::uuid, $2::uuid, $3, $4::jsonb, '{}'::jsonb, $5)
-            RETURNING id
-            """,
-            tenant_id, coworker_id, name,
-            json.dumps(frontmatter_common or {}), enabled,
-        )
-        for path, content in files.items():
-            await conn.execute(
-                """
-                INSERT INTO skill_files (skill_id, path, content)
-                VALUES ($1::uuid, $2, $3)
-                """,
-                skill_id, path, content,
-            )
-    return str(skill_id)
+    """Wrap ``create_skill`` with the test's flat ``{path: content}`` shape."""
+    skill = await create_skill(
+        tenant_id=tenant_id,
+        coworker_id=coworker_id,
+        name=name,
+        frontmatter_common=dict(frontmatter_common or {}),
+        frontmatter_backend={},
+        files={
+            path: SkillFile(path=path, content=content)
+            for path, content in files.items()
+        },
+        enabled=enabled,
+    )
+    return skill.id
 
 
 # ---------------------------------------------------------------------------
-# Without skills table present
+# Empty skills tree
 # ---------------------------------------------------------------------------
 
 
-async def test_freeze_works_without_skills_tables() -> None:
-    """Parallel worktree hasn't landed yet: freeze must not crash,
-    and ``skills`` should appear as an empty list in the output."""
+async def test_freeze_empty_skills_when_coworker_has_none() -> None:
+    """A coworker with no skills produces ``skills: []`` and a stable hash."""
     t = await create_tenant(name="T", slug=f"t-{uuid.uuid4().hex[:6]}")
     cw = await create_coworker(
         tenant_id=t.id, name="cw", folder=f"cw-{uuid.uuid4().hex[:6]}",
@@ -75,11 +71,11 @@ async def test_freeze_works_without_skills_tables() -> None:
 
 
 # ---------------------------------------------------------------------------
-# With skills table present (skills_schema fixture)
+# Skills snapshot shape
 # ---------------------------------------------------------------------------
 
 
-async def test_freeze_includes_enabled_skill_files(skills_schema: None) -> None:
+async def test_freeze_includes_enabled_skill_files() -> None:
     t = await create_tenant(name="T", slug=f"t-{uuid.uuid4().hex[:6]}")
     cw = await create_coworker(
         tenant_id=t.id, name="cw", folder=f"cw-{uuid.uuid4().hex[:6]}",
@@ -100,7 +96,7 @@ async def test_freeze_includes_enabled_skill_files(skills_schema: None) -> None:
     assert skills[0]["files"]["ref/notes.md"] == "beta"
 
 
-async def test_freeze_skips_disabled_skills(skills_schema: None) -> None:
+async def test_freeze_skips_disabled_skills() -> None:
     """Disabled skills are not bind-mounted into containers, so they
     must not appear in the snapshot either — including them would
     inflate the config sha and falsely diff against live behaviour."""
@@ -121,7 +117,7 @@ async def test_freeze_skips_disabled_skills(skills_schema: None) -> None:
     assert names == ["enabled-one"]
 
 
-async def test_freeze_hash_stable_across_calls(skills_schema: None) -> None:
+async def test_freeze_hash_stable_across_calls() -> None:
     """Repeated freeze of unchanged coworker must produce identical
     sha — config-clustering depends on this. Mutation guard: sort_keys
     in canonical dump."""
@@ -131,7 +127,7 @@ async def test_freeze_hash_stable_across_calls(skills_schema: None) -> None:
     )
     await _seed_skill(
         tenant_id=t.id, coworker_id=cw.id, name="s1",
-        files={"a.md": "1", "b.md": "2"},
+        files={"a.md": "1", "b.md": "2", "SKILL.md": "x"},
     )
     f1 = await freeze_coworker_config(cw.id, tenant_id=t.id)
     f2 = await freeze_coworker_config(cw.id, tenant_id=t.id)
@@ -139,7 +135,7 @@ async def test_freeze_hash_stable_across_calls(skills_schema: None) -> None:
     assert f1.config == f2.config
 
 
-async def test_freeze_hash_changes_when_skill_edits(skills_schema: None) -> None:
+async def test_freeze_hash_changes_when_skill_edits() -> None:
     """A single byte change in a skill file body must move the hash —
     otherwise eval can't tell two runs apart by config."""
     t = await create_tenant(name="T", slug=f"t-{uuid.uuid4().hex[:6]}")
@@ -152,12 +148,12 @@ async def test_freeze_hash_changes_when_skill_edits(skills_schema: None) -> None
     )
     h1 = (await freeze_coworker_config(cw.id, tenant_id=t.id)).sha256
 
-    async with admin_conn() as conn:
-        await conn.execute(
-            "UPDATE skill_files SET content = 'v2' "
-            "WHERE skill_id = $1::uuid AND path = 'SKILL.md'",
-            skill_id,
-        )
+    # update_skill with new files replaces the file set; SKILL.md must
+    # always be present (application invariant enforced by create_skill).
+    await update_skill(
+        skill_id, tenant_id=t.id,
+        files={"SKILL.md": SkillFile(path="SKILL.md", content="v2")},
+    )
     h2 = (await freeze_coworker_config(cw.id, tenant_id=t.id)).sha256
     assert h1 != h2
 
@@ -171,86 +167,24 @@ async def test_freeze_unknown_coworker_raises_lookup_error() -> None:
         await freeze_coworker_config(bogus_id, tenant_id=t.id)
 
 
-async def test_freeze_skill_file_order_deterministic(skills_schema: None) -> None:
-    """Files are inserted in inverse alpha order; freeze must still
-    list them sorted so repeat freezes hash identically."""
+async def test_freeze_skill_file_order_deterministic() -> None:
+    """Files are seeded in inverse alpha order via the dict iteration;
+    freeze must still list them sorted so repeat freezes hash
+    identically."""
     t = await create_tenant(name="T", slug=f"t-{uuid.uuid4().hex[:6]}")
     cw = await create_coworker(
         tenant_id=t.id, name="cw", folder=f"cw-{uuid.uuid4().hex[:6]}",
     )
-    skill_id = uuid.uuid4()
-    async with admin_conn() as conn:
-        await conn.execute(
-            """
-            INSERT INTO skills (id, tenant_id, coworker_id, name, enabled)
-            VALUES ($1::uuid, $2::uuid, $3::uuid, 'order-skill', TRUE)
-            """,
-            str(skill_id), t.id, cw.id,
-        )
-        # Insert in reverse-alpha so the underlying scan order is bad.
-        for path, content in [("z.md", "z"), ("m.md", "m"), ("a.md", "a")]:
-            await conn.execute(
-                "INSERT INTO skill_files (skill_id, path, content) "
-                "VALUES ($1::uuid, $2, $3)",
-                str(skill_id), path, content,
-            )
-
-    h1 = (await freeze_coworker_config(cw.id, tenant_id=t.id)).sha256
-    h2 = (await freeze_coworker_config(cw.id, tenant_id=t.id)).sha256
-    assert h1 == h2
-
-
-# ---------------------------------------------------------------------------
-# Schema-conformance smoke tests — guard against fixture drift from the
-# real ``feat/skills`` schema. If the strict fixture ever weakens (e.g.
-# someone drops a CHECK), these tests catch it before the real schema
-# rejects production-bound data.
-# ---------------------------------------------------------------------------
-
-
-async def test_seed_rejects_invalid_skill_name(skills_schema: None) -> None:
-    """The real ``skills`` table CHECKs ``name ~ '^[a-zA-Z][a-zA-Z0-9_-]{0,63}$'``;
-    an underscore-prefixed name should be rejected. If the fixture drops
-    the regex CHECK, this test fails loud."""
-    import asyncpg
-
-    t = await create_tenant(name="T", slug=f"t-{uuid.uuid4().hex[:6]}")
-    cw = await create_coworker(
-        tenant_id=t.id, name="cw", folder=f"cw-{uuid.uuid4().hex[:6]}",
+    # Insertion-order dict preserves z, m, a — the underlying scan
+    # order. freeze must override it with sorted output.
+    files = {"z.md": "z", "m.md": "m", "a.md": "a", "SKILL.md": "x"}
+    await _seed_skill(
+        tenant_id=t.id, coworker_id=cw.id, name="order-skill",
+        files=files,
     )
-    with pytest.raises(asyncpg.exceptions.CheckViolationError):
-        async with admin_conn() as conn:
-            await conn.execute(
-                """
-                INSERT INTO skills (tenant_id, coworker_id, name, enabled)
-                VALUES ($1::uuid, $2::uuid, '_bad_name', TRUE)
-                """,
-                t.id, cw.id,
-            )
-
-
-async def test_seed_rejects_skill_file_path_with_dot_segment(
-    skills_schema: None,
-) -> None:
-    """Path CHECK forbids ``../`` traversal segments. Ensures the fixture
-    enforces it so freeze tests can't silently rely on paths the real
-    schema would reject."""
-    import asyncpg
-
-    t = await create_tenant(name="T", slug=f"t-{uuid.uuid4().hex[:6]}")
-    cw = await create_coworker(
-        tenant_id=t.id, name="cw", folder=f"cw-{uuid.uuid4().hex[:6]}",
-    )
-    skill_id = await _seed_skill(
-        tenant_id=t.id, coworker_id=cw.id, name="ok",
-        files={"SKILL.md": "ok"},
-    )
-    with pytest.raises(asyncpg.exceptions.CheckViolationError):
-        async with admin_conn() as conn:
-            await conn.execute(
-                """
-                INSERT INTO skill_files (skill_id, path, content)
-                VALUES ($1::uuid, '../etc/passwd', 'evil')
-                """,
-                skill_id,
-            )
+    f1 = await freeze_coworker_config(cw.id, tenant_id=t.id)
+    f2 = await freeze_coworker_config(cw.id, tenant_id=t.id)
+    assert f1.sha256 == f2.sha256
+    # Verify the canonical JSON keeps file paths in sorted order.
+    files_dict = f1.config["skills"][0]["files"]
+    assert list(files_dict.keys()) == sorted(files_dict.keys())

@@ -5,10 +5,12 @@ even after the live Coworker is edited or deleted. The hash over a
 canonical JSON serialization (``coworker_config_sha256``) lets the
 ``rolemesh-eval list`` command cluster runs that share a configuration.
 
-Skills are queried from the new ``skills`` / ``skill_files`` schema (see
-``docs/skills-architecture.md``). The legacy ``coworkers.skills`` JSONB
-column is intentionally NOT consulted — it only holds names and would
-miss the actual file contents that drive container behavior.
+Skills are read via ``rolemesh.db.pg.list_skills_for_coworker`` so
+the freeze stays in lockstep with the production projection: same
+``enabled_only`` filter, same name-ordered scan, same per-file content
+fetch. ``frontmatter_common`` and ``frontmatter_backend`` are kept
+separate (rather than pre-merged into the active backend's view) so
+one snapshot describes a Coworker switched between backends.
 """
 
 from __future__ import annotations
@@ -18,10 +20,10 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from rolemesh.db.pg import get_coworker, tenant_conn
+from rolemesh.db.pg import get_coworker, list_skills_for_coworker
 
 if TYPE_CHECKING:
-    from rolemesh.core.types import Coworker
+    from rolemesh.core.types import Coworker, Skill
 
 
 @dataclass(frozen=True)
@@ -93,83 +95,23 @@ def _coworker_to_dict(c: Coworker) -> dict[str, Any]:
     }
 
 
-async def _freeze_skills(
-    tenant_id: str, coworker_id: str
-) -> list[dict[str, Any]]:
-    """Snapshot enabled skills with their full file trees.
+def _skill_to_dict(s: Skill) -> dict[str, Any]:
+    """Project a ``Skill`` dataclass to the JSON shape we hash and store.
 
-    Mirrors the orchestrator's container-time projection: only enabled
-    skills, ordered by ``name`` then file ``path`` for determinism so
-    the resulting JSON hash is stable across runs that don't actually
-    differ. ``frontmatter_common`` and ``frontmatter_backend`` are kept
-    separate (rather than pre-merged) so the config snapshot reflects
-    what the DB held, not what the active backend would see — that lets
-    the same snapshot describe a Coworker switched between backends.
-
-    Skills tables ship in the ``feat/skills`` branch (PR 1). Until that
-    lands on main, this function tolerates their absence by returning an
-    empty list — running eval against a coworker on a build without the
-    skills schema produces no skill snapshot rather than a crash.
-
-    The query shape (column names, ``enabled = TRUE`` filter, ordering)
-    matches the real PR 1 DDL exactly, verified via dev-DB e2e against
-    the ``feat/skills`` schema. Once that PR lands on main, the
-    ``information_schema`` guard becomes dead code and should be deleted
-    so a future schema mismatch fails loud instead of silent-emptying.
+    Files are sorted by path for hash determinism — the production CRUD
+    helper already orders the SELECT, but we re-sort here as a
+    defense-in-depth so a future API change can't silently shift hashes.
     """
-    async with tenant_conn(tenant_id) as conn:
-        # Defensive presence check — the parallel worktree introduces
-        # these tables; running eval before that lands should not
-        # crash. Empty list signals "no skills snapshotted" which is a
-        # legitimate state (Coworker may genuinely have no skills).
-        has_tables = await conn.fetchval(
-            "SELECT EXISTS ("
-            "  SELECT 1 FROM information_schema.tables "
-            "   WHERE table_name = 'skills'"
-            ")"
-        )
-        if not has_tables:
-            return []
-        skill_rows = await conn.fetch(
-            """
-            SELECT id, name, frontmatter_common, frontmatter_backend, enabled
-              FROM skills
-             WHERE coworker_id = $1::uuid AND enabled = TRUE
-             ORDER BY name
-            """,
-            coworker_id,
-        )
-        out: list[dict[str, Any]] = []
-        for sr in skill_rows:
-            file_rows = await conn.fetch(
-                """
-                SELECT path, content
-                  FROM skill_files
-                 WHERE skill_id = $1::uuid
-                 ORDER BY path
-                """,
-                sr["id"],
-            )
-            fc_raw = sr["frontmatter_common"]
-            fb_raw = sr["frontmatter_backend"]
-            out.append(
-                {
-                    "name": sr["name"],
-                    "enabled": bool(sr["enabled"]),
-                    "frontmatter_common": (
-                        fc_raw if isinstance(fc_raw, dict)
-                        else json.loads(fc_raw) if fc_raw else {}
-                    ),
-                    "frontmatter_backend": (
-                        fb_raw if isinstance(fb_raw, dict)
-                        else json.loads(fb_raw) if fb_raw else {}
-                    ),
-                    "files": {
-                        fr["path"]: fr["content"] for fr in file_rows
-                    },
-                }
-            )
-    return out
+    return {
+        "name": s.name,
+        "enabled": s.enabled,
+        "frontmatter_common": dict(s.frontmatter_common),
+        "frontmatter_backend": {
+            backend: dict(overrides)
+            for backend, overrides in s.frontmatter_backend.items()
+        },
+        "files": {path: s.files[path].content for path in sorted(s.files)},
+    }
 
 
 async def freeze_coworker_config(
@@ -187,5 +129,8 @@ async def freeze_coworker_config(
         msg = f"coworker {coworker_id!r} not found in tenant {tenant_id!r}"
         raise LookupError(msg)
     config = _coworker_to_dict(coworker)
-    config["skills"] = await _freeze_skills(tenant_id, coworker_id)
+    skills = await list_skills_for_coworker(
+        coworker_id, tenant_id=tenant_id, enabled_only=True, with_files=True,
+    )
+    config["skills"] = [_skill_to_dict(s) for s in skills]
     return FrozenConfig(config=config, sha256=_hash_config(config))
