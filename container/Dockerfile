@@ -45,6 +45,7 @@ WORKDIR /app
 COPY src/agent_runner/ ./agent_runner/
 COPY src/pi/ ./pi/
 COPY src/rolemesh/ipc/protocol.py ./rolemesh/ipc/protocol.py
+COPY src/rolemesh/ipc/skill_mount.py ./rolemesh/ipc/skill_mount.py
 COPY src/rolemesh/auth/permissions.py ./rolemesh/auth/permissions.py
 
 # rolemesh.safety subset needed by agent_runner's container-side hook

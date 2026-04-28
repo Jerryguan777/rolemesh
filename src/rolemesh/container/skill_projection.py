@@ -41,6 +41,7 @@ from rolemesh.core.skills import (
     validate_skill_name,
 )
 from rolemesh.db.pg import list_skills_for_coworker
+from rolemesh.ipc.skill_mount import CONTAINER_TARGETS_BY_BACKEND
 
 if TYPE_CHECKING:
     from rolemesh.core.types import Coworker, Skill, SkillFile
@@ -53,34 +54,23 @@ logger = get_logger()
 # (one per agent invocation) gets its own subtree keyed by job_id.
 SPAWN_ROOT: Path = DATA_DIR / "spawns"
 
-# Per-backend skill mount targets inside the agent container.
+# Per-backend skill mount targets — the source of truth lives in
+# ``rolemesh.ipc.skill_mount`` so the in-container Pi runtime can
+# import the same constants without depending on this orchestrator-
+# only module. Re-exported here as ``CONTAINER_TARGETS`` for
+# backward compatibility with existing tests; new code should pull
+# directly from ``rolemesh.ipc.skill_mount``.
 #
-# Constraint discovered the hard way: the bind mount path must be a
-# DIRECT CHILD of a directory whose ownership matches the agent UID
-# at the time the container starts.
+# Why two-call-site coupling matters: the projector mounts at one
+# of these paths and the agent's resource loader scans the same
+# path. Any byte-level divergence is a silent failure (spawn
+# succeeds, container starts, model never sees the skill). The
+# shared module makes it impossible to change one side without
+# touching the other.
 #
-# When Docker prepares a bind mount at depth 2+ on a tmpfs (e.g. the
-# original ``/home/agent/.pi/agent/skills``), it has to mkdir the
-# intermediate path (``.pi/agent/``) on tmpfs. The tmpfs ``uid=1000``
-# mount option only covers the tmpfs ROOT — Docker's mkdir of the
-# intermediate runs as root and the new directory is owned root:root.
-# The agent process can no longer write SIBLINGS of skills (e.g.
-# Pi's ``.pi/agent/sessions/``) inside that root-owned intermediate
-# and crashes at startup with EACCES.
-#
-# Fix: keep the skill mount at depth 1 in the tmpfs / writable bind.
-# Then any root-owned dir Docker creates is a leaf (the bind target
-# itself, fully overlaid by the read-only mount), not a chokepoint
-# for sibling writes. ``.claude/skills`` already follows this pattern
-# because ``.claude`` is a writable bind mount (host source is
-# orchestrator-created and agent-owned). Pi must follow the same
-# discipline — see docs/skills-architecture.md "Pi backend mount
-# strategy" for the full reasoning.
-CONTAINER_TARGETS: dict[str, str] = {
-    "claude": "/home/agent/.claude/skills",
-    "claude-code": "/home/agent/.claude/skills",
-    "pi": "/home/agent/.pi/skills",
-}
+# The depth-1 invariant — the bind target must be a direct child
+# of an agent-owned parent — is documented at the source module.
+CONTAINER_TARGETS: dict[str, str] = CONTAINER_TARGETS_BY_BACKEND
 
 
 def _spawn_skills_dir(job_id: str) -> Path:

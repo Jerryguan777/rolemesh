@@ -616,6 +616,53 @@ def test_container_targets_match_design_doc() -> None:
     assert CONTAINER_TARGETS["pi"] == "/home/agent/.pi/skills"
 
 
+def test_skill_projection_uses_shared_constants() -> None:
+    """The projector's ``CONTAINER_TARGETS`` must be the SAME object
+    (not just equal-valued) as the shared ``CONTAINER_TARGETS_BY_BACKEND``
+    from ``rolemesh.ipc.skill_mount``. Without this the in-container
+    Pi runtime and the orchestrator-side projector can drift on a
+    path edit (a real bug we hit before the constants were shared).
+    """
+    from rolemesh.ipc.skill_mount import CONTAINER_TARGETS_BY_BACKEND
+
+    assert CONTAINER_TARGETS is CONTAINER_TARGETS_BY_BACKEND, (
+        "skill_projection.CONTAINER_TARGETS must be re-exported from "
+        "rolemesh.ipc.skill_mount.CONTAINER_TARGETS_BY_BACKEND, not a copy"
+    )
+
+
+def test_pi_backend_uses_shared_skill_mount_constant() -> None:
+    """``agent_runner.pi_backend`` must wire ``additional_skill_paths``
+    from the shared ``PI_SKILLS_PATH`` constant rather than
+    a hardcoded literal. Catches the realistic regression: someone
+    replaces ``PI_SKILLS_PATH`` with a literal string while editing,
+    which compiles and passes other tests, but breaks silently if
+    the orchestrator-side path ever moves again.
+
+    Also asserts the constant value matches the projector's target —
+    the contract that this whole shared-module refactor exists to
+    enforce.
+    """
+    import inspect
+
+    from rolemesh.ipc.skill_mount import PI_SKILLS_PATH
+
+    from agent_runner import pi_backend
+
+    src = inspect.getsource(pi_backend)
+    assert "from rolemesh.ipc.skill_mount import PI_SKILLS_PATH" in src, (
+        "pi_backend must import PI_SKILLS_PATH from the shared module"
+    )
+    assert "additional_skill_paths=[PI_SKILLS_PATH]" in src, (
+        "pi_backend must pass the shared constant to "
+        "DefaultResourceLoaderOptions, not a literal path string"
+    )
+    assert PI_SKILLS_PATH == CONTAINER_TARGETS["pi"], (
+        f"PI_SKILLS_PATH ({PI_SKILLS_PATH!r}) must equal projector's "
+        f"CONTAINER_TARGETS['pi'] ({CONTAINER_TARGETS['pi']!r})"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Re-projection idempotence — two calls with the same job_id should
 # produce the same final state, even though re-using a job_id is

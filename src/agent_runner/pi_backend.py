@@ -59,6 +59,7 @@ from pi.coding_agent.core.extensions.loader import create_extension_runtime
 from pi.coding_agent.core.extensions.runner import ExtensionRunner
 from pi.coding_agent.core.extensions.types import Extension
 from pi.coding_agent.core.resource_loader import DefaultResourceLoader, DefaultResourceLoaderOptions
+from rolemesh.ipc.skill_mount import PI_SKILLS_PATH
 from pi.coding_agent.core.sdk import CreateAgentSessionOptions, create_agent_session
 from pi.coding_agent.core.session_manager import SessionManager
 from pi.mcp import McpServerConnection, load_mcp_tools
@@ -489,18 +490,19 @@ class PiBackend:
         # Build resource loader with system prompt injection.
         #
         # ``additional_skill_paths`` points the loader at the skill
-        # bind mount that the orchestrator's projector emits — the
-        # path is fixed by ``CONTAINER_TARGETS["pi"]`` in
-        # ``rolemesh.container.skill_projection``. Pi's default scan
-        # path (``agent_dir / "skills"`` = ``~/.pi/agent/skills``)
-        # was deliberately abandoned in favor of ``.pi/skills`` to
-        # avoid the depth-2-on-tmpfs ownership trap; see the comment
-        # block above ``CONTAINER_TARGETS`` for the full rationale.
+        # bind mount the orchestrator's projector emits. The path
+        # constant lives in ``rolemesh.ipc.skill_mount`` so this
+        # module and the projector cannot drift — both import from
+        # the same source of truth. Pi's default scan path
+        # (``agent_dir / "skills"`` = ``~/.pi/agent/skills``) is
+        # deliberately abandoned for ``.pi/skills`` to avoid a
+        # depth-2-on-tmpfs ownership trap; see
+        # ``docs/skills-architecture.md`` "Pi backend mount strategy".
         resource_loader = DefaultResourceLoader(
             DefaultResourceLoaderOptions(
                 cwd=cwd,
                 agent_dir=str(Path.home() / ".pi" / "agent"),
-                additional_skill_paths=[str(Path.home() / ".pi" / "skills")],
+                additional_skill_paths=[PI_SKILLS_PATH],
                 system_prompt=custom_system_prompt,
                 append_system_prompt=append_system_prompt,
             )
