@@ -26,6 +26,7 @@ The eval-specific concerns this module owns:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 import time
 from dataclasses import dataclass, field
@@ -101,12 +102,25 @@ class EvalRunner:
         get_coworker: Any,  # Callable[[str], Coworker | None]
         run_id: str,
         timeout_s: float = 300.0,
+        user_id: str = "",
     ) -> None:
         self._runtime = runtime
         self._transport = transport
         self._get_coworker = get_coworker
         self._run_id = run_id
         self._timeout_s = timeout_s
+        # ``user_id`` flows through ``AgentInput`` to ``init.user_id`` in
+        # the container, where ``claude_backend`` and ``pi_backend`` use
+        # it to set ``X-RoleMesh-User-Id`` on outbound MCP requests. The
+        # credential proxy then injects an OIDC bearer for that user
+        # against any MCP server with ``auth_mode in ("user", "both")``.
+        # Empty string is the legacy default — works for service-mode
+        # MCP servers (which don't need user identity), but causes
+        # user-mode MCP initialize handshakes to be rejected by the
+        # upstream server, which Claude SDK currently waits on
+        # indefinitely (see Bug 9). The CLI fail-checks user-mode tools
+        # at run start so this never silently triggers.
+        self._user_id = user_id
         self._executors: dict[str, ContainerAgentExecutor] = {}
 
     def _executor(self, backend: AgentBackendConfig) -> ContainerAgentExecutor:
@@ -160,7 +174,7 @@ class EvalRunner:
             # own session file. Claude backend ignores this for session
             # routing (it goes through SDK options).
             conversation_id=group_folder,
-            user_id="",
+            user_id=self._user_id,
             session_id=None,
             is_scheduled_task=False,
             assistant_name=coworker.name,
@@ -174,11 +188,13 @@ class EvalRunner:
         result_event_count = 0
         safety_block: dict[str, Any] | None = None
         captured_job_id: str | None = None
+        captured_container_name: str | None = None
         shutdown_tasks: set[asyncio.Task[None]] = set()
 
-        def _on_process(_container_name: str, job_id: str) -> None:
-            nonlocal captured_job_id
+        def _on_process(container_name: str, job_id: str) -> None:
+            nonlocal captured_job_id, captured_container_name
             captured_job_id = job_id
+            captured_container_name = container_name
 
         async def _request_shutdown() -> None:
             """Wind the container down after a turn so we don't sit
@@ -271,10 +287,56 @@ class EvalRunner:
 
         start = time.monotonic()
         try:
-            final = await executor.execute(
-                agent_input,
-                on_process=_on_process,
-                on_output=_on_output,
+            # Hard wall-clock cap per sample. The executor's own timeout
+            # watcher is an *idle* timer (resets on every NATS event) and
+            # defaults to ~30 min via CONTAINER_TIMEOUT — wrong shape for
+            # eval, where we want to bound total cost. ``wait_for``
+            # cancels the executor coroutine on timeout; we then force-
+            # stop the container by name so it doesn't leak (the
+            # cancellation alone wouldn't tell Docker to kill the
+            # process). Mitigates Bug 9 (Claude SDK MCP-initialize hang
+            # waits forever on a malformed handshake) by capping the
+            # per-sample blast radius.
+            final = await asyncio.wait_for(
+                executor.execute(
+                    agent_input,
+                    on_process=_on_process,
+                    on_output=_on_output,
+                ),
+                timeout=self._timeout_s,
+            )
+        except TimeoutError:
+            latency_ms = int((time.monotonic() - start) * 1000)
+            logger.warning(
+                "eval sample timed out — force-stopping container",
+                run_id=self._run_id,
+                sample_idx=sample_idx,
+                container=captured_container_name,
+                timeout_s=self._timeout_s,
+            )
+            if captured_container_name is not None:
+                with contextlib.suppress(Exception):
+                    await self._runtime.stop(
+                        captured_container_name, timeout=5,
+                    )
+            # Deliberately return ``output_text=""`` even when a partial
+            # answer landed before the wall-clock fired: status=error
+            # plus a non-empty text would let the scorer grade CORRECT,
+            # contradicting the error signal. Operator can still see the
+            # captured partial via metadata["partial_output_at_timeout"]
+            # when triaging in ``inspect view``.
+            md: dict[str, Any] = {}
+            if last_result_text is not None:
+                md["partial_output_at_timeout"] = last_result_text
+            return SampleExecution(
+                output_text="",
+                observed_tool_calls=observed_tool_calls,
+                usage=last_usage,
+                latency_ms=latency_ms,
+                status="error",
+                error=f"sample timeout after {self._timeout_s}s",
+                result_event_count=result_event_count,
+                metadata=md,
             )
         except Exception as exc:
             latency_ms = int((time.monotonic() - start) * 1000)

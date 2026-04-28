@@ -40,6 +40,7 @@ from rolemesh.core.logger import get_logger
 from rolemesh.db.pg import (
     get_coworker,
     get_coworker_by_folder,
+    get_user,
     init_database,
 )
 from rolemesh.evaluation.dataset import load_dataset
@@ -88,6 +89,20 @@ async def _resolve_coworker(coworker_arg: str, tenant_id: str) -> Any:
     # Fall back to folder name lookup. Matches what users see in
     # ``rolemesh-eval list`` and on disk under data/tenants/<t>/coworkers/.
     return await get_coworker_by_folder(tenant_id, coworker_arg)
+
+
+def _user_mode_mcp_servers(coworker: Any) -> list[str]:
+    """Names of MCP servers on this coworker that need a user identity.
+
+    ``user`` and ``both`` modes both call out to the credential proxy
+    expecting an ``X-RoleMesh-User-Id`` header so an OIDC bearer can
+    be looked up; ``service`` mode uses static per-server headers and
+    is safe under ``user_id=""``.
+    """
+    return [
+        t.name for t in (coworker.tools or [])
+        if t.auth_mode in ("user", "both")
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +275,37 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         )
         return 1
 
+    # Resolve user identity for user-mode MCP authentication. Optional
+    # at the CLI level, but **required** if any of the coworker's MCP
+    # tools have ``auth_mode in ("user", "both")``: leaving user_id
+    # blank in that case makes ``X-RoleMesh-User-Id`` go unset, the
+    # credential proxy skips OIDC bearer injection, and the upstream
+    # MCP server rejects ``initialize`` — at which point Claude SDK
+    # currently hangs forever (Bug 9). Fail-loud upfront beats every
+    # sample silently timing out.
+    user_id = (args.user or "").strip()
+    if user_id:
+        user = await get_user(user_id, tenant_id=tenant_id)
+        if user is None:
+            print(
+                f"ERROR: user {user_id!r} not found in tenant "
+                f"{tenant_id!r}",
+                file=sys.stderr,
+            )
+            return 1
+    else:
+        offending = _user_mode_mcp_servers(coworker)
+        if offending:
+            print(
+                f"ERROR: coworker {coworker.folder!r} has user-mode MCP "
+                f"servers {offending} but --user was not provided. "
+                f"Pass --user <uuid> so the credential proxy can inject "
+                f"an OIDC bearer; otherwise every sample will hang on "
+                f"the MCP initialize handshake.",
+                file=sys.stderr,
+            )
+            return 1
+
     frozen = await freeze_coworker_config(coworker.id, tenant_id=tenant_id)
 
     # Container + NATS setup deferred to import time of inspect_glue,
@@ -325,6 +371,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
             get_coworker=_get_coworker,
             run_id=run_row.id,
             timeout_s=float(args.timeout_s),
+            user_id=user_id,
         )
 
         task = build_eval_task(
@@ -576,7 +623,20 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     pr.add_argument(
         "--timeout-s", type=int, default=300,
-        help="per-sample container timeout in seconds",
+        help="per-sample wall-clock timeout in seconds — hard cap; on "
+             "expiry the container is force-stopped and the sample is "
+             "marked status=error. Default 300s. Set higher if your "
+             "tasks legitimately run long; set lower to cap eval cost "
+             "when an upstream hang (e.g. MCP initialize) would "
+             "otherwise eat the full IDLE_TIMEOUT.",
+    )
+    pr.add_argument(
+        "--user", default=None,
+        help="user UUID to attribute the eval run to. Required when the "
+             "coworker has any MCP tool with auth_mode=user/both — eval "
+             "fails-loud at start otherwise. Used to set "
+             "X-RoleMesh-User-Id so the credential proxy injects the "
+             "user's OIDC bearer on outbound MCP calls.",
     )
     pr.add_argument(
         "--threshold", action="append",
