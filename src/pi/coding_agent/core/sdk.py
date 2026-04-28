@@ -30,6 +30,36 @@ from pi.coding_agent.core.resource_loader import (
 )
 from pi.coding_agent.core.session_manager import SessionManager
 from pi.coding_agent.core.settings_manager import SettingsManager
+from pi.coding_agent.core.skills import format_skills_for_prompt
+
+
+def _assemble_system_prompt(resource_loader: Any) -> str:
+    """Compose the agent's system_prompt from the resource_loader's pieces.
+
+    Order: ``get_system_prompt()`` → ``get_append_system_prompt()`` parts
+    → skills XML block (per Agent Skills standard).
+
+    Without this assembly the AgentState was created with
+    ``system_prompt=""`` and every author-supplied prompt + every
+    loaded skill description was silently dropped on the floor — the
+    model received nothing but the user's first message.
+    """
+    pieces: list[str] = []
+    base = resource_loader.get_system_prompt() if resource_loader else None
+    if base:
+        pieces.append(base)
+    if resource_loader:
+        for chunk in resource_loader.get_append_system_prompt():
+            if chunk:
+                pieces.append(chunk)
+        skills = list(resource_loader.get_skills().values()) if hasattr(
+            resource_loader, "get_skills"
+        ) else []
+        if skills:
+            block = format_skills_for_prompt(skills).lstrip("\n")
+            if block:
+                pieces.append(block)
+    return "\n\n".join(pieces)
 
 
 @dataclass
@@ -266,7 +296,7 @@ async def create_agent_session(
 
     # Create agent
     initial_state = AgentState(
-        system_prompt="",
+        system_prompt=_assemble_system_prompt(resource_loader),
         model=model or Model(),
         thinking_level=thinking_level or "off",
         tools=active_tools,
