@@ -23,6 +23,10 @@ from rolemesh.container.runner import (
     build_container_spec,
     build_volume_mounts,
 )
+from rolemesh.container.skill_projection import (
+    cleanup_spawn_skills,
+    materialize_skills_for_spawn,
+)
 from rolemesh.container.runtime import CONTAINER_HOST_GATEWAY
 from rolemesh.core.config import (
     CONTAINER_MAX_OUTPUT_SIZE,
@@ -138,6 +142,54 @@ class ContainerAgentExecutor:
         tenant_id = inp.tenant_id or coworker.tenant_id
         conversation_id = inp.conversation_id or ""
 
+        try:
+            return await self._execute_after_setup(
+                inp,
+                on_process,
+                on_output,
+                coworker=coworker,
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                job_id=job_id,
+                start_time=start_time,
+                start_epoch_ms=start_epoch_ms,
+            )
+        finally:
+            # Outer safety net for the per-spawn skills directory.
+            # The inner ``_execute_after_setup`` explicitly cleans up
+            # at each ``return`` for prompt disk reuse on the happy
+            # paths, but exceptions raised by ``build_container_spec``,
+            # ``self._runtime.run``, the approval/safety loaders, or
+            # any other line bypass those returns. ``cleanup_spawn_skills``
+            # is idempotent, so duplicating with the inner calls is
+            # harmless — this finally just guarantees no orphan dir
+            # is left behind regardless of how the function exits.
+            cleanup_spawn_skills(job_id)
+
+    async def _execute_after_setup(
+        self,
+        inp: AgentInput,
+        on_process: Callable[[str, str], None],
+        on_output: Callable[[AgentOutput], Awaitable[None]] | None,
+        *,
+        coworker: Coworker,
+        tenant_id: str,
+        conversation_id: str,
+        job_id: str,
+        start_time: float,
+        start_epoch_ms: int,
+    ) -> AgentOutput:
+        """Spawn the container and drive the conversation.
+
+        Split out from ``execute`` so the outer ``try/finally`` in the
+        public method can guarantee ``cleanup_spawn_skills(job_id)``
+        runs on every exit path — including exceptions raised by
+        ``build_container_spec``, ``self._runtime.run``, the
+        approval / safety loaders, or any other line in this body.
+        The explicit ``cleanup_spawn_skills`` calls below remain so
+        disk is reclaimed promptly on the happy paths; the outer
+        finally only kicks in when something raises.
+        """
         # Ensure coworker directory exists
         coworker_dir = DATA_DIR / "tenants" / tenant_id / "coworkers" / coworker.folder
         coworker_dir.mkdir(parents=True, exist_ok=True)
@@ -147,6 +199,27 @@ class ContainerAgentExecutor:
             coworker, tenant_id, conversation_id,
             permissions=permissions, backend_config=self._config,
         )
+
+        # Materialize per-coworker skills to a per-spawn build dir
+        # and bind-mount it read-only at the backend's skill path.
+        # Returns None if there are no enabled skills, in which case
+        # we skip the mount entirely. Cleanup happens in the finally
+        # below — including on exceptions raised before the
+        # container is even started.
+        try:
+            skill_mount = await materialize_skills_for_spawn(
+                coworker, job_id, backend=self._config.name,
+            )
+        except Exception as exc:  # noqa: BLE001 — projection bugs must not crash spawn
+            logger.warning(
+                "Skill projection failed; spawning without skills",
+                coworker=coworker.name,
+                job_id=job_id,
+                error=str(exc),
+            )
+            skill_mount = None
+        if skill_mount is not None:
+            mounts.append(skill_mount)
         safe_name = re.sub(r"[^a-zA-Z0-9-]", "-", inp.group_folder)
         container_name = f"rolemesh-{safe_name}-{start_epoch_ms}"
 
@@ -493,6 +566,7 @@ class ContainerAgentExecutor:
                     duration=duration_ms,
                     code=code,
                 )
+                cleanup_spawn_skills(job_id)
                 return AgentOutput(
                     status="success",
                     result=None,
@@ -506,6 +580,7 @@ class ContainerAgentExecutor:
                 duration=duration_ms,
                 code=code,
             )
+            cleanup_spawn_skills(job_id)
             return AgentOutput(
                 status="error",
                 result=None,
@@ -570,6 +645,7 @@ class ContainerAgentExecutor:
                 stderr=stderr_buf,
                 log_file=str(log_file),
             )
+            cleanup_spawn_skills(job_id)
             return AgentOutput(
                 status="error",
                 result=None,
@@ -582,6 +658,7 @@ class ContainerAgentExecutor:
             duration=duration_ms,
             new_session_id=new_session_id,
         )
+        cleanup_spawn_skills(job_id)
         return AgentOutput(
             status="success",
             result=None,

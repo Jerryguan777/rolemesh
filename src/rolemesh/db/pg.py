@@ -25,6 +25,8 @@ from rolemesh.core.types import (
     NewMessage,
     RegisteredGroup,
     ScheduledTask,
+    Skill,
+    SkillFile,
     TaskRunLog,
     Tenant,
     User,
@@ -180,7 +182,6 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             agent_backend TEXT DEFAULT 'claude-code',
             system_prompt TEXT,
             tools JSONB DEFAULT '[]',
-            skills JSONB DEFAULT '[]',
             container_config JSONB,
             max_concurrent INT DEFAULT 2,
             status TEXT DEFAULT 'active',
@@ -201,22 +202,24 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
                 ("agent_backend", "'claude-code'"),
                 ("system_prompt", "NULL"),
                 ("tools", "'[]'::jsonb"),
-                ("skills", "'[]'::jsonb"),
             ]:
                 await conn.execute(
                     f"ALTER TABLE coworkers ADD COLUMN IF NOT EXISTS {col} "
-                    f"{'JSONB' if col in ('tools', 'skills') else 'TEXT'} DEFAULT {default}"
+                    f"{'JSONB' if col == 'tools' else 'TEXT'} DEFAULT {default}"
                 )
             await conn.execute("""
                 UPDATE coworkers SET
                     agent_backend = r.agent_backend,
                     system_prompt = r.system_prompt,
-                    tools = r.tools,
-                    skills = r.skills
+                    tools = r.tools
                 FROM roles r WHERE coworkers.role_id = r.id
             """)
             await conn.execute("ALTER TABLE coworkers DROP COLUMN role_id")
         await conn.execute("DROP TABLE IF EXISTS roles CASCADE")
+    # Drop the legacy `skills` JSONB column on existing dev databases.
+    # The skill system is moving to dedicated `skills` / `skill_files` tables;
+    # the old per-coworker JSONB list was never consumed by the runner.
+    await conn.execute("ALTER TABLE coworkers DROP COLUMN IF EXISTS skills")
     # --- Auth: add agent_role + permissions to coworkers ---
     await conn.execute(
         "ALTER TABLE coworkers ADD COLUMN IF NOT EXISTS agent_role TEXT DEFAULT 'agent'"
@@ -255,6 +258,85 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     """)
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_uaa_user ON user_agent_assignments(user_id)")
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_uaa_coworker ON user_agent_assignments(coworker_id)")
+
+    # Skills: per-coworker capability folders. SKILL.md (frontmatter +
+    # body) lives in the row keyed by ``path = 'SKILL.md'`` in
+    # ``skill_files``. Frontmatter is split between common (carries
+    # name/description for both runtimes) and backend-specific
+    # (Claude SDK or Pi loader). See docs/skills-architecture.md.
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS skills (
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            coworker_id UUID NOT NULL REFERENCES coworkers(id) ON DELETE CASCADE,
+            name TEXT NOT NULL CHECK (name ~ '^[a-zA-Z][a-zA-Z0-9_-]{0,63}$'),
+            frontmatter_common JSONB NOT NULL DEFAULT '{}',
+            frontmatter_backend JSONB NOT NULL DEFAULT '{}',
+            enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+            UNIQUE (coworker_id, name)
+        )
+    """)
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_skills_coworker ON skills(coworker_id, enabled)"
+    )
+
+    # skill_files holds the file tree. Path validation: positive
+    # whitelist (each segment alphanumeric-led, only [A-Za-z0-9_.-]),
+    # plus a defense-in-depth regex that rejects any segment that is
+    # purely dots. The application-layer validator in
+    # rolemesh.core.skills mirrors these rules. Raw triple-quoted
+    # string keeps PG-side regex escapes (``\.``) intact without
+    # triggering Python SyntaxWarnings.
+    await conn.execute(r"""
+        CREATE TABLE IF NOT EXISTS skill_files (
+            skill_id UUID NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+            path TEXT NOT NULL CHECK (length(path) > 0
+                AND path ~ '^[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$'
+                AND path !~ '(^|/)\.+($|/)'),
+            content TEXT NOT NULL,
+            mime_type TEXT NOT NULL DEFAULT 'text/plain',
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+            PRIMARY KEY (skill_id, path)
+        )
+    """)
+
+    # SECURITY DEFINER trigger: prevents writing a skill whose
+    # ``coworker_id`` belongs to a different tenant than its own
+    # ``tenant_id``. Without DEFINER, the trigger would run RLS-bound
+    # on coworkers and would not be able to see a foreign tenant's
+    # coworker (cw_tenant comes back NULL), missing the attack.
+    # ``IS DISTINCT FROM`` handles NULL safely either way.
+    await conn.execute("""
+        CREATE OR REPLACE FUNCTION skills_check_coworker_tenant()
+        RETURNS TRIGGER
+        SECURITY DEFINER
+        SET search_path = pg_catalog, public
+        LANGUAGE plpgsql AS $func$
+        DECLARE
+            cw_tenant UUID;
+        BEGIN
+            SELECT tenant_id INTO cw_tenant FROM coworkers WHERE id = NEW.coworker_id;
+            IF cw_tenant IS DISTINCT FROM NEW.tenant_id THEN
+                RAISE EXCEPTION
+                    'skills.coworker_id % belongs to a different tenant '
+                    '(or does not exist)', NEW.coworker_id;
+            END IF;
+            RETURN NEW;
+        END
+        $func$;
+    """)
+    await conn.execute(
+        "DROP TRIGGER IF EXISTS trg_skills_check_coworker_tenant ON skills"
+    )
+    await conn.execute("""
+        CREATE TRIGGER trg_skills_check_coworker_tenant
+            BEFORE INSERT OR UPDATE OF coworker_id, tenant_id ON skills
+            FOR EACH ROW EXECUTE FUNCTION skills_check_coworker_tenant();
+    """)
+
     # Password hash for future builtin auth
     await conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT")
 
@@ -1023,6 +1105,39 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     await _enable_rls_on(conn, "user_agent_assignments")
     await _enable_rls_on(conn, "users")                # D9
     await _enable_rls_on(conn, "oidc_user_tokens")     # D10 (tenant_id backfilled above)
+    await _enable_rls_on(conn, "skills")               # skills feature: standard tenant_id scope
+    await _enable_rls_on_transitive_skill_files(conn)
+
+
+async def _enable_rls_on_transitive_skill_files(
+    conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record],
+) -> None:
+    """RLS for ``skill_files`` keyed transitively through the parent ``skills`` row.
+
+    ``skill_files`` does not carry its own ``tenant_id`` — its parent
+    ``skills`` row does. The EXISTS subquery is itself RLS-bound on
+    ``skills``, so a tenant A session looking up a tenant B
+    skill_file sees zero matches and the row is hidden / write
+    rejected. See docs/skills-architecture.md "RLS" section for the
+    rationale on not denormalizing tenant_id onto this table.
+    """
+    table = "skill_files"
+    await conn.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
+    await conn.execute(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
+    parent_check = (
+        "EXISTS (SELECT 1 FROM skills "
+        "WHERE skills.id = skill_files.skill_id "
+        "AND skills.tenant_id = current_tenant_id())"
+    )
+    for op, body in (
+        ("SELECT", f"USING ({parent_check})"),
+        ("INSERT", f"WITH CHECK ({parent_check})"),
+        ("UPDATE", f"USING ({parent_check}) WITH CHECK ({parent_check})"),
+        ("DELETE", f"USING ({parent_check})"),
+    ):
+        policy = f"rls_{op.lower()}"
+        await conn.execute(f"DROP POLICY IF EXISTS {policy} ON {table}")
+        await conn.execute(f"CREATE POLICY {policy} ON {table} FOR {op} {body}")
 
 
 async def _enable_rls_on(
@@ -1114,6 +1229,8 @@ async def _init_test_database(
         await conn.execute("DROP TABLE IF EXISTS approval_policies CASCADE")
         await conn.execute("DROP TABLE IF EXISTS oidc_user_tokens CASCADE")
         await conn.execute("DROP TABLE IF EXISTS external_tenant_map CASCADE")
+        await conn.execute("DROP TABLE IF EXISTS skill_files CASCADE")
+        await conn.execute("DROP TABLE IF EXISTS skills CASCADE")
         await conn.execute("DROP TABLE IF EXISTS user_agent_assignments CASCADE")
         await conn.execute("DROP TABLE IF EXISTS task_run_logs CASCADE")
         await conn.execute("DROP TABLE IF EXISTS messages CASCADE")
@@ -1623,7 +1740,6 @@ async def create_coworker(
     agent_backend: str = "claude-code",
     system_prompt: str | None = None,
     tools: list[McpServerConfig] | None = None,
-    skills: list[str] | None = None,
     container_config: ContainerConfig | None = None,
     max_concurrent: int = 2,
     agent_role: str = "agent",
@@ -1646,8 +1762,8 @@ async def create_coworker(
         row = await conn.fetchrow(
             """
             INSERT INTO coworkers (tenant_id, name, folder, agent_backend, system_prompt,
-                tools, skills, container_config, max_concurrent, agent_role, permissions)
-            VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9, $10, $11::jsonb)
+                tools, container_config, max_concurrent, agent_role, permissions)
+            VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10::jsonb)
             RETURNING *
             """,
             tenant_id,
@@ -1670,7 +1786,6 @@ async def create_coworker(
                 if tools
                 else []
             ),
-            json.dumps(skills or []),
             cc_json,
             max_concurrent,
             agent_role,
@@ -1707,7 +1822,6 @@ def _record_to_coworker(row: asyncpg.Record) -> Coworker:
                 )
             )
         # Skip legacy string entries silently
-    skills_raw = row.get("skills")
 
     # Parse agent_role and permissions (new auth fields)
     agent_role = row.get("agent_role") or "agent"
@@ -1726,7 +1840,6 @@ def _record_to_coworker(row: asyncpg.Record) -> Coworker:
         agent_backend=row.get("agent_backend") or "claude-code",
         system_prompt=row.get("system_prompt"),
         tools=tools,
-        skills=skills_raw if isinstance(skills_raw, list) else json.loads(skills_raw) if skills_raw else [],
         container_config=_parse_container_config(row["container_config"]),
         max_concurrent=row["max_concurrent"],
         status=row["status"] or "active",
@@ -1789,7 +1902,6 @@ async def update_coworker(
     name: str | None = None,
     system_prompt: str | None = None,
     tools: list[McpServerConfig] | None = None,
-    skills: list[str] | None = None,
     max_concurrent: int | None = None,
     status: str | None = None,
     agent_role: str | None = None,
@@ -1825,10 +1937,6 @@ async def update_coworker(
                 ]
             )
         )
-        param_idx += 1
-    if skills is not None:
-        fields.append(f"skills = ${param_idx}::jsonb")
-        values.append(json.dumps(skills))
         param_idx += 1
     if max_concurrent is not None:
         fields.append(f"max_concurrent = ${param_idx}")
@@ -4384,3 +4492,379 @@ async def list_safety_decisions(
             }
         )
     return result
+
+
+# ---------------------------------------------------------------------------
+# Skills (per-coworker capability folders)
+# ---------------------------------------------------------------------------
+
+
+def _record_to_skill(row: asyncpg.Record, files: list[SkillFile] | None = None) -> Skill:
+    """Build a ``Skill`` dataclass from a ``skills`` row.
+
+    ``files`` is optional — set it when the caller has already
+    fetched ``skill_files`` for this skill. Otherwise the dataclass
+    has an empty ``files`` map; callers that only need metadata can
+    skip the second query.
+    """
+    fc_raw = row["frontmatter_common"]
+    fb_raw = row["frontmatter_backend"]
+    fc = json.loads(fc_raw) if isinstance(fc_raw, str) else (fc_raw or {})
+    fb = json.loads(fb_raw) if isinstance(fb_raw, str) else (fb_raw or {})
+    return Skill(
+        id=str(row["id"]),
+        tenant_id=str(row["tenant_id"]),
+        coworker_id=str(row["coworker_id"]),
+        name=row["name"],
+        frontmatter_common=fc,
+        frontmatter_backend=fb,
+        enabled=bool(row["enabled"]),
+        created_at=row["created_at"].isoformat() if row["created_at"] else "",
+        updated_at=row["updated_at"].isoformat() if row["updated_at"] else "",
+        created_by=str(row["created_by"]) if row["created_by"] else None,
+        files={f.path: f for f in (files or [])},
+    )
+
+
+def _record_to_skill_file(row: asyncpg.Record) -> SkillFile:
+    return SkillFile(
+        path=row["path"],
+        content=row["content"],
+        mime_type=row["mime_type"],
+        updated_at=row["updated_at"].isoformat() if row["updated_at"] else "",
+    )
+
+
+async def create_skill(
+    *,
+    tenant_id: str,
+    coworker_id: str,
+    name: str,
+    frontmatter_common: dict[str, Any],
+    frontmatter_backend: dict[str, dict[str, Any]],
+    files: dict[str, SkillFile],
+    enabled: bool = True,
+    created_by: str | None = None,
+) -> Skill:
+    """Create a skill plus its files in a single transaction.
+
+    Caller is expected to have run the frontmatter splitter and
+    ``validate_skill_*`` helpers from ``rolemesh.core.skills``
+    already; the DB CHECK constraints and SECURITY DEFINER trigger
+    are the second line of defense.
+
+    The ``files`` map must contain ``SKILL.md`` (the application
+    invariant). The DB does not enforce this directly because we
+    cannot express "every skill has a row with path = 'SKILL.md'"
+    as a single CHECK; the application enforces it on every write.
+    """
+    if "SKILL.md" not in files:
+        raise ValueError("skill files must contain SKILL.md")
+    fc_json = json.dumps(frontmatter_common)
+    fb_json = json.dumps(frontmatter_backend)
+    async with tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO skills (tenant_id, coworker_id, name,
+                                frontmatter_common, frontmatter_backend,
+                                enabled, created_by)
+            VALUES ($1::uuid, $2::uuid, $3, $4::jsonb, $5::jsonb, $6,
+                    $7::uuid)
+            RETURNING *
+            """,
+            tenant_id,
+            coworker_id,
+            name,
+            fc_json,
+            fb_json,
+            enabled,
+            created_by,
+        )
+        assert row is not None
+        skill_id = row["id"]
+        # Insert all files in a single batch
+        await conn.executemany(
+            """
+            INSERT INTO skill_files (skill_id, path, content, mime_type)
+            VALUES ($1::uuid, $2, $3, $4)
+            """,
+            [
+                (skill_id, f.path, f.content, f.mime_type)
+                for f in files.values()
+            ],
+        )
+        # Fetch back files (canonical updated_at from server clock)
+        file_rows = await conn.fetch(
+            "SELECT * FROM skill_files WHERE skill_id = $1::uuid ORDER BY path",
+            skill_id,
+        )
+    return _record_to_skill(row, [_record_to_skill_file(r) for r in file_rows])
+
+
+async def get_skill(
+    skill_id: str, *, tenant_id: str, with_files: bool = True
+) -> Skill | None:
+    """Fetch a skill by id, scoped to ``tenant_id``.
+
+    The explicit ``AND tenant_id`` is the application-layer defense
+    in depth alongside RLS, matching the convention used elsewhere
+    in this module (see ``get_coworker``).
+    """
+    async with tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM skills WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            skill_id,
+            tenant_id,
+        )
+        if row is None:
+            return None
+        files: list[SkillFile] = []
+        if with_files:
+            file_rows = await conn.fetch(
+                "SELECT * FROM skill_files WHERE skill_id = $1::uuid ORDER BY path",
+                skill_id,
+            )
+            files = [_record_to_skill_file(r) for r in file_rows]
+    return _record_to_skill(row, files)
+
+
+async def list_skills_for_coworker(
+    coworker_id: str,
+    *,
+    tenant_id: str,
+    enabled_only: bool = False,
+    with_files: bool = False,
+) -> list[Skill]:
+    """List all skills for a coworker.
+
+    ``enabled_only`` filters to projection-eligible skills (used by
+    the orchestrator at spawn time). ``with_files`` controls whether
+    the ``files`` map is populated — admin REST list responses skip
+    file content; the projector needs it.
+    """
+    async with tenant_conn(tenant_id) as conn:
+        if enabled_only:
+            rows = await conn.fetch(
+                "SELECT * FROM skills WHERE coworker_id = $1::uuid "
+                "AND tenant_id = $2::uuid AND enabled = TRUE ORDER BY name",
+                coworker_id,
+                tenant_id,
+            )
+        else:
+            rows = await conn.fetch(
+                "SELECT * FROM skills WHERE coworker_id = $1::uuid "
+                "AND tenant_id = $2::uuid ORDER BY name",
+                coworker_id,
+                tenant_id,
+            )
+        result: list[Skill] = []
+        if with_files and rows:
+            ids = [r["id"] for r in rows]
+            file_rows = await conn.fetch(
+                "SELECT * FROM skill_files WHERE skill_id = ANY($1::uuid[]) "
+                "ORDER BY skill_id, path",
+                ids,
+            )
+            files_by_skill: dict[str, list[SkillFile]] = {}
+            for fr in file_rows:
+                files_by_skill.setdefault(str(fr["skill_id"]), []).append(
+                    _record_to_skill_file(fr)
+                )
+            for r in rows:
+                result.append(
+                    _record_to_skill(r, files_by_skill.get(str(r["id"]), []))
+                )
+        else:
+            for r in rows:
+                result.append(_record_to_skill(r))
+    return result
+
+
+async def update_skill(
+    skill_id: str,
+    *,
+    tenant_id: str,
+    frontmatter_common: dict[str, Any] | None = None,
+    frontmatter_backend: dict[str, dict[str, Any]] | None = None,
+    enabled: bool | None = None,
+    files: dict[str, SkillFile] | None = None,
+) -> Skill | None:
+    """Update a skill's frontmatter, enabled flag, and/or files.
+
+    Files semantics: if ``files`` is provided, it is treated as a
+    full replacement of the skill's file set. SKILL.md must be
+    present in the new map. Use ``set_skill_file`` /
+    ``delete_skill_file`` for surgical edits.
+    """
+    fields: list[str] = []
+    values: list[Any] = []
+    param_idx = 1
+    if frontmatter_common is not None:
+        fields.append(f"frontmatter_common = ${param_idx}::jsonb")
+        values.append(json.dumps(frontmatter_common))
+        param_idx += 1
+    if frontmatter_backend is not None:
+        fields.append(f"frontmatter_backend = ${param_idx}::jsonb")
+        values.append(json.dumps(frontmatter_backend))
+        param_idx += 1
+    if enabled is not None:
+        fields.append(f"enabled = ${param_idx}")
+        values.append(enabled)
+        param_idx += 1
+
+    if files is not None and "SKILL.md" not in files:
+        raise ValueError("skill files must contain SKILL.md")
+
+    async with tenant_conn(tenant_id) as conn:
+        if fields:
+            fields.append("updated_at = now()")
+            values.append(skill_id)
+            tenant_param = param_idx + 1
+            values.append(tenant_id)
+            sql = (
+                f"UPDATE skills SET {', '.join(fields)} "
+                f"WHERE id = ${param_idx}::uuid AND tenant_id = ${tenant_param}::uuid "
+                f"RETURNING *"
+            )
+            row = await conn.fetchrow(sql, *values)
+        else:
+            row = await conn.fetchrow(
+                "SELECT * FROM skills WHERE id = $1::uuid "
+                "AND tenant_id = $2::uuid",
+                skill_id,
+                tenant_id,
+            )
+        if row is None:
+            return None
+        if files is not None:
+            await conn.execute(
+                "DELETE FROM skill_files WHERE skill_id = $1::uuid", skill_id
+            )
+            await conn.executemany(
+                """
+                INSERT INTO skill_files (skill_id, path, content, mime_type)
+                VALUES ($1::uuid, $2, $3, $4)
+                """,
+                [
+                    (skill_id, f.path, f.content, f.mime_type)
+                    for f in files.values()
+                ],
+            )
+            # Touch updated_at so list views reflect file changes too,
+            # even if no metadata fields changed.
+            row = await conn.fetchrow(
+                "UPDATE skills SET updated_at = now() WHERE id = $1::uuid "
+                "AND tenant_id = $2::uuid RETURNING *",
+                skill_id,
+                tenant_id,
+            )
+            assert row is not None
+        file_rows = await conn.fetch(
+            "SELECT * FROM skill_files WHERE skill_id = $1::uuid ORDER BY path",
+            skill_id,
+        )
+    return _record_to_skill(row, [_record_to_skill_file(r) for r in file_rows])
+
+
+async def delete_skill(skill_id: str, *, tenant_id: str) -> bool:
+    """Hard-delete a skill (cascades to skill_files). Returns True if a
+    row was actually deleted, False if the skill did not exist for this
+    tenant.
+    """
+    async with tenant_conn(tenant_id) as conn:
+        result = await conn.execute(
+            "DELETE FROM skills WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            skill_id,
+            tenant_id,
+        )
+    # asyncpg returns "DELETE n" — parse the count
+    return result.endswith(" 1")
+
+
+async def set_skill_file(
+    skill_id: str,
+    path: str,
+    *,
+    tenant_id: str,
+    content: str,
+    mime_type: str = "text/plain",
+) -> SkillFile | None:
+    """Upsert a single file in a skill. Returns the new ``SkillFile`` or
+    ``None`` if the parent skill does not belong to ``tenant_id``.
+
+    The application-layer SKILL.md invariant is enforced by the REST
+    layer, not here — so callers can use this for both fresh adds and
+    edits. The DB's CHECK on ``path`` rejects traversal.
+    """
+    async with tenant_conn(tenant_id) as conn:
+        # Verify the parent skill belongs to this tenant before inserting.
+        # Explicit AND tenant_id is the application-layer mirror of the
+        # RLS policy — the test pool runs as superuser and bypasses RLS,
+        # so without this clause cross-tenant attempts would slip through
+        # in tests even though they're blocked in production.
+        exists = await conn.fetchval(
+            "SELECT 1 FROM skills WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            skill_id,
+            tenant_id,
+        )
+        if not exists:
+            return None
+        row = await conn.fetchrow(
+            """
+            INSERT INTO skill_files (skill_id, path, content, mime_type)
+            VALUES ($1::uuid, $2, $3, $4)
+            ON CONFLICT (skill_id, path) DO UPDATE
+                SET content = EXCLUDED.content,
+                    mime_type = EXCLUDED.mime_type,
+                    updated_at = now()
+            RETURNING *
+            """,
+            skill_id,
+            path,
+            content,
+            mime_type,
+        )
+        await conn.execute(
+            "UPDATE skills SET updated_at = now() WHERE id = $1::uuid "
+            "AND tenant_id = $2::uuid",
+            skill_id,
+            tenant_id,
+        )
+    assert row is not None
+    return _record_to_skill_file(row)
+
+
+async def delete_skill_file(
+    skill_id: str, path: str, *, tenant_id: str
+) -> bool:
+    """Remove a single file from a skill.
+
+    Refuses to delete ``SKILL.md`` — that is the application-layer
+    invariant. Returns True if a row was actually deleted.
+    """
+    if path == "SKILL.md":
+        raise ValueError("SKILL.md cannot be deleted from a skill")
+    async with tenant_conn(tenant_id) as conn:
+        # Defense in depth: verify the parent skill belongs to this
+        # tenant before deleting (the EXISTS subquery on skills carries
+        # the tenant_id check). RLS on skill_files would reject a
+        # cross-tenant delete in production, but the test pool runs as
+        # superuser — explicit AND tenant_id closes that gap.
+        result = await conn.execute(
+            "DELETE FROM skill_files USING skills "
+            "WHERE skill_files.skill_id = $1::uuid AND skill_files.path = $2 "
+            "AND skills.id = skill_files.skill_id "
+            "AND skills.tenant_id = $3::uuid",
+            skill_id,
+            path,
+            tenant_id,
+        )
+        if result.endswith(" 1"):
+            await conn.execute(
+                "UPDATE skills SET updated_at = now() WHERE id = $1::uuid "
+                "AND tenant_id = $2::uuid",
+                skill_id,
+                tenant_id,
+            )
+            return True
+    return False

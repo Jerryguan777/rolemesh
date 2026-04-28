@@ -30,7 +30,6 @@ class CoworkerConfig:
     max_concurrent: int
     role_config: dict[str, object] = field(default_factory=dict)
     tools: list[McpServerConfig] = field(default_factory=list)
-    skills: list[str] = field(default_factory=list)
     agent_role: str = "agent"
     permissions: AgentPermissions | None = None  # filled by __post_init__; always non-None after init
 

@@ -140,7 +140,6 @@ class Coworker:
     agent_backend: str = "claude-code"
     system_prompt: str | None = None
     tools: list[McpServerConfig] = field(default_factory=list)
-    skills: list[str] = field(default_factory=list)
     container_config: ContainerConfig | None = None
     max_concurrent: int = 2
     status: str = "active"
@@ -153,6 +152,40 @@ class Coworker:
             from rolemesh.auth.permissions import AgentPermissions as _AgentPermissions
 
             self.permissions = _AgentPermissions.for_role(self.agent_role)
+
+
+@dataclass
+class SkillFile:
+    """One file within a skill folder. ``path`` is POSIX-relative
+    to the skill root; ``content`` is text-only in v1.
+    """
+
+    path: str
+    content: str
+    mime_type: str = "text/plain"
+    updated_at: str = ""
+
+
+@dataclass
+class Skill:
+    """A per-coworker skill folder. ``frontmatter_common`` carries the
+    keys both backends accept (at least ``name`` and ``description``);
+    ``frontmatter_backend`` has the shape ``{"claude": {...}, "pi": {...}}``
+    for backend-specific overrides. ``files`` is keyed by relative path,
+    always contains ``SKILL.md``.
+    """
+
+    id: str
+    tenant_id: str
+    coworker_id: str
+    name: str
+    frontmatter_common: dict[str, object] = field(default_factory=dict)
+    frontmatter_backend: dict[str, dict[str, object]] = field(default_factory=dict)
+    enabled: bool = True
+    created_at: str = ""
+    updated_at: str = ""
+    created_by: str | None = None
+    files: dict[str, SkillFile] = field(default_factory=dict)
 
 
 @dataclass

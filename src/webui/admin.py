@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid as _uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated
 
@@ -13,7 +14,13 @@ from rolemesh.approval.engine import ApprovalEngine, ConflictError, ForbiddenErr
 from rolemesh.auth.permissions import AgentPermissions
 from rolemesh.auth.provider import AuthenticatedUser
 from rolemesh.core.group_folder import is_valid_group_folder
-from rolemesh.core.types import McpServerConfig
+from rolemesh.core.skills import (
+    SkillValidationError,
+    parse_inbound_skill_md,
+    validate_skill_file_path,
+    validate_skill_name,
+)
+from rolemesh.core.types import McpServerConfig, SkillFile
 from rolemesh.db import pg
 from webui.dependencies import (
     get_current_user,
@@ -43,6 +50,12 @@ from webui.schemas import (
     SafetyRuleCreate,
     SafetyRuleResponse,
     SafetyRuleUpdate,
+    SkillCreate,
+    SkillFileInPayload,
+    SkillFileUpdate,
+    SkillResponse,
+    SkillSummary,
+    SkillUpdate,
     TaskResponse,
     TenantResponse,
     TenantUpdate,
@@ -56,7 +69,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from rolemesh.approval.types import ApprovalAuditEntry, ApprovalPolicy, ApprovalRequest
-    from rolemesh.core.types import ChannelBinding, Conversation, Coworker, ScheduledTask, Tenant, User
+    from rolemesh.core.types import ChannelBinding, Conversation, Coworker, ScheduledTask, Skill, Tenant, User
     from rolemesh.safety.types import Rule as SafetyRule
 
 # Annotated dependency types (avoids B008 lint warnings)
@@ -211,7 +224,6 @@ def _coworker_to_response(cw: Coworker) -> AgentResponse:
             }
             for t in cw.tools
         ],
-        skills=cw.skills,
         max_concurrent=cw.max_concurrent,
         status=cw.status,
         agent_role=cw.agent_role,
@@ -448,7 +460,6 @@ async def create_agent(
             agent_backend=body.agent_backend,
             system_prompt=body.system_prompt,
             tools=tools,
-            skills=body.skills or None,
             max_concurrent=body.max_concurrent,
             agent_role=body.agent_role,
             permissions=permissions,
@@ -493,7 +504,6 @@ async def update_agent(
         name=body.name,
         system_prompt=body.system_prompt,
         tools=tools,
-        skills=body.skills,
         max_concurrent=body.max_concurrent,
         status=body.status,
         agent_role=body.agent_role,
@@ -1546,3 +1556,319 @@ async def export_safety_decisions_csv(
             "Content-Disposition": f'attachment; filename="{filename}"',
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Skills (per-coworker capability folders)
+# ---------------------------------------------------------------------------
+
+
+def _normalize_files(
+    files_in: dict[str, str | SkillFileInPayload],
+) -> dict[str, SkillFile]:
+    """Accept either ``{path: content_str}`` or ``{path: {content, mime_type}}``
+    and return a uniform ``dict[path, SkillFile]``.
+    """
+    out: dict[str, SkillFile] = {}
+    for path, value in files_in.items():
+        validate_skill_file_path(path)
+        if isinstance(value, str):
+            out[path] = SkillFile(path=path, content=value)
+        else:
+            out[path] = SkillFile(
+                path=path, content=value.content, mime_type=value.mime_type
+            )
+    return out
+
+
+def _skill_to_response(s: Skill) -> SkillResponse:
+    return SkillResponse(
+        id=s.id,
+        coworker_id=s.coworker_id,
+        name=s.name,
+        frontmatter_common=s.frontmatter_common,
+        frontmatter_backend=s.frontmatter_backend,
+        enabled=s.enabled,
+        created_at=s.created_at,
+        updated_at=s.updated_at,
+        created_by=s.created_by,
+        files={
+            p: SkillFileInPayload(content=f.content, mime_type=f.mime_type)
+            for p, f in s.files.items()
+        },
+    )
+
+
+def _skill_to_summary(s: Skill) -> SkillSummary:
+    desc_raw = s.frontmatter_common.get("description", "")
+    description = desc_raw if isinstance(desc_raw, str) else ""
+    return SkillSummary(
+        id=s.id,
+        coworker_id=s.coworker_id,
+        name=s.name,
+        description=description,
+        enabled=s.enabled,
+        created_at=s.created_at,
+        updated_at=s.updated_at,
+    )
+
+
+@router.get(
+    "/agents/{agent_id}/skills",
+    response_model=list[SkillSummary],
+)
+async def list_skills(
+    agent_id: str,
+    user: AdminUser,
+) -> list[SkillSummary]:
+    await _get_agent_or_404(agent_id, user.tenant_id)
+    skills = await pg.list_skills_for_coworker(
+        agent_id, tenant_id=user.tenant_id, enabled_only=False, with_files=False,
+    )
+    return [_skill_to_summary(s) for s in skills]
+
+
+@router.post(
+    "/agents/{agent_id}/skills",
+    response_model=SkillResponse,
+    status_code=201,
+)
+async def create_skill(
+    agent_id: str,
+    body: SkillCreate,
+    user: AdminUser,
+) -> SkillResponse:
+    await _get_agent_or_404(agent_id, user.tenant_id)
+    try:
+        validate_skill_name(body.name)
+        files = _normalize_files(body.files)
+        if "SKILL.md" not in files:
+            raise SkillValidationError("payload must include SKILL.md in 'files'")
+        common, backend, body_text = parse_inbound_skill_md(
+            files["SKILL.md"].content,
+            frontmatter_common_override=body.frontmatter_common,
+            frontmatter_backend_override=body.frontmatter_backend,
+            expected_skill_name=body.name,
+        )
+    except SkillValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # Replace SKILL.md content with the body-only form so the splitter
+    # round-trips cleanly: frontmatter lives in the JSONB columns.
+    files["SKILL.md"] = SkillFile(
+        path="SKILL.md",
+        content=body_text,
+        mime_type=files["SKILL.md"].mime_type or "text/markdown",
+    )
+    # Bootstrap admin has user_id="bootstrap" (not a real UUID).
+    # Store NULL in created_by rather than letting asyncpg blow up.
+    try:
+        created_by_uuid: str | None = str(_uuid.UUID(user.user_id))
+    except (ValueError, AttributeError):
+        created_by_uuid = None
+    try:
+        skill = await pg.create_skill(
+            tenant_id=user.tenant_id,
+            coworker_id=agent_id,
+            name=body.name,
+            frontmatter_common=common,
+            frontmatter_backend=backend,
+            files=files,
+            enabled=body.enabled,
+            created_by=created_by_uuid,
+        )
+    except asyncpg.UniqueViolationError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Skill with name {body.name!r} already exists on this agent",
+        ) from exc
+    except asyncpg.CheckViolationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _skill_to_response(skill)
+
+
+@router.get(
+    "/agents/{agent_id}/skills/{skill_id}",
+    response_model=SkillResponse,
+)
+async def get_skill_detail(
+    agent_id: str,
+    skill_id: str,
+    user: AdminUser,
+) -> SkillResponse:
+    await _get_agent_or_404(agent_id, user.tenant_id)
+    skill = await pg.get_skill(skill_id, tenant_id=user.tenant_id)
+    if skill is None or skill.coworker_id != agent_id:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    return _skill_to_response(skill)
+
+
+@router.patch(
+    "/agents/{agent_id}/skills/{skill_id}",
+    response_model=SkillResponse,
+)
+async def update_skill(
+    agent_id: str,
+    skill_id: str,
+    body: SkillUpdate,
+    user: AdminUser,
+) -> SkillResponse:
+    await _get_agent_or_404(agent_id, user.tenant_id)
+    existing = await pg.get_skill(skill_id, tenant_id=user.tenant_id)
+    if existing is None or existing.coworker_id != agent_id:
+        raise HTTPException(status_code=404, detail="Skill not found")
+
+    files: dict[str, SkillFile] | None = None
+    common: dict[str, object] | None = None
+    backend: dict[str, dict[str, object]] | None = None
+    try:
+        if body.files is not None:
+            files = _normalize_files(body.files)
+            if "SKILL.md" not in files:
+                raise SkillValidationError("'files' must include SKILL.md")
+            # Re-parse SKILL.md frontmatter (overrides applied on top).
+            parsed_common, parsed_backend, body_text = parse_inbound_skill_md(
+                files["SKILL.md"].content,
+                frontmatter_common_override=body.frontmatter_common,
+                frontmatter_backend_override=body.frontmatter_backend,
+                expected_skill_name=existing.name,
+            )
+            common, backend = parsed_common, parsed_backend
+            files["SKILL.md"] = SkillFile(
+                path="SKILL.md",
+                content=body_text,
+                mime_type=files["SKILL.md"].mime_type or "text/markdown",
+            )
+        elif body.frontmatter_common is not None or body.frontmatter_backend is not None:
+            # Frontmatter-only update: re-validate against existing
+            # body so description bounds stay consistent. Pull body
+            # text from the stored SKILL.md row to feed the splitter.
+            current_md = existing.files.get("SKILL.md")
+            current_body = current_md.content if current_md else ""
+            # Important: ``A or B`` treats an explicitly-empty dict as
+            # "not provided" because ``{}`` is falsy. Use ``is not None``
+            # so a caller can clear all backend overrides by sending
+            # ``frontmatter_backend: {}`` rather than silently keeping
+            # the existing dict. Same applies to common.
+            common_override = (
+                body.frontmatter_common
+                if body.frontmatter_common is not None
+                else {}
+            )
+            backend_override = (
+                body.frontmatter_backend
+                if body.frontmatter_backend is not None
+                else existing.frontmatter_backend
+            )
+            parsed_common, parsed_backend, _ = parse_inbound_skill_md(
+                current_body,
+                frontmatter_common_override={
+                    **existing.frontmatter_common,
+                    **common_override,
+                },
+                frontmatter_backend_override=backend_override,
+                expected_skill_name=existing.name,
+            )
+            common, backend = parsed_common, parsed_backend
+    except SkillValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    try:
+        updated = await pg.update_skill(
+            skill_id,
+            tenant_id=user.tenant_id,
+            frontmatter_common=common,
+            frontmatter_backend=backend,
+            enabled=body.enabled,
+            files=files,
+        )
+    except asyncpg.CheckViolationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    return _skill_to_response(updated)
+
+
+@router.delete(
+    "/agents/{agent_id}/skills/{skill_id}",
+    status_code=204,
+)
+async def delete_skill(
+    agent_id: str,
+    skill_id: str,
+    user: AdminUser,
+) -> None:
+    await _get_agent_or_404(agent_id, user.tenant_id)
+    skill = await pg.get_skill(skill_id, tenant_id=user.tenant_id, with_files=False)
+    if skill is None or skill.coworker_id != agent_id:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    await pg.delete_skill(skill_id, tenant_id=user.tenant_id)
+
+
+@router.patch(
+    "/agents/{agent_id}/skills/{skill_id}/files/{path:path}",
+    response_model=SkillResponse,
+)
+async def update_skill_file(
+    agent_id: str,
+    skill_id: str,
+    path: str,
+    body: SkillFileUpdate,
+    user: AdminUser,
+) -> SkillResponse:
+    """Upsert a single file in a skill. ``path`` is path-encoded so
+    ``scripts/helper.py`` works as a URL segment.
+    """
+    await _get_agent_or_404(agent_id, user.tenant_id)
+    skill = await pg.get_skill(skill_id, tenant_id=user.tenant_id, with_files=False)
+    if skill is None or skill.coworker_id != agent_id:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    try:
+        validate_skill_file_path(path)
+    except SkillValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        result = await pg.set_skill_file(
+            skill_id,
+            path,
+            tenant_id=user.tenant_id,
+            content=body.content,
+            mime_type=body.mime_type,
+        )
+    except asyncpg.CheckViolationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    refreshed = await pg.get_skill(skill_id, tenant_id=user.tenant_id)
+    assert refreshed is not None
+    return _skill_to_response(refreshed)
+
+
+@router.delete(
+    "/agents/{agent_id}/skills/{skill_id}/files/{path:path}",
+    status_code=204,
+)
+async def delete_skill_file(
+    agent_id: str,
+    skill_id: str,
+    path: str,
+    user: AdminUser,
+) -> None:
+    """Remove a single file from a skill. SKILL.md is rejected to
+    enforce the application invariant.
+    """
+    await _get_agent_or_404(agent_id, user.tenant_id)
+    skill = await pg.get_skill(skill_id, tenant_id=user.tenant_id, with_files=False)
+    if skill is None or skill.coworker_id != agent_id:
+        raise HTTPException(status_code=404, detail="Skill not found")
+    if path == "SKILL.md":
+        raise HTTPException(
+            status_code=400,
+            detail="SKILL.md cannot be deleted; delete the whole skill or update it",
+        )
+    try:
+        validate_skill_file_path(path)
+    except SkillValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    deleted = await pg.delete_skill_file(skill_id, path, tenant_id=user.tenant_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="File not found in skill")

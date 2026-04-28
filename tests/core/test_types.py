@@ -87,7 +87,6 @@ def test_coworker_defaults() -> None:
     cw = Coworker(id="cw1", tenant_id="t1", name="Bot", folder="bot")
     assert cw.agent_backend == "claude-code"
     assert cw.tools == []
-    assert cw.skills == []
     assert cw.agent_role == "agent"
     assert cw.max_concurrent == 2
     assert cw.status == "active"

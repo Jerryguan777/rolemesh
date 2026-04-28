@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import os
 import platform
-import shutil
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -187,16 +186,6 @@ def build_volume_mounts(
             + "\n",
             encoding="utf-8",
         )
-
-    # Sync skills
-    skills_src = project_root / "container" / "skills"
-    skills_dst = claude_sessions_dir / "skills"
-    if skills_src.exists():
-        for skill_dir in skills_src.iterdir():
-            if not skill_dir.is_dir():
-                continue
-            dst_dir = skills_dst / skill_dir.name
-            shutil.copytree(str(skill_dir), str(dst_dir), dirs_exist_ok=True)
 
     mounts.append(
         VolumeMount(

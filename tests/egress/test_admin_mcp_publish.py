@@ -49,7 +49,6 @@ def _coworker_with_tools(tools: list[McpServerConfig]) -> Coworker:
         agent_backend="claude-code",
         system_prompt=None,
         tools=tools,
-        skills=[],
         container_config=None,
         max_concurrent=2,
         status="active",
