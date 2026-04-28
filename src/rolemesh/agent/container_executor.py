@@ -142,6 +142,54 @@ class ContainerAgentExecutor:
         tenant_id = inp.tenant_id or coworker.tenant_id
         conversation_id = inp.conversation_id or ""
 
+        try:
+            return await self._execute_after_setup(
+                inp,
+                on_process,
+                on_output,
+                coworker=coworker,
+                tenant_id=tenant_id,
+                conversation_id=conversation_id,
+                job_id=job_id,
+                start_time=start_time,
+                start_epoch_ms=start_epoch_ms,
+            )
+        finally:
+            # Outer safety net for the per-spawn skills directory.
+            # The inner ``_execute_after_setup`` explicitly cleans up
+            # at each ``return`` for prompt disk reuse on the happy
+            # paths, but exceptions raised by ``build_container_spec``,
+            # ``self._runtime.run``, the approval/safety loaders, or
+            # any other line bypass those returns. ``cleanup_spawn_skills``
+            # is idempotent, so duplicating with the inner calls is
+            # harmless — this finally just guarantees no orphan dir
+            # is left behind regardless of how the function exits.
+            cleanup_spawn_skills(job_id)
+
+    async def _execute_after_setup(
+        self,
+        inp: AgentInput,
+        on_process: Callable[[str, str], None],
+        on_output: Callable[[AgentOutput], Awaitable[None]] | None,
+        *,
+        coworker: Coworker,
+        tenant_id: str,
+        conversation_id: str,
+        job_id: str,
+        start_time: float,
+        start_epoch_ms: int,
+    ) -> AgentOutput:
+        """Spawn the container and drive the conversation.
+
+        Split out from ``execute`` so the outer ``try/finally`` in the
+        public method can guarantee ``cleanup_spawn_skills(job_id)``
+        runs on every exit path — including exceptions raised by
+        ``build_container_spec``, ``self._runtime.run``, the
+        approval / safety loaders, or any other line in this body.
+        The explicit ``cleanup_spawn_skills`` calls below remain so
+        disk is reclaimed promptly on the happy paths; the outer
+        finally only kicks in when something raises.
+        """
         # Ensure coworker directory exists
         coworker_dir = DATA_DIR / "tenants" / tenant_id / "coworkers" / coworker.folder
         coworker_dir.mkdir(parents=True, exist_ok=True)

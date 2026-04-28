@@ -514,6 +514,98 @@ async def test_cleanup_orphan_spawns_sweeps_abandoned() -> None:
 # ---------------------------------------------------------------------------
 
 
+async def test_outer_finally_cleans_up_on_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If ``_execute_after_setup`` raises (any line — projection,
+    spec build, runtime spawn, approval loader…), the ``execute``
+    wrapper's ``finally`` must still call ``cleanup_spawn_skills``.
+    Otherwise an exception path leaks the spawn dir until the orphan
+    cleaner sweeps it on a much later schedule.
+
+    Test creates a real spawn dir on disk (mimicking what projection
+    would have produced) then runs ``execute`` with an inner method
+    that raises immediately. Asserts the dir is gone afterwards.
+    """
+    from rolemesh.agent.container_executor import ContainerAgentExecutor
+    from rolemesh.container import skill_projection as sp
+    from rolemesh.agent.executor import AgentInput, AgentBackendConfig
+
+    monkeypatch.setattr(sp, "SPAWN_ROOT", tmp_path / "spawns")
+
+    # Capture the auto-generated job_id so we can pre-create its dir.
+    captured: dict[str, str] = {}
+
+    class _Boom(Exception):
+        pass
+
+    async def _raising_inner(self, inp, on_process, on_output, **kw):
+        captured["job_id"] = kw["job_id"]
+        # Pre-create the spawn dir to simulate "projection ran, then
+        # something later failed". Without the outer finally we'd
+        # observe this dir still on disk after execute returns.
+        spawn_dir = sp.SPAWN_ROOT / kw["job_id"]
+        spawn_dir.mkdir(parents=True, exist_ok=True)
+        (spawn_dir / "marker").write_text("x")
+        raise _Boom("simulated mid-execute failure")
+
+    monkeypatch.setattr(
+        ContainerAgentExecutor,
+        "_execute_after_setup",
+        _raising_inner,
+        raising=False,
+    )
+
+    # Build a minimally-functional executor stub. Only the prelude
+    # needs to work — coworker lookup + execute wrapper.
+    @dataclass_for_test
+    class _FakeCoworker:
+        id: str = "cw-1"
+        tenant_id: str = "t-1"
+        name: str = "Bot"
+        folder: str = "bot"
+        agent_backend: str = "claude-code"
+        agent_role: str = "agent"
+        permissions: object = None
+        tools: object = ()
+        container_config: object = None
+
+    fake_cw = _FakeCoworker()
+    cfg = AgentBackendConfig(name="claude", image="x", extra_env={})
+    executor = ContainerAgentExecutor.__new__(ContainerAgentExecutor)
+    executor._config = cfg
+    executor._get_coworker = lambda cid: fake_cw if cid == "cw-1" else None
+    executor._transport = None  # not reached — inner raises first
+    executor._runtime = None
+
+    inp = AgentInput(
+        prompt="hi",
+        group_folder="bot",
+        chat_jid="x@g.us",
+        permissions={"data_scope": "self", "task_schedule": False,
+                     "task_manage_others": False, "agent_delegate": False},
+        tenant_id="t-1",
+        coworker_id="cw-1",
+    )
+
+    with pytest.raises(_Boom):
+        await executor.execute(inp, on_process=lambda *_: None)
+
+    assert "job_id" in captured, "inner method was never invoked"
+    spawn_dir = sp.SPAWN_ROOT / captured["job_id"]
+    assert not spawn_dir.exists(), (
+        f"outer finally failed to clean up {spawn_dir}; orphan leaked"
+    )
+
+
+def dataclass_for_test(cls):
+    """Tiny helper because the real Coworker dataclass has __post_init__
+    side-effects we don't want to reproduce here.
+    """
+    from dataclasses import dataclass
+    return dataclass(cls)
+
+
 def test_container_targets_match_design_doc() -> None:
     """Defends against accidental edits to the path constants — these
     are part of the public spec because the agent SDKs expect to scan
