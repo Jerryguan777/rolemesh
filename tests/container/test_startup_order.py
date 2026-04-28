@@ -166,11 +166,14 @@ async def test_launch_aborts_when_gateway_readiness_probe_fails() -> None:
     """Gateway binary up but not serving /healthz within budget → refuse
     to enter ready. Agents would only produce a cryptic failure later.
 
-    Same provenance as the launch-fails test: the contract followed the
-    code into ``_launch_egress_gateway_once_ready`` after the chicken-
-    and-egg fix.
+    Patches the bootstrap-module references because that's where the
+    launch + wait calls actually live now. ``rolemesh.egress.launcher``
+    is the source-of-truth module but bootstrap captures its imports
+    at module load via ``from launcher import ...``, so a patch on
+    launcher's surface doesn't reach the bootstrap call site.
     """
     from rolemesh import main as main_module
+    from rolemesh.egress import bootstrap
 
     rt = _make_runtime_mock()
     launch_mock = AsyncMock()
@@ -178,8 +181,8 @@ async def test_launch_aborts_when_gateway_readiness_probe_fails() -> None:
 
     with (
         patch.object(main_module, "_runtime", rt),
-        patch("rolemesh.egress.launcher.launch_egress_gateway", launch_mock),
-        patch("rolemesh.egress.launcher.wait_for_gateway_ready", wait_mock),
+        patch.object(bootstrap, "launch_egress_gateway", launch_mock),
+        patch.object(bootstrap, "wait_for_gateway_ready", wait_mock),
         pytest.raises(RuntimeError, match="probe exhausted"),
     ):
         await main_module._launch_egress_gateway_once_ready()
@@ -217,18 +220,24 @@ async def test_launch_skips_in_rollback_mode() -> None:
     must short-circuit ``_launch_egress_gateway_once_ready`` so launch +
     readiness probe + IP discovery are all skipped. Pre-Path-C, launch
     was attempted with an empty network name and crashed startup.
+
+    The rollback gate was moved into ``bootstrap._ec2_active`` after
+    the egress-helper extraction, so we patch
+    ``CONTAINER_NETWORK_NAME`` on the bootstrap module — patching
+    main's reference no longer reaches the read site.
     """
     from rolemesh import main as main_module
+    from rolemesh.egress import bootstrap
 
     rt = _make_runtime_mock()
     launch_mock = AsyncMock()
     wait_mock = AsyncMock()
 
     with (
-        patch.object(main_module, "CONTAINER_NETWORK_NAME", ""),
+        patch.object(bootstrap, "CONTAINER_NETWORK_NAME", ""),
         patch.object(main_module, "_runtime", rt),
-        patch("rolemesh.egress.launcher.launch_egress_gateway", launch_mock),
-        patch("rolemesh.egress.launcher.wait_for_gateway_ready", wait_mock),
+        patch.object(bootstrap, "launch_egress_gateway", launch_mock),
+        patch.object(bootstrap, "wait_for_gateway_ready", wait_mock),
     ):
         await main_module._launch_egress_gateway_once_ready()
 
