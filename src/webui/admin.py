@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid as _uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated
 
@@ -1658,6 +1659,12 @@ async def create_skill(
         content=body_text,
         mime_type=files["SKILL.md"].mime_type or "text/markdown",
     )
+    # Bootstrap admin has user_id="bootstrap" (not a real UUID).
+    # Store NULL in created_by rather than letting asyncpg blow up.
+    try:
+        created_by_uuid: str | None = str(_uuid.UUID(user.user_id))
+    except (ValueError, AttributeError):
+        created_by_uuid = None
     try:
         skill = await pg.create_skill(
             tenant_id=user.tenant_id,
@@ -1667,7 +1674,7 @@ async def create_skill(
             frontmatter_backend=backend,
             files=files,
             enabled=body.enabled,
-            created_by=user.user_id,
+            created_by=created_by_uuid,
         )
     except asyncpg.UniqueViolationError as exc:
         raise HTTPException(
