@@ -242,6 +242,109 @@ def test_splitter_rejects_invalid_yaml() -> None:
 
 
 # ---------------------------------------------------------------------------
+# BOM + leading-whitespace tolerance
+# ---------------------------------------------------------------------------
+
+
+def test_splitter_tolerates_utf8_bom() -> None:
+    """Windows-edited SKILL.md often starts with a BOM. Without
+    tolerance the splitter falls through to the no-frontmatter
+    branch and the user gets a confusing "description required"
+    error from a SKILL.md that visibly has frontmatter at the top.
+    """
+    skill_md = (
+        "﻿"
+        "---\n"
+        f"name: bomtest\n"
+        f"description: {_GOOD_DESC}\n"
+        "---\n"
+        "# Body"
+    )
+    common, _, body = parse_inbound_skill_md(skill_md, expected_skill_name="bomtest")
+    assert common["name"] == "bomtest"
+    assert common["description"] == _GOOD_DESC
+    assert body == "# Body"
+
+
+def test_splitter_tolerates_leading_blank_lines() -> None:
+    """Some editors auto-insert a blank line before frontmatter.
+    Same root cause as the BOM case — silent dropping is hostile.
+    """
+    skill_md = (
+        "\n\n"
+        "---\n"
+        f"name: blanky\n"
+        f"description: {_GOOD_DESC}\n"
+        "---\n"
+        "# Body"
+    )
+    common, _, _ = parse_inbound_skill_md(skill_md, expected_skill_name="blanky")
+    assert common["name"] == "blanky"
+
+
+def test_splitter_tolerates_bom_plus_blanks() -> None:
+    skill_md = (
+        "﻿"
+        " \n\t\n"
+        "---\n"
+        f"name: combo\n"
+        f"description: {_GOOD_DESC}\n"
+        "---\n"
+        "body"
+    )
+    common, _, _ = parse_inbound_skill_md(skill_md, expected_skill_name="combo")
+    assert common["name"] == "combo"
+
+
+# ---------------------------------------------------------------------------
+# YAML 1.1 boolean trap — friendly error
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bool_literal", ["on", "off", "yes", "no", "true", "false", "ON", "Yes"])
+def test_splitter_explains_yaml_boolean_trap_for_name(bool_literal: str) -> None:
+    """``name: on`` parses as ``True`` under YAML 1.1. Without a
+    targeted error, downstream users see "name (True) does not
+    match the skill's name ('on')" which is incomprehensible
+    unless you happen to know the trap.
+    """
+    skill_md = (
+        "---\n"
+        f"name: {bool_literal}\n"
+        f"description: {_GOOD_DESC}\n"
+        "---\nbody"
+    )
+    with pytest.raises(SkillValidationError, match="YAML 1.1"):
+        parse_inbound_skill_md(skill_md, expected_skill_name=bool_literal)
+
+
+def test_splitter_accepts_quoted_boolean_string_for_name() -> None:
+    """The error message tells users to quote — make sure the
+    quoted form actually works.
+    """
+    skill_md = (
+        "---\n"
+        f'name: "on"\n'
+        f"description: {_GOOD_DESC}\n"
+        "---\nbody"
+    )
+    common, _, _ = parse_inbound_skill_md(skill_md, expected_skill_name="on")
+    assert common["name"] == "on"
+
+
+def test_splitter_explains_yaml_boolean_for_description() -> None:
+    """description has the same string-typed contract; same trap."""
+    skill_md = (
+        "---\n"
+        "name: x\n"
+        "description: yes\n"
+        "---\nbody"
+    )
+    with pytest.raises(SkillValidationError, match="YAML 1.1"):
+        parse_inbound_skill_md(skill_md, expected_skill_name="x")
+
+
+# ---------------------------------------------------------------------------
 # Backend frontmatter merging
 # ---------------------------------------------------------------------------
 

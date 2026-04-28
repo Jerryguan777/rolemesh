@@ -134,8 +134,13 @@ def _validate_description(value: object) -> str:
 # ---------------------------------------------------------------------------
 
 
+# Tolerate a BOM (﻿, common in Windows-edited UTF-8 files) and
+# any leading whitespace before the opening ``---``. Without this the
+# splitter silently treats the entire file as body and the YAML
+# frontmatter is dropped on the floor — every author who edits with a
+# tool that adds a BOM gets a confusing "description required" error.
 _FRONTMATTER_BLOCK_RE = re.compile(
-    r"\A---\r?\n(?P<yaml>.*?)\r?\n---\r?\n?(?P<body>.*)\Z",
+    r"\A﻿?[ \t\r\n]*---\r?\n(?P<yaml>.*?)\r?\n---\r?\n?(?P<body>.*)\Z",
     re.DOTALL,
 )
 
@@ -160,6 +165,18 @@ def _split_frontmatter_block(text: str) -> tuple[dict[str, Any] | None, str]:
     return parsed, m.group("body")
 
 
+# PyYAML uses YAML 1.1 by default, which interprets bare ``on``,
+# ``off``, ``yes``, ``no``, ``y``, ``n``, ``true``, ``false``, plus
+# their case variants, as booleans. A user who writes ``name: on``
+# meaning the literal string ``"on"`` gets ``True`` instead — the
+# downstream "name does not match" error is real but useless to debug.
+# Catch the common case (string-typed fields receiving a bool) and
+# point at the YAML 1.1 footgun.
+_STRING_TYPED_FRONTMATTER_KEYS: frozenset[str] = frozenset(
+    {"name", "description", "argument-hint", "model"}
+)
+
+
 def _route_frontmatter_keys(
     raw: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
@@ -173,6 +190,16 @@ def _route_frontmatter_keys(
         if not isinstance(key, str):
             raise SkillValidationError(
                 f"frontmatter keys must be strings, got {type(key).__name__}"
+            )
+        if key in _STRING_TYPED_FRONTMATTER_KEYS and isinstance(value, bool):
+            # Catch the YAML 1.1 boolean trap before routing — the
+            # downstream type errors are confusing because the source
+            # text looked like a string.
+            raise SkillValidationError(
+                f"frontmatter {key!r} parsed as boolean ({value}); YAML 1.1 "
+                f"interprets bare on/off/yes/no/true/false (case-insensitive) "
+                f"as booleans. Quote the value explicitly: "
+                f'``{key}: "your-value"``'
             )
         if key in COMMON_FRONTMATTER_KEYS:
             common[key] = value
