@@ -1301,61 +1301,18 @@ async def _launch_egress_gateway_once_ready() -> None:
       * ``hasattr(_runtime, ...)`` — k8s runtime will grow its own
         gateway pod primitive and should not use this path.
     """
-    if (
-        CONTAINER_NETWORK_NAME
-        and hasattr(_runtime, "ensure_egress_network")
-        and hasattr(_runtime, "verify_egress_gateway_reachable")
-    ):
-        from rolemesh.container.runner import set_egress_gateway_dns_ip
-        from rolemesh.egress.launcher import launch_egress_gateway, wait_for_gateway_ready
+    # Idempotent bootstrap: ensure the gateway is running and register
+    # its agent-network IP so ``runner.build_container_spec`` can pin it
+    # as each agent container's DNS resolver. Lives in a shared module
+    # so other entry points that spin up their own ``ContainerRuntime``
+    # (eval CLI, ad-hoc admin scripts) get the same behaviour by
+    # calling one function instead of duplicating this block — the
+    # original inline code led to a real bug where eval-spawned
+    # containers silently fell back to Docker's default DNS resolver
+    # because no one called ``set_egress_gateway_dns_ip``.
+    from rolemesh.egress.bootstrap import ensure_gateway_running_and_register_dns
 
-        # Access the aiodocker client directly via the Docker runtime's
-        # adapter surface. For the k8s backend we'll wrap this differently.
-        docker_client = _runtime._ensure_client()  # type: ignore[attr-defined]
-        await launch_egress_gateway(
-            docker_client,
-            agent_network=CONTAINER_NETWORK_NAME,
-            egress_network=CONTAINER_EGRESS_NETWORK_NAME,
-        )
-        await wait_for_gateway_ready(
-            docker_client,
-            agent_network=CONTAINER_NETWORK_NAME,
-            gateway_service_name=EGRESS_GATEWAY_CONTAINER_NAME,
-            reverse_proxy_port=CREDENTIAL_PROXY_PORT,
-        )
-
-        # Discover the gateway's bridge IP on the agent network and
-        # register it so runner.build_container_spec can pin it as
-        # each agent container's DNS resolver. Without this step the
-        # authoritative DNS resolver built in EC-2 never sees agent
-        # traffic — queries go through Docker's embedded resolver
-        # (127.0.0.11) which forwards to the host. See EC-2 code
-        # review P1 finding.
-        gateway_container = docker_client.containers.container(
-            EGRESS_GATEWAY_CONTAINER_NAME
-        )
-        gateway_info = await gateway_container.show()
-        gateway_ip = (
-            gateway_info.get("NetworkSettings", {})
-            .get("Networks", {})
-            .get(CONTAINER_NETWORK_NAME, {})
-            .get("IPAddress", "")
-        )
-        if gateway_ip:
-            set_egress_gateway_dns_ip(gateway_ip)
-        else:
-            # Gateway is reachable by name (we just verified /healthz)
-            # but doesn't expose an IPAddress on agent-net in inspect
-            # output. Shouldn't happen in practice with our topology;
-            # log as an error because it means agent DNS will silently
-            # fall back to the embedded resolver.
-            logger.error(
-                "Gateway healthy but its agent-net IP is missing from "
-                "inspect output — agents will fall back to Docker DNS "
-                "and the authoritative resolver will not see their queries",
-                gateway=EGRESS_GATEWAY_CONTAINER_NAME,
-                agent_network=CONTAINER_NETWORK_NAME,
-            )
+    await ensure_gateway_running_and_register_dns(_runtime)
 
 
 # ---------------------------------------------------------------------------
