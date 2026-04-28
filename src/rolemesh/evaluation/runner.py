@@ -190,6 +190,12 @@ class EvalRunner:
         captured_job_id: str | None = None
         captured_container_name: str | None = None
         shutdown_tasks: set[asyncio.Task[None]] = set()
+        # Latches the shutdown publish so a turn that gets followed by
+        # additional terminal-shaped events (e.g. the batch-final
+        # marker arriving right after the first ResultEvent on Pi)
+        # doesn't queue redundant RPCs. The handler tolerates extras
+        # but the latch keeps the trace cleaner.
+        shutdown_sent = False
 
         def _on_process(container_name: str, job_id: str) -> None:
             nonlocal captured_job_id, captured_container_name
@@ -197,29 +203,54 @@ class EvalRunner:
             captured_container_name = container_name
 
         async def _request_shutdown() -> None:
-            """Wind the container down after a turn so we don't sit
-            on the executor's 30-min idle timer between samples.
+            """Wind the container down so we don't sit on a watchdog timer.
 
-            Best-effort: a 5 s request-reply matches the production
-            scheduler's contract (``container/scheduler.py:request_shutdown``);
-            any failure is swallowed because the timeout watcher in the
-            executor is the eventual backstop.
+            For Claude SDK backend this is the *only* termination path
+            in single-turn eval: the SDK's ``MessageStream`` (see
+            ``agent_runner/message_stream.py``) is push-based and stays
+            open until ``stream.end()`` is called — only fired by
+            ``backend.abort()``, not by natural turn completion. So
+            without an external shutdown request, ``run_prompt()`` never
+            returns, the agent_runner's batch-final marker
+            (``is_final=True``) never publishes, and the sample sits
+            idle until the wall-clock timeout. Sending shutdown drives
+            the container to ``backend.abort()`` → cancels the SDK
+            query → run_prompt unwinds → container exits cleanly.
+
+            For Pi this races with the natural completion publish, but
+            it's idempotent: agent_runner's ``handle_shutdown`` just
+            ack's and sets a flag.
+
+            Best-effort across the board — any RPC failure (timeout,
+            no responder if the container already exited, broken
+            socket on a teardown race) is swallowed since the
+            executor's timeout watcher and our own wall-clock cap are
+            both backstops.
             """
             if captured_job_id is None:
                 return
-            try:
+            with contextlib.suppress(Exception):
                 await self._transport.nc.request(
                     f"agent.{captured_job_id}.shutdown",
                     b"shutdown",
                     timeout=5.0,
                 )
-            except (OSError, TimeoutError):
-                logger.debug(
-                    "eval shutdown not acked",
-                    run_id=self._run_id,
-                    sample_idx=sample_idx,
-                    job_id=captured_job_id,
-                )
+
+        def _try_shutdown() -> None:
+            """Schedule one shutdown RPC if we haven't yet.
+
+            Pinning the task in ``shutdown_tasks`` keeps it from being
+            garbage-collected mid-flight (RUF006). The latch
+            ``shutdown_sent`` makes the call idempotent across
+            terminal events that may arrive in close succession
+            (Pi's ResultEvent + batch-final, Claude's
+            ResultEvent + StoppedEvent, etc.).
+            """
+            nonlocal shutdown_sent
+            if shutdown_sent:
+                return
+            shutdown_sent = True
+            shutdown_tasks.add(asyncio.create_task(_request_shutdown()))
 
         async def _on_output(out: AgentOutput) -> None:
             nonlocal last_usage, last_result_text, result_event_count, safety_block
@@ -241,19 +272,20 @@ class EvalRunner:
                     last_usage = usage
                 # Safety block is terminal for the turn; ask the
                 # container to wind down.
-                # Fire-and-forget; the executor's timeout watcher is the
-                # eventual backstop if the request hangs. Pinned in
-                # ``shutdown_tasks`` so the task isn't garbage-collected
-                # mid-flight (RUF006).
-                shutdown_tasks.add(asyncio.create_task(_request_shutdown()))
+                _try_shutdown()
                 return
             if out.status == "success":
                 # The wire format produces two success events per turn:
                 # backend ``ResultEvent`` (carries the assistant text,
                 # ``is_final=False``) and the agent_runner batch-final
-                # marker (``result=None``, ``is_final=True``). Capture
-                # text from any non-empty ``result`` and treat
-                # ``is_final=True`` purely as the "send shutdown" trigger.
+                # marker (``result=None``, ``is_final=True``). Pi emits
+                # both; Claude SDK only emits the first (run_prompt
+                # never returns, so the marker never publishes — see
+                # ``_request_shutdown`` for why). Capture text from any
+                # non-empty ``result``, then trigger shutdown on EITHER
+                # the first text event or the batch-final marker —
+                # whichever lands first. ``shutdown_sent`` keeps
+                # subsequent triggers from queuing duplicate RPCs.
                 if isinstance(out.result, str) and out.result:
                     raw = out.result
                     last_result_text = _INTERNAL_RE.sub("", raw).strip()
@@ -261,12 +293,13 @@ class EvalRunner:
                 usage = (out.metadata or {}).get("usage")
                 if isinstance(usage, dict):
                     last_usage = usage
-                if out.is_final:
-                    # Fire-and-forget; pinned in ``shutdown_tasks`` so
-                    # the task isn't garbage-collected mid-flight
-                    # (RUF006). The executor's timeout watcher is the
-                    # eventual backstop if the request hangs.
-                    shutdown_tasks.add(asyncio.create_task(_request_shutdown()))
+                # Trigger shutdown as soon as we have a final answer —
+                # don't wait for the batch-final marker, which Claude
+                # SDK never sends in single-turn eval scenarios.
+                # ``is_final=True`` from the marker is also a trigger,
+                # for backends that emit it.
+                if last_result_text is not None or out.is_final:
+                    _try_shutdown()
                 return
             if out.status in ("error", "stopped"):
                 usage = (out.metadata or {}).get("usage")
@@ -275,11 +308,7 @@ class EvalRunner:
                 # Either status is terminal — ask the container to exit
                 # so the next sample doesn't sit waiting for the timeout
                 # watcher to fire.
-                # Fire-and-forget; the executor's timeout watcher is the
-                # eventual backstop if the request hangs. Pinned in
-                # ``shutdown_tasks`` so the task isn't garbage-collected
-                # mid-flight (RUF006).
-                shutdown_tasks.add(asyncio.create_task(_request_shutdown()))
+                _try_shutdown()
                 return
 
         backend = _backend_for_coworker(coworker)
