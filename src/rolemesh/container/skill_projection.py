@@ -126,10 +126,24 @@ def _materialize_one_skill(
     skill_partial = partial_root / skill.name
     skill_final = final_root / skill.name
 
-    # If a previous failed projection left a stale .partial subtree,
-    # remove it first so we always start clean.
-    if skill_partial.exists() or skill_partial.is_symlink():
-        shutil.rmtree(skill_partial, ignore_errors=True)
+    # Refuse to operate on a pre-existing symlink — same contract as
+    # the outer build_dir handling. ``shutil.rmtree(.., ignore_errors
+    # =True)`` SILENTLY DOES NOT remove a symlink (it raises "Cannot
+    # call rmtree on a symbolic link", which ignore_errors swallows),
+    # leaving the link in place; the next ``mkdir(exist_ok=False)``
+    # then explodes with FileExistsError. Aborting loudly here is
+    # both safer (tampering visible in logs) and matches the design
+    # invariant that v1 never writes symlinks.
+    if skill_partial.is_symlink():
+        raise SkillValidationError(
+            f"refusing to project skill {skill.name!r}: "
+            f"{skill_partial} is a symlink"
+        )
+    if skill_partial.exists():
+        # A prior aborted projection in this same spawn could have
+        # left a stale partial subtree (the orphan cleaner only sweeps
+        # whole spawn dirs). Remove it cleanly — no ignore_errors.
+        shutil.rmtree(skill_partial)
     skill_partial.mkdir(parents=True, exist_ok=False)
 
     if "SKILL.md" not in skill.files:
@@ -168,8 +182,16 @@ def _materialize_one_skill(
 
     # Whole-skill atomic publish. If something raised mid-loop, the
     # partial dir is left for the orphan cleaner to remove next pass.
-    if skill_final.exists() or skill_final.is_symlink():
-        shutil.rmtree(skill_final, ignore_errors=True)
+    # Same symlink-aware cleanup as above: rmtree+ignore_errors does
+    # not remove symlinks, and ``rename`` over a non-empty / symlinked
+    # target has undefined behaviour on POSIX.
+    if skill_final.is_symlink():
+        raise SkillValidationError(
+            f"refusing to publish skill {skill.name!r}: "
+            f"{skill_final} is a symlink"
+        )
+    if skill_final.exists():
+        shutil.rmtree(skill_final)
     skill_partial.rename(skill_final)
 
 
@@ -295,11 +317,19 @@ def cleanup_orphan_spawns(active_job_ids: set[str]) -> int:
     at startup). Protects against ``kill -9`` of the orchestrator
     process: the per-spawn finalizer never ran, but the build dir
     is still on disk. Returns the count of removed directories.
+
+    Materialize the directory listing before removing — POSIX
+    ``readdir`` semantics around concurrent removal are
+    implementation-defined (entries can be skipped or revisited),
+    and ``shutil.rmtree`` mid-iteration would otherwise expose us to
+    that. ``list(SPAWN_ROOT.iterdir())`` snapshots the directory
+    while it's still consistent.
     """
     if not SPAWN_ROOT.exists():
         return 0
     removed = 0
-    for entry in SPAWN_ROOT.iterdir():
+    entries = list(SPAWN_ROOT.iterdir())
+    for entry in entries:
         if not entry.is_dir():
             continue
         if entry.name in active_job_ids:

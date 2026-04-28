@@ -314,6 +314,105 @@ async def test_partial_dir_cleaned_up_after_success() -> None:
 # ---------------------------------------------------------------------------
 
 
+async def test_rejects_symlinked_skill_partial_dir(tmp_path: Path) -> None:
+    """Inner ``_materialize_one_skill`` must reject a pre-existing
+    symlink at ``<build_dir>/.partial/<skill_name>``. Bypassing the
+    outer guard requires unusual conditions (e.g. the build dir
+    itself was just created, but a malicious actor races to
+    symlink the per-skill partial subdir before projection iterates
+    that skill). The fix: refuse loudly instead of silently
+    rmtree+ignore_errors which is a no-op on symlinks.
+    """
+    from rolemesh.container.skill_projection import _materialize_one_skill
+    from rolemesh.core.skills import SkillValidationError as _SVE
+
+    tenant_id, coworker_id = await _make_coworker("symp")
+    skill = await create_skill(
+        tenant_id=tenant_id, coworker_id=coworker_id, name="trapped",
+        frontmatter_common={"description": _GOOD_DESC},
+        frontmatter_backend={},
+        files={"SKILL.md": SkillFile(path="SKILL.md", content="b")},
+    )
+    fetched_skills = await __import__(
+        "rolemesh.db.pg", fromlist=["list_skills_for_coworker"]
+    ).list_skills_for_coworker(
+        coworker_id, tenant_id=tenant_id, with_files=True,
+    )
+    fetched = next(s for s in fetched_skills if s.id == skill.id)
+
+    partial_root = tmp_path / "partial"
+    final_root = tmp_path / "final"
+    partial_root.mkdir()
+    final_root.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (partial_root / "trapped").symlink_to(elsewhere)
+
+    with pytest.raises(_SVE, match="symlink"):
+        _materialize_one_skill(fetched, "claude", partial_root, final_root)
+    assert list(elsewhere.iterdir()) == [], (
+        "projection wrote through symlink to {}".format(elsewhere)
+    )
+
+
+async def test_rejects_symlinked_skill_final_dir(tmp_path: Path) -> None:
+    """``skill_final`` (the published location) must also reject a
+    pre-existing symlink — ``rename`` over a symlinked target has
+    undefined POSIX behaviour. Same root cause as above.
+    """
+    from rolemesh.container.skill_projection import _materialize_one_skill
+    from rolemesh.core.skills import SkillValidationError as _SVE
+
+    tenant_id, coworker_id = await _make_coworker("symf")
+    skill = await create_skill(
+        tenant_id=tenant_id, coworker_id=coworker_id, name="finaltrap",
+        frontmatter_common={"description": _GOOD_DESC},
+        frontmatter_backend={},
+        files={"SKILL.md": SkillFile(path="SKILL.md", content="b")},
+    )
+    fetched_skills = await __import__(
+        "rolemesh.db.pg", fromlist=["list_skills_for_coworker"]
+    ).list_skills_for_coworker(
+        coworker_id, tenant_id=tenant_id, with_files=True,
+    )
+    fetched = next(s for s in fetched_skills if s.id == skill.id)
+
+    partial_root = tmp_path / "partial"
+    final_root = tmp_path / "final"
+    partial_root.mkdir()
+    final_root.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (final_root / "finaltrap").symlink_to(elsewhere)
+
+    with pytest.raises(_SVE, match="symlink"):
+        _materialize_one_skill(fetched, "claude", partial_root, final_root)
+
+
+def test_cleanup_orphan_spawns_safe_under_iteration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """``iterdir()`` + ``rmtree`` mid-iteration is implementation-
+    defined on POSIX (entries can be skipped or revisited).
+    Snapshotting via ``list()`` before removal avoids that. Test
+    proves all orphans are removed in one pass.
+    """
+    from rolemesh.container import skill_projection as sp
+
+    fake_root = tmp_path / "spawns"
+    fake_root.mkdir()
+    monkeypatch.setattr(sp, "SPAWN_ROOT", fake_root)
+
+    # Create 5 orphan spawn dirs.
+    orphan_ids = [f"orphan-{i}" for i in range(5)]
+    for jid in orphan_ids:
+        (fake_root / jid / "skills").mkdir(parents=True)
+        (fake_root / jid / "skills" / "marker").write_text("x")
+
+    removed = sp.cleanup_orphan_spawns(set())
+    assert removed == 5
+    # All orphans gone in a single pass — no skipped entries.
+    assert list(fake_root.iterdir()) == []
+
+
 async def test_rejects_symlinked_build_dir(tmp_path: Path) -> None:
     """If a malicious actor pre-creates a symlinked spawn subdirectory
     (pointing somewhere else on the host), the projector must abort
