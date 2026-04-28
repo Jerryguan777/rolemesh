@@ -180,7 +180,6 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             agent_backend TEXT DEFAULT 'claude-code',
             system_prompt TEXT,
             tools JSONB DEFAULT '[]',
-            skills JSONB DEFAULT '[]',
             container_config JSONB,
             max_concurrent INT DEFAULT 2,
             status TEXT DEFAULT 'active',
@@ -201,22 +200,24 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
                 ("agent_backend", "'claude-code'"),
                 ("system_prompt", "NULL"),
                 ("tools", "'[]'::jsonb"),
-                ("skills", "'[]'::jsonb"),
             ]:
                 await conn.execute(
                     f"ALTER TABLE coworkers ADD COLUMN IF NOT EXISTS {col} "
-                    f"{'JSONB' if col in ('tools', 'skills') else 'TEXT'} DEFAULT {default}"
+                    f"{'JSONB' if col == 'tools' else 'TEXT'} DEFAULT {default}"
                 )
             await conn.execute("""
                 UPDATE coworkers SET
                     agent_backend = r.agent_backend,
                     system_prompt = r.system_prompt,
-                    tools = r.tools,
-                    skills = r.skills
+                    tools = r.tools
                 FROM roles r WHERE coworkers.role_id = r.id
             """)
             await conn.execute("ALTER TABLE coworkers DROP COLUMN role_id")
         await conn.execute("DROP TABLE IF EXISTS roles CASCADE")
+    # Drop the legacy `skills` JSONB column on existing dev databases.
+    # The skill system is moving to dedicated `skills` / `skill_files` tables;
+    # the old per-coworker JSONB list was never consumed by the runner.
+    await conn.execute("ALTER TABLE coworkers DROP COLUMN IF EXISTS skills")
     # --- Auth: add agent_role + permissions to coworkers ---
     await conn.execute(
         "ALTER TABLE coworkers ADD COLUMN IF NOT EXISTS agent_role TEXT DEFAULT 'agent'"
@@ -1623,7 +1624,6 @@ async def create_coworker(
     agent_backend: str = "claude-code",
     system_prompt: str | None = None,
     tools: list[McpServerConfig] | None = None,
-    skills: list[str] | None = None,
     container_config: ContainerConfig | None = None,
     max_concurrent: int = 2,
     agent_role: str = "agent",
@@ -1646,8 +1646,8 @@ async def create_coworker(
         row = await conn.fetchrow(
             """
             INSERT INTO coworkers (tenant_id, name, folder, agent_backend, system_prompt,
-                tools, skills, container_config, max_concurrent, agent_role, permissions)
-            VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9, $10, $11::jsonb)
+                tools, container_config, max_concurrent, agent_role, permissions)
+            VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10::jsonb)
             RETURNING *
             """,
             tenant_id,
@@ -1670,7 +1670,6 @@ async def create_coworker(
                 if tools
                 else []
             ),
-            json.dumps(skills or []),
             cc_json,
             max_concurrent,
             agent_role,
@@ -1707,7 +1706,6 @@ def _record_to_coworker(row: asyncpg.Record) -> Coworker:
                 )
             )
         # Skip legacy string entries silently
-    skills_raw = row.get("skills")
 
     # Parse agent_role and permissions (new auth fields)
     agent_role = row.get("agent_role") or "agent"
@@ -1726,7 +1724,6 @@ def _record_to_coworker(row: asyncpg.Record) -> Coworker:
         agent_backend=row.get("agent_backend") or "claude-code",
         system_prompt=row.get("system_prompt"),
         tools=tools,
-        skills=skills_raw if isinstance(skills_raw, list) else json.loads(skills_raw) if skills_raw else [],
         container_config=_parse_container_config(row["container_config"]),
         max_concurrent=row["max_concurrent"],
         status=row["status"] or "active",
@@ -1789,7 +1786,6 @@ async def update_coworker(
     name: str | None = None,
     system_prompt: str | None = None,
     tools: list[McpServerConfig] | None = None,
-    skills: list[str] | None = None,
     max_concurrent: int | None = None,
     status: str | None = None,
     agent_role: str | None = None,
@@ -1825,10 +1821,6 @@ async def update_coworker(
                 ]
             )
         )
-        param_idx += 1
-    if skills is not None:
-        fields.append(f"skills = ${param_idx}::jsonb")
-        values.append(json.dumps(skills))
         param_idx += 1
     if max_concurrent is not None:
         fields.append(f"max_concurrent = ${param_idx}")

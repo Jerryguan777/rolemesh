@@ -140,7 +140,6 @@ class Coworker:
     agent_backend: str = "claude-code"
     system_prompt: str | None = None
     tools: list[McpServerConfig] = field(default_factory=list)
-    skills: list[str] = field(default_factory=list)
     container_config: ContainerConfig | None = None
     max_concurrent: int = 2
     status: str = "active"

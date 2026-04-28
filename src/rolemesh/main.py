@@ -208,7 +208,6 @@ def _coworker_from_state(cw_state: CoworkerState) -> Coworker:
         agent_backend=c.agent_backend,
         system_prompt=c.system_prompt,
         tools=c.tools,
-        skills=c.skills,
         max_concurrent=c.max_concurrent,
     )
 
@@ -420,7 +419,6 @@ async def _load_state() -> None:
             container_image=None,
             max_concurrent=cw.max_concurrent,
             tools=cw.tools,
-            skills=cw.skills,
             agent_role=cw.agent_role,
             permissions=cw.permissions,
         )

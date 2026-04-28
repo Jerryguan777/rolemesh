@@ -129,7 +129,6 @@ async def test_create_and_get_coworker() -> None:
         tools=[
             McpServerConfig(name="my-mcp-server", type="sse", url="http://localhost:9100/mcp/"),
         ],
-        skills=["browser"],
     )
     assert cw.id
     assert cw.agent_role == "super_agent"
