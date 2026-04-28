@@ -33,7 +33,11 @@ from pi.coding_agent.core.settings_manager import SettingsManager
 from pi.coding_agent.core.skills import format_skills_for_prompt
 
 
-def _assemble_system_prompt(resource_loader: Any) -> str:
+def _assemble_system_prompt(
+    resource_loader: Any,
+    *,
+    has_read_tool: bool = True,
+) -> str:
     """Compose the agent's system_prompt from the resource_loader's pieces.
 
     Order: ``get_system_prompt()`` → ``get_append_system_prompt()`` parts
@@ -43,6 +47,12 @@ def _assemble_system_prompt(resource_loader: Any) -> str:
     ``system_prompt=""`` and every author-supplied prompt + every
     loaded skill description was silently dropped on the floor — the
     model received nothing but the user's first message.
+
+    Skills are only injected when the read tool is available — the
+    block tells the model "Use the read tool to load a skill's
+    file...", and Pi's own ``build_system_prompt`` for the default
+    branch gates the block on the same condition. Telling the model
+    about skills it cannot read is worse than not telling it at all.
     """
     pieces: list[str] = []
     base = resource_loader.get_system_prompt() if resource_loader else None
@@ -52,13 +62,14 @@ def _assemble_system_prompt(resource_loader: Any) -> str:
         for chunk in resource_loader.get_append_system_prompt():
             if chunk:
                 pieces.append(chunk)
-        skills = list(resource_loader.get_skills().values()) if hasattr(
-            resource_loader, "get_skills"
-        ) else []
-        if skills:
-            block = format_skills_for_prompt(skills).lstrip("\n")
-            if block:
-                pieces.append(block)
+        if has_read_tool:
+            skills = list(resource_loader.get_skills().values()) if hasattr(
+                resource_loader, "get_skills"
+            ) else []
+            if skills:
+                block = format_skills_for_prompt(skills).lstrip("\n")
+                if block:
+                    pieces.append(block)
     return "\n\n".join(pieces)
 
 
@@ -296,7 +307,10 @@ async def create_agent_session(
 
     # Create agent
     initial_state = AgentState(
-        system_prompt=_assemble_system_prompt(resource_loader),
+        system_prompt=_assemble_system_prompt(
+            resource_loader,
+            has_read_tool="read" in initial_tool_names,
+        ),
         model=model or Model(),
         thinking_level=thinking_level or "off",
         tools=active_tools,
