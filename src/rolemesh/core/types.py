@@ -155,6 +155,40 @@ class Coworker:
 
 
 @dataclass
+class SkillFile:
+    """One file within a skill folder. ``path`` is POSIX-relative
+    to the skill root; ``content`` is text-only in v1.
+    """
+
+    path: str
+    content: str
+    mime_type: str = "text/plain"
+    updated_at: str = ""
+
+
+@dataclass
+class Skill:
+    """A per-coworker skill folder. ``frontmatter_common`` carries the
+    keys both backends accept (at least ``name`` and ``description``);
+    ``frontmatter_backend`` has the shape ``{"claude": {...}, "pi": {...}}``
+    for backend-specific overrides. ``files`` is keyed by relative path,
+    always contains ``SKILL.md``.
+    """
+
+    id: str
+    tenant_id: str
+    coworker_id: str
+    name: str
+    frontmatter_common: dict[str, object] = field(default_factory=dict)
+    frontmatter_backend: dict[str, dict[str, object]] = field(default_factory=dict)
+    enabled: bool = True
+    created_at: str = ""
+    updated_at: str = ""
+    created_by: str | None = None
+    files: dict[str, SkillFile] = field(default_factory=dict)
+
+
+@dataclass
 class ChannelBinding:
     """Per-coworker per-channel-type bot credentials."""
 
