@@ -95,9 +95,10 @@ testpaths = ["tests"]
 # Exclude integration tests by default. They require a live Docker daemon
 # and pull alpine on first run; PR CI stays fast, nightly runs them via
 # `uv run pytest -m integration` (or `-m ""` to include everything).
-addopts = "-m 'not integration'"
+addopts = "-m 'not integration and not e2e'"
 markers = [
     "integration: end-to-end tests that require a live Docker daemon",
+    "e2e: real-model end-to-end tests requiring Anthropic API + Docker",
 ]
 
 [tool.mypy]
