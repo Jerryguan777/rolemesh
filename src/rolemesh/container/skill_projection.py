@@ -20,7 +20,7 @@ The flow is described in detail in docs/skills-architecture.md
 The mount target inside the container depends on the backend:
 
 * ``claude`` / ``claude-code`` → ``/home/agent/.claude/skills``
-* ``pi``                       → ``/home/agent/.pi/agent/skills``
+* ``pi``                       → ``/home/agent/.pi/skills``
 """
 
 from __future__ import annotations
@@ -41,6 +41,7 @@ from rolemesh.core.skills import (
     validate_skill_name,
 )
 from rolemesh.db.pg import list_skills_for_coworker
+from rolemesh.ipc.skill_mount import CONTAINER_TARGETS_BY_BACKEND
 
 if TYPE_CHECKING:
     from rolemesh.core.types import Coworker, Skill, SkillFile
@@ -53,11 +54,23 @@ logger = get_logger()
 # (one per agent invocation) gets its own subtree keyed by job_id.
 SPAWN_ROOT: Path = DATA_DIR / "spawns"
 
-CONTAINER_TARGETS: dict[str, str] = {
-    "claude": "/home/agent/.claude/skills",
-    "claude-code": "/home/agent/.claude/skills",
-    "pi": "/home/agent/.pi/agent/skills",
-}
+# Per-backend skill mount targets — the source of truth lives in
+# ``rolemesh.ipc.skill_mount`` so the in-container Pi runtime can
+# import the same constants without depending on this orchestrator-
+# only module. Re-exported here as ``CONTAINER_TARGETS`` for
+# backward compatibility with existing tests; new code should pull
+# directly from ``rolemesh.ipc.skill_mount``.
+#
+# Why two-call-site coupling matters: the projector mounts at one
+# of these paths and the agent's resource loader scans the same
+# path. Any byte-level divergence is a silent failure (spawn
+# succeeds, container starts, model never sees the skill). The
+# shared module makes it impossible to change one side without
+# touching the other.
+#
+# The depth-1 invariant — the bind target must be a direct child
+# of an agent-owned parent — is documented at the source module.
+CONTAINER_TARGETS: dict[str, str] = CONTAINER_TARGETS_BY_BACKEND
 
 
 def _spawn_skills_dir(job_id: str) -> Path:
