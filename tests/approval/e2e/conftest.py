@@ -4,6 +4,16 @@ The ``test_db`` fixture comes from the repo-level ``tests/conftest.py``
 (recreates schema per test). ``nats_url`` here assumes the dev NATS
 server is reachable; the test suite as a whole will skip this module
 if NATS is not available.
+
+Auto-applies the ``e2e`` marker to every test in this directory so the
+default ``addopts = "-m 'not integration and not e2e'"`` in
+``pyproject.toml`` actually keeps these out of fast PR runs. Without
+this hook, the ``e2e`` directory name is just convention — pytest sees
+plain unmarked tests and runs them, which (a) requires NATS / Docker
+on every CI worker and (b) sequentially exercises overlapping
+JetStream consumers across the harness's per-test ephemeral runs.
+Operators who want the e2e tests opt back in with ``pytest -m e2e``
+or ``pytest -m ""`` (include everything).
 """
 
 from __future__ import annotations
@@ -47,6 +57,21 @@ if not _nats_reachable(_NATS_URL):
         "Start with: docker compose -f docker-compose.dev.yml up -d",
         allow_module_level=True,
     )
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """Stamp every test under this directory with the ``e2e`` marker.
+
+    Pytest auto-loads the nearest conftest, so this hook only fires
+    for items collected under ``tests/approval/e2e/``. Done at the
+    conftest level rather than by adding ``pytestmark`` to every file
+    so a new test file in this dir gets the marker by default and
+    can't accidentally leak into a fast PR run.
+    """
+    for item in items:
+        item.add_marker(pytest.mark.e2e)
 
 
 @pytest.fixture
