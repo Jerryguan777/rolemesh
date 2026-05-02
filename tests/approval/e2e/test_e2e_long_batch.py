@@ -17,7 +17,10 @@ Notes on why this is E2E-only:
 
 from __future__ import annotations
 
-from rolemesh.db import pg
+from rolemesh.db import (
+    get_approval_request,
+    list_approval_requests,
+)
 
 from .harness import OrchestratorHarness, make_auth_user, seed_tenant
 
@@ -69,12 +72,12 @@ async def test_long_batch_does_not_redeliver_or_double_execute(
 
     async def _pending() -> bool:
         return bool(
-            await pg.list_approval_requests(seed.tenant_id, status="pending")
+            await list_approval_requests(seed.tenant_id, status="pending")
         )
 
     await harness.wait_for(_pending, timeout=5.0)
     req = (
-        await pg.list_approval_requests(seed.tenant_id, status="pending")
+        await list_approval_requests(seed.tenant_id, status="pending")
     )[0]
 
     async with harness.api_client(admin) as api:
@@ -113,7 +116,7 @@ async def test_long_batch_does_not_redeliver_or_double_execute(
 
     # Final status: executed.
     async def _executed() -> bool:
-        fresh = await pg.get_approval_request(req.id, tenant_id=seed.tenant_id)
+        fresh = await get_approval_request(req.id, tenant_id=seed.tenant_id)
         return fresh is not None and fresh.status == "executed"
 
     await harness.wait_for(_executed, timeout=5.0)

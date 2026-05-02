@@ -19,14 +19,14 @@ from typing import TYPE_CHECKING, Any
 
 from rolemesh.core.logger import get_logger
 
-# ``rolemesh.db.pg`` and ``asyncpg`` are orchestrator-only dependencies
+# ``rolemesh.db`` and ``asyncpg`` are orchestrator-only dependencies
 # (not shipped in the agent container image). We still expose
 # ``list_safety_rules_for_coworker`` as a module attribute so that
 # orchestrator-side tests can ``monkeypatch.setattr(loader,
 # "list_safety_rules_for_coworker", ...)`` — the agent container path
 # never calls it.
 try:
-    from rolemesh.db.pg import list_safety_rules_for_coworker  # noqa: F401
+    from rolemesh.db import list_safety_rules_for_coworker  # noqa: F401
 except ModuleNotFoundError:
     # Agent container: rolemesh.db is not packaged. Leave the symbol
     # undefined at module scope; ``fetch_safety_rule_snapshots`` below
@@ -89,7 +89,7 @@ async def fetch_safety_rule_snapshots(
     # Resolve via ``globals()`` so orchestrator tests that
     # ``monkeypatch.setattr(loader, "list_safety_rules_for_coworker",
     # ...)`` actually substitute the function at call time. A
-    # ``from rolemesh.db.pg import ...`` at call site would bypass
+    # ``from rolemesh.db import ...`` at call site would bypass
     # the patched binding; the try/except at module top imports it
     # into this namespace on the orchestrator path, and agent
     # containers hit the ModuleNotFoundError fallback and raise a
@@ -98,7 +98,7 @@ async def fetch_safety_rule_snapshots(
     if fn is None:
         raise RuntimeError(
             "fetch_safety_rule_snapshots called outside the orchestrator: "
-            "rolemesh.db.pg is not packaged in this environment"
+            "rolemesh.db is not packaged in this environment"
         )
     rules = await fn(tenant_id, coworker_id)
     return [r.to_snapshot_dict() for r in rules]

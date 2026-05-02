@@ -17,7 +17,10 @@ Flow:
 
 from __future__ import annotations
 
-from rolemesh.db import pg
+from rolemesh.db import (
+    create_user,
+    list_approval_requests,
+)
 
 from .harness import OrchestratorHarness, make_auth_user, seed_tenant
 
@@ -27,11 +30,11 @@ async def test_policy_approver_edit_does_not_re_scope_open_requests(
 ) -> None:
     seed = await seed_tenant()
     # Create two named users: alice (first approver), bob (second).
-    alice = await pg.create_user(
+    alice = await create_user(
         tenant_id=seed.tenant_id, name="Alice",
         email="alice@x.com", role="admin",
     )
-    bob = await pg.create_user(
+    bob = await create_user(
         tenant_id=seed.tenant_id, name="Bob",
         email="bob@x.com", role="admin",
     )
@@ -83,13 +86,13 @@ async def test_policy_approver_edit_does_not_re_scope_open_requests(
 
     async def _one_pending() -> bool:
         return (
-            len(await pg.list_approval_requests(seed.tenant_id, status="pending"))
+            len(await list_approval_requests(seed.tenant_id, status="pending"))
             == 1
         )
 
     await harness.wait_for(_one_pending, timeout=5.0)
     row_alice = (
-        await pg.list_approval_requests(seed.tenant_id, status="pending")
+        await list_approval_requests(seed.tenant_id, status="pending")
     )[0]
     assert row_alice.resolved_approvers == [alice.id]
 
@@ -134,14 +137,14 @@ async def test_policy_approver_edit_does_not_re_scope_open_requests(
     )
 
     async def _second_pending() -> bool:
-        rows = await pg.list_approval_requests(
+        rows = await list_approval_requests(
             seed.tenant_id, status="pending"
         )
         return len(rows) == 1  # old row is now approved
 
     await harness.wait_for(_second_pending, timeout=5.0)
     row_bob = (
-        await pg.list_approval_requests(seed.tenant_id, status="pending")
+        await list_approval_requests(seed.tenant_id, status="pending")
     )[0]
     assert row_bob.resolved_approvers == [bob.id]
 

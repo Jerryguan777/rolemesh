@@ -5,9 +5,9 @@ from ``rolemesh.db`` directly:
 
     from rolemesh.db import create_coworker, tenant_conn
 
-The ``rolemesh.db.pg`` shim still works for legacy ``from
-rolemesh.db.pg import X`` call sites and is removed once they are
-migrated.
+Entity-scoped imports (``rolemesh.db.coworker``, ``rolemesh.db.safety``,
+…) are also valid; the package-level surface is the back-compat target
+for the historic ``rolemesh.db.pg`` shim, which has been removed.
 """
 
 from rolemesh.db._pool import *  # noqa: F403

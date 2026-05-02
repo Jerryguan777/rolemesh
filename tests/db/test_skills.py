@@ -23,7 +23,7 @@ import asyncpg
 import pytest
 
 from rolemesh.core.types import SkillFile
-from rolemesh.db.pg import (
+from rolemesh.db import (
     _get_pool,
     create_coworker,
     create_skill,
@@ -373,23 +373,22 @@ async def test_cross_tenant_blocked_under_rls_through_app_role(
     """
     tenant_a, _ = await _make_tenant_with_coworker("rta")
     tenant_b, coworker_b = await _make_tenant_with_coworker("rtb")
-    async with app_pool.acquire() as conn:
-        async with conn.transaction():
+    async with app_pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "SELECT set_config('app.current_tenant_id', $1, true)",
+            tenant_a,
+        )
+        with pytest.raises(
+            (asyncpg.InsufficientPrivilegeError, asyncpg.RaiseError)
+        ):
             await conn.execute(
-                "SELECT set_config('app.current_tenant_id', $1, true)",
+                "INSERT INTO skills (tenant_id, coworker_id, name, "
+                "frontmatter_common, frontmatter_backend) "
+                "VALUES ($1::uuid, $2::uuid, $3, '{}'::jsonb, '{}'::jsonb)",
                 tenant_a,
+                coworker_b,
+                "forged-rls",
             )
-            with pytest.raises(
-                (asyncpg.InsufficientPrivilegeError, asyncpg.RaiseError)
-            ):
-                await conn.execute(
-                    "INSERT INTO skills (tenant_id, coworker_id, name, "
-                    "frontmatter_common, frontmatter_backend) "
-                    "VALUES ($1::uuid, $2::uuid, $3, '{}'::jsonb, '{}'::jsonb)",
-                    tenant_a,
-                    coworker_b,
-                    "forged-rls",
-                )
 
 
 # ---------------------------------------------------------------------------
@@ -407,15 +406,14 @@ async def test_rls_select_isolates_skills(
         frontmatter_common={"description": _GOOD_DESC},
         frontmatter_backend={}, files=_basic_files(),
     )
-    async with app_pool.acquire() as conn:
-        async with conn.transaction():
-            await conn.execute(
-                "SELECT set_config('app.current_tenant_id', $1, true)",
-                tenant_a,
-            )
-            rows = await conn.fetch(
-                "SELECT * FROM skills WHERE id = $1::uuid", skill_b.id
-            )
+    async with app_pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "SELECT set_config('app.current_tenant_id', $1, true)",
+            tenant_a,
+        )
+        rows = await conn.fetch(
+            "SELECT * FROM skills WHERE id = $1::uuid", skill_b.id
+        )
     assert rows == [], "tenant A could see tenant B's skill"
 
 
@@ -436,16 +434,15 @@ async def test_rls_select_isolates_skill_files_transitively(
             "secret.md": SkillFile(path="secret.md", content="confidential"),
         },
     )
-    async with app_pool.acquire() as conn:
-        async with conn.transaction():
-            await conn.execute(
-                "SELECT set_config('app.current_tenant_id', $1, true)",
-                tenant_a,
-            )
-            rows = await conn.fetch(
-                "SELECT * FROM skill_files WHERE skill_id = $1::uuid",
-                skill_b.id,
-            )
+    async with app_pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "SELECT set_config('app.current_tenant_id', $1, true)",
+            tenant_a,
+        )
+        rows = await conn.fetch(
+            "SELECT * FROM skill_files WHERE skill_id = $1::uuid",
+            skill_b.id,
+        )
     assert rows == []
 
 

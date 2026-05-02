@@ -64,7 +64,7 @@ import pytest
 from agent_runner.backend import UsageSnapshot
 from agent_runner.main import ContainerOutput
 from rolemesh.agent.container_executor import _parse_container_output
-from rolemesh.db.pg import (
+from rolemesh.db import (
     _get_pool,
     create_channel_binding,
     create_conversation,

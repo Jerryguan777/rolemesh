@@ -1,6 +1,6 @@
 """PR-E: static check that webui never imports admin escapes.
 
-The classification (in pg.py docstrings + the RLS design doc) is
+The classification (in db.schema docstrings + the RLS design doc) is
 that ``admin_conn`` and ``resolve_*`` are system-only paths.
 REST handlers must never reach for them — every webui caller goes
 through tenant-scoped reads/writes that have a user.tenant_id in
@@ -38,18 +38,18 @@ def _admin_imports(tree: ast.Module) -> list[str]:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 # Catch `from rolemesh.db import pg` — that's fine,
-                # but `pg.admin_conn(...)` calls are a separate
+                # but `admin_conn(...)` calls are a separate
                 # check (Attribute access).
                 pass
     return found
 
 
 def _admin_attribute_calls(tree: ast.Module, src_text: str) -> list[str]:
-    """Return any ``pg.admin_conn(...)`` / ``pg.resolve_*(...)`` calls."""
+    """Return any ``admin_conn(...)`` / ``resolve_*(...)`` calls."""
     found: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute) and node.attr in ADMIN_NAMES:
-            # Most callers do ``pg.admin_conn`` — check the value is
+            # Most callers do ``admin_conn`` — check the value is
             # an attribute on something named pg, but be lenient since
             # the rule is "no use", not "no specific syntax".
             line = src_text.splitlines()[node.lineno - 1] if node.lineno else ""

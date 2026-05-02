@@ -5,7 +5,7 @@ Responsibilities are split across this file:
 - ``ApprovalEngine`` owns state transitions and talks to NATS.
 - ``ApprovalRequestBuilder`` owns request creation + approver resolution
   and calls into the audit layer via the DB trigger (see
-  ``_approval_write_audit_from_trigger`` in ``src/rolemesh/db/pg.py``).
+  ``_approval_write_audit_from_trigger`` in ``src/rolemesh/db/approval.py``).
 - ``_resolve_approvers`` implements the fallback chain
   (policy → assigned users → tenant owners).
 
@@ -36,7 +36,22 @@ from agent_runner.approval.policy import (
     find_matching_policy,
 )
 from rolemesh.core.logger import get_logger
-from rolemesh.db import pg
+from rolemesh.db import (
+    cancel_pending_approvals_for_job,
+    create_approval_request,
+    decide_approval_request_full,
+    expire_approval_if_pending,
+    find_pending_request_by_action_hash,
+    get_approval_request,
+    get_enabled_policies_for_coworker,
+    get_tenant,
+    get_users_for_agent,
+    get_users_for_tenant,
+    list_expired_pending_approvals,
+    list_stuck_approved_approvals,
+    list_stuck_executing_approvals,
+    set_approval_status,
+)
 
 from .notification import (
     ChannelSender,
@@ -144,7 +159,7 @@ class ApprovalRequestBuilder:
         mcp_server = str(actions[0].get("mcp_server") or "") if actions else ""
         expiry = _expiry(policy.auto_expire_minutes if policy else None)
         post_exec = policy.post_exec_mode if policy else "report"
-        req = await pg.create_approval_request(
+        req = await create_approval_request(
             tenant_id=tenant_id,
             coworker_id=coworker_id,
             conversation_id=conversation_id,
@@ -182,7 +197,7 @@ class ApprovalRequestBuilder:
         approvers: list[str],
     ) -> ApprovalRequest:
         actions = [{"mcp_server": server, "tool_name": tool, "params": params}]
-        req = await pg.create_approval_request(
+        req = await create_approval_request(
             tenant_id=tenant_id,
             coworker_id=coworker_id,
             conversation_id=conversation_id,
@@ -227,7 +242,7 @@ class ApprovalRequestBuilder:
         NULL for auto-intercepts) and 'skipped' (always NULL actor).
         """
         actor = user_id if source == "proposal" else None
-        req = await pg.create_approval_request(
+        req = await create_approval_request(
             tenant_id=tenant_id,
             coworker_id=coworker_id,
             conversation_id=conversation_id,
@@ -339,7 +354,7 @@ class ApprovalEngine:
             )
             return
 
-        policies = await pg.get_enabled_policies_for_coworker(tenant_id, coworker_id)
+        policies = await get_enabled_policies_for_coworker(tenant_id, coworker_id)
         policy_dicts = [p.to_dict() for p in policies]
         matched = find_matching_policies_for_actions(policy_dicts, actions)
         action_hashes = [
@@ -360,7 +375,7 @@ class ApprovalEngine:
         #                      Worker just delivers the rejection
         #                      notification.
         if all(m is None for m in matched):
-            tenant = await pg.get_tenant(tenant_id)
+            tenant = await get_tenant(tenant_id)
             default_mode = (
                 tenant.approval_default_mode if tenant else "auto_execute"
             )
@@ -377,7 +392,7 @@ class ApprovalEngine:
                 approvers=[],
             )
             if default_mode == "auto_execute":
-                await pg.set_approval_status(
+                await set_approval_status(
                     req.id, "approved", tenant_id=req.tenant_id
                 )
                 await self._publish_decided(
@@ -387,12 +402,12 @@ class ApprovalEngine:
                 # Move pending → skipped (system transition). The
                 # originating conversation is notified; admins must
                 # create a policy or decide manually via a side channel.
-                await pg.set_approval_status(
+                await set_approval_status(
                     req.id, "skipped", tenant_id=req.tenant_id
                 )
                 await self._send_to_origin(
                     (
-                        await pg.get_approval_request(
+                        await get_approval_request(
                             req.id, tenant_id=req.tenant_id
                         )
                     )
@@ -407,7 +422,7 @@ class ApprovalEngine:
                     "No matching approval policy; this tenant is "
                     "configured for deny-by-default."
                 )
-                await pg.set_approval_status(
+                await set_approval_status(
                     req.id, "rejected", tenant_id=req.tenant_id, note=note
                 )
                 await self._publish_decided(
@@ -475,7 +490,7 @@ class ApprovalEngine:
         # Dedup: short-circuit if a pending request with the same
         # action_hash exists within the last DEDUP_WINDOW minutes.
         if action_hash:
-            existing = await pg.find_pending_request_by_action_hash(
+            existing = await find_pending_request_by_action_hash(
                 tenant_id, action_hash, within_minutes=_DEDUP_WINDOW_MINUTES
             )
             if existing is not None:
@@ -489,7 +504,7 @@ class ApprovalEngine:
         # Re-match against the current policy set — the container snapshot
         # may be stale if the admin disabled the policy between init and
         # the hook firing.
-        policies = await pg.get_enabled_policies_for_coworker(tenant_id, coworker_id)
+        policies = await get_enabled_policies_for_coworker(tenant_id, coworker_id)
         policy_dicts = [p.to_dict() for p in policies]
         if not isinstance(params, dict):
             params = {}
@@ -613,7 +628,7 @@ class ApprovalEngine:
         # spawn one pending approval_request per retry. 5-minute window
         # matches _DEDUP_WINDOW_MINUTES so the two paths behave
         # consistently to operators reading the audit log.
-        existing = await pg.find_pending_request_by_action_hash(
+        existing = await find_pending_request_by_action_hash(
             tenant_id, action_hash, within_minutes=_DEDUP_WINDOW_MINUTES
         )
         if existing is not None:
@@ -625,7 +640,7 @@ class ApprovalEngine:
             )
             return existing
 
-        req = await pg.create_approval_request(
+        req = await create_approval_request(
             tenant_id=tenant_id,
             coworker_id=coworker_id,
             conversation_id=conversation_id,
@@ -696,7 +711,7 @@ class ApprovalEngine:
             raise ValueError(f"Unknown decision action: {action}")
         new_status = "approved" if action == "approve" else "rejected"
 
-        outcome = await pg.decide_approval_request_full(
+        outcome = await decide_approval_request_full(
             request_id,
             tenant_id=tenant_id,
             new_status=new_status,
@@ -748,9 +763,9 @@ class ApprovalEngine:
         one 'cancelled' audit row per cancelled request with NULL actor
         (system transition).
         """
-        cancelled = await pg.cancel_pending_approvals_for_job(job_id)
+        cancelled = await cancel_pending_approvals_for_job(job_id)
         for req_id, tenant_id in cancelled:
-            req = await pg.get_approval_request(req_id, tenant_id=tenant_id)
+            req = await get_approval_request(req_id, tenant_id=tenant_id)
             if req is None:
                 continue
             await self._send_to_origin(req, format_cancelled_message(req))
@@ -761,13 +776,13 @@ class ApprovalEngine:
     async def expire_stale_requests(self) -> int:
         """Transition pending → expired for rows past their deadline.
 
-        The pending→expired CAS lives in ``pg.expire_approval_if_pending``;
+        The pending→expired CAS lives in ``expire_approval_if_pending``;
         the trigger writes the 'expired' audit row.
         """
-        expired = await pg.list_expired_pending_approvals()
+        expired = await list_expired_pending_approvals()
         count = 0
         for req in expired:
-            updated = await pg.expire_approval_if_pending(
+            updated = await expire_approval_if_pending(
                 req.id, tenant_id=req.tenant_id
             )
             if updated is None:
@@ -781,7 +796,7 @@ class ApprovalEngine:
         """Republish missed approvals and surface wedged executions."""
         republished = 0
         stale = 0
-        for req in await pg.list_stuck_approved_approvals(
+        for req in await list_stuck_approved_approvals(
             older_than_seconds=_RECONCILE_APPROVED_GRACE_S
         ):
             # Republish with explicit status so the Worker's default-
@@ -790,10 +805,10 @@ class ApprovalEngine:
                 req.id, tenant_id=req.tenant_id, status="approved", note=None
             )
             republished += 1
-        for req in await pg.list_stuck_executing_approvals(
+        for req in await list_stuck_executing_approvals(
             older_than_seconds=_RECONCILE_EXECUTING_GRACE_S
         ):
-            transitioned = await pg.set_approval_status(
+            transitioned = await set_approval_status(
                 req.id, "execution_stale", tenant_id=req.tenant_id
             )
             if transitioned is None:
@@ -816,7 +831,7 @@ class ApprovalEngine:
         """Fallback chain: policy → assigned users → tenant owners."""
         if policy.approver_user_ids:
             return list(policy.approver_user_ids)
-        assigned = await pg.get_users_for_agent(coworker_id, tenant_id=tenant_id)
+        assigned = await get_users_for_agent(coworker_id, tenant_id=tenant_id)
         if assigned:
             return [u.id for u in assigned]
         return await _tenant_owner_ids(tenant_id)
@@ -867,7 +882,7 @@ def _pick_strictest(matched: list[dict[str, Any] | None]) -> dict[str, Any]:
 
 async def _tenant_owner_ids(tenant_id: str) -> list[str]:
     """Return user_ids of tenant owners."""
-    users = await pg.get_users_for_tenant(tenant_id)
+    users = await get_users_for_tenant(tenant_id)
     return [u.id for u in users if u.role == "owner"]
 
 

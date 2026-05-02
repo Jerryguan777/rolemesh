@@ -1,6 +1,6 @@
 """Full-chain E2E starting from the admin REST surface.
 
-The existing test_pii_block.py starts at pg.create_safety_rule,
+The existing test_pii_block.py starts at create_safety_rule,
 skipping the admin REST layer. That leaves the most common production
 flow — a tenant admin POSTs a rule → browses GET /rules → the agent
 container picks it up → tool call is blocked → both decision-audit
@@ -47,7 +47,14 @@ from agent_runner.hooks.events import ToolCallEvent
 from agent_runner.safety.hook_handler import SafetyHookHandler
 from agent_runner.safety.registry import build_container_registry
 from rolemesh.auth.provider import AuthenticatedUser
-from rolemesh.db import pg
+from rolemesh.db import (
+    create_coworker,
+    create_tenant,
+    create_user,
+    list_safety_decisions,
+    list_safety_rules_audit,
+    list_safety_rules_for_coworker,
+)
 from rolemesh.safety.engine import SafetyEngine
 from rolemesh.safety.subscriber import (
     SafetyEventsSubscriber,
@@ -118,14 +125,14 @@ def _client(app: FastAPI) -> httpx.AsyncClient:
 
 async def _seed_tenant_user_coworker() -> tuple[str, str, str, str]:
     """Returns (tenant_id, user_id, coworker_id, coworker_folder)."""
-    tenant = await pg.create_tenant(
+    tenant = await create_tenant(
         name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
     )
-    user = await pg.create_user(
+    user = await create_user(
         tenant_id=tenant.id, name="Admin",
         email=f"a-{uuid.uuid4().hex[:8]}@x.com", role="owner",
     )
-    cw = await pg.create_coworker(
+    cw = await create_coworker(
         tenant_id=tenant.id, name="cw",
         folder=f"cw-{uuid.uuid4().hex[:8]}",
     )
@@ -204,7 +211,7 @@ class TestRestCreateToAudit:
         #    snapshot shape the Handler consumes would break here.
         snapshot = [
             r.to_snapshot_dict()
-            for r in await pg.list_safety_rules_for_coworker(tid, cw_id)
+            for r in await list_safety_rules_for_coworker(tid, cw_id)
         ]
         assert snapshot, "POST result must be visible to the container"
 
@@ -234,7 +241,7 @@ class TestRestCreateToAudit:
         )
 
         # 5a. Decision audit: safety_decisions has the block row.
-        decisions = await pg.list_safety_decisions(tid)
+        decisions = await list_safety_decisions(tid)
         assert len(decisions) == 1
         assert decisions[0]["verdict_action"] == "block"
         assert decisions[0]["triggered_rule_ids"] == [rule_id]
@@ -242,7 +249,7 @@ class TestRestCreateToAudit:
         # 5b. Rule-change audit: safety_rules_audit has the 'created'
         #     row attributed to the caller. This is the timeline
         #     operators need for "who set this rule?" forensics.
-        rule_audit = await pg.list_safety_rules_audit(
+        rule_audit = await list_safety_rules_audit(
             tenant_id=tid, rule_id=rule_id
         )
         assert len(rule_audit) == 1
@@ -279,7 +286,7 @@ class TestRestPatchPropagates:
             # Baseline: Handler built from current snapshot blocks.
             snap_before = [
                 r.to_snapshot_dict()
-                for r in await pg.list_safety_rules_for_coworker(
+                for r in await list_safety_rules_for_coworker(
                     tid, cw_id
                 )
             ]
@@ -288,7 +295,7 @@ class TestRestPatchPropagates:
             )
             assert v_before is not None and v_before.block
 
-            # PATCH through HTTP, not direct pg.update.
+            # PATCH through HTTP, not direct update.
             r = await client.patch(
                 f"/api/admin/safety/rules/{rule_id}",
                 json={"enabled": False},
@@ -299,7 +306,7 @@ class TestRestPatchPropagates:
             # Fresh snapshot reflects the change. New Handler allows.
             snap_after = [
                 r.to_snapshot_dict()
-                for r in await pg.list_safety_rules_for_coworker(
+                for r in await list_safety_rules_for_coworker(
                     tid, cw_id
                 )
             ]
@@ -317,7 +324,7 @@ class TestRestPatchPropagates:
 
         # Audit: 'updated' row with before=enabled:true,
         # after=enabled:false.
-        rule_audit = await pg.list_safety_rules_audit(
+        rule_audit = await list_safety_rules_audit(
             tenant_id=tid, rule_id=rule_id
         )
         # Newest first: updated then created.
@@ -354,12 +361,12 @@ class TestRestDeleteAudit:
             assert r.status_code == 204
 
         # Rule is gone from container-visible queries.
-        snap = await pg.list_safety_rules_for_coworker(tid, cw_id)
+        snap = await list_safety_rules_for_coworker(tid, cw_id)
         assert snap == []
 
         # But the audit row survives — the compliance timeline
         # outlives the rule itself.
-        rule_audit = await pg.list_safety_rules_audit(
+        rule_audit = await list_safety_rules_audit(
             tenant_id=tid, rule_id=rule_id
         )
         actions = [r["action"] for r in rule_audit]

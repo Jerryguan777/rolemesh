@@ -88,11 +88,11 @@ def mock_db():
         state.pop(user_id, None)
 
     with (
-        patch("rolemesh.db.pg.upsert_user_oidc_tokens", AsyncMock(side_effect=upsert)),
-        patch("rolemesh.db.pg.get_user_oidc_tokens", AsyncMock(side_effect=get_tokens)),
-        patch("rolemesh.db.pg.update_user_access_token", AsyncMock(side_effect=update_access)),
-        patch("rolemesh.db.pg.update_user_refresh_token", AsyncMock(side_effect=update_refresh)),
-        patch("rolemesh.db.pg.delete_user_oidc_tokens", AsyncMock(side_effect=delete)),
+        patch("rolemesh.db.upsert_user_oidc_tokens", AsyncMock(side_effect=upsert)),
+        patch("rolemesh.db.get_user_oidc_tokens", AsyncMock(side_effect=get_tokens)),
+        patch("rolemesh.db.update_user_access_token", AsyncMock(side_effect=update_access)),
+        patch("rolemesh.db.update_user_refresh_token", AsyncMock(side_effect=update_refresh)),
+        patch("rolemesh.db.delete_user_oidc_tokens", AsyncMock(side_effect=delete)),
     ):
         yield state
 

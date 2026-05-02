@@ -25,9 +25,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from nats.js.api import StreamConfig
-
-from rolemesh.db import pg
-from rolemesh.db.pg import _get_pool, close_database, init_database, tenant_conn
+from rolemesh.db import (
+    _get_pool,
+    close_database,
+    get_channel_binding_for_coworker,
+    get_coworker,
+    init_database,
+    tenant_conn,
+)
 from webui import auth, ws
 from webui.admin import router as admin_router
 from webui.config import (
@@ -99,7 +104,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # configuration instead of silently 404'ing.
     from rolemesh.approval.engine import ApprovalEngine
     from rolemesh.approval.notification import NotificationTargetResolver
-    from rolemesh.db.pg import get_conversation as _pg_get_conv
+    from rolemesh.db import get_conversation as _pg_get_conv
     from webui import admin as _admin
     from webui.config import WEBUI_BASE_URL
 
@@ -176,12 +181,12 @@ async def _resolve_web_agent(agent_id: str, token: str) -> tuple[str, str] | JSO
     if user is None:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     try:
-        coworker = await pg.get_coworker(agent_id, tenant_id=user.tenant_id)
+        coworker = await get_coworker(agent_id, tenant_id=user.tenant_id)
     except asyncpg.DataError:
         coworker = None
     if coworker is None:
         return JSONResponse({"error": "Agent not found"}, status_code=404)
-    binding = await pg.get_channel_binding_for_coworker(agent_id, "web", tenant_id=user.tenant_id)
+    binding = await get_channel_binding_for_coworker(agent_id, "web", tenant_id=user.tenant_id)
     if binding is None:
         return JSONResponse({"error": "Web binding not found"}, status_code=404)
     return binding.id, user.tenant_id

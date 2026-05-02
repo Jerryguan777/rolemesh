@@ -21,7 +21,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-from rolemesh.db import pg
+from rolemesh.db import (
+    _get_pool,
+    create_approval_policy,
+    create_approval_request,
+    get_approval_request,
+    list_approval_audit,
+    set_approval_status,
+)
 
 from .harness import OrchestratorHarness, seed_tenant
 
@@ -33,7 +40,7 @@ async def test_reconcile_republishes_stuck_approved_to_executed(
 
     # Insert an approved row directly (skip engine.decide so we never
     # publish the decided event).
-    policy = await pg.create_approval_policy(
+    policy = await create_approval_policy(
         tenant_id=seed.tenant_id,
         coworker_id=seed.coworker_id,
         mcp_server_name=harness.mcp_server_name,
@@ -41,7 +48,7 @@ async def test_reconcile_republishes_stuck_approved_to_executed(
         condition_expr={"always": True},
         approver_user_ids=[seed.owner_user_id],
     )
-    req = await pg.create_approval_request(
+    req = await create_approval_request(
         tenant_id=seed.tenant_id,
         coworker_id=seed.coworker_id,
         conversation_id=seed.conversation_id,
@@ -64,10 +71,10 @@ async def test_reconcile_republishes_stuck_approved_to_executed(
         expires_at=datetime.now(UTC) + timedelta(minutes=60),
     )
     # Flip to approved without publishing.
-    await pg.set_approval_status(req.id, "approved", tenant_id=seed.tenant_id)
+    await set_approval_status(req.id, "approved", tenant_id=seed.tenant_id)
 
     # Push updated_at into the past so the 60s grace window triggers.
-    pool = pg._get_pool()  # noqa: SLF001
+    pool = _get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE approval_requests SET updated_at = now() - interval '2 minutes' "
@@ -84,7 +91,7 @@ async def test_reconcile_republishes_stuck_approved_to_executed(
     await harness.wait_for(_mcp_hit, timeout=10.0)
 
     async def _executed() -> bool:
-        fresh = await pg.get_approval_request(req.id, tenant_id=seed.tenant_id)
+        fresh = await get_approval_request(req.id, tenant_id=seed.tenant_id)
         return fresh is not None and fresh.status == "executed"
 
     await harness.wait_for(_executed, timeout=5.0)
@@ -93,7 +100,7 @@ async def test_reconcile_republishes_stuck_approved_to_executed(
     # happen — reconcile's only job is to get the Worker running,
     # everything after that is the normal flow.
     audit_actions = [
-        e.action for e in await pg.list_approval_audit(req.id, tenant_id=seed.tenant_id)
+        e.action for e in await list_approval_audit(req.id, tenant_id=seed.tenant_id)
     ]
     assert "executing" in audit_actions
     assert "executed" in audit_actions

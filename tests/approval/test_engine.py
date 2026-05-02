@@ -36,7 +36,7 @@ from rolemesh.approval.engine import (
     ForbiddenError,
 )
 from rolemesh.approval.notification import NotificationTargetResolver
-from rolemesh.db.pg import (
+from rolemesh.db import (
     create_approval_policy,
     create_channel_binding,
     create_conversation,
@@ -720,7 +720,7 @@ class TestCancelAndMaintenance:
     async def test_expire_moves_pending_past_deadline(self) -> None:
         tenant_id, user_id, cw_id, conv_id, _j, _p = await _seed()
         # Build a request directly in the past.
-        from rolemesh.db.pg import create_approval_request, list_approval_policies
+        from rolemesh.db import create_approval_request, list_approval_policies
 
         pol = (await list_approval_policies(tenant_id))[0]
         req = await create_approval_request(
@@ -751,7 +751,7 @@ class TestCancelAndMaintenance:
 
     async def test_reconcile_republishes_stuck_approved(self) -> None:
         tenant_id, user_id, cw_id, conv_id, _j, _p = await _seed()
-        from rolemesh.db.pg import create_approval_request, list_approval_policies
+        from rolemesh.db import create_approval_request, list_approval_policies
 
         pol = (await list_approval_policies(tenant_id))[0]
         req = await create_approval_request(
@@ -775,7 +775,7 @@ class TestCancelAndMaintenance:
         # appear stuck. To keep the test deterministic AND exercise the
         # engine's own 60s threshold, we force the updated_at into the
         # past via raw SQL.
-        from rolemesh.db.pg import _get_pool
+        from rolemesh.db import _get_pool
 
         pool = _get_pool()
         async with pool.acquire() as conn:
@@ -791,7 +791,7 @@ class TestCancelAndMaintenance:
 
     async def test_reconcile_marks_stuck_executing_stale(self) -> None:
         tenant_id, user_id, cw_id, conv_id, _j, _p = await _seed()
-        from rolemesh.db.pg import (
+        from rolemesh.db import (
             _get_pool,
             create_approval_request,
             list_approval_policies,

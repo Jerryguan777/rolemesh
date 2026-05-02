@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import pytest
 
-from rolemesh.db.pg import (
+from rolemesh.db import (
     _get_admin_pool,
     _get_pool,
     admin_conn,

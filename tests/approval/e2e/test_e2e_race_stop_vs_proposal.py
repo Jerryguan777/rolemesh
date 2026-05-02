@@ -35,7 +35,12 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 
-from rolemesh.db import pg
+from rolemesh.db import (
+    _get_pool,
+    get_approval_request,
+    list_approval_audit,
+    list_approval_requests,
+)
 
 from .harness import OrchestratorHarness, make_auth_user, seed_tenant
 
@@ -90,10 +95,10 @@ async def test_cancel_then_late_proposal_creates_orphan_that_expires(
     )
 
     async def _one_row() -> bool:
-        return len(await pg.list_approval_requests(seed.tenant_id)) == 1
+        return len(await list_approval_requests(seed.tenant_id)) == 1
 
     await harness.wait_for(_one_row, timeout=5.0)
-    row = (await pg.list_approval_requests(seed.tenant_id))[0]
+    row = (await list_approval_requests(seed.tenant_id))[0]
 
     # CURRENT BEHAVIOUR (documented limitation): the orphan is pending.
     # Stop cascade did not reach it because the row did not exist yet
@@ -110,7 +115,7 @@ async def test_cancel_then_late_proposal_creates_orphan_that_expires(
     # maintenance loop. The orphan transitions to ``expired``, gets
     # an audit row, and the origin conversation is notified — the
     # same path any regular pending request takes.
-    pool = pg._get_pool()  # noqa: SLF001
+    pool = _get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE approval_requests SET expires_at = $1 "
@@ -120,14 +125,14 @@ async def test_cancel_then_late_proposal_creates_orphan_that_expires(
         )
     await harness.engine.expire_stale_requests()
 
-    fresh = await pg.get_approval_request(row.id, tenant_id=seed.tenant_id)
+    fresh = await get_approval_request(row.id, tenant_id=seed.tenant_id)
     assert fresh is not None
     assert fresh.status == "expired", (
         f"orphan pending row must be reaped by expiry; got {fresh.status!r}"
     )
     # Audit captures the expire as a system transition.
     expired_audit = [
-        e for e in await pg.list_approval_audit(row.id, tenant_id=seed.tenant_id)
+        e for e in await list_approval_audit(row.id, tenant_id=seed.tenant_id)
         if e.action == "expired"
     ]
     assert len(expired_audit) == 1

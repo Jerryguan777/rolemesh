@@ -155,7 +155,7 @@ class _FakeUser:
 
 @pytest.fixture
 def mock_db():
-    """Patch all rolemesh.db.pg functions used by OIDCAuthProvider."""
+    """Patch all rolemesh.db functions used by OIDCAuthProvider."""
     state: dict[str, object] = {
         "users_by_sub": {},  # external_sub -> _FakeUser
         "tenants_by_slug": {"default": _FakeTenant("default-tenant-id", slug="default")},
@@ -209,23 +209,23 @@ def mock_db():
         return None
 
     with (
-        patch("rolemesh.db.pg.get_tenant_by_slug", AsyncMock(side_effect=get_tenant_by_slug)),
-        patch("rolemesh.db.pg.create_tenant", AsyncMock(side_effect=create_tenant)),
-        patch("rolemesh.db.pg.get_local_tenant_id", AsyncMock(side_effect=get_local_tenant_id)),
+        patch("rolemesh.db.get_tenant_by_slug", AsyncMock(side_effect=get_tenant_by_slug)),
+        patch("rolemesh.db.create_tenant", AsyncMock(side_effect=create_tenant)),
+        patch("rolemesh.db.get_local_tenant_id", AsyncMock(side_effect=get_local_tenant_id)),
         patch(
-            "rolemesh.db.pg.create_external_tenant_mapping",
+            "rolemesh.db.create_external_tenant_mapping",
             AsyncMock(side_effect=create_external_tenant_mapping),
         ),
         patch(
-            "rolemesh.db.pg.get_user_by_external_sub",
+            "rolemesh.db.get_user_by_external_sub",
             AsyncMock(side_effect=get_user_by_external_sub),
         ),
         patch(
-            "rolemesh.db.pg.create_user_with_external_sub",
+            "rolemesh.db.create_user_with_external_sub",
             AsyncMock(side_effect=create_user_with_external_sub),
         ),
-        patch("rolemesh.db.pg.update_user", AsyncMock(side_effect=update_user)),
-        patch("rolemesh.db.pg.get_user", AsyncMock(side_effect=get_user)),
+        patch("rolemesh.db.update_user", AsyncMock(side_effect=update_user)),
+        patch("rolemesh.db.get_user", AsyncMock(side_effect=get_user)),
     ):
         yield state
 

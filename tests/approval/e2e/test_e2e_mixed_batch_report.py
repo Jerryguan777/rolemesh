@@ -20,7 +20,11 @@ test fail, it proves two distinct bugs.
 
 from __future__ import annotations
 
-from rolemesh.db import pg
+from rolemesh.db import (
+    get_approval_request,
+    list_approval_audit,
+    list_approval_requests,
+)
 
 from .harness import OrchestratorHarness, make_auth_user, seed_tenant
 
@@ -80,12 +84,12 @@ async def test_mixed_batch_produces_readable_report(
 
     async def _pending() -> bool:
         return bool(
-            await pg.list_approval_requests(seed.tenant_id, status="pending")
+            await list_approval_requests(seed.tenant_id, status="pending")
         )
 
     await harness.wait_for(_pending, timeout=5.0)
     req = (
-        await pg.list_approval_requests(seed.tenant_id, status="pending")
+        await list_approval_requests(seed.tenant_id, status="pending")
     )[0]
 
     async with harness.api_client(admin) as api:
@@ -101,14 +105,14 @@ async def test_mixed_batch_produces_readable_report(
     await harness.wait_for(_both_called, timeout=10.0)
 
     async def _terminal() -> bool:
-        fresh = await pg.get_approval_request(req.id, tenant_id=seed.tenant_id)
+        fresh = await get_approval_request(req.id, tenant_id=seed.tenant_id)
         return fresh is not None and fresh.status in (
             "executed",
             "execution_failed",
         )
 
     await harness.wait_for(_terminal, timeout=5.0)
-    fresh = await pg.get_approval_request(req.id, tenant_id=seed.tenant_id)
+    fresh = await get_approval_request(req.id, tenant_id=seed.tenant_id)
     assert fresh is not None
     assert fresh.status == "execution_failed", (
         "one HTTP 500 among the actions must flip the batch to "
@@ -117,7 +121,7 @@ async def test_mixed_batch_produces_readable_report(
 
     # The terminal audit row carries per-action results.
     audit = [
-        e for e in await pg.list_approval_audit(req.id, tenant_id=seed.tenant_id)
+        e for e in await list_approval_audit(req.id, tenant_id=seed.tenant_id)
         if e.action == "execution_failed"
     ]
     assert audit, "audit must contain execution_failed row"

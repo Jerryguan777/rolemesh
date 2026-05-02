@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import asyncio
 
-from rolemesh.db import pg
+from rolemesh.db import (
+    list_approval_audit,
+    list_approval_requests,
+)
 
 from .harness import OrchestratorHarness, make_auth_user, seed_tenant
 
@@ -61,12 +64,12 @@ async def test_reject_delivers_note_and_never_calls_mcp(
 
     async def _pending() -> bool:
         return bool(
-            await pg.list_approval_requests(seed.tenant_id, status="pending")
+            await list_approval_requests(seed.tenant_id, status="pending")
         )
 
     await harness.wait_for(_pending, timeout=5.0)
     req = (
-        await pg.list_approval_requests(seed.tenant_id, status="pending")
+        await list_approval_requests(seed.tenant_id, status="pending")
     )[0]
 
     # Clear the notifications recorded so far (approver notify) so we
@@ -103,13 +106,13 @@ async def test_reject_delivers_note_and_never_calls_mcp(
     )
 
     audit_actions = [
-        e.action for e in await pg.list_approval_audit(req.id, tenant_id=seed.tenant_id)
+        e.action for e in await list_approval_audit(req.id, tenant_id=seed.tenant_id)
     ]
     assert audit_actions == ["created", "rejected"], (
         f"audit chain mismatch: {audit_actions!r}"
     )
     rejected_entry = [
-        e for e in await pg.list_approval_audit(req.id, tenant_id=seed.tenant_id) if e.action == "rejected"
+        e for e in await list_approval_audit(req.id, tenant_id=seed.tenant_id) if e.action == "rejected"
     ][0]
     assert rejected_entry.actor_user_id == seed.owner_user_id
     assert rejected_entry.note is not None

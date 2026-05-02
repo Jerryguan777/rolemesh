@@ -25,7 +25,7 @@ def pg_url() -> Generator[str, None, None]:
 @pytest.fixture
 async def test_db(pg_url: str) -> AsyncGenerator[None, None]:
     """Initialize a fresh test database for each test."""
-    from rolemesh.db.pg import _init_test_database, close_database
+    from rolemesh.db import _init_test_database, close_database
 
     await _init_test_database(pg_url)
     yield

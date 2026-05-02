@@ -19,9 +19,14 @@ import time
 import pytest
 
 import rolemesh.agent  # noqa: F401
-
-from rolemesh.safety.types import SafetyContext, Stage  # noqa: E402
-
+from rolemesh.db import (
+    create_approval_policy,
+    get_conversation_for_notification,
+    list_approval_audit,
+    list_approval_requests,
+    list_safety_decisions,
+)
+from rolemesh.safety.types import SafetyContext, Stage
 
 # ---------------------------------------------------------------------------
 # G3. Oversized tool_input
@@ -79,12 +84,11 @@ async def test_G4_approval_flood_does_not_corrupt_state(
     Assert all 50 rows are distinct and audit is consistent."""
     from rolemesh.approval.engine import ApprovalEngine
     from rolemesh.approval.notification import NotificationTargetResolver
-    from rolemesh.db import pg
 
     from .conftest import seed_victim
 
     victim = await seed_victim("flood")
-    await pg.create_approval_policy(
+    await create_approval_policy(
         tenant_id=victim.tenant_id,
         coworker_id=victim.coworker_id,
         mcp_server_name="erp",
@@ -97,7 +101,7 @@ async def test_G4_approval_flood_does_not_corrupt_state(
         return []
 
     async def _resolver_get_conv(cid: str) -> object | None:
-        return await pg.get_conversation_for_notification(cid)
+        return await get_conversation_for_notification(cid)
 
     engine = ApprovalEngine(
         publisher=fake_publisher,
@@ -135,11 +139,11 @@ async def test_G4_approval_flood_does_not_corrupt_state(
         )
     await asyncio.gather(*tasks)
 
-    rows = await pg.list_approval_requests(victim.tenant_id, status="pending")
+    rows = await list_approval_requests(victim.tenant_id, status="pending")
     assert len(rows) == N, f"expected {N} distinct requests, got {len(rows)}"
     # Each row has one 'created' audit entry — trigger kept up.
     for r in rows:
-        audit = await pg.list_approval_audit(r.id, tenant_id=victim.tenant_id)
+        audit = await list_approval_audit(r.id, tenant_id=victim.tenant_id)
         assert audit and audit[0].action == "created", (
             f"request {r.id} missing created audit under flood"
         )
@@ -185,7 +189,6 @@ async def test_G6_audit_write_pressure() -> None:
     to saturate DB. Goal: degrade orchestrator throughput.
     Defense: audit write is a single insert; Postgres handles
     thousands/sec. We verify 500 writes complete in reasonable time."""
-    from rolemesh.db import pg
     from rolemesh.safety.audit import AuditEvent, DbAuditSink
 
     from .conftest import seed_victim
@@ -214,7 +217,7 @@ async def test_G6_audit_write_pressure() -> None:
     await asyncio.gather(*tasks)
     elapsed = time.monotonic() - t0
 
-    rows = await pg.list_safety_decisions(victim.tenant_id, limit=1000)
+    rows = await list_safety_decisions(victim.tenant_id, limit=1000)
     assert len(rows) >= 500
     # Soft SLO. Allow 10s for 500 writes; real prod is typically <2s.
     assert elapsed < 10.0, f"500 audit writes took {elapsed:.2f}s"

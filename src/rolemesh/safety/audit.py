@@ -6,7 +6,7 @@ payload digest + short summary — not the original text — so the audit
 table cannot double as a PII leak vector (see design §5.10).
 
 ``DbAuditSink`` is the production implementation backed by
-``rolemesh.db.pg``. Tests use their own in-memory fake.
+``rolemesh.db``. Tests use their own in-memory fake.
 """
 
 from __future__ import annotations
@@ -15,6 +15,10 @@ import hashlib
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
+
+from rolemesh.db import (
+    insert_safety_decision,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -63,9 +67,8 @@ class DbAuditSink:
     """Persists AuditEvent to the ``safety_decisions`` table."""
 
     async def write(self, event: AuditEvent) -> None:
-        from rolemesh.db import pg
 
-        await pg.insert_safety_decision(
+        await insert_safety_decision(
             tenant_id=event.tenant_id,
             coworker_id=event.coworker_id,
             conversation_id=event.conversation_id,

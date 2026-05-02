@@ -38,7 +38,12 @@ from nats.js.api import ConsumerConfig
 
 from rolemesh.core.config import CREDENTIAL_PROXY_PORT
 from rolemesh.core.logger import get_logger
-from rolemesh.db import pg
+from rolemesh.db import (
+    claim_approval_for_execution,
+    get_approval_request,
+    resolve_request_tenant,
+    set_approval_status,
+)
 
 from .notification import (
     ChannelSender,
@@ -177,7 +182,7 @@ class ApprovalWorker:
             # users' approved actions would never execute (eventually
             # surfaced by the reconcile loop, but with a notification
             # gap).
-            tenant_id = await pg.resolve_request_tenant(request_id)
+            tenant_id = await resolve_request_tenant(request_id)
             if tenant_id is None:
                 logger.warning(
                     "approval worker: legacy decided message references unknown request",
@@ -193,7 +198,7 @@ class ApprovalWorker:
         if status == "rejected":
             # The engine has already written the 'rejected' state + audit.
             # We just deliver the notification.
-            req = await pg.get_approval_request(request_id, tenant_id=tenant_id)
+            req = await get_approval_request(request_id, tenant_id=tenant_id)
             if req is not None and req.conversation_id:
                 try:
                     await self._channel.send_to_conversation(
@@ -215,7 +220,7 @@ class ApprovalWorker:
             return
 
         # status == "approved": claim and execute.
-        req = await pg.claim_approval_for_execution(
+        req = await claim_approval_for_execution(
             request_id, tenant_id=tenant_id
         )
         if req is None:
@@ -239,7 +244,7 @@ class ApprovalWorker:
         )
         # Pass metadata through the CRUD call so the trigger attaches it
         # to the terminal audit row in the same transaction.
-        await pg.set_approval_status(
+        await set_approval_status(
             request_id,
             terminal,
             tenant_id=tenant_id,

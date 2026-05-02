@@ -34,7 +34,11 @@ catch because each layer is isolated there):
 
 from __future__ import annotations
 
-from rolemesh.db import pg
+from rolemesh.db import (
+    get_approval_request,
+    list_approval_audit,
+    list_approval_requests,
+)
 
 from .harness import OrchestratorHarness, make_auth_user, seed_tenant
 
@@ -91,12 +95,12 @@ async def test_happy_path_proposal_approve_execute_report(
 
     # 3. Wait for pending row (engine consumed the NATS task).
     async def _pending_created() -> bool:
-        rows = await pg.list_approval_requests(seed.tenant_id, status="pending")
+        rows = await list_approval_requests(seed.tenant_id, status="pending")
         return len(rows) == 1
 
     await harness.wait_for(_pending_created, timeout=5.0)
     pending = (
-        await pg.list_approval_requests(seed.tenant_id, status="pending")
+        await list_approval_requests(seed.tenant_id, status="pending")
     )[0]
 
     # 4. Approver notification delivered.
@@ -160,12 +164,12 @@ async def test_happy_path_proposal_approve_execute_report(
 
     # 8. Final DB state + full audit chain.
     async def _executed() -> bool:
-        req = await pg.get_approval_request(pending.id, tenant_id=seed.tenant_id)
+        req = await get_approval_request(pending.id, tenant_id=seed.tenant_id)
         return req is not None and req.status == "executed"
 
     await harness.wait_for(_executed, timeout=5.0)
 
-    audit = await pg.list_approval_audit(pending.id, tenant_id=seed.tenant_id)
+    audit = await list_approval_audit(pending.id, tenant_id=seed.tenant_id)
     actions = [e.action for e in audit]
     assert actions == ["created", "approved", "executing", "executed"], (
         f"audit chain mismatch: {actions!r}"

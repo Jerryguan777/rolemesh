@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import asyncio
 
-from rolemesh.db import pg
+from rolemesh.db import (
+    list_approval_requests,
+)
 
 from .harness import OrchestratorHarness, make_auth_user, seed_tenant
 
@@ -111,7 +113,7 @@ async def test_malformed_payloads_do_not_break_downstream_flow(
     await asyncio.sleep(1.0)
 
     # No rows created by any of the malformed messages.
-    assert await pg.list_approval_requests(seed.tenant_id) == [], (
+    assert await list_approval_requests(seed.tenant_id) == [], (
         "malformed payloads must not produce approval_requests rows"
     )
 
@@ -138,7 +140,7 @@ async def test_malformed_payloads_do_not_break_downstream_flow(
 
     async def _healthy_pending() -> bool:
         return (
-            len(await pg.list_approval_requests(seed.tenant_id, status="pending"))
+            len(await list_approval_requests(seed.tenant_id, status="pending"))
             == 1
         )
 

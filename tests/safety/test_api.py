@@ -19,7 +19,7 @@ import pytest
 from fastapi import FastAPI
 
 from rolemesh.auth.provider import AuthenticatedUser
-from rolemesh.db.pg import (
+from rolemesh.db import (
     create_coworker,
     create_tenant,
     create_user,

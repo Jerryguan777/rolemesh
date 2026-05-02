@@ -7,7 +7,7 @@ import uuid
 import pytest
 
 from rolemesh.core.types import McpServerConfig, ScheduledTask, TaskRunLog
-from rolemesh.db.pg import (
+from rolemesh.db import (
     create_channel_binding,
     create_conversation,
     create_coworker,

@@ -30,7 +30,17 @@ from rolemesh.approval.engine import (
     ForbiddenError,
 )
 from rolemesh.approval.notification import NotificationTargetResolver
-from rolemesh.db import pg
+from rolemesh.db import (
+    _get_pool,
+    claim_approval_for_execution,
+    create_approval_policy,
+    create_user,
+    get_approval_request,
+    get_conversation_for_notification,
+    list_approval_audit,
+    list_approval_requests,
+    update_approval_policy,
+)
 
 from .conftest import VictimTenant, seed_victim
 
@@ -47,7 +57,7 @@ def _resolver() -> NotificationTargetResolver:
         return []
 
     async def _conv(cid: str) -> object | None:
-        return await pg.get_conversation_for_notification(cid)
+        return await get_conversation_for_notification(cid)
 
     return NotificationTargetResolver(
         get_conversations_for_user_and_coworker=_convs,
@@ -66,7 +76,7 @@ async def _seed_approver_and_pending(
 ) -> tuple[str, str]:
     """Create a policy with the owner as approver, then generate a
     pending approval row. Returns (request_id, approver_id)."""
-    await pg.create_approval_policy(
+    await create_approval_policy(
         tenant_id=victim.tenant_id,
         coworker_id=victim.coworker_id,
         mcp_server_name="erp",
@@ -89,7 +99,7 @@ async def _seed_approver_and_pending(
         tenant_id=victim.tenant_id,
         coworker_id=victim.coworker_id,
     )
-    reqs = await pg.list_approval_requests(victim.tenant_id, status="pending")
+    reqs = await list_approval_requests(victim.tenant_id, status="pending")
     assert len(reqs) == 1
     return reqs[0].id, victim.owner_user_id
 
@@ -109,7 +119,7 @@ async def test_F1_non_approver_cannot_decide(fake_publisher, fake_channel) -> No
     engine = _engine(fake_publisher, fake_channel)
     request_id, _ = await _seed_approver_and_pending(victim, engine)
 
-    attacker = await pg.create_user(
+    attacker = await create_user(
         tenant_id=victim.tenant_id,
         name="attacker",
         email="mal@x.com",
@@ -124,7 +134,7 @@ async def test_F1_non_approver_cannot_decide(fake_publisher, fake_channel) -> No
             user_id=attacker.id,
         )
 
-    fresh = await pg.get_approval_request(request_id, tenant_id=victim.tenant_id)
+    fresh = await get_approval_request(request_id, tenant_id=victim.tenant_id)
     assert fresh is not None and fresh.status == "pending"
 
 
@@ -141,13 +151,13 @@ async def test_F2_concurrent_approve_wins_once(fake_publisher, fake_channel) -> 
     Defense: atomic pending→approved|rejected CAS — exactly one wins,
     other sees ConflictError."""
     victim = await seed_victim()
-    other_approver = await pg.create_user(
+    other_approver = await create_user(
         tenant_id=victim.tenant_id,
         name="other",
         email="o@x.com",
         role="admin",
     )
-    await pg.create_approval_policy(
+    await create_approval_policy(
         tenant_id=victim.tenant_id,
         coworker_id=victim.coworker_id,
         mcp_server_name="erp",
@@ -169,7 +179,7 @@ async def test_F2_concurrent_approve_wins_once(fake_publisher, fake_channel) -> 
         tenant_id=victim.tenant_id,
         coworker_id=victim.coworker_id,
     )
-    req = (await pg.list_approval_requests(victim.tenant_id, status="pending"))[0]
+    req = (await list_approval_requests(victim.tenant_id, status="pending"))[0]
 
     results = await asyncio.gather(
         engine.handle_decision(
@@ -185,7 +195,7 @@ async def test_F2_concurrent_approve_wins_once(fake_publisher, fake_channel) -> 
     assert len(successes) == 1, f"expected 1 winner; got {results}"
     assert len(conflicts) == 1, f"expected 1 conflict; got {results}"
 
-    audit = await pg.list_approval_audit(req.id, tenant_id=victim.tenant_id)
+    audit = await list_approval_audit(req.id, tenant_id=victim.tenant_id)
     terminals = [e for e in audit if e.action in ("approved", "rejected")]
     assert len(terminals) == 1, (
         "atomic CAS must emit exactly one terminal audit; got "
@@ -211,13 +221,13 @@ async def test_F3_self_promotion_cannot_reach_prior_pending(
     engine = _engine(fake_publisher, fake_channel)
 
     original_approver = victim.owner_user_id
-    attacker = await pg.create_user(
+    attacker = await create_user(
         tenant_id=victim.tenant_id,
         name="mallory",
         email="m@x.com",
         role="admin",
     )
-    policy = await pg.create_approval_policy(
+    policy = await create_approval_policy(
         tenant_id=victim.tenant_id,
         coworker_id=victim.coworker_id,
         mcp_server_name="erp",
@@ -238,11 +248,11 @@ async def test_F3_self_promotion_cannot_reach_prior_pending(
         tenant_id=victim.tenant_id,
         coworker_id=victim.coworker_id,
     )
-    req = (await pg.list_approval_requests(victim.tenant_id, status="pending"))[0]
+    req = (await list_approval_requests(victim.tenant_id, status="pending"))[0]
     assert req.resolved_approvers == [original_approver]
 
     # Attacker edits the policy to add themselves.
-    await pg.update_approval_policy(
+    await update_approval_policy(
         policy.id,
         tenant_id=victim.tenant_id,
         approver_user_ids=[original_approver, attacker.id],
@@ -275,10 +285,10 @@ async def test_F4_decided_event_replay_does_not_double_execute(
         request_id=request_id, tenant_id=victim.tenant_id, action="approve", user_id=approver_id
     )
 
-    first = await pg.claim_approval_for_execution(request_id, tenant_id=victim.tenant_id)
+    first = await claim_approval_for_execution(request_id, tenant_id=victim.tenant_id)
     assert first is not None and first.status == "executing"
 
-    second = await pg.claim_approval_for_execution(request_id, tenant_id=victim.tenant_id)
+    second = await claim_approval_for_execution(request_id, tenant_id=victim.tenant_id)
     assert second is None, (
         "atomic claim must return None on replay — worker drops "
         "replayed messages silently"
@@ -367,7 +377,7 @@ async def test_F6_stop_race_orphan_reaped_by_expiry(
     happens from the orphan state (pending never calls MCP)."""
     victim = await seed_victim()
     engine = _engine(fake_publisher, fake_channel)
-    await pg.create_approval_policy(
+    await create_approval_policy(
         tenant_id=victim.tenant_id,
         coworker_id=victim.coworker_id,
         mcp_server_name="erp",
@@ -395,13 +405,13 @@ async def test_F6_stop_race_orphan_reaped_by_expiry(
         tenant_id=victim.tenant_id,
         coworker_id=victim.coworker_id,
     )
-    rows = await pg.list_approval_requests(victim.tenant_id)
+    rows = await list_approval_requests(victim.tenant_id)
     assert len(rows) == 1
     orphan = rows[0]
     assert orphan.status == "pending"
 
     # Force past deadline and run expiry.
-    pool = pg._get_pool()  # noqa: SLF001
+    pool = _get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE approval_requests SET expires_at = $1 WHERE id = $2::uuid",
@@ -409,7 +419,7 @@ async def test_F6_stop_race_orphan_reaped_by_expiry(
             orphan.id,
         )
     await engine.expire_stale_requests()
-    after = await pg.get_approval_request(orphan.id, tenant_id=victim.tenant_id)
+    after = await get_approval_request(orphan.id, tenant_id=victim.tenant_id)
     assert after is not None and after.status == "expired"
 
 
@@ -430,7 +440,7 @@ async def test_F7_expire_and_approve_race_wins_once(
     engine = _engine(fake_publisher, fake_channel)
     request_id, approver_id = await _seed_approver_and_pending(victim, engine)
 
-    pool = pg._get_pool()  # noqa: SLF001
+    pool = _get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE approval_requests SET expires_at = now() - interval '1 second' "
@@ -450,7 +460,7 @@ async def test_F7_expire_and_approve_race_wins_once(
     approver_outcome, _ = await asyncio.gather(
         _approver(), engine.expire_stale_requests()
     )
-    fresh = await pg.get_approval_request(request_id, tenant_id=victim.tenant_id)
+    fresh = await get_approval_request(request_id, tenant_id=victim.tenant_id)
     assert fresh is not None
     assert fresh.status in ("approved", "expired")
 
@@ -459,6 +469,6 @@ async def test_F7_expire_and_approve_race_wins_once(
     else:
         assert isinstance(approver_outcome, ConflictError)
 
-    audit_actions = [e.action for e in await pg.list_approval_audit(request_id, tenant_id=victim.tenant_id)]
+    audit_actions = [e.action for e in await list_approval_audit(request_id, tenant_id=victim.tenant_id)]
     terminals = [a for a in audit_actions if a in ("approved", "expired", "rejected")]
     assert len(terminals) == 1, f"audit must have one terminal; got {audit_actions!r}"

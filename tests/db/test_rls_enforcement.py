@@ -20,8 +20,7 @@ from typing import TYPE_CHECKING
 import asyncpg
 import pytest
 
-from rolemesh.db import pg
-from rolemesh.db.pg import (
+from rolemesh.db import (
     _get_pool,
     admin_conn,
     create_approval_request,
@@ -124,16 +123,15 @@ async def test_app_role_select_blocked_across_tenant(
     tenants = await _two_tenants_full()
     a, b = tenants["A"], tenants["B"]
 
-    async with app_pool.acquire() as conn:
-        async with conn.transaction():
-            await conn.execute(
-                "SELECT set_config('app.current_tenant_id', $1, true)",
-                a["tenant_id"],
-            )
-            rows = await conn.fetch(
-                "SELECT * FROM approval_requests WHERE tenant_id = $1::uuid",
-                b["tenant_id"],
-            )
+    async with app_pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "SELECT set_config('app.current_tenant_id', $1, true)",
+            a["tenant_id"],
+        )
+        rows = await conn.fetch(
+            "SELECT * FROM approval_requests WHERE tenant_id = $1::uuid",
+            b["tenant_id"],
+        )
     assert rows == [], (
         "RLS failed: rolemesh_app saw tenant B rows while bound to tenant A"
     )
@@ -148,23 +146,22 @@ async def test_app_role_insert_blocked_across_tenant(
     or CheckViolation depending on PG's classification."""
     tenants = await _two_tenants_full()
     a, b = tenants["A"], tenants["B"]
-    async with app_pool.acquire() as conn:
-        async with conn.transaction():
+    async with app_pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "SELECT set_config('app.current_tenant_id', $1, true)",
+            a["tenant_id"],
+        )
+        with pytest.raises(
+            (asyncpg.InsufficientPrivilegeError, asyncpg.CheckViolationError)
+        ):
             await conn.execute(
-                "SELECT set_config('app.current_tenant_id', $1, true)",
-                a["tenant_id"],
+                "INSERT INTO approval_audit_log "
+                "(request_id, tenant_id, action) "
+                "VALUES ($1::uuid, $2::uuid, $3)",
+                a["request_id"],  # valid request id, but...
+                b["tenant_id"],   # ...wrong tenant_id
+                "noop",
             )
-            with pytest.raises(
-                (asyncpg.InsufficientPrivilegeError, asyncpg.CheckViolationError)
-            ):
-                await conn.execute(
-                    "INSERT INTO approval_audit_log "
-                    "(request_id, tenant_id, action) "
-                    "VALUES ($1::uuid, $2::uuid, $3)",
-                    a["request_id"],  # valid request id, but...
-                    b["tenant_id"],   # ...wrong tenant_id
-                    "noop",
-                )
 
 
 async def test_unset_guc_returns_empty(
@@ -208,15 +205,14 @@ async def test_guc_does_not_leak_across_acquires(
     leak tenant data."""
     tenants = await _two_tenants_full()
     a = tenants["A"]
-    async with app_pool.acquire() as conn:
-        async with conn.transaction():
-            await conn.execute(
-                "SELECT set_config('app.current_tenant_id', $1, true)",
-                a["tenant_id"],
-            )
-            assert (
-                await conn.fetchval("SELECT current_tenant_id()::text")
-            ) == a["tenant_id"]
+    async with app_pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "SELECT set_config('app.current_tenant_id', $1, true)",
+            a["tenant_id"],
+        )
+        assert (
+            await conn.fetchval("SELECT current_tenant_id()::text")
+        ) == a["tenant_id"]
     # Subsequent acquire on the same pool: GUC must be NULL.
     async with app_pool.acquire() as conn:
         assert await conn.fetchval("SELECT current_tenant_id()") is None
@@ -264,4 +260,4 @@ async def test_force_rls_keeps_owner_under_policy(
 
 
 # Silence unused-import noise on tenant_conn (kept for future tests).
-assert tenant_conn is pg.tenant_conn
+assert tenant_conn is tenant_conn

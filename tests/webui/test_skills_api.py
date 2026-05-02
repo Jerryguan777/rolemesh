@@ -23,7 +23,7 @@ import pytest
 from fastapi import FastAPI
 
 from rolemesh.auth.provider import AuthenticatedUser
-from rolemesh.db.pg import (
+from rolemesh.db import (
     create_coworker,
     create_tenant,
     create_user,
@@ -35,7 +35,6 @@ from webui.dependencies import (
     require_manage_tenant,
     require_manage_users,
 )
-
 
 pytestmark = pytest.mark.usefixtures("test_db")
 

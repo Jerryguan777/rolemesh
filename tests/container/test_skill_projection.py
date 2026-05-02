@@ -31,13 +31,12 @@ from rolemesh.container.skill_projection import (
 )
 from rolemesh.core.skills import SkillValidationError
 from rolemesh.core.types import SkillFile
-from rolemesh.db.pg import (
+from rolemesh.db import (
     create_coworker,
     create_skill,
     create_tenant,
     get_coworker,
 )
-
 
 pytestmark = pytest.mark.usefixtures("test_db")
 
@@ -334,7 +333,7 @@ async def test_rejects_symlinked_skill_partial_dir(tmp_path: Path) -> None:
         files={"SKILL.md": SkillFile(path="SKILL.md", content="b")},
     )
     fetched_skills = await __import__(
-        "rolemesh.db.pg", fromlist=["list_skills_for_coworker"]
+        "rolemesh.db", fromlist=["list_skills_for_coworker"]
     ).list_skills_for_coworker(
         coworker_id, tenant_id=tenant_id, with_files=True,
     )
@@ -351,7 +350,7 @@ async def test_rejects_symlinked_skill_partial_dir(tmp_path: Path) -> None:
     with pytest.raises(_SVE, match="symlink"):
         _materialize_one_skill(fetched, "claude", partial_root, final_root)
     assert list(elsewhere.iterdir()) == [], (
-        "projection wrote through symlink to {}".format(elsewhere)
+        f"projection wrote through symlink to {elsewhere}"
     )
 
 
@@ -371,7 +370,7 @@ async def test_rejects_symlinked_skill_final_dir(tmp_path: Path) -> None:
         files={"SKILL.md": SkillFile(path="SKILL.md", content="b")},
     )
     fetched_skills = await __import__(
-        "rolemesh.db.pg", fromlist=["list_skills_for_coworker"]
+        "rolemesh.db", fromlist=["list_skills_for_coworker"]
     ).list_skills_for_coworker(
         coworker_id, tenant_id=tenant_id, with_files=True,
     )
@@ -528,8 +527,8 @@ async def test_outer_finally_cleans_up_on_exception(
     that raises immediately. Asserts the dir is gone afterwards.
     """
     from rolemesh.agent.container_executor import ContainerAgentExecutor
+    from rolemesh.agent.executor import AgentBackendConfig, AgentInput
     from rolemesh.container import skill_projection as sp
-    from rolemesh.agent.executor import AgentInput, AgentBackendConfig
 
     monkeypatch.setattr(sp, "SPAWN_ROOT", tmp_path / "spawns")
 
@@ -645,9 +644,8 @@ def test_pi_backend_uses_shared_skill_mount_constant() -> None:
     """
     import inspect
 
-    from rolemesh.ipc.skill_mount import PI_SKILLS_PATH
-
     from agent_runner import pi_backend
+    from rolemesh.ipc.skill_mount import PI_SKILLS_PATH
 
     src = inspect.getsource(pi_backend)
     assert "from rolemesh.ipc.skill_mount import PI_SKILLS_PATH" in src, (
@@ -657,7 +655,7 @@ def test_pi_backend_uses_shared_skill_mount_constant() -> None:
         "pi_backend must pass the shared constant to "
         "DefaultResourceLoaderOptions, not a literal path string"
     )
-    assert PI_SKILLS_PATH == CONTAINER_TARGETS["pi"], (
+    assert CONTAINER_TARGETS["pi"] == PI_SKILLS_PATH, (
         f"PI_SKILLS_PATH ({PI_SKILLS_PATH!r}) must equal projector's "
         f"CONTAINER_TARGETS['pi'] ({CONTAINER_TARGETS['pi']!r})"
     )

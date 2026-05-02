@@ -15,7 +15,16 @@ from __future__ import annotations
 
 import uuid
 
-from rolemesh.db import pg
+from rolemesh.db import (
+    create_approval_policy,
+    create_channel_binding,
+    create_conversation,
+    create_coworker,
+    create_tenant,
+    create_user,
+    list_approval_audit,
+    list_approval_requests,
+)
 
 from .harness import OrchestratorHarness
 
@@ -24,28 +33,28 @@ async def test_proposal_skipped_when_no_approver_configured(
     harness: OrchestratorHarness,
 ) -> None:
     # Build a tenant with a member-only user (no owner).
-    t = await pg.create_tenant(
+    t = await create_tenant(
         name="NoOwner", slug=f"no-{uuid.uuid4().hex[:8]}"
     )
-    member = await pg.create_user(
+    member = await create_user(
         tenant_id=t.id, name="Mem", email="m@x.com", role="member"
     )
-    cw = await pg.create_coworker(
+    cw = await create_coworker(
         tenant_id=t.id, name="CW", folder=f"cw-{uuid.uuid4().hex[:8]}"
     )
-    b = await pg.create_channel_binding(
+    b = await create_channel_binding(
         coworker_id=cw.id,
         tenant_id=t.id,
         channel_type="telegram",
         credentials={"bot_token": "x"},
     )
-    conv = await pg.create_conversation(
+    conv = await create_conversation(
         tenant_id=t.id,
         coworker_id=cw.id,
         channel_binding_id=b.id,
         channel_chat_id=str(uuid.uuid4()),
     )
-    await pg.create_approval_policy(
+    await create_approval_policy(
         tenant_id=t.id,
         coworker_id=cw.id,
         mcp_server_name=harness.mcp_server_name,
@@ -76,15 +85,15 @@ async def test_proposal_skipped_when_no_approver_configured(
     )
 
     async def _skipped() -> bool:
-        rows = await pg.list_approval_requests(t.id)
+        rows = await list_approval_requests(t.id)
         return len(rows) == 1 and rows[0].status == "skipped"
 
     await harness.wait_for(_skipped, timeout=5.0)
-    row = (await pg.list_approval_requests(t.id))[0]
+    row = (await list_approval_requests(t.id))[0]
 
     # Audit chain: created + skipped (trigger writes both on initial
     # non-pending INSERT).
-    audit = [e.action for e in await pg.list_approval_audit(row.id, tenant_id=t.id)]
+    audit = [e.action for e in await list_approval_audit(row.id, tenant_id=t.id)]
     assert audit == ["created", "skipped"], audit
 
     # Origin got a "no approver" style notification.

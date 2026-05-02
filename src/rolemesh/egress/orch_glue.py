@@ -29,6 +29,10 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from rolemesh.core.logger import get_logger
+from rolemesh.db import (
+    get_all_tenants,
+    list_safety_rules,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -51,7 +55,6 @@ from .mcp_cache import (  # noqa: E402
 )
 from .policy_cache import RULE_CHANGED_SUBJECT, SNAPSHOT_REQUEST_SUBJECT  # noqa: E402
 from .remote_token_vault import TOKEN_ACCESS_REQUEST_SUBJECT  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # Identity registry (mirrors what we've published to the gateway)
@@ -329,7 +332,7 @@ async def start_token_responder(
     just plumb each RPC into it.
 
     ``vault`` is typed ``Any`` so this module doesn't import the real
-    ``TokenVault`` (transitively pulls in ``rolemesh.db.pg``); the
+    ``TokenVault`` (transitively pulls in ``rolemesh.db``); the
     duck-typed call is ``vault.get_fresh_access_token(user_id)``.
 
     Returns the subscription handle; caller is responsible for
@@ -391,12 +394,11 @@ async def fetch_all_egress_rules() -> list[dict[str, Any]]:
     sees every agent on the bridge. ``enabled=TRUE`` is filtered at
     the SQL layer to keep the snapshot lean.
     """
-    from rolemesh.db import pg
 
-    tenants = await pg.get_all_tenants()
+    tenants = await get_all_tenants()
     out: list[dict[str, Any]] = []
     for tenant in tenants:
-        rows = await pg.list_safety_rules(
+        rows = await list_safety_rules(
             tenant.id, stage="egress_request", enabled=True
         )
         out.extend(r.to_snapshot_dict() for r in rows)

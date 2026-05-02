@@ -116,7 +116,7 @@ class OIDCAuthProvider:
         no tenant context yet); then ``get_user`` runs the tenant-scoped
         query that downstream RLS will enforce.
         """
-        from rolemesh.db.pg import get_user, resolve_user_for_auth
+        from rolemesh.db import get_user, resolve_user_for_auth
 
         resolved = await resolve_user_for_auth(user_id)
         if resolved is None:
@@ -137,7 +137,7 @@ class OIDCAuthProvider:
     # -- Provisioning helpers ------------------------------------------------
 
     async def _provision_tenant(self, claims: dict[str, Any]) -> str | None:
-        from rolemesh.db.pg import (
+        from rolemesh.db import (
             create_external_tenant_mapping,
             create_tenant,
             get_local_tenant_id,
@@ -166,7 +166,7 @@ class OIDCAuthProvider:
     async def _provision_user(
         self, external_sub: str, tenant_id: str, claims: dict[str, Any]
     ):
-        from rolemesh.db.pg import (
+        from rolemesh.db import (
             create_user_with_external_sub,
             get_user_by_external_sub,
             update_user,
@@ -207,7 +207,7 @@ class OIDCAuthProvider:
         # first-time creation; subsequent logins do not re-assign because an
         # admin may have intentionally unassigned the user.
         if self._auto_assign_to_all:
-            from rolemesh.db.pg import (
+            from rolemesh.db import (
                 assign_agent_to_user,
                 get_coworkers_for_tenant,
             )

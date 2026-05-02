@@ -23,11 +23,11 @@ from rolemesh.container.runner import (
     build_container_spec,
     build_volume_mounts,
 )
+from rolemesh.container.runtime import CONTAINER_HOST_GATEWAY
 from rolemesh.container.skill_projection import (
     cleanup_spawn_skills,
     materialize_skills_for_spawn,
 )
-from rolemesh.container.runtime import CONTAINER_HOST_GATEWAY
 from rolemesh.core.config import (
     CONTAINER_MAX_OUTPUT_SIZE,
     CONTAINER_NETWORK_NAME,
@@ -271,7 +271,7 @@ class ContainerAgentExecutor:
         # chain in zero-impact deployments.
         approval_policies_dicts: list[dict[str, object]] | None = None
         try:
-            from rolemesh.db.pg import get_enabled_policies_for_coworker
+            from rolemesh.db import get_enabled_policies_for_coworker
 
             enabled = await get_enabled_policies_for_coworker(
                 tenant_id, inp.coworker_id

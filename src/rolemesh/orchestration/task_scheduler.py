@@ -21,7 +21,7 @@ from rolemesh.container.runner import write_tasks_snapshot
 from rolemesh.core.config import SCHEDULER_POLL_INTERVAL
 from rolemesh.core.logger import get_logger
 from rolemesh.core.types import ScheduledTask, TaskRunLog
-from rolemesh.db.pg import (
+from rolemesh.db import (
     get_all_tasks,
     get_due_tasks,
     get_task_by_id,

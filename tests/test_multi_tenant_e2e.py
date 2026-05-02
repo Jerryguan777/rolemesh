@@ -59,13 +59,13 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pg_url: str) -> P
     monkeypatch.setattr("rolemesh.core.group_folder.DATA_DIR", data_dir)
     monkeypatch.setattr("rolemesh.core.group_folder.GROUPS_DIR", groups_dir)
 
-    from rolemesh.db.pg import _init_test_database
+    from rolemesh.db import _init_test_database
 
     await _init_test_database(pg_url)
 
     yield tmp_path
 
-    from rolemesh.db.pg import close_database
+    from rolemesh.db import close_database
 
     await close_database()
 
@@ -76,7 +76,7 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pg_url: str) -> P
 
 
 async def _create_tenant_in_db(name: str, slug: str, max_containers: int = 5) -> Tenant:
-    from rolemesh.db.pg import create_tenant
+    from rolemesh.db import create_tenant
 
     return await create_tenant(name=name, slug=slug, max_concurrent_containers=max_containers)
 
@@ -93,7 +93,7 @@ async def _create_coworker_full(
     requires_trigger: bool = True,
 ) -> tuple[Coworker, ChannelBinding, list[Conversation]]:
     """Create coworker + binding + conversations in DB. Returns all entities."""
-    from rolemesh.db.pg import create_channel_binding, create_conversation, create_coworker
+    from rolemesh.db import create_channel_binding, create_conversation, create_coworker
 
     cw = await create_coworker(
         tenant_id=tenant_id,
@@ -308,7 +308,7 @@ async def _inject_message(
     msg_id: str | None = None,
 ) -> None:
     """Store a message directly in DB as if a channel delivered it."""
-    from rolemesh.db.pg import store_message
+    from rolemesh.db import store_message
 
     await store_message(
         tenant_id=tenant_id,
@@ -488,7 +488,7 @@ class TestSessionIsolation:
         await m._process_conversation_messages(convs[1].id)
 
         # Sessions should be different
-        from rolemesh.db.pg import get_session
+        from rolemesh.db import get_session
 
         sess_a = await get_session(convs[0].id, tenant_id=tenant.id)
         sess_b = await get_session(convs[1].id, tenant_id=tenant.id)
@@ -681,7 +681,7 @@ class TestMigration:
     async def test_registered_groups_migrate_to_coworkers(self, env: Path) -> None:
         """Legacy registered_groups → coworker + binding + conversation."""
         from rolemesh.core.types import RegisteredGroup
-        from rolemesh.db.pg import (
+        from rolemesh.db import (
             _get_pool,
             get_all_conversations,
             get_all_coworkers,
@@ -753,7 +753,7 @@ class TestMigration:
         assert len(legacy) == 2
 
         # Run migration inline (same logic as scripts/migrate_to_multi_tenant.py)
-        from rolemesh.db.pg import (
+        from rolemesh.db import (
             create_channel_binding,
             create_conversation,
             create_coworker,
@@ -793,7 +793,7 @@ class TestMigration:
                 requires_trigger=group.requires_trigger,
             )
 
-            from rolemesh.db.pg import get_session_legacy
+            from rolemesh.db import get_session_legacy
 
             old_sess = await get_session_legacy(group.folder)
             if old_sess:
@@ -938,7 +938,7 @@ class TestVolumeMountPaths:
 class TestMessageIsolation:
     async def test_messages_scoped_to_conversation(self, env: Path) -> None:
         """Two coworkers in same chat → each only sees its own conversation's messages."""
-        from rolemesh.db.pg import get_messages_since
+        from rolemesh.db import get_messages_since
 
         tenant = await _create_tenant_in_db("Acme", "acme-iso")
 
@@ -990,7 +990,7 @@ class TestTaskSchedulingPerCoworker:
     async def test_task_created_with_coworker_id(self, env: Path) -> None:
         """IPC schedule_task creates task keyed by coworker_id, not folder."""
         from rolemesh.auth.permissions import AgentPermissions
-        from rolemesh.db.pg import get_task_by_id
+        from rolemesh.db import get_task_by_id
         from rolemesh.ipc.task_handler import process_task_ipc
 
         tenant = await _create_tenant_in_db("Acme", "acme-task")
@@ -1034,7 +1034,7 @@ class TestTaskSchedulingPerCoworker:
     async def test_non_admin_cannot_schedule_for_other_coworker(self, env: Path) -> None:
         """Non-admin trying to schedule a task for another coworker → blocked."""
         from rolemesh.auth.permissions import AgentPermissions
-        from rolemesh.db.pg import get_all_tasks
+        from rolemesh.db import get_all_tasks
         from rolemesh.ipc.task_handler import process_task_ipc
 
         tenant = await _create_tenant_in_db("Acme", "acme-task-auth")
