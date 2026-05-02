@@ -18,7 +18,7 @@ import pytest
 boto3 = pytest.importorskip("boto3")  # noqa: F841
 
 from pi.ai.providers.amazon_bedrock import _convert_tool_config
-from pi.ai.tool import Tool
+from pi.ai.types import Tool
 
 
 def _tool(name: str) -> Tool:
