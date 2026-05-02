@@ -391,10 +391,16 @@ async def orchestrator_harness(
         publisher=js, channel_sender=channel, resolver=resolver
     )
     admin_module.set_approval_engine(engine)
+    # Per-test uuid'd durable name so consecutive tests on the same
+    # NATS instance don't collide — nats-py's ``js.subscribe`` rejects
+    # binding to a durable that the server still flags push_bound from
+    # the prior test's (now-closed) connection.
+    worker_durable = f"orch-approval-worker-{uuid.uuid4().hex[:8]}"
     worker = ApprovalWorker(
         js=js,
         channel_sender=channel,
         proxy_base_url=f"http://127.0.0.1:{proxy_port}",
+        durable_name=worker_durable,
     )
     await worker.start()
 
@@ -408,12 +414,14 @@ async def orchestrator_harness(
     )
 
     # --- Subscriptions that mirror main._handle_tasks / _on_cancel_for_job ---
-    task_sub = await js.subscribe(
-        "agent.*.tasks", durable=f"e2e-tasks-{uuid.uuid4().hex[:8]}"
-    )
+    # Hold onto the durable names so teardown can ``delete_consumer``
+    # them — see the cleanup block below for why ``unsubscribe`` alone
+    # is not sufficient.
+    task_durable = f"e2e-tasks-{uuid.uuid4().hex[:8]}"
+    cancel_durable = f"e2e-cancel-{uuid.uuid4().hex[:8]}"
+    task_sub = await js.subscribe("agent.*.tasks", durable=task_durable)
     cancel_sub = await js.subscribe(
-        "approval.cancel_for_job.*",
-        durable=f"e2e-cancel-{uuid.uuid4().hex[:8]}",
+        "approval.cancel_for_job.*", durable=cancel_durable,
     )
 
     async def _task_loop() -> None:
@@ -509,6 +517,19 @@ async def orchestrator_harness(
         with suppress(asyncio.CancelledError):
             await maintenance_task
         await worker.stop()
+        # Explicitly delete the per-test durables we created. ``unsubscribe``
+        # only severs the local sub; the durable stays on the server until
+        # something deletes it. Without this, every test run permanently
+        # leaks 3 durables (task / cancel / worker) on the dev NATS
+        # instance — empirically observed at >250 stale consumers on
+        # ``approval-ipc`` after a few iterations.
+        for stream, name in (
+            ("agent-ipc", task_durable),
+            ("approval-ipc", cancel_durable),
+            ("approval-ipc", worker_durable),
+        ):
+            with suppress(Exception):
+                await js.delete_consumer(stream, name)
         admin_module.set_approval_engine(None)
         await mcp.stop()
         with suppress(Exception):

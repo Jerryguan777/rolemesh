@@ -85,10 +85,22 @@ class ApprovalWorker:
         js: JetStreamContext,
         channel_sender: ChannelSender,
         proxy_base_url: str | None = None,
+        durable_name: str = "orch-approval-worker",
     ) -> None:
         self._js = js
         self._channel = channel_sender
         self._proxy_base = (proxy_base_url or _CREDENTIAL_PROXY_URL).rstrip("/")
+        # Durable consumer name. Production keeps the default so a worker
+        # restart resumes from where the prior process left off (the
+        # whole point of using ``durable=`` rather than ephemeral). The
+        # eval / e2e harness overrides with a uuid-suffixed name so
+        # consecutive tests on the same NATS instance don't collide:
+        # nats-py's ``js.subscribe`` raises ``"consumer is already bound
+        # to a subscription"`` when the server still has ``push_bound``
+        # set from the prior test's connection (server-side cleanup of
+        # a closed deliver_subject lags behind the connection close by
+        # tens of seconds).
+        self._durable_name = durable_name
         self._sub: Any = None
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
@@ -101,7 +113,7 @@ class ApprovalWorker:
         # batches don't trigger redelivery mid-execution.
         self._sub = await self._js.subscribe(
             "approval.decided.*",
-            durable="orch-approval-worker",
+            durable=self._durable_name,
             manual_ack=True,
             config=ConsumerConfig(ack_wait=_ACK_WAIT_SECONDS),
         )
