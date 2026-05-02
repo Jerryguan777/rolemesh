@@ -37,7 +37,7 @@ from typing import Any
 import rolemesh.bootstrap  # noqa: F401
 from rolemesh.core.config import NATS_URL
 from rolemesh.core.logger import get_logger
-from rolemesh.db.pg import (
+from rolemesh.db import (
     get_coworker,
     get_coworker_by_folder,
     get_user,

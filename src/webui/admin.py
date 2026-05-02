@@ -10,6 +10,7 @@ import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 
+from rolemesh import db
 from rolemesh.approval.engine import ApprovalEngine, ConflictError, ForbiddenError
 from rolemesh.auth.permissions import AgentPermissions
 from rolemesh.auth.provider import AuthenticatedUser
@@ -21,7 +22,6 @@ from rolemesh.core.skills import (
     validate_skill_name,
 )
 from rolemesh.core.types import McpServerConfig, SkillFile
-from rolemesh.db import pg
 from webui.dependencies import (
     get_current_user,
     require_manage_agents,
@@ -292,7 +292,7 @@ def _task_to_response(t: ScheduledTask) -> TaskResponse:
 
 async def _get_agent_or_404(agent_id: str, tenant_id: str) -> Coworker:
     """Fetch a coworker, raising 404 if not found or cross-tenant."""
-    cw = await pg.get_coworker(agent_id, tenant_id=tenant_id)
+    cw = await db.get_coworker(agent_id, tenant_id=tenant_id)
     if cw is None:
         raise HTTPException(status_code=404, detail="Agent not found")
     return cw
@@ -331,7 +331,7 @@ def _parse_permissions(perms_dict: dict[str, object] | None) -> AgentPermissions
 
 @router.get("/tenant", response_model=TenantResponse)
 async def get_tenant(user: OwnerUser) -> TenantResponse:
-    tenant = await pg.get_tenant(user.tenant_id)
+    tenant = await db.get_tenant(user.tenant_id)
     if tenant is None:
         raise HTTPException(status_code=404, detail="Tenant not found")
     return _tenant_to_response(tenant)
@@ -342,7 +342,7 @@ async def update_tenant(
     body: TenantUpdate,
     user: OwnerUser,
 ) -> TenantResponse:
-    tenant = await pg.update_tenant(
+    tenant = await db.update_tenant(
         user.tenant_id,
         name=body.name,
         max_concurrent_containers=body.max_concurrent_containers,
@@ -359,7 +359,7 @@ async def update_tenant(
 
 @router.get("/users", response_model=list[UserResponse])
 async def list_users(user: UserManager) -> list[UserResponse]:
-    users = await pg.get_users_for_tenant(user.tenant_id)
+    users = await db.get_users_for_tenant(user.tenant_id)
     return [_user_to_response(u) for u in users]
 
 
@@ -370,7 +370,7 @@ async def create_user(
 ) -> UserResponse:
     if body.role == "owner" and user.role != "owner":
         raise HTTPException(status_code=403, detail="Only owners can create owner-role users")
-    new_user = await pg.create_user(
+    new_user = await db.create_user(
         tenant_id=user.tenant_id,
         name=body.name,
         email=body.email,
@@ -385,10 +385,10 @@ async def get_user_detail(
     user_id: str,
     user: UserManager,
 ) -> UserDetailResponse:
-    target = await pg.get_user(user_id, tenant_id=user.tenant_id)
+    target = await db.get_user(user_id, tenant_id=user.tenant_id)
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
-    agents = await pg.get_agents_for_user(user_id, tenant_id=user.tenant_id)
+    agents = await db.get_agents_for_user(user_id, tenant_id=user.tenant_id)
     resp = UserDetailResponse(
         **_user_to_response(target).model_dump(),
         assigned_agents=[_coworker_to_summary(a) for a in agents],
@@ -402,12 +402,12 @@ async def update_user(
     body: UserUpdate,
     user: UserManager,
 ) -> UserResponse:
-    target = await pg.get_user(user_id, tenant_id=user.tenant_id)
+    target = await db.get_user(user_id, tenant_id=user.tenant_id)
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
     if body.role == "owner" and user.role != "owner":
         raise HTTPException(status_code=403, detail="Only owners can assign owner role")
-    updated = await pg.update_user(
+    updated = await db.update_user(
         user_id,
         tenant_id=user.tenant_id,
         name=body.name,
@@ -426,10 +426,10 @@ async def delete_user(
 ) -> None:
     if user_id == user.user_id:
         raise HTTPException(status_code=400, detail="Cannot delete yourself")
-    target = await pg.get_user(user_id, tenant_id=user.tenant_id)
+    target = await db.get_user(user_id, tenant_id=user.tenant_id)
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
-    await pg.delete_user(user_id, tenant_id=user.tenant_id)
+    await db.delete_user(user_id, tenant_id=user.tenant_id)
 
 
 # ---------------------------------------------------------------------------
@@ -439,7 +439,7 @@ async def delete_user(
 
 @router.get("/agents", response_model=list[AgentResponse])
 async def list_agents(user: AdminUser) -> list[AgentResponse]:
-    agents = await pg.get_coworkers_for_tenant(user.tenant_id)
+    agents = await db.get_coworkers_for_tenant(user.tenant_id)
     return [_coworker_to_response(a) for a in agents]
 
 
@@ -453,7 +453,7 @@ async def create_agent(
     tools = _parse_tools(body.tools) if body.tools else None
     permissions = _parse_permissions(body.permissions)
     try:
-        cw = await pg.create_coworker(
+        cw = await db.create_coworker(
             tenant_id=user.tenant_id,
             name=body.name,
             folder=body.folder,
@@ -480,8 +480,8 @@ async def get_agent_detail(
     user: AdminUser,
 ) -> AgentDetailResponse:
     cw = await _get_agent_or_404(agent_id, user.tenant_id)
-    bindings = await pg.get_channel_bindings_for_coworker(agent_id, tenant_id=user.tenant_id)
-    conversations = await pg.get_conversations_for_coworker(agent_id, tenant_id=user.tenant_id)
+    bindings = await db.get_channel_bindings_for_coworker(agent_id, tenant_id=user.tenant_id)
+    conversations = await db.get_conversations_for_coworker(agent_id, tenant_id=user.tenant_id)
     return AgentDetailResponse(
         **_coworker_to_response(cw).model_dump(),
         bindings=[_binding_to_response(b) for b in bindings],
@@ -498,7 +498,7 @@ async def update_agent(
     await _get_agent_or_404(agent_id, user.tenant_id)
     tools = _parse_tools(body.tools) if body.tools is not None else None
     permissions = _parse_permissions(body.permissions)
-    updated = await pg.update_coworker(
+    updated = await db.update_coworker(
         agent_id,
         tenant_id=user.tenant_id,
         name=body.name,
@@ -532,7 +532,7 @@ async def delete_agent(
     user: AdminUser,
 ) -> None:
     await _get_agent_or_404(agent_id, user.tenant_id)
-    await pg.delete_coworker(agent_id, tenant_id=user.tenant_id)
+    await db.delete_coworker(agent_id, tenant_id=user.tenant_id)
 
 
 # ---------------------------------------------------------------------------
@@ -546,7 +546,7 @@ async def list_assigned_users(
     user: AdminUser,
 ) -> list[UserResponse]:
     await _get_agent_or_404(agent_id, user.tenant_id)
-    users = await pg.get_users_for_agent(agent_id, tenant_id=user.tenant_id)
+    users = await db.get_users_for_agent(agent_id, tenant_id=user.tenant_id)
     return [_user_to_response(u) for u in users]
 
 
@@ -557,10 +557,10 @@ async def assign_agent(
     user: AdminUser,
 ) -> None:
     await _get_agent_or_404(agent_id, user.tenant_id)
-    target = await pg.get_user(body.user_id, tenant_id=user.tenant_id)
+    target = await db.get_user(body.user_id, tenant_id=user.tenant_id)
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
-    await pg.assign_agent_to_user(body.user_id, agent_id, user.tenant_id)
+    await db.assign_agent_to_user(body.user_id, agent_id, user.tenant_id)
 
 
 @router.delete("/agents/{agent_id}/assign/{user_id}", status_code=204)
@@ -570,10 +570,10 @@ async def unassign_agent(
     user: AdminUser,
 ) -> None:
     await _get_agent_or_404(agent_id, user.tenant_id)
-    target = await pg.get_user(user_id, tenant_id=user.tenant_id)
+    target = await db.get_user(user_id, tenant_id=user.tenant_id)
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
-    await pg.unassign_agent_from_user(user_id, agent_id, tenant_id=user.tenant_id)
+    await db.unassign_agent_from_user(user_id, agent_id, tenant_id=user.tenant_id)
 
 
 # ---------------------------------------------------------------------------
@@ -587,7 +587,7 @@ async def list_bindings(
     user: AdminUser,
 ) -> list[BindingResponse]:
     await _get_agent_or_404(agent_id, user.tenant_id)
-    bindings = await pg.get_channel_bindings_for_coworker(agent_id, tenant_id=user.tenant_id)
+    bindings = await db.get_channel_bindings_for_coworker(agent_id, tenant_id=user.tenant_id)
     return [_binding_to_response(b) for b in bindings]
 
 
@@ -599,7 +599,7 @@ async def create_binding(
 ) -> BindingResponse:
     await _get_agent_or_404(agent_id, user.tenant_id)
     try:
-        binding = await pg.create_channel_binding(
+        binding = await db.create_channel_binding(
             coworker_id=agent_id,
             tenant_id=user.tenant_id,
             channel_type=body.channel_type,
@@ -619,10 +619,10 @@ async def update_binding(
     user: AdminUser,
 ) -> BindingResponse:
     await _get_agent_or_404(agent_id, user.tenant_id)
-    binding = await pg.get_channel_binding(binding_id, tenant_id=user.tenant_id)
+    binding = await db.get_channel_binding(binding_id, tenant_id=user.tenant_id)
     if binding is None or binding.coworker_id != agent_id:
         raise HTTPException(status_code=404, detail="Binding not found")
-    updated = await pg.update_channel_binding(
+    updated = await db.update_channel_binding(
         binding_id,
         tenant_id=user.tenant_id,
         credentials=body.credentials,
@@ -641,10 +641,10 @@ async def delete_binding(
     user: AdminUser,
 ) -> None:
     await _get_agent_or_404(agent_id, user.tenant_id)
-    binding = await pg.get_channel_binding(binding_id, tenant_id=user.tenant_id)
+    binding = await db.get_channel_binding(binding_id, tenant_id=user.tenant_id)
     if binding is None or binding.coworker_id != agent_id:
         raise HTTPException(status_code=404, detail="Binding not found")
-    await pg.delete_channel_binding(binding_id, tenant_id=user.tenant_id)
+    await db.delete_channel_binding(binding_id, tenant_id=user.tenant_id)
 
 
 # ---------------------------------------------------------------------------
@@ -658,7 +658,7 @@ async def list_conversations(
     user: AdminUser,
 ) -> list[ConversationResponse]:
     await _get_agent_or_404(agent_id, user.tenant_id)
-    conversations = await pg.get_conversations_for_coworker(agent_id, tenant_id=user.tenant_id)
+    conversations = await db.get_conversations_for_coworker(agent_id, tenant_id=user.tenant_id)
     return [_conversation_to_response(c) for c in conversations]
 
 
@@ -670,10 +670,10 @@ async def create_conversation(
 ) -> ConversationResponse:
     await _get_agent_or_404(agent_id, user.tenant_id)
     # Verify the binding belongs to this agent
-    binding = await pg.get_channel_binding(body.channel_binding_id, tenant_id=user.tenant_id)
+    binding = await db.get_channel_binding(body.channel_binding_id, tenant_id=user.tenant_id)
     if binding is None or binding.coworker_id != agent_id:
         raise HTTPException(status_code=400, detail="Binding does not belong to this agent")
-    conv = await pg.create_conversation(
+    conv = await db.create_conversation(
         tenant_id=user.tenant_id,
         coworker_id=agent_id,
         channel_binding_id=body.channel_binding_id,
@@ -691,10 +691,10 @@ async def delete_conversation(
     user: AdminUser,
 ) -> None:
     await _get_agent_or_404(agent_id, user.tenant_id)
-    conv = await pg.get_conversation(conversation_id, tenant_id=user.tenant_id)
+    conv = await db.get_conversation(conversation_id, tenant_id=user.tenant_id)
     if conv is None or conv.coworker_id != agent_id:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    await pg.delete_conversation(conversation_id, tenant_id=user.tenant_id)
+    await db.delete_conversation(conversation_id, tenant_id=user.tenant_id)
 
 
 # ---------------------------------------------------------------------------
@@ -704,7 +704,7 @@ async def delete_conversation(
 
 @router.get("/tasks", response_model=list[TaskResponse])
 async def list_all_tasks(user: AdminUser) -> list[TaskResponse]:
-    tasks = await pg.get_all_tasks(tenant_id=user.tenant_id)
+    tasks = await db.get_all_tasks(tenant_id=user.tenant_id)
     return [_task_to_response(t) for t in tasks]
 
 
@@ -714,7 +714,7 @@ async def list_agent_tasks(
     user: AdminUser,
 ) -> list[TaskResponse]:
     await _get_agent_or_404(agent_id, user.tenant_id)
-    tasks = await pg.get_tasks_for_coworker(agent_id, tenant_id=user.tenant_id)
+    tasks = await db.get_tasks_for_coworker(agent_id, tenant_id=user.tenant_id)
     return [_task_to_response(t) for t in tasks]
 
 
@@ -723,10 +723,10 @@ async def delete_task(
     task_id: str,
     user: AdminUser,
 ) -> None:
-    task = await pg.get_task_by_id(task_id, tenant_id=user.tenant_id)
+    task = await db.get_task_by_id(task_id, tenant_id=user.tenant_id)
     if task is None:
         raise HTTPException(status_code=404, detail="Task not found")
-    await pg.delete_task(task_id, tenant_id=user.tenant_id)
+    await db.delete_task(task_id, tenant_id=user.tenant_id)
 
 
 # ---------------------------------------------------------------------------
@@ -759,7 +759,7 @@ async def list_approval_policies_ep(
     coworker_id: str | None = None,
     enabled: bool | None = None,
 ) -> list[ApprovalPolicyResponse]:
-    rows = await pg.list_approval_policies(
+    rows = await db.list_approval_policies(
         user.tenant_id, coworker_id=coworker_id, enabled=enabled
     )
     return [_policy_to_response(p) for p in rows]
@@ -778,7 +778,7 @@ async def create_approval_policy_ep(
         # Guard against cross-tenant policy creation: a tenant admin must
         # not be able to attach a policy to a coworker they don't own.
         await _get_agent_or_404(body.coworker_id, user.tenant_id)
-    p = await pg.create_approval_policy(
+    p = await db.create_approval_policy(
         tenant_id=user.tenant_id,
         coworker_id=body.coworker_id,
         mcp_server_name=body.mcp_server_name,
@@ -799,7 +799,7 @@ async def get_approval_policy_ep(
     policy_id: str,
     user: AdminUser,
 ) -> ApprovalPolicyResponse:
-    p = await pg.get_approval_policy(policy_id, tenant_id=user.tenant_id)
+    p = await db.get_approval_policy(policy_id, tenant_id=user.tenant_id)
     if p is None:
         raise HTTPException(status_code=404, detail="Policy not found")
     return _policy_to_response(p)
@@ -813,10 +813,10 @@ async def update_approval_policy_ep(
     body: ApprovalPolicyUpdate,
     user: AdminUser,
 ) -> ApprovalPolicyResponse:
-    existing = await pg.get_approval_policy(policy_id, tenant_id=user.tenant_id)
+    existing = await db.get_approval_policy(policy_id, tenant_id=user.tenant_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Policy not found")
-    updated = await pg.update_approval_policy(
+    updated = await db.update_approval_policy(
         policy_id,
         tenant_id=user.tenant_id,
         mcp_server_name=body.mcp_server_name,
@@ -839,10 +839,10 @@ async def delete_approval_policy_ep(
     policy_id: str,
     user: AdminUser,
 ) -> None:
-    existing = await pg.get_approval_policy(policy_id, tenant_id=user.tenant_id)
+    existing = await db.get_approval_policy(policy_id, tenant_id=user.tenant_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Policy not found")
-    await pg.delete_approval_policy(policy_id, tenant_id=user.tenant_id)
+    await db.delete_approval_policy(policy_id, tenant_id=user.tenant_id)
 
 
 # ---------------------------------------------------------------------------
@@ -893,7 +893,7 @@ async def list_approvals_ep(
     status: str | None = None,
     coworker_id: str | None = None,
 ) -> list[ApprovalRequestResponse]:
-    rows = await pg.list_approval_requests(
+    rows = await db.list_approval_requests(
         user.tenant_id, status=status, coworker_id=coworker_id
     )
     return [_request_to_response(r) for r in rows]
@@ -906,10 +906,10 @@ async def get_approval_ep(
     request_id: str,
     user: AuthedUser,
 ) -> ApprovalRequestDetailResponse:
-    req = await pg.get_approval_request(request_id, tenant_id=user.tenant_id)
+    req = await db.get_approval_request(request_id, tenant_id=user.tenant_id)
     if req is None:
         raise HTTPException(status_code=404, detail="Approval not found")
-    audit = await pg.list_approval_audit(request_id, tenant_id=user.tenant_id)
+    audit = await db.list_approval_audit(request_id, tenant_id=user.tenant_id)
     return ApprovalRequestDetailResponse(
         **_request_to_response(req).model_dump(),
         audit_log=[_audit_to_response(e) for e in audit],
@@ -924,10 +924,10 @@ async def get_approval_audit_ep(
     request_id: str,
     user: AuthedUser,
 ) -> list[ApprovalAuditEntryResponse]:
-    req = await pg.get_approval_request(request_id, tenant_id=user.tenant_id)
+    req = await db.get_approval_request(request_id, tenant_id=user.tenant_id)
     if req is None:
         raise HTTPException(status_code=404, detail="Approval not found")
-    rows = await pg.list_approval_audit(request_id, tenant_id=user.tenant_id)
+    rows = await db.list_approval_audit(request_id, tenant_id=user.tenant_id)
     return [_audit_to_response(r) for r in rows]
 
 
@@ -958,7 +958,7 @@ async def decide_approval_ep(
     user: AuthedUser,
 ) -> ApprovalRequestResponse:
     engine = _require_engine()
-    req = await pg.get_approval_request(request_id, tenant_id=user.tenant_id)
+    req = await db.get_approval_request(request_id, tenant_id=user.tenant_id)
     if req is None:
         raise HTTPException(status_code=404, detail="Approval not found")
     try:
@@ -1103,11 +1103,11 @@ async def _validate_safety_rule_body(
     ):
         coworkers: list[object] = []
         if coworker_id is not None:
-            cw = await pg.get_coworker(coworker_id, tenant_id=tenant_id)
+            cw = await db.get_coworker(coworker_id, tenant_id=tenant_id)
             if cw is not None:
                 coworkers.append(cw)
         else:
-            coworkers.extend(await pg.get_coworkers_for_tenant(tenant_id))
+            coworkers.extend(await db.get_coworkers_for_tenant(tenant_id))
         for cw_any in coworkers:
             tools = getattr(cw_any, "tools", None) or []
             for mcp in tools:
@@ -1155,7 +1155,7 @@ async def create_safety_rule_ep(
         tenant_id=user.tenant_id,
         coworker_id=body.coworker_id,
     )
-    rule = await pg.create_safety_rule(
+    rule = await db.create_safety_rule(
         tenant_id=user.tenant_id,
         coworker_id=body.coworker_id,
         stage=body.stage,
@@ -1179,7 +1179,7 @@ async def list_safety_rules_ep(
     stage: str | None = None,
     enabled: bool | None = None,
 ) -> list[SafetyRuleResponse]:
-    rows = await pg.list_safety_rules(
+    rows = await db.list_safety_rules(
         user.tenant_id,
         coworker_id=coworker_id,
         stage=stage,
@@ -1195,7 +1195,7 @@ async def get_safety_rule_ep(
     rule_id: str,
     user: AdminUser,
 ) -> SafetyRuleResponse:
-    r = await pg.get_safety_rule(rule_id, tenant_id=user.tenant_id)
+    r = await db.get_safety_rule(rule_id, tenant_id=user.tenant_id)
     if r is None:
         raise HTTPException(status_code=404, detail="Rule not found")
     return _safety_rule_to_response(r)
@@ -1209,7 +1209,7 @@ async def update_safety_rule_ep(
     body: SafetyRuleUpdate,
     user: AdminUser,
 ) -> SafetyRuleResponse:
-    existing = await pg.get_safety_rule(rule_id, tenant_id=user.tenant_id)
+    existing = await db.get_safety_rule(rule_id, tenant_id=user.tenant_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Rule not found")
 
@@ -1229,7 +1229,7 @@ async def update_safety_rule_ep(
             coworker_id=existing.coworker_id,
         )
 
-    updated = await pg.update_safety_rule(
+    updated = await db.update_safety_rule(
         rule_id,
         tenant_id=user.tenant_id,
         stage=body.stage,
@@ -1251,10 +1251,10 @@ async def delete_safety_rule_ep(
     rule_id: str,
     user: AdminUser,
 ) -> None:
-    existing = await pg.get_safety_rule(rule_id, tenant_id=user.tenant_id)
+    existing = await db.get_safety_rule(rule_id, tenant_id=user.tenant_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Rule not found")
-    await pg.delete_safety_rule(
+    await db.delete_safety_rule(
         rule_id, tenant_id=user.tenant_id, actor_user_id=user.user_id
     )
     await _publish_rule_changed("deleted", existing)
@@ -1355,7 +1355,7 @@ async def list_safety_decisions_ep(
         raise HTTPException(status_code=403, detail="tenant scope mismatch")
     capped = max(1, min(int(limit), 200))
     safe_offset = max(0, int(offset))
-    total = await pg.count_safety_decisions(
+    total = await db.count_safety_decisions(
         tid,
         verdict_action=verdict_action,
         coworker_id=coworker_id,
@@ -1363,7 +1363,7 @@ async def list_safety_decisions_ep(
         from_ts=from_ts,
         to_ts=to_ts,
     )
-    items = await pg.list_safety_decisions(
+    items = await db.list_safety_decisions(
         tid,
         verdict_action=verdict_action,
         coworker_id=coworker_id,
@@ -1389,7 +1389,7 @@ async def get_safety_decision_ep(
     """
     if tid != user.tenant_id:
         raise HTTPException(status_code=404, detail="decision not found")
-    row = await pg.get_safety_decision(decision_id, tenant_id=tid)
+    row = await db.get_safety_decision(decision_id, tenant_id=tid)
     if row is None:
         raise HTTPException(status_code=404, detail="decision not found")
     return row
@@ -1412,7 +1412,7 @@ async def list_safety_rule_audit_ep(
     if tid != user.tenant_id:
         raise HTTPException(status_code=403, detail="tenant scope mismatch")
     capped = max(1, min(int(limit), 500))
-    return await pg.list_safety_rules_audit(
+    return await db.list_safety_rules_audit(
         tenant_id=tid, rule_id=rule_id, limit=capped
     )
 
@@ -1536,7 +1536,7 @@ async def export_safety_decisions_csv(
 
     async def _generate() -> AsyncIterator[bytes]:
         yield (",".join(_CSV_COLUMNS) + "\n").encode("utf-8")
-        async for chunk in pg.stream_safety_decisions(
+        async for chunk in db.stream_safety_decisions(
             tid,
             from_ts=from_ts,
             to_ts=to_ts,
@@ -1622,7 +1622,7 @@ async def list_skills(
     user: AdminUser,
 ) -> list[SkillSummary]:
     await _get_agent_or_404(agent_id, user.tenant_id)
-    skills = await pg.list_skills_for_coworker(
+    skills = await db.list_skills_for_coworker(
         agent_id, tenant_id=user.tenant_id, enabled_only=False, with_files=False,
     )
     return [_skill_to_summary(s) for s in skills]
@@ -1666,7 +1666,7 @@ async def create_skill(
     except (ValueError, AttributeError):
         created_by_uuid = None
     try:
-        skill = await pg.create_skill(
+        skill = await db.create_skill(
             tenant_id=user.tenant_id,
             coworker_id=agent_id,
             name=body.name,
@@ -1696,7 +1696,7 @@ async def get_skill_detail(
     user: AdminUser,
 ) -> SkillResponse:
     await _get_agent_or_404(agent_id, user.tenant_id)
-    skill = await pg.get_skill(skill_id, tenant_id=user.tenant_id)
+    skill = await db.get_skill(skill_id, tenant_id=user.tenant_id)
     if skill is None or skill.coworker_id != agent_id:
         raise HTTPException(status_code=404, detail="Skill not found")
     return _skill_to_response(skill)
@@ -1713,7 +1713,7 @@ async def update_skill(
     user: AdminUser,
 ) -> SkillResponse:
     await _get_agent_or_404(agent_id, user.tenant_id)
-    existing = await pg.get_skill(skill_id, tenant_id=user.tenant_id)
+    existing = await db.get_skill(skill_id, tenant_id=user.tenant_id)
     if existing is None or existing.coworker_id != agent_id:
         raise HTTPException(status_code=404, detail="Skill not found")
 
@@ -1773,7 +1773,7 @@ async def update_skill(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
-        updated = await pg.update_skill(
+        updated = await db.update_skill(
             skill_id,
             tenant_id=user.tenant_id,
             frontmatter_common=common,
@@ -1798,10 +1798,10 @@ async def delete_skill(
     user: AdminUser,
 ) -> None:
     await _get_agent_or_404(agent_id, user.tenant_id)
-    skill = await pg.get_skill(skill_id, tenant_id=user.tenant_id, with_files=False)
+    skill = await db.get_skill(skill_id, tenant_id=user.tenant_id, with_files=False)
     if skill is None or skill.coworker_id != agent_id:
         raise HTTPException(status_code=404, detail="Skill not found")
-    await pg.delete_skill(skill_id, tenant_id=user.tenant_id)
+    await db.delete_skill(skill_id, tenant_id=user.tenant_id)
 
 
 @router.patch(
@@ -1819,7 +1819,7 @@ async def update_skill_file(
     ``scripts/helper.py`` works as a URL segment.
     """
     await _get_agent_or_404(agent_id, user.tenant_id)
-    skill = await pg.get_skill(skill_id, tenant_id=user.tenant_id, with_files=False)
+    skill = await db.get_skill(skill_id, tenant_id=user.tenant_id, with_files=False)
     if skill is None or skill.coworker_id != agent_id:
         raise HTTPException(status_code=404, detail="Skill not found")
     try:
@@ -1827,7 +1827,7 @@ async def update_skill_file(
     except SkillValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
-        result = await pg.set_skill_file(
+        result = await db.set_skill_file(
             skill_id,
             path,
             tenant_id=user.tenant_id,
@@ -1838,7 +1838,7 @@ async def update_skill_file(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if result is None:
         raise HTTPException(status_code=404, detail="Skill not found")
-    refreshed = await pg.get_skill(skill_id, tenant_id=user.tenant_id)
+    refreshed = await db.get_skill(skill_id, tenant_id=user.tenant_id)
     assert refreshed is not None
     return _skill_to_response(refreshed)
 
@@ -1857,7 +1857,7 @@ async def delete_skill_file(
     enforce the application invariant.
     """
     await _get_agent_or_404(agent_id, user.tenant_id)
-    skill = await pg.get_skill(skill_id, tenant_id=user.tenant_id, with_files=False)
+    skill = await db.get_skill(skill_id, tenant_id=user.tenant_id, with_files=False)
     if skill is None or skill.coworker_id != agent_id:
         raise HTTPException(status_code=404, detail="Skill not found")
     if path == "SKILL.md":
@@ -1869,6 +1869,6 @@ async def delete_skill_file(
         validate_skill_file_path(path)
     except SkillValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    deleted = await pg.delete_skill_file(skill_id, path, tenant_id=user.tenant_id)
+    deleted = await db.delete_skill_file(skill_id, path, tenant_id=user.tenant_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="File not found in skill")

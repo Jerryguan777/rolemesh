@@ -83,7 +83,7 @@ class TokenVault:
         expires_in: int | None,
     ) -> None:
         """Persist tokens after a successful OIDC code exchange."""
-        from rolemesh.db.pg import upsert_user_oidc_tokens
+        from rolemesh.db import upsert_user_oidc_tokens
 
         refresh_enc = self._encrypt(refresh_token)
         access_enc = self._encrypt(access_token) if access_token else None
@@ -100,7 +100,7 @@ class TokenVault:
 
         Returns None if no tokens are stored or the refresh failed.
         """
-        from rolemesh.db.pg import (
+        from rolemesh.db import (
             delete_user_oidc_tokens,
             get_user_oidc_tokens,
             update_user_access_token,
@@ -155,7 +155,7 @@ class TokenVault:
         Lock is not explicitly removed; WeakValueDictionary GCs it when no
         coroutine holds a reference.
         """
-        from rolemesh.db.pg import delete_user_oidc_tokens
+        from rolemesh.db import delete_user_oidc_tokens
 
         await delete_user_oidc_tokens(user_id)
 

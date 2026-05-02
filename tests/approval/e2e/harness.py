@@ -37,7 +37,15 @@ from rolemesh.approval.executor import ApprovalWorker
 from rolemesh.approval.expiry import run_approval_maintenance_loop
 from rolemesh.approval.notification import NotificationTargetResolver
 from rolemesh.auth.provider import AuthenticatedUser
-from rolemesh.db import pg
+from rolemesh.db import (
+    _get_pool,
+    create_channel_binding,
+    create_conversation,
+    create_coworker,
+    create_tenant,
+    create_user,
+    get_conversation_for_notification,
+)
 from rolemesh.security.credential_proxy import (
     register_mcp_server,
     start_credential_proxy,
@@ -271,25 +279,25 @@ async def seed_tenant(
     owner_role: str = "owner",
     with_web_binding: bool = False,
 ) -> SeedResult:
-    t = await pg.create_tenant(
+    t = await create_tenant(
         name=name_prefix, slug=f"{name_prefix.lower()}-{uuid.uuid4().hex[:8]}"
     )
-    owner = await pg.create_user(
+    owner = await create_user(
         tenant_id=t.id, name=f"{name_prefix}-owner",
         email=f"{name_prefix.lower()}@x.com", role=owner_role,
     )
-    cw = await pg.create_coworker(
+    cw = await create_coworker(
         tenant_id=t.id,
         name=f"{name_prefix}-cw",
         folder=f"cw-{uuid.uuid4().hex[:8]}",
     )
-    b = await pg.create_channel_binding(
+    b = await create_channel_binding(
         coworker_id=cw.id,
         tenant_id=t.id,
         channel_type=("web" if with_web_binding else "telegram"),
         credentials={"bot_token": "x"},
     )
-    conv = await pg.create_conversation(
+    conv = await create_conversation(
         tenant_id=t.id,
         coworker_id=cw.id,
         channel_binding_id=b.id,
@@ -380,7 +388,7 @@ async def orchestrator_harness(
     async def _get_conv(conv_id: str) -> object | None:
         # Mirror main.py: notification path needs an unscoped lookup
         # because the ChannelSender protocol carries no tenant context.
-        return await pg.get_conversation_for_notification(conv_id)
+        return await get_conversation_for_notification(conv_id)
 
     resolver = NotificationTargetResolver(
         get_conversations_for_user_and_coworker=_no_convs,
@@ -438,7 +446,7 @@ async def orchestrator_harness(
                 source_tenant: str | None = None
                 source_id: str | None = None
                 if claimed_cw:
-                    pool = pg._get_pool()
+                    pool = _get_pool()
                     async with pool.acquire() as conn:
                         row = await conn.fetchrow(
                             "SELECT id, tenant_id FROM coworkers WHERE id = $1::uuid",

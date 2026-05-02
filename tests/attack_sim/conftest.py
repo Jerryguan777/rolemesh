@@ -27,15 +27,17 @@ from __future__ import annotations
 import os
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import pytest
 
-from rolemesh.db import pg
-
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-
+from rolemesh.db import (
+    create_channel_binding,
+    create_conversation,
+    create_coworker,
+    create_tenant,
+    create_user,
+)
 
 # ---------------------------------------------------------------------------
 # Fake NATS publisher and channel sender — reused across attack files
@@ -96,25 +98,25 @@ class VictimTenant:
 
 
 async def seed_victim(name: str = "victim") -> VictimTenant:
-    tenant = await pg.create_tenant(
+    tenant = await create_tenant(
         name=name.capitalize(), slug=f"{name}-{uuid.uuid4().hex[:8]}"
     )
-    owner = await pg.create_user(
+    owner = await create_user(
         tenant_id=tenant.id,
         name=f"{name}-owner",
         email=f"{name}@example.com",
         role="owner",
     )
-    coworker = await pg.create_coworker(
+    coworker = await create_coworker(
         tenant_id=tenant.id, name="CW", folder=f"cw-{uuid.uuid4().hex[:8]}"
     )
-    binding = await pg.create_channel_binding(
+    binding = await create_channel_binding(
         coworker_id=coworker.id,
         tenant_id=tenant.id,
         channel_type="telegram",
         credentials={"bot_token": "x"},
     )
-    conv = await pg.create_conversation(
+    conv = await create_conversation(
         tenant_id=tenant.id,
         coworker_id=coworker.id,
         channel_binding_id=binding.id,

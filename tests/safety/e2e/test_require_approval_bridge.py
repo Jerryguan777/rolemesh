@@ -41,7 +41,15 @@ from agent_runner.safety.registry import build_container_registry
 from rolemesh.approval.engine import ApprovalEngine
 from rolemesh.approval.notification import NotificationTargetResolver
 from rolemesh.auth.permissions import AgentPermissions
-from rolemesh.db import pg
+from rolemesh.db import (
+    _get_pool,
+    create_coworker,
+    create_safety_rule,
+    create_tenant,
+    create_user,
+    list_safety_decisions,
+    list_safety_rules_for_coworker,
+)
 from rolemesh.safety.engine import SafetyEngine
 from rolemesh.safety.subscriber import (
     SafetyEventsSubscriber,
@@ -142,25 +150,25 @@ class TestRequireApprovalFullLoop:
         ApprovalEngine.create_from_safety → row lands in
         approval_requests with source='safety_require_approval'.
         """
-        tenant = await pg.create_tenant(
+        tenant = await create_tenant(
             name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
         )
         # Tenant owner — approver fallback chain lands here when no
         # policy matches. Without this user the create_from_safety
         # path logs "no tenant owners" and returns None.
-        owner = await pg.create_user(
+        owner = await create_user(
             tenant_id=tenant.id,
             name="Owner",
             email=f"owner-{uuid.uuid4().hex[:6]}@example.com",
             role="owner",
         )
-        cw = await pg.create_coworker(
+        cw = await create_coworker(
             tenant_id=tenant.id,
             name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
             permissions=AgentPermissions.for_role("agent"),
         )
-        rule = await pg.create_safety_rule(
+        rule = await create_safety_rule(
             tenant_id=tenant.id,
             stage="pre_tool_call",
             check_id="pii.regex",
@@ -174,7 +182,7 @@ class TestRequireApprovalFullLoop:
         # Container side: run the snapshot + hook handler with an SSN
         # payload. The override rewrites the check's natural block
         # verdict into require_approval.
-        rules = await pg.list_safety_rules_for_coworker(tenant.id, cw.id)
+        rules = await list_safety_rules_for_coworker(tenant.id, cw.id)
         assert len(rules) == 1
         snapshot = [r.to_snapshot_dict() for r in rules]
 
@@ -231,7 +239,7 @@ class TestRequireApprovalFullLoop:
         # Audit row lands in safety_decisions with approval_context
         # populated — proves the schema migration (approval_context
         # column) round-trips through the engine.
-        decisions = await pg.list_safety_decisions(tenant.id)
+        decisions = await list_safety_decisions(tenant.id)
         assert len(decisions) == 1
         d = decisions[0]
         assert d["verdict_action"] == "require_approval"
@@ -242,7 +250,7 @@ class TestRequireApprovalFullLoop:
         # This is the load-bearing assertion: without the DB CHECK
         # widening (migration), this INSERT would have raised
         # 23514 CheckViolation.
-        pool = pg._get_pool()  # type: ignore[attr-defined]
+        pool = _get_pool()  # type: ignore[attr-defined]
         async with pool.acquire() as conn:
             rows = await conn.fetch(
                 "SELECT id, source, status, mcp_server_name, actions, "
@@ -296,21 +304,21 @@ class TestRequireApprovalFullLoop:
         approval_requests with duplicates for the same action_hash
         within the 5-minute dedup window.
         """
-        tenant = await pg.create_tenant(
+        tenant = await create_tenant(
             name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
         )
-        owner = await pg.create_user(
+        owner = await create_user(
             tenant_id=tenant.id,
             name="Owner",
             email=f"owner-{uuid.uuid4().hex[:6]}@example.com",
             role="owner",
         )
-        cw = await pg.create_coworker(
+        cw = await create_coworker(
             tenant_id=tenant.id,
             name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
         )
-        await pg.create_safety_rule(
+        await create_safety_rule(
             tenant_id=tenant.id,
             stage="pre_tool_call",
             check_id="pii.regex",
@@ -319,7 +327,7 @@ class TestRequireApprovalFullLoop:
                 "action_override": "require_approval",
             },
         )
-        rules = await pg.list_safety_rules_for_coworker(tenant.id, cw.id)
+        rules = await list_safety_rules_for_coworker(tenant.id, cw.id)
         snapshot = [r.to_snapshot_dict() for r in rules]
 
         tool_ctx = _FakeToolCtx(
@@ -358,13 +366,13 @@ class TestRequireApprovalFullLoop:
             )
 
         # Three audit rows — one per container-side evaluation — OK.
-        decisions = await pg.list_safety_decisions(tenant.id)
+        decisions = await list_safety_decisions(tenant.id)
         assert len(decisions) == 3
 
         # But ONLY ONE approval_request row — the dedup window should
         # have collapsed the other two into no-ops. Without the fix
         # we'd see 3 pending rows here.
-        pool = pg._get_pool()  # type: ignore[attr-defined]
+        pool = _get_pool()  # type: ignore[attr-defined]
         async with pool.acquire() as conn:
             count = await conn.fetchval(
                 "SELECT COUNT(*) FROM approval_requests "
@@ -384,14 +392,14 @@ class TestRequireApprovalFullLoop:
         and returns None. The audit row still lands, the approval
         request does NOT — degraded but no cascade failure.
         """
-        tenant = await pg.create_tenant(
+        tenant = await create_tenant(
             name="NoOwner", slug=f"t-{uuid.uuid4().hex[:8]}"
         )
-        cw = await pg.create_coworker(
+        cw = await create_coworker(
             tenant_id=tenant.id, name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
         )
-        await pg.create_safety_rule(
+        await create_safety_rule(
             tenant_id=tenant.id,
             stage="pre_tool_call",
             check_id="pii.regex",
@@ -400,7 +408,7 @@ class TestRequireApprovalFullLoop:
                 "action_override": "require_approval",
             },
         )
-        rules = await pg.list_safety_rules_for_coworker(tenant.id, cw.id)
+        rules = await list_safety_rules_for_coworker(tenant.id, cw.id)
         snapshot = [r.to_snapshot_dict() for r in rules]
 
         tool_ctx = _FakeToolCtx(tenant_id=tenant.id, coworker_id=cw.id)
@@ -434,11 +442,11 @@ class TestRequireApprovalFullLoop:
         )
 
         # Audit row landed.
-        decisions = await pg.list_safety_decisions(tenant.id)
+        decisions = await list_safety_decisions(tenant.id)
         assert len(decisions) == 1
 
         # Approval request did NOT land — no approvers, skipped.
-        pool = pg._get_pool()  # type: ignore[attr-defined]
+        pool = _get_pool()  # type: ignore[attr-defined]
         async with pool.acquire() as conn:
             count = await conn.fetchval(
                 "SELECT COUNT(*) FROM approval_requests "
@@ -457,20 +465,20 @@ class TestRequireApprovalFullLoop:
         approval_request with empty tool_name, which 23514'd against
         a NOT NULL constraint.
         """
-        tenant = await pg.create_tenant(
+        tenant = await create_tenant(
             name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
         )
-        await pg.create_user(
+        await create_user(
             tenant_id=tenant.id,
             name="Owner",
             email=f"owner-{uuid.uuid4().hex[:6]}@example.com",
             role="owner",
         )
-        cw = await pg.create_coworker(
+        cw = await create_coworker(
             tenant_id=tenant.id, name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
         )
-        await pg.create_safety_rule(
+        await create_safety_rule(
             tenant_id=tenant.id,
             stage="input_prompt",
             check_id="pii.regex",
@@ -479,7 +487,7 @@ class TestRequireApprovalFullLoop:
                 "action_override": "require_approval",
             },
         )
-        rules = await pg.list_safety_rules_for_coworker(tenant.id, cw.id)
+        rules = await list_safety_rules_for_coworker(tenant.id, cw.id)
         snapshot = [r.to_snapshot_dict() for r in rules]
 
         from agent_runner.hooks.events import UserPromptEvent
@@ -517,7 +525,7 @@ class TestRequireApprovalFullLoop:
 
         # Approval request NOT created — there's no tool_input to
         # surface for human decision on an INPUT_PROMPT event.
-        pool = pg._get_pool()  # type: ignore[attr-defined]
+        pool = _get_pool()  # type: ignore[attr-defined]
         async with pool.acquire() as conn:
             count = await conn.fetchval(
                 "SELECT COUNT(*) FROM approval_requests "

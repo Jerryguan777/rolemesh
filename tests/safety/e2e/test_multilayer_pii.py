@@ -38,7 +38,13 @@ import pytest
 from agent_runner.hooks.events import UserPromptEvent
 from agent_runner.safety.hook_handler import SafetyHookHandler
 from agent_runner.safety.registry import build_container_registry
-from rolemesh.db import pg
+from rolemesh.db import (
+    create_coworker,
+    create_safety_rule,
+    create_tenant,
+    list_safety_decisions,
+    list_safety_rules_for_coworker,
+)
 from rolemesh.ipc.protocol import AgentInitData
 from rolemesh.safety.engine import SafetyEngine
 from rolemesh.safety.subscriber import (
@@ -85,14 +91,14 @@ class TestMultiLayerPII:
         turn is aborted here. Also confirms the audit event reaches
         safety_decisions via the real subscriber trust boundary.
         """
-        tenant = await pg.create_tenant(
+        tenant = await create_tenant(
             name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
         )
-        cw = await pg.create_coworker(
+        cw = await create_coworker(
             tenant_id=tenant.id, name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
         )
-        rule_input = await pg.create_safety_rule(
+        rule_input = await create_safety_rule(
             tenant_id=tenant.id,
             stage="input_prompt",
             check_id="pii.regex",
@@ -102,7 +108,7 @@ class TestMultiLayerPII:
 
         # Simulate container boot: load snapshots + round-trip through
         # AgentInitData so any JSON-serialization regression surfaces.
-        rules = await pg.list_safety_rules_for_coworker(tenant.id, cw.id)
+        rules = await list_safety_rules_for_coworker(tenant.id, cw.id)
         snapshot_dicts = [r.to_snapshot_dict() for r in rules]
         init = AgentInitData(
             prompt="",
@@ -148,7 +154,7 @@ class TestMultiLayerPII:
             json.dumps(event_payload).encode()
         )
 
-        decisions = await pg.list_safety_decisions(tenant.id)
+        decisions = await list_safety_decisions(tenant.id)
         assert len(decisions) == 1
         d = decisions[0]
         assert d["verdict_action"] == "block"
@@ -171,17 +177,17 @@ class TestMultiLayerPII:
         pytest.importorskip("presidio_analyzer")
         pytest.importorskip("detect_secrets")
 
-        tenant = await pg.create_tenant(
+        tenant = await create_tenant(
             name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
         )
-        cw = await pg.create_coworker(
+        cw = await create_coworker(
             tenant_id=tenant.id, name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
         )
         # presidio.pii with higher priority so it runs FIRST (designs
         # the redact-before-block ordering). secret_scanner runs at
         # lower priority on the redacted payload.
-        rule_presidio = await pg.create_safety_rule(
+        rule_presidio = await create_safety_rule(
             tenant_id=tenant.id,
             stage="model_output",
             check_id="presidio.pii",
@@ -189,7 +195,7 @@ class TestMultiLayerPII:
             priority=99,
             description="redact emails in model output",
         )
-        rule_secret = await pg.create_safety_rule(
+        rule_secret = await create_safety_rule(
             tenant_id=tenant.id,
             stage="model_output",
             check_id="secret_scanner",
@@ -240,7 +246,7 @@ class TestMultiLayerPII:
         # Audit rows: both rules produced events (redact per-rule
         # publish + block short-circuit publish). Two rows total,
         # newest-first means block row is first.
-        decisions = await pg.list_safety_decisions(tenant.id)
+        decisions = await list_safety_decisions(tenant.id)
         assert len(decisions) == 2
         actions = [d["verdict_action"] for d in decisions]
         assert "block" in actions
@@ -258,21 +264,21 @@ class TestMultiLayerPII:
         pytest.importorskip("presidio_analyzer")
         pytest.importorskip("detect_secrets")
 
-        tenant = await pg.create_tenant(
+        tenant = await create_tenant(
             name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
         )
-        cw = await pg.create_coworker(
+        cw = await create_coworker(
             tenant_id=tenant.id, name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
         )
-        await pg.create_safety_rule(
+        await create_safety_rule(
             tenant_id=tenant.id,
             stage="model_output",
             check_id="presidio.pii",
             config={"redact_codes": ["PII.EMAIL"]},
             priority=99,
         )
-        await pg.create_safety_rule(
+        await create_safety_rule(
             tenant_id=tenant.id,
             stage="model_output",
             check_id="secret_scanner",
@@ -301,7 +307,7 @@ class TestMultiLayerPII:
         # Both rules ran and each emitted one allow audit row. The
         # tail allow (pipeline's final no-match return) does NOT emit
         # a row — this test pins both invariants.
-        decisions = await pg.list_safety_decisions(tenant.id)
+        decisions = await list_safety_decisions(tenant.id)
         assert len(decisions) == 2
         assert all(d["verdict_action"] == "allow" for d in decisions)
 
@@ -320,21 +326,21 @@ class TestMultiLayerPII:
         pytest.importorskip("presidio_analyzer")
         pytest.importorskip("detect_secrets")
 
-        tenant = await pg.create_tenant(
+        tenant = await create_tenant(
             name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
         )
-        cw = await pg.create_coworker(
+        cw = await create_coworker(
             tenant_id=tenant.id, name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
         )
-        await pg.create_safety_rule(
+        await create_safety_rule(
             tenant_id=tenant.id,
             stage="model_output",
             check_id="presidio.pii",
             config={"redact_codes": ["PII.EMAIL"]},
             priority=99,
         )
-        await pg.create_safety_rule(
+        await create_safety_rule(
             tenant_id=tenant.id,
             stage="model_output",
             check_id="secret_scanner",

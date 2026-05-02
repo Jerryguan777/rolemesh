@@ -1,7 +1,7 @@
 """End-to-end test for the V1 acceptance scenario (design §5.12).
 
 Exercises the full loop without containers:
-  1. Admin POSTs a rule via REST (simulated via direct pg.create).
+  1. Admin POSTs a rule via REST (simulated via direct create).
   2. container_executor loads rule snapshots at job start (simulated:
      we call ``list_safety_rules_for_coworker`` directly).
   3. Snapshot is serialized into AgentInitData and deserialized back
@@ -34,7 +34,14 @@ import pytest
 from agent_runner.hooks.events import ToolCallEvent
 from agent_runner.safety.hook_handler import SafetyHookHandler
 from agent_runner.safety.registry import build_container_registry
-from rolemesh.db import pg
+from rolemesh.db import (
+    create_coworker,
+    create_safety_rule,
+    create_tenant,
+    list_safety_decisions,
+    list_safety_rules_for_coworker,
+    update_safety_rule,
+)
 from rolemesh.ipc.protocol import AgentInitData
 from rolemesh.safety.engine import SafetyEngine
 from rolemesh.safety.subscriber import (
@@ -69,14 +76,14 @@ class TestV1Acceptance:
         # 1. Seed tenant + coworker + rule via the CRUD layer the REST
         #    API uses. (Tested independently in test_api.py; here we
         #    want the full loop rather than repeating HTTP setup.)
-        tenant = await pg.create_tenant(
+        tenant = await create_tenant(
             name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
         )
-        cw = await pg.create_coworker(
+        cw = await create_coworker(
             tenant_id=tenant.id, name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
         )
-        rule = await pg.create_safety_rule(
+        rule = await create_safety_rule(
             tenant_id=tenant.id,
             stage="pre_tool_call",
             check_id="pii.regex",
@@ -85,7 +92,7 @@ class TestV1Acceptance:
         )
 
         # 2. Simulate container_executor loading snapshots.
-        rules = await pg.list_safety_rules_for_coworker(tenant.id, cw.id)
+        rules = await list_safety_rules_for_coworker(tenant.id, cw.id)
         assert rules and rules[0].id == rule.id
         snapshot_dicts = [r.to_snapshot_dict() for r in rules]
 
@@ -151,7 +158,7 @@ class TestV1Acceptance:
             json.dumps(event_payload).encode()
         )
 
-        decisions = await pg.list_safety_decisions(tenant.id)
+        decisions = await list_safety_decisions(tenant.id)
         assert len(decisions) == 1
         d = decisions[0]
         assert d["verdict_action"] == "block"
@@ -172,14 +179,14 @@ class TestV1Acceptance:
         # This version runs the full container flow twice: once with
         # the rule enabled (asserts block), once with it disabled
         # (asserts no block on the same tool_input).
-        tenant = await pg.create_tenant(
+        tenant = await create_tenant(
             name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
         )
-        cw = await pg.create_coworker(
+        cw = await create_coworker(
             tenant_id=tenant.id, name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
         )
-        rule = await pg.create_safety_rule(
+        rule = await create_safety_rule(
             tenant_id=tenant.id,
             stage="pre_tool_call",
             check_id="pii.regex",
@@ -189,7 +196,7 @@ class TestV1Acceptance:
         # Snapshot A: rule enabled, Handler must block.
         snapshot_a = [
             r.to_snapshot_dict()
-            for r in await pg.list_safety_rules_for_coworker(
+            for r in await list_safety_rules_for_coworker(
                 tenant.id, cw.id
             )
         ]
@@ -211,14 +218,14 @@ class TestV1Acceptance:
         )
 
         # Admin disables the rule.
-        await pg.update_safety_rule(rule.id, tenant_id=tenant.id, enabled=False)
+        await update_safety_rule(rule.id, tenant_id=tenant.id, enabled=False)
 
         # Snapshot B: disabled rule, fresh Handler, SAME tool_input
         # must now be allowed through. This is the property the
         # previous test advertised but did not verify.
         snapshot_b = [
             r.to_snapshot_dict()
-            for r in await pg.list_safety_rules_for_coworker(
+            for r in await list_safety_rules_for_coworker(
                 tenant.id, cw.id
             )
         ]

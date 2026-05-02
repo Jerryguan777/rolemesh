@@ -5,7 +5,7 @@ even after the live Coworker is edited or deleted. The hash over a
 canonical JSON serialization (``coworker_config_sha256``) lets the
 ``rolemesh-eval list`` command cluster runs that share a configuration.
 
-Skills are read via ``rolemesh.db.pg.list_skills_for_coworker`` so
+Skills are read via ``rolemesh.db.list_skills_for_coworker`` so
 the freeze stays in lockstep with the production projection: same
 ``enabled_only`` filter, same name-ordered scan, same per-file content
 fetch. ``frontmatter_common`` and ``frontmatter_backend`` are kept
@@ -20,7 +20,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from rolemesh.db.pg import get_coworker, list_skills_for_coworker
+from rolemesh.db import get_coworker, list_skills_for_coworker
 
 if TYPE_CHECKING:
     from rolemesh.core.types import Coworker, Skill

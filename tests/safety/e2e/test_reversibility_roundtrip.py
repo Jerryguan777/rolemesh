@@ -35,7 +35,13 @@ from fastapi import FastAPI
 
 from rolemesh.auth.provider import AuthenticatedUser
 from rolemesh.core.types import McpServerConfig
-from rolemesh.db import pg
+from rolemesh.db import (
+    create_coworker,
+    create_tenant,
+    create_user,
+    get_coworker,
+    update_coworker,
+)
 from rolemesh.ipc.protocol import AgentInitData, McpServerSpec
 from rolemesh.safety.registry import (
     build_orchestrator_registry,
@@ -84,7 +90,7 @@ class TestPersistenceRoundTrip:
         serialize → deserialize, build the ToolContext map, resolve
         each tool via the same helper the hook handler uses.
         """
-        tenant = await pg.create_tenant(
+        tenant = await create_tenant(
             name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
         )
         mcp = McpServerConfig(
@@ -101,7 +107,7 @@ class TestPersistenceRoundTrip:
                 "legacy_typo": True,
             },
         )
-        cw = await pg.create_coworker(
+        cw = await create_coworker(
             tenant_id=tenant.id,
             name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
@@ -109,7 +115,7 @@ class TestPersistenceRoundTrip:
         )
 
         # Layer 2 → 3 → 4: read coworker back, build spec, serialize.
-        fetched = await pg.get_coworker(cw.id, tenant_id=tenant.id)
+        fetched = await get_coworker(cw.id, tenant_id=tenant.id)
         assert fetched is not None
         assert len(fetched.tools) == 1
         persisted_mcp = fetched.tools[0]
@@ -186,10 +192,10 @@ class TestPersistenceRoundTrip:
         forgot to include the key in the UPDATE serialiser would
         silently drop overrides on any edit.
         """
-        tenant = await pg.create_tenant(
+        tenant = await create_tenant(
             name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
         )
-        cw = await pg.create_coworker(
+        cw = await create_coworker(
             tenant_id=tenant.id,
             name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
@@ -203,7 +209,7 @@ class TestPersistenceRoundTrip:
             ],
         )
         # Update with a modified reversibility map.
-        await pg.update_coworker(
+        await update_coworker(
             cw.id,
             tenant_id=tenant.id,
             tools=[
@@ -219,7 +225,7 @@ class TestPersistenceRoundTrip:
                 )
             ],
         )
-        fetched = await pg.get_coworker(cw.id, tenant_id=tenant.id)
+        fetched = await get_coworker(cw.id, tenant_id=tenant.id)
         assert fetched is not None
         assert fetched.tools[0].tool_reversibility == {
             "read": True,
@@ -280,7 +286,7 @@ def _build_app(user: AuthenticatedUser) -> FastAPI:
 
 
 async def _seed_user(tenant_id: str) -> AuthenticatedUser:
-    user = await pg.create_user(
+    user = await create_user(
         tenant_id=tenant_id,
         name="Admin",
         email=f"admin-{uuid.uuid4().hex[:6]}@example.com",
@@ -308,11 +314,11 @@ class TestRestGuardWithPersistedReversibility:
         step 2→3 of the chain would make this test fail with 201
         (rule accepted incorrectly).
         """
-        tenant = await pg.create_tenant(
+        tenant = await create_tenant(
             name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
         )
         user = await _seed_user(tenant.id)
-        cw = await pg.create_coworker(
+        cw = await create_coworker(
             tenant_id=tenant.id,
             name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
@@ -349,11 +355,11 @@ class TestRestGuardWithPersistedReversibility:
     async def test_rest_accepts_slow_pretool_when_all_tools_are_irreversible(
         self, slow_check_registered: None
     ) -> None:
-        tenant = await pg.create_tenant(
+        tenant = await create_tenant(
             name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
         )
         user = await _seed_user(tenant.id)
-        cw = await pg.create_coworker(
+        cw = await create_coworker(
             tenant_id=tenant.id,
             name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",

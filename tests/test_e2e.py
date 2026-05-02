@@ -43,13 +43,13 @@ async def e2e_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pg_url: str) 
     monkeypatch.setattr("rolemesh.core.group_folder.DATA_DIR", data_dir)
     monkeypatch.setattr("rolemesh.core.group_folder.GROUPS_DIR", groups_dir)
 
-    from rolemesh.db.pg import _init_test_database
+    from rolemesh.db import _init_test_database
 
     await _init_test_database(pg_url)
 
     yield tmp_path
 
-    from rolemesh.db.pg import close_database
+    from rolemesh.db import close_database
 
     await close_database()
 
@@ -61,7 +61,7 @@ async def e2e_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pg_url: str) 
 
 async def test_multi_tenant_schema_creation(e2e_env: Path) -> None:
     """All new tables are created correctly."""
-    from rolemesh.db.pg import (
+    from rolemesh.db import (
         create_channel_binding,
         create_conversation,
         create_coworker,
@@ -105,7 +105,7 @@ async def test_multi_tenant_schema_creation(e2e_env: Path) -> None:
 
 async def test_session_per_conversation(e2e_env: Path) -> None:
     """Sessions are keyed by conversation_id."""
-    from rolemesh.db.pg import (
+    from rolemesh.db import (
         create_channel_binding,
         create_conversation,
         create_coworker,
@@ -131,7 +131,7 @@ async def test_session_per_conversation(e2e_env: Path) -> None:
 
 async def test_messages_per_conversation(e2e_env: Path) -> None:
     """Messages are stored and retrieved per conversation."""
-    from rolemesh.db.pg import (
+    from rolemesh.db import (
         create_channel_binding,
         create_conversation,
         create_coworker,
@@ -168,7 +168,7 @@ async def test_messages_per_conversation(e2e_env: Path) -> None:
 async def test_tasks_per_coworker(e2e_env: Path) -> None:
     """Tasks are created per coworker and retrieved correctly."""
     from rolemesh.core.types import ScheduledTask
-    from rolemesh.db.pg import (
+    from rolemesh.db import (
         create_coworker,
         create_task,
         create_tenant,

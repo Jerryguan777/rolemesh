@@ -19,7 +19,7 @@ from decimal import Decimal
 
 import pytest
 
-from rolemesh.db.pg import (
+from rolemesh.db import (
     _create_schema,
     _get_pool,
     create_channel_binding,

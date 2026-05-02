@@ -21,7 +21,7 @@ import pytest
 
 from rolemesh.approval.engine import ApprovalEngine
 from rolemesh.approval.notification import NotificationTargetResolver
-from rolemesh.db.pg import (
+from rolemesh.db import (
     create_approval_policy,
     create_channel_binding,
     create_conversation,

@@ -1,100 +1,23 @@
-"""Data layer — PostgreSQL persistence."""
+"""Data layer — PostgreSQL persistence.
 
-# Test helper — only import when needed
-from rolemesh.db.pg import _init_test_database as _init_test_database
-from rolemesh.db.pg import (
-    close_database,
-    create_channel_binding,
-    create_conversation,
-    create_coworker,
-    create_task,
-    create_tenant,
-    create_user,
-    delete_task,
-    drop_legacy_tables,
-    get_all_channel_bindings,
-    get_all_conversations,
-    get_all_coworkers,
-    get_all_registered_groups,
-    get_all_sessions,
-    get_all_sessions_legacy,
-    get_all_tasks,
-    get_all_tenants,
-    get_channel_binding,
-    get_channel_binding_for_coworker,
-    get_channel_bindings_for_coworker,
-    get_conversation,
-    get_conversation_by_binding_and_chat,
-    get_conversations_for_coworker,
-    get_coworker,
-    get_coworker_by_folder,
-    get_coworkers_for_tenant,
-    get_due_tasks,
-    get_messages_since,
-    get_new_messages_for_conversations,
-    get_session,
-    get_session_legacy,
-    get_task_by_id,
-    get_tasks_for_coworker,
-    get_tenant,
-    get_tenant_by_slug,
-    init_database,
-    log_task_run,
-    set_registered_group,
-    set_session,
-    set_session_legacy,
-    store_message,
-    update_conversation_last_invocation,
-    update_task,
-    update_task_after_run,
-    update_tenant_message_cursor,
-)
+Public API is the union of all entity submodules' public APIs. Import
+from ``rolemesh.db`` directly:
 
-__all__ = [
-    "_init_test_database",
-    "close_database",
-    "create_channel_binding",
-    "create_conversation",
-    "create_coworker",
-    "create_task",
-    "create_tenant",
-    "create_user",
-    "delete_task",
-    "drop_legacy_tables",
-    "get_all_channel_bindings",
-    "get_all_conversations",
-    "get_all_coworkers",
-    "get_all_registered_groups",
-    "get_all_sessions",
-    "get_all_sessions_legacy",
-    "get_all_tasks",
-    "get_all_tenants",
-    "get_channel_binding",
-    "get_channel_binding_for_coworker",
-    "get_channel_bindings_for_coworker",
-    "get_conversation",
-    "get_conversation_by_binding_and_chat",
-    "get_conversations_for_coworker",
-    "get_coworker",
-    "get_coworker_by_folder",
-    "get_coworkers_for_tenant",
-    "get_due_tasks",
-    "get_messages_since",
-    "get_new_messages_for_conversations",
-    "get_session",
-    "get_session_legacy",
-    "get_task_by_id",
-    "get_tasks_for_coworker",
-    "get_tenant",
-    "get_tenant_by_slug",
-    "init_database",
-    "log_task_run",
-    "set_registered_group",
-    "set_session",
-    "set_session_legacy",
-    "store_message",
-    "update_conversation_last_invocation",
-    "update_task",
-    "update_task_after_run",
-    "update_tenant_message_cursor",
-]
+    from rolemesh.db import create_coworker, tenant_conn
+
+Entity-scoped imports (``rolemesh.db.coworker``, ``rolemesh.db.safety``,
+…) are also valid; the package-level surface is the back-compat target
+for the historic ``rolemesh.db.pg`` shim, which has been removed.
+"""
+
+from rolemesh.db._pool import *  # noqa: F403
+from rolemesh.db.approval import *  # noqa: F403
+from rolemesh.db.chat import *  # noqa: F403
+from rolemesh.db.coworker import *  # noqa: F403
+from rolemesh.db.legacy import *  # noqa: F403
+from rolemesh.db.safety import *  # noqa: F403
+from rolemesh.db.schema import *  # noqa: F403
+from rolemesh.db.skill import *  # noqa: F403
+from rolemesh.db.task import *  # noqa: F403
+from rolemesh.db.tenant import *  # noqa: F403
+from rolemesh.db.user import *  # noqa: F403

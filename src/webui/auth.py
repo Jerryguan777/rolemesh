@@ -54,7 +54,7 @@ async def authenticate_ws(token: str) -> AuthenticatedUser | None:
     from webui.config import ADMIN_BOOTSTRAP_TOKEN
 
     if ADMIN_BOOTSTRAP_TOKEN and token == ADMIN_BOOTSTRAP_TOKEN:
-        from rolemesh.db.pg import get_tenant_by_slug
+        from rolemesh.db import get_tenant_by_slug
 
         tenant = await get_tenant_by_slug("default")
         tenant_id = tenant.id if tenant else "default"

@@ -17,7 +17,9 @@ import asyncio
 import contextlib
 
 from rolemesh.core.logger import get_logger
-from rolemesh.db import pg
+from rolemesh.db import (
+    cleanup_old_safety_approval_contexts,
+)
 
 logger = get_logger()
 
@@ -43,7 +45,7 @@ async def run_safety_maintenance_loop(
     stop = stop_event or asyncio.Event()
     while not stop.is_set():
         try:
-            cleared = await pg.cleanup_old_safety_approval_contexts(
+            cleared = await cleanup_old_safety_approval_contexts(
                 retention_hours=retention_hours
             )
             if cleared:

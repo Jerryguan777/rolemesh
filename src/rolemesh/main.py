@@ -62,7 +62,6 @@ from rolemesh.core.config import (
     CONTAINER_EGRESS_NETWORK_NAME,
     CONTAINER_NETWORK_NAME,
     CREDENTIAL_PROXY_PORT,
-    EGRESS_GATEWAY_CONTAINER_NAME,
     GLOBAL_MAX_CONTAINERS,
     IDLE_TIMEOUT,
     NATS_URL,
@@ -77,7 +76,7 @@ from rolemesh.core.orchestrator_state import (
     OrchestratorState,
 )
 from rolemesh.core.types import ChannelBinding, Conversation, Coworker
-from rolemesh.db.pg import (
+from rolemesh.db import (
     DEFAULT_TENANT,
     close_database,
     create_conversation,
@@ -96,10 +95,10 @@ from rolemesh.db.pg import (
     update_conversation_last_invocation,
     update_tenant_message_cursor,
 )
-from rolemesh.db.pg import (
+from rolemesh.db import (
     get_conversations_for_coworker as pg_get_conversations_for_coworker,
 )
-from rolemesh.db.pg import (
+from rolemesh.db import (
     store_message as db_store_message,
 )
 from rolemesh.ipc.nats_transport import NatsTransport
@@ -387,7 +386,7 @@ async def _load_state() -> None:
         logger.info("Created default tenant", tenant_id=default_tenant.id)
 
     # Load ALL tenants
-    from rolemesh.db.pg import get_all_tenants
+    from rolemesh.db import get_all_tenants
 
     for t in await get_all_tenants():
         _state.tenants[t.id] = t
@@ -1431,7 +1430,7 @@ async def main() -> None:
     # fan-out.
     from rolemesh.approval.engine import ApprovalEngine
     from rolemesh.approval.notification import NotificationTargetResolver
-    from rolemesh.db.pg import get_conversation_for_notification as _pg_get_conv
+    from rolemesh.db import get_conversation_for_notification as _pg_get_conv
 
     async def _convs_for_user_and_cw(user_id: str, coworker_id: str) -> list[str]:
         # Find conversations this user can talk to this coworker in.

@@ -22,7 +22,12 @@ import asyncio
 
 import pytest
 
-from rolemesh.db import pg
+from rolemesh.db import (
+    _get_pool,
+    get_approval_request,
+    list_approval_audit,
+    list_approval_requests,
+)
 
 from .harness import OrchestratorHarness, make_auth_user, seed_tenant
 
@@ -69,16 +74,16 @@ async def test_concurrent_expire_and_approve_yield_single_terminal(
 
     async def _pending() -> bool:
         return bool(
-            await pg.list_approval_requests(seed.tenant_id, status="pending")
+            await list_approval_requests(seed.tenant_id, status="pending")
         )
 
     await harness.wait_for(_pending, timeout=5.0)
     req = (
-        await pg.list_approval_requests(seed.tenant_id, status="pending")
+        await list_approval_requests(seed.tenant_id, status="pending")
     )[0]
 
     # Force the row past its deadline.
-    pool = pg._get_pool()  # noqa: SLF001
+    pool = _get_pool()
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE approval_requests SET expires_at = now() - interval '1 second' "
@@ -109,10 +114,10 @@ async def test_concurrent_expire_and_approve_yield_single_terminal(
     # call sees zero rows to touch. Only the terminal DB state is
     # load-bearing for correctness.
     if decide_status == 200:
-        fresh = await pg.get_approval_request(req.id, tenant_id=seed.tenant_id)
+        fresh = await get_approval_request(req.id, tenant_id=seed.tenant_id)
         assert fresh is not None and fresh.status == "approved"
     elif decide_status == 409:
-        fresh = await pg.get_approval_request(req.id, tenant_id=seed.tenant_id)
+        fresh = await get_approval_request(req.id, tenant_id=seed.tenant_id)
         assert fresh is not None and fresh.status == "expired"
     else:
         pytest.fail(
@@ -124,7 +129,7 @@ async def test_concurrent_expire_and_approve_yield_single_terminal(
     # No matter who won, audit must contain exactly one terminal row
     # for this request.
     audit_actions = [
-        e.action for e in await pg.list_approval_audit(req.id, tenant_id=seed.tenant_id)
+        e.action for e in await list_approval_audit(req.id, tenant_id=seed.tenant_id)
     ]
     terminals = [
         a for a in audit_actions if a in ("approved", "expired", "rejected")

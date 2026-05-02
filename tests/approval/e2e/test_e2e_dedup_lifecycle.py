@@ -17,7 +17,10 @@ Assert we have two rows, not one.
 
 from __future__ import annotations
 
-from rolemesh.db import pg
+from rolemesh.db import (
+    get_approval_request,
+    list_approval_requests,
+)
 
 from .harness import OrchestratorHarness, make_auth_user, seed_tenant
 
@@ -59,13 +62,13 @@ async def test_dedup_does_not_suppress_retry_after_rejection(
 
     async def _one_pending() -> bool:
         return (
-            len(await pg.list_approval_requests(seed.tenant_id, status="pending"))
+            len(await list_approval_requests(seed.tenant_id, status="pending"))
             == 1
         )
 
     await harness.wait_for(_one_pending, timeout=5.0)
     row1 = (
-        await pg.list_approval_requests(seed.tenant_id, status="pending")
+        await list_approval_requests(seed.tenant_id, status="pending")
     )[0]
 
     # Approver rejects row 1.
@@ -77,7 +80,7 @@ async def test_dedup_does_not_suppress_retry_after_rejection(
         assert r.status_code == 200
 
     async def _row1_rejected() -> bool:
-        fresh = await pg.get_approval_request(row1.id, tenant_id=seed.tenant_id)
+        fresh = await get_approval_request(row1.id, tenant_id=seed.tenant_id)
         return fresh is not None and fresh.status == "rejected"
 
     await harness.wait_for(_row1_rejected, timeout=5.0)
@@ -88,13 +91,13 @@ async def test_dedup_does_not_suppress_retry_after_rejection(
 
     async def _two_rows() -> bool:
         return (
-            len(await pg.list_approval_requests(seed.tenant_id)) == 2
+            len(await list_approval_requests(seed.tenant_id)) == 2
         )
 
     await harness.wait_for(_two_rows, timeout=5.0)
 
     # The second row should be pending, distinct from row1.
-    all_rows = await pg.list_approval_requests(seed.tenant_id)
+    all_rows = await list_approval_requests(seed.tenant_id)
     pending_rows = [r for r in all_rows if r.status == "pending"]
     rejected_rows = [r for r in all_rows if r.status == "rejected"]
     assert len(pending_rows) == 1

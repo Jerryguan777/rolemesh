@@ -47,13 +47,13 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pg_url: str) -> P
     monkeypatch.setattr("rolemesh.core.group_folder.DATA_DIR", data_dir)
     monkeypatch.setattr("rolemesh.core.group_folder.GROUPS_DIR", groups_dir)
 
-    from rolemesh.db.pg import _init_test_database
+    from rolemesh.db import _init_test_database
 
     await _init_test_database(pg_url)
 
     yield tmp_path
 
-    from rolemesh.db.pg import close_database
+    from rolemesh.db import close_database
 
     await close_database()
 
@@ -63,14 +63,14 @@ class TestScenarioFirstTimeUser:
 
     async def test_database_init_and_state_load(self, env: Path) -> None:
         """DB initializes with new schema, all tables exist."""
-        from rolemesh.db.pg import get_all_tenants
+        from rolemesh.db import get_all_tenants
 
         tenants = await get_all_tenants()
         assert isinstance(tenants, list)
 
     async def test_full_entity_creation_flow(self, env: Path) -> None:
         """Create tenant → role → coworker → binding → conversation → session."""
-        from rolemesh.db.pg import (
+        from rolemesh.db import (
             create_channel_binding,
             create_conversation,
             create_coworker,
@@ -160,7 +160,7 @@ class TestScenarioIPCFromContainer:
 
     async def test_container_schedules_cron_task(self, env: Path) -> None:
         """Agent creates a task via IPC handler."""
-        from rolemesh.db.pg import (
+        from rolemesh.db import (
             create_coworker,
             create_tenant,
             get_task_by_id,
@@ -372,7 +372,7 @@ class TestScenarioMountSecurity:
 class TestScenarioDatabaseOperations:
     async def test_message_store_and_query_per_conversation(self, env: Path) -> None:
         """Messages stored per conversation with TIMESTAMPTZ."""
-        from rolemesh.db.pg import (
+        from rolemesh.db import (
             create_channel_binding,
             create_conversation,
             create_coworker,
@@ -413,7 +413,7 @@ class TestScenarioDatabaseOperations:
         import uuid
 
         from rolemesh.core.types import ScheduledTask
-        from rolemesh.db.pg import (
+        from rolemesh.db import (
             create_coworker,
             create_task,
             create_tenant,

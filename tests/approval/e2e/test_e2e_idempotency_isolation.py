@@ -23,7 +23,9 @@ Outcome:
 
 from __future__ import annotations
 
-from rolemesh.db import pg
+from rolemesh.db import (
+    list_approval_requests,
+)
 
 from .harness import OrchestratorHarness, make_auth_user, seed_tenant
 
@@ -80,17 +82,17 @@ async def test_same_action_across_tenants_has_distinct_idempotency_keys(
         )
 
     async def _both_pending() -> bool:
-        a = await pg.list_approval_requests(tenant_a.tenant_id, status="pending")
-        b = await pg.list_approval_requests(tenant_b.tenant_id, status="pending")
+        a = await list_approval_requests(tenant_a.tenant_id, status="pending")
+        b = await list_approval_requests(tenant_b.tenant_id, status="pending")
         return len(a) == 1 and len(b) == 1
 
     await harness.wait_for(_both_pending, timeout=5.0)
 
     req_a = (
-        await pg.list_approval_requests(tenant_a.tenant_id, status="pending")
+        await list_approval_requests(tenant_a.tenant_id, status="pending")
     )[0]
     req_b = (
-        await pg.list_approval_requests(tenant_b.tenant_id, status="pending")
+        await list_approval_requests(tenant_b.tenant_id, status="pending")
     )[0]
 
     # Both approve.

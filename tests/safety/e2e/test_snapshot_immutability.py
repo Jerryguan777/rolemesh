@@ -33,7 +33,14 @@ import pytest
 from agent_runner.hooks.events import ToolCallEvent
 from agent_runner.safety.hook_handler import SafetyHookHandler
 from agent_runner.safety.registry import build_container_registry
-from rolemesh.db import pg
+from rolemesh.db import (
+    create_coworker,
+    create_safety_rule,
+    create_tenant,
+    delete_safety_rule,
+    list_safety_rules_for_coworker,
+    update_safety_rule,
+)
 
 pytestmark = pytest.mark.usefixtures("test_db")
 
@@ -57,14 +64,14 @@ class _FakeToolCtx:
 
 
 async def _seed(patterns: dict[str, bool] | None = None) -> tuple[str, str, str]:
-    tenant = await pg.create_tenant(
+    tenant = await create_tenant(
         name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
     )
-    cw = await pg.create_coworker(
+    cw = await create_coworker(
         tenant_id=tenant.id, name="cw",
         folder=f"cw-{uuid.uuid4().hex[:8]}",
     )
-    rule = await pg.create_safety_rule(
+    rule = await create_safety_rule(
         tenant_id=tenant.id,
         stage="pre_tool_call",
         check_id="pii.regex",
@@ -96,7 +103,7 @@ class TestSnapshotImmutability:
 
         # Load snapshot into Handler A — represents a long-running
         # container holding a rules reference.
-        rows_a = await pg.list_safety_rules_for_coworker(tid, cwid)
+        rows_a = await list_safety_rules_for_coworker(tid, cwid)
         snapshot_a = [r.to_snapshot_dict() for r in rows_a]
         handler_a = SafetyHookHandler(
             rules=snapshot_a,
@@ -106,7 +113,7 @@ class TestSnapshotImmutability:
         assert await _run_ssn_against(handler_a), "initial SSN must block"
 
         # Admin disables the rule mid-flight.
-        await pg.update_safety_rule(rule_id, tenant_id=tid, enabled=False)
+        await update_safety_rule(rule_id, tenant_id=tid, enabled=False)
 
         # Handler A is UNCHANGED — still blocks. This is the core
         # contract: the snapshot is immutable until container restart.
@@ -117,7 +124,7 @@ class TestSnapshotImmutability:
 
         # A fresh Handler B (simulating a container restart) sees the
         # new empty snapshot and no longer blocks.
-        rows_b = await pg.list_safety_rules_for_coworker(tid, cwid)
+        rows_b = await list_safety_rules_for_coworker(tid, cwid)
         snapshot_b = [r.to_snapshot_dict() for r in rows_b]
         handler_b = SafetyHookHandler(
             rules=snapshot_b,
@@ -134,15 +141,15 @@ class TestSnapshotImmutability:
         must not start blocking in the running handler. Symmetry
         matters — hot-update in only one direction would be a footgun.
         """
-        tenant = await pg.create_tenant(
+        tenant = await create_tenant(
             name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
         )
-        cw = await pg.create_coworker(
+        cw = await create_coworker(
             tenant_id=tenant.id, name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
         )
         # Start with no rules.
-        rows_empty = await pg.list_safety_rules_for_coworker(tenant.id, cw.id)
+        rows_empty = await list_safety_rules_for_coworker(tenant.id, cw.id)
         assert rows_empty == []
         handler = SafetyHookHandler(
             rules=[],
@@ -154,7 +161,7 @@ class TestSnapshotImmutability:
         assert not await _run_ssn_against(handler)
 
         # Admin adds a blocking rule.
-        await pg.create_safety_rule(
+        await create_safety_rule(
             tenant_id=tenant.id,
             stage="pre_tool_call",
             check_id="pii.regex",
@@ -173,24 +180,24 @@ class TestSnapshotImmutability:
         snapshot_dict ever returned something like a proxy that
         re-queried on access, the immutability guarantee collapses.
         """
-        tenant = await pg.create_tenant(
+        tenant = await create_tenant(
             name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
         )
-        cw = await pg.create_coworker(
+        cw = await create_coworker(
             tenant_id=tenant.id, name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
         )
-        rule = await pg.create_safety_rule(
+        rule = await create_safety_rule(
             tenant_id=tenant.id,
             stage="pre_tool_call",
             check_id="pii.regex",
             config={"patterns": {"SSN": True}},
         )
-        rows = await pg.list_safety_rules_for_coworker(tenant.id, cw.id)
+        rows = await list_safety_rules_for_coworker(tenant.id, cw.id)
         snapshot = [r.to_snapshot_dict() for r in rows]
 
         # Delete the rule in DB.
-        await pg.delete_safety_rule(rule.id, tenant_id=tenant.id)
+        await delete_safety_rule(rule.id, tenant_id=tenant.id)
 
         # Snapshot dicts must still carry the old data.
         assert snapshot[0]["check_id"] == "pii.regex"

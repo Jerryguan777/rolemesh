@@ -35,7 +35,11 @@ from typing import Any
 import pytest
 
 from agent_runner.hooks.registry import HookRegistry
-from rolemesh.db import pg
+from rolemesh.db import (
+    create_coworker,
+    create_safety_rule,
+    create_tenant,
+)
 from rolemesh.safety import loader as loader_mod
 from rolemesh.safety.loader import (
     load_safety_rules_snapshot,
@@ -103,7 +107,7 @@ class TestFailModeStartup:
 
         # Patch the name the loader's function body reads. The loader
         # imports ``list_safety_rules_for_coworker`` at module top and
-        # binds it locally, so monkeypatching pg.list_safety_rules_for_
+        # binds it locally, so monkeypatching list_safety_rules_for_
         # coworker only is not picked up. This is the correct Python
         # idiom for stubbing dependencies in the caller's namespace.
         monkeypatch.setattr(
@@ -218,14 +222,14 @@ class TestFailModeStartup:
         # Control case: with a live DB and at least one rule, the
         # loader returns the snapshot-ready dict list (not Rule
         # objects, because the container deserializes from JSON).
-        tenant = await pg.create_tenant(
+        tenant = await create_tenant(
             name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
         )
-        cw = await pg.create_coworker(
+        cw = await create_coworker(
             tenant_id=tenant.id, name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
         )
-        await pg.create_safety_rule(
+        await create_safety_rule(
             tenant_id=tenant.id,
             stage="pre_tool_call",
             check_id="pii.regex",
@@ -245,10 +249,10 @@ class TestFailModeStartup:
         # this contract because the guard checks `if safety_rules:`,
         # which treats None and [] the same today but could diverge
         # in a future refactor.
-        tenant = await pg.create_tenant(
+        tenant = await create_tenant(
             name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
         )
-        cw = await pg.create_coworker(
+        cw = await create_coworker(
             tenant_id=tenant.id, name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
         )

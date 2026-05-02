@@ -21,7 +21,7 @@ import pytest
 from aiohttp import web
 
 from rolemesh.approval.executor import ApprovalWorker
-from rolemesh.db.pg import (
+from rolemesh.db import (
     create_approval_policy,
     create_approval_request,
     create_channel_binding,

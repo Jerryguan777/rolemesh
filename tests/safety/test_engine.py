@@ -12,7 +12,12 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from rolemesh.db import pg
+from rolemesh.db import (
+    create_coworker,
+    create_safety_rule,
+    create_tenant,
+    list_safety_decisions,
+)
 from rolemesh.safety.engine import SafetyEngine
 
 if TYPE_CHECKING:
@@ -35,14 +40,14 @@ class _CaptureSink:
 class TestLoadRules:
     @pytest.mark.asyncio
     async def test_returns_snapshot_dicts(self) -> None:
-        tenant = await pg.create_tenant(
+        tenant = await create_tenant(
             name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
         )
-        cw = await pg.create_coworker(
+        cw = await create_coworker(
             tenant_id=tenant.id, name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
         )
-        await pg.create_safety_rule(
+        await create_safety_rule(
             tenant_id=tenant.id, stage="pre_tool_call",
             check_id="pii.regex",
             config={"patterns": {"SSN": True}},
@@ -57,14 +62,14 @@ class TestLoadRules:
 
     @pytest.mark.asyncio
     async def test_excludes_disabled_rules(self) -> None:
-        tenant = await pg.create_tenant(
+        tenant = await create_tenant(
             name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
         )
-        cw = await pg.create_coworker(
+        cw = await create_coworker(
             tenant_id=tenant.id, name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
         )
-        await pg.create_safety_rule(
+        await create_safety_rule(
             tenant_id=tenant.id, stage="pre_tool_call",
             check_id="pii.regex", config={}, enabled=False,
         )
@@ -131,7 +136,7 @@ class TestHandleSafetyEvent:
     async def test_default_sink_persists_to_db(self) -> None:
         # Use the default (DbAuditSink) to confirm the full wiring ends
         # up in safety_decisions.
-        tenant = await pg.create_tenant(
+        tenant = await create_tenant(
             name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
         )
         engine = SafetyEngine()  # default DbAuditSink
@@ -148,7 +153,7 @@ class TestHandleSafetyEvent:
             "context_summary": "tool=xyz",
         }
         await engine.handle_safety_event(payload)
-        rows = await pg.list_safety_decisions(tenant.id)
+        rows = await list_safety_decisions(tenant.id)
         assert len(rows) == 1
         assert rows[0]["stage"] == "pre_tool_call"
         assert rows[0]["findings"][0]["code"] == "PII.SSN"

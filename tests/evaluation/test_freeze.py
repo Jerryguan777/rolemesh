@@ -20,7 +20,7 @@ import uuid
 import pytest
 
 from rolemesh.core.types import SkillFile
-from rolemesh.db.pg import (
+from rolemesh.db import (
     create_coworker,
     create_skill,
     create_tenant,

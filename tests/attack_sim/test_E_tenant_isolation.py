@@ -28,7 +28,13 @@ import pytest
 
 from rolemesh.approval.engine import ApprovalEngine
 from rolemesh.approval.notification import NotificationTargetResolver
-from rolemesh.db import pg
+from rolemesh.db import (
+    create_approval_policy,
+    create_approval_request,
+    get_approval_request,
+    get_conversation_for_notification,
+    list_approval_requests,
+)
 
 from .conftest import seed_victim
 
@@ -40,7 +46,7 @@ def _resolver() -> NotificationTargetResolver:
         return []
 
     async def _conv(cid: str) -> object | None:
-        return await pg.get_conversation_for_notification(cid)
+        return await get_conversation_for_notification(cid)
 
     return NotificationTargetResolver(
         get_conversations_for_user_and_coworker=_convs,
@@ -90,8 +96,8 @@ async def test_E1_forged_tenant_id_dropped_by_engine(
 
     # No rows created in EITHER tenant. The message was dropped by the
     # tenant-matches guard; engine refused to silently re-attribute.
-    assert await pg.list_approval_requests(tenant_b.tenant_id) == []
-    assert await pg.list_approval_requests(tenant_a.tenant_id) == []
+    assert await list_approval_requests(tenant_b.tenant_id) == []
+    assert await list_approval_requests(tenant_a.tenant_id) == []
 
 
 # ---------------------------------------------------------------------------
@@ -124,8 +130,8 @@ async def test_E2_forged_coworker_id_dropped(fake_publisher, fake_channel) -> No
         coworker_id=tenant_a.coworker_id,
     )
 
-    assert await pg.list_approval_requests(tenant_a.tenant_id) == []
-    assert await pg.list_approval_requests(tenant_b.tenant_id) == []
+    assert await list_approval_requests(tenant_a.tenant_id) == []
+    assert await list_approval_requests(tenant_b.tenant_id) == []
 
 
 # ---------------------------------------------------------------------------
@@ -145,7 +151,7 @@ async def test_E3_cross_tenant_audit_read_blocked() -> None:
     tenant_b = await seed_victim("b3")
 
     # Seed a request in tenant B.
-    policy_b = await pg.create_approval_policy(
+    policy_b = await create_approval_policy(
         tenant_id=tenant_b.tenant_id,
         coworker_id=tenant_b.coworker_id,
         mcp_server_name="erp",
@@ -155,7 +161,7 @@ async def test_E3_cross_tenant_audit_read_blocked() -> None:
     )
     from datetime import UTC, datetime, timedelta
 
-    await pg.create_approval_request(
+    await create_approval_request(
         tenant_id=tenant_b.tenant_id,
         coworker_id=tenant_b.coworker_id,
         conversation_id=tenant_b.conversation_id,
@@ -173,11 +179,11 @@ async def test_E3_cross_tenant_audit_read_blocked() -> None:
     )
 
     # Tenant A's REST list of approvals must NOT see anything from B.
-    from_a_view = await pg.list_approval_requests(tenant_a.tenant_id)
+    from_a_view = await list_approval_requests(tenant_a.tenant_id)
     assert from_a_view == [], (
         "tenant A listing must not leak tenant B's approvals"
     )
-    from_b_view = await pg.list_approval_requests(tenant_b.tenant_id)
+    from_b_view = await list_approval_requests(tenant_b.tenant_id)
     assert len(from_b_view) == 1
 
 
@@ -198,7 +204,7 @@ async def test_E4_cross_tenant_decide_blocked(fake_publisher, fake_channel) -> N
     engine_b = _engine(fake_publisher, fake_channel)
 
     # Seed a pending request in B.
-    await pg.create_approval_policy(
+    await create_approval_policy(
         tenant_id=tenant_b.tenant_id,
         coworker_id=tenant_b.coworker_id,
         mcp_server_name="erp",
@@ -219,19 +225,19 @@ async def test_E4_cross_tenant_decide_blocked(fake_publisher, fake_channel) -> N
         tenant_id=tenant_b.tenant_id,
         coworker_id=tenant_b.coworker_id,
     )
-    req_b = (await pg.list_approval_requests(tenant_b.tenant_id))[0]
+    req_b = (await list_approval_requests(tenant_b.tenant_id))[0]
 
     # DB-layer tenant filter: a forged request_id from tenant B looked
     # up under tenant A's context returns None — no leak even before the
     # REST 404 check is reached.
-    leaked = await pg.get_approval_request(req_b.id, tenant_id=tenant_a.tenant_id)
+    leaked = await get_approval_request(req_b.id, tenant_id=tenant_a.tenant_id)
     assert leaked is None, (
         "get_approval_request must reject cross-tenant lookup at the SQL "
         "layer; if this assertion fails the REST 404 check became the "
         "single line of defense"
     )
     # And the legitimate read still works.
-    same_tenant = await pg.get_approval_request(req_b.id, tenant_id=tenant_b.tenant_id)
+    same_tenant = await get_approval_request(req_b.id, tenant_id=tenant_b.tenant_id)
     assert same_tenant is not None
 
 
@@ -258,7 +264,7 @@ async def test_E5_idempotency_keys_unique_across_tenants(
     tenant_a = await seed_victim("a5")
     tenant_b = await seed_victim("b5")
 
-    policy_a = await pg.create_approval_policy(
+    policy_a = await create_approval_policy(
         tenant_id=tenant_a.tenant_id,
         coworker_id=tenant_a.coworker_id,
         mcp_server_name="erp",
@@ -266,7 +272,7 @@ async def test_E5_idempotency_keys_unique_across_tenants(
         condition_expr={"always": True},
         approver_user_ids=[tenant_a.owner_user_id],
     )
-    policy_b = await pg.create_approval_policy(
+    policy_b = await create_approval_policy(
         tenant_id=tenant_b.tenant_id,
         coworker_id=tenant_b.coworker_id,
         mcp_server_name="erp",
@@ -281,7 +287,7 @@ async def test_E5_idempotency_keys_unique_across_tenants(
     ]
     common_hash = "identical-sha256"
 
-    req_a = await pg.create_approval_request(
+    req_a = await create_approval_request(
         tenant_id=tenant_a.tenant_id,
         coworker_id=tenant_a.coworker_id,
         conversation_id=tenant_a.conversation_id,
@@ -297,7 +303,7 @@ async def test_E5_idempotency_keys_unique_across_tenants(
         resolved_approvers=[tenant_a.owner_user_id],
         expires_at=datetime.now(UTC) + timedelta(hours=1),
     )
-    req_b = await pg.create_approval_request(
+    req_b = await create_approval_request(
         tenant_id=tenant_b.tenant_id,
         coworker_id=tenant_b.coworker_id,
         conversation_id=tenant_b.conversation_id,

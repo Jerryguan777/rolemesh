@@ -2,7 +2,7 @@
 
 These mirror the three database tables (approval_policies,
 approval_requests, approval_audit_log). CRUD functions in
-``rolemesh.db.pg`` return these, and the engine/executor/notification
+``rolemesh.db`` return these, and the engine/executor/notification
 modules consume them.
 """
 

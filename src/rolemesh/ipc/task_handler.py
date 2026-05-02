@@ -17,7 +17,7 @@ from croniter import croniter
 from rolemesh.auth.authorization import can_manage_task, can_schedule_task
 from rolemesh.core.logger import get_logger
 from rolemesh.core.types import ScheduledTask
-from rolemesh.db.pg import (
+from rolemesh.db import (
     DEFAULT_TENANT,
     create_task,
     delete_task,

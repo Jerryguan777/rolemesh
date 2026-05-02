@@ -20,16 +20,23 @@ import uuid
 
 import pytest
 
-from rolemesh.db import pg
+from rolemesh.db import (
+    _get_pool,
+    cleanup_old_safety_approval_contexts,
+    create_coworker,
+    create_tenant,
+    get_safety_decision,
+    insert_safety_decision,
+)
 
 pytestmark = pytest.mark.usefixtures("test_db")
 
 
 async def _fresh_tenant_cw() -> tuple[str, str]:
-    tenant = await pg.create_tenant(
+    tenant = await create_tenant(
         name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
     )
-    cw = await pg.create_coworker(
+    cw = await create_coworker(
         tenant_id=tenant.id, name="cw",
         folder=f"cw-{uuid.uuid4().hex[:8]}",
     )
@@ -45,7 +52,7 @@ async def _insert_with_age(
     age_hours: int,
 ) -> str:
     """Insert a decision and backdate created_at so we can test the TTL."""
-    decision_id = await pg.insert_safety_decision(
+    decision_id = await insert_safety_decision(
         tenant_id=tenant_id,
         coworker_id=coworker_id,
         stage="pre_tool_call",
@@ -56,7 +63,7 @@ async def _insert_with_age(
         context_summary="",
         approval_context=approval_context,
     )
-    pool = pg._get_pool()  # type: ignore[attr-defined]
+    pool = _get_pool()  # type: ignore[attr-defined]
     async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE safety_decisions "
@@ -82,11 +89,11 @@ class TestCleanupOldApprovalContexts:
             },
             age_hours=48,  # older than retention
         )
-        cleared = await pg.cleanup_old_safety_approval_contexts(
+        cleared = await cleanup_old_safety_approval_contexts(
             retention_hours=24
         )
         assert cleared == 1
-        row = await pg.get_safety_decision(old_id, tenant_id=tid)
+        row = await get_safety_decision(old_id, tenant_id=tid)
         assert row is not None
         assert row["approval_context"] is None
 
@@ -102,11 +109,11 @@ class TestCleanupOldApprovalContexts:
             },
             age_hours=1,  # well inside retention
         )
-        cleared = await pg.cleanup_old_safety_approval_contexts(
+        cleared = await cleanup_old_safety_approval_contexts(
             retention_hours=24
         )
         assert cleared == 0
-        row = await pg.get_safety_decision(recent_id, tenant_id=tid)
+        row = await get_safety_decision(recent_id, tenant_id=tid)
         assert row is not None
         assert row["approval_context"] is not None
 
@@ -122,7 +129,7 @@ class TestCleanupOldApprovalContexts:
             approval_context=None,
             age_hours=48,
         )
-        cleared = await pg.cleanup_old_safety_approval_contexts(
+        cleared = await cleanup_old_safety_approval_contexts(
             retention_hours=24
         )
         assert cleared == 0
@@ -146,12 +153,12 @@ class TestCleanupOldApprovalContexts:
             approval_context={"tool_name": "y", "tool_input": {}},
             age_hours=25,
         )
-        cleared = await pg.cleanup_old_safety_approval_contexts(
+        cleared = await cleanup_old_safety_approval_contexts(
             retention_hours=24
         )
         assert cleared == 1
-        young_row = await pg.get_safety_decision(a_young, tenant_id=tid)
-        old_row = await pg.get_safety_decision(a_old, tenant_id=tid)
+        young_row = await get_safety_decision(a_young, tenant_id=tid)
+        old_row = await get_safety_decision(a_old, tenant_id=tid)
         assert young_row is not None
         assert old_row is not None
         assert young_row["approval_context"] is not None

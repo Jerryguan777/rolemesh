@@ -11,7 +11,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from rolemesh.db.pg import tenant_conn
+from rolemesh.db import tenant_conn
 
 if TYPE_CHECKING:
     from datetime import datetime

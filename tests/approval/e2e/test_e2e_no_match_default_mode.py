@@ -18,9 +18,14 @@ from __future__ import annotations
 
 import asyncio
 
-from rolemesh.db import pg
+from rolemesh.db import (
+    get_approval_request,
+    list_approval_audit,
+    list_approval_requests,
+    update_tenant,
+)
 
-from .harness import OrchestratorHarness, make_auth_user, seed_tenant
+from .harness import OrchestratorHarness, seed_tenant
 
 
 async def _submit_unmatched_proposal(
@@ -50,10 +55,10 @@ async def _submit_unmatched_proposal(
     )
 
     async def _row_exists() -> bool:
-        return bool(await pg.list_approval_requests(seed.tenant_id))
+        return bool(await list_approval_requests(seed.tenant_id))
 
     await harness.wait_for(_row_exists, timeout=5.0)
-    return (await pg.list_approval_requests(seed.tenant_id))[0].id
+    return (await list_approval_requests(seed.tenant_id))[0].id
 
 
 async def test_auto_execute_mode_runs_unsupervised(
@@ -65,7 +70,7 @@ async def test_auto_execute_mode_runs_unsupervised(
     req_id = await _submit_unmatched_proposal(harness, seed)
 
     async def _executed() -> bool:
-        fresh = await pg.get_approval_request(req_id, tenant_id=seed.tenant_id)
+        fresh = await get_approval_request(req_id, tenant_id=seed.tenant_id)
         return fresh is not None and fresh.status == "executed"
 
     await harness.wait_for(_executed, timeout=10.0)
@@ -76,13 +81,13 @@ async def test_require_approval_mode_blocks_unsupervised_execution(
     harness: OrchestratorHarness,
 ) -> None:
     seed = await seed_tenant()
-    await pg.update_tenant(
+    await update_tenant(
         seed.tenant_id, approval_default_mode="require_approval"
     )
     req_id = await _submit_unmatched_proposal(harness, seed)
 
     async def _skipped() -> bool:
-        fresh = await pg.get_approval_request(req_id, tenant_id=seed.tenant_id)
+        fresh = await get_approval_request(req_id, tenant_id=seed.tenant_id)
         return fresh is not None and fresh.status == "skipped"
 
     await harness.wait_for(_skipped, timeout=5.0)
@@ -107,13 +112,13 @@ async def test_deny_mode_rejects_with_system_note(
     harness: OrchestratorHarness,
 ) -> None:
     seed = await seed_tenant()
-    await pg.update_tenant(
+    await update_tenant(
         seed.tenant_id, approval_default_mode="deny"
     )
     req_id = await _submit_unmatched_proposal(harness, seed)
 
     async def _rejected() -> bool:
-        fresh = await pg.get_approval_request(req_id, tenant_id=seed.tenant_id)
+        fresh = await get_approval_request(req_id, tenant_id=seed.tenant_id)
         return fresh is not None and fresh.status == "rejected"
 
     await harness.wait_for(_rejected, timeout=5.0)
@@ -123,7 +128,7 @@ async def test_deny_mode_rejects_with_system_note(
     )
     # The rejection audit row carries the system note explaining why.
     audit = [
-        e for e in await pg.list_approval_audit(req_id, tenant_id=seed.tenant_id)
+        e for e in await list_approval_audit(req_id, tenant_id=seed.tenant_id)
         if e.action == "rejected"
     ]
     assert audit, "audit must include a rejected row"

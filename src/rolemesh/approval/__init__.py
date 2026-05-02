@@ -1,6 +1,6 @@
 """Orchestrator-side approval module.
 
-Depends on rolemesh.db.pg + NATS transport. Container-side policy
+Depends on rolemesh.db + NATS transport. Container-side policy
 matching lives in ``agent_runner.approval.policy`` and is imported by
 both this package's engine and the in-container hook.
 """

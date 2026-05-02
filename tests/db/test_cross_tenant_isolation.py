@@ -26,7 +26,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from rolemesh.core.types import ScheduledTask
-from rolemesh.db.pg import (
+from rolemesh.db import (
     create_approval_policy,
     create_approval_request,
     create_channel_binding,

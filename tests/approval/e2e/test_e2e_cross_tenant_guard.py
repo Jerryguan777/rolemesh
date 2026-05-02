@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import asyncio
 
-from rolemesh.db import pg
+from rolemesh.db import (
+    list_approval_requests,
+)
 
 from .harness import OrchestratorHarness, seed_tenant
 
@@ -38,7 +40,7 @@ async def test_forged_tenant_id_does_not_leak_across_tenants(
     tenant_b = await seed_tenant(name_prefix="Vic")
     # B has a policy that would match; make sure if the forge DID work,
     # a row would actually get created.
-    from rolemesh.db.pg import create_approval_policy
+    from rolemesh.db import create_approval_policy
 
     await create_approval_policy(
         tenant_id=tenant_b.tenant_id,
@@ -79,7 +81,7 @@ async def test_forged_tenant_id_does_not_leak_across_tenants(
     await asyncio.sleep(1.0)
 
     # THE ASSERTION: B sees nothing.
-    b_rows = await pg.list_approval_requests(tenant_b.tenant_id)
+    b_rows = await list_approval_requests(tenant_b.tenant_id)
     assert b_rows == [], (
         f"forged tenantId leaked a row into the victim tenant: {b_rows!r}"
     )
@@ -87,7 +89,7 @@ async def test_forged_tenant_id_does_not_leak_across_tenants(
     # The dispatcher rewrites body.tenantId to the coworker's actual
     # tenant_id (A). Engine then sees claimed=B vs trusted=A → drops
     # with "mismatched tenantId" warning. So A also sees nothing.
-    a_rows = await pg.list_approval_requests(tenant_a.tenant_id)
+    a_rows = await list_approval_requests(tenant_a.tenant_id)
     assert a_rows == [], (
         "forge attempt should be dropped entirely (claimed tenantId "
         "disagreed with resolved trusted tenant), not silently "
@@ -113,9 +115,9 @@ async def test_forged_tenant_id_does_not_leak_across_tenants(
 
     async def _a_has_one() -> bool:
         return (
-            len(await pg.list_approval_requests(tenant_a.tenant_id)) == 1
+            len(await list_approval_requests(tenant_a.tenant_id)) == 1
         )
 
     await harness.wait_for(_a_has_one, timeout=5.0)
     # B is still empty after the legitimate A message.
-    assert await pg.list_approval_requests(tenant_b.tenant_id) == []
+    assert await list_approval_requests(tenant_b.tenant_id) == []

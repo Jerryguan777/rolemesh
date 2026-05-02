@@ -25,7 +25,6 @@ from __future__ import annotations
 import os
 import uuid
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import httpx
 import pytest
@@ -38,7 +37,7 @@ from rolemesh.container.skill_projection import (
     cleanup_spawn_skills,
     materialize_skills_for_spawn,
 )
-from rolemesh.db.pg import (
+from rolemesh.db import (
     create_coworker,
     create_tenant,
     create_user,
@@ -51,10 +50,6 @@ from webui.dependencies import (
     require_manage_tenant,
     require_manage_users,
 )
-
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-
 
 pytestmark = pytest.mark.usefixtures("test_db")
 

@@ -24,7 +24,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from rolemesh.approval.types import APPROVAL_STATUSES, AUDIT_ACTIONS
-from rolemesh.db.pg import (
+from rolemesh.db import (
     cancel_pending_approvals_for_job,
     claim_approval_for_execution,
     create_approval_policy,

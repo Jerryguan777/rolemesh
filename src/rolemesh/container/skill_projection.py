@@ -40,11 +40,11 @@ from rolemesh.core.skills import (
     validate_skill_file_path,
     validate_skill_name,
 )
-from rolemesh.db.pg import list_skills_for_coworker
+from rolemesh.db import list_skills_for_coworker
 from rolemesh.ipc.skill_mount import CONTAINER_TARGETS_BY_BACKEND
 
 if TYPE_CHECKING:
-    from rolemesh.core.types import Coworker, Skill, SkillFile
+    from rolemesh.core.types import Coworker, Skill
 
 
 logger = get_logger()

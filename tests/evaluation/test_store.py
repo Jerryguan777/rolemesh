@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 import asyncpg
 import pytest
 
-from rolemesh.db.pg import (
+from rolemesh.db import (
     _get_pool,
     create_coworker,
     create_tenant,
