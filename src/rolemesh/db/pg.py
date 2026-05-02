@@ -1007,6 +1007,44 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         FOR EACH ROW EXECUTE FUNCTION _safety_rules_write_audit_from_trigger();
     """)
 
+    # Eval framework — one row per eval run.
+    # coworker_config is the frozen-at-run-time snapshot (system_prompt,
+    # tools, skills incl. file contents, permissions, agent_backend);
+    # the sha256 lets ``rolemesh-eval list`` cluster runs that share a
+    # configuration. coworker_id is FK SET NULL so historical runs
+    # survive the underlying coworker being deleted — the JSONB still
+    # records what was tested.
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS eval_runs (
+            id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            tenant_id              UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            coworker_id            UUID REFERENCES coworkers(id) ON DELETE SET NULL,
+            coworker_config        JSONB NOT NULL,
+            coworker_config_sha256 TEXT NOT NULL,
+            dataset_path           TEXT NOT NULL,
+            dataset_sha256         TEXT NOT NULL,
+            eval_log_uri           TEXT,
+            metrics                JSONB,
+            status                 TEXT NOT NULL DEFAULT 'running'
+                CHECK (status IN ('running', 'completed', 'failed', 'aborted')),
+            created_by             UUID REFERENCES users(id) ON DELETE SET NULL,
+            started_at             TIMESTAMPTZ NOT NULL DEFAULT now(),
+            finished_at            TIMESTAMPTZ
+        )
+    """)
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_eval_runs_tenant_time "
+        "ON eval_runs (tenant_id, started_at DESC)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_eval_runs_coworker_time "
+        "ON eval_runs (tenant_id, coworker_id, started_at DESC)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_eval_runs_config_sha "
+        "ON eval_runs (tenant_id, coworker_config_sha256)"
+    )
+
     # Idempotent default tenant. OIDCAuthProvider._provision_tenant falls back
     # to slug='default' for single-tenant deployments where the IdP doesn't
     # carry a tenant claim. Without this row, the first OIDC login on a fresh
@@ -1107,6 +1145,7 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     await _enable_rls_on(conn, "oidc_user_tokens")     # D10 (tenant_id backfilled above)
     await _enable_rls_on(conn, "skills")               # skills feature: standard tenant_id scope
     await _enable_rls_on_transitive_skill_files(conn)
+    await _enable_rls_on(conn, "eval_runs")            # eval framework
 
 
 async def _enable_rls_on_transitive_skill_files(
@@ -1221,6 +1260,7 @@ async def _init_test_database(
     _admin_pool = await asyncpg.create_pool(admin_url, min_size=1, max_size=3)
     async with _admin_pool.acquire() as conn:
         # Drop all tables for a clean slate
+        await conn.execute("DROP TABLE IF EXISTS eval_runs CASCADE")
         await conn.execute("DROP TABLE IF EXISTS safety_decisions CASCADE")
         await conn.execute("DROP TABLE IF EXISTS safety_rules_audit CASCADE")
         await conn.execute("DROP TABLE IF EXISTS safety_rules CASCADE")
