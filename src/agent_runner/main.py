@@ -42,7 +42,7 @@ from .backend import (
     ToolUseEvent,
 )
 from .hooks import HookRegistry
-from .hooks.handlers import ApprovalHookHandler, TranscriptArchiveHandler
+from .hooks.handlers import ApprovalHookHandler, TracingHookHandler, TranscriptArchiveHandler
 from .tools.context import ToolContext
 
 if TYPE_CHECKING:
@@ -161,7 +161,7 @@ async def run_query_loop(
     # ``init.trace_context``. ``install_tracer`` is a no-op when
     # ``OTEL_EXPORTER_OTLP_ENDPOINT`` is unset or the optional extra
     # is missing, so default deployments stay bit-identical.
-    from rolemesh.observability import install_tracer
+    from rolemesh.observability import attach_parent_context, install_tracer
 
     install_tracer(
         service_name="rolemesh-agent",
@@ -173,6 +173,38 @@ async def run_query_loop(
             "rolemesh.agent_backend": AGENT_BACKEND,
         },
     )
+
+    # Attach the orchestrator's per-turn span as the active context so
+    # everything that runs below — TracingHookHandler tool spans,
+    # OpenInference-emitted LLM generation spans — automatically
+    # becomes a child of it. Container exits at the end of run, so
+    # we deliberately skip ``detach_parent_context`` (process death
+    # cleans up). For multi-turn sessions the per-prompt context
+    # lives in init.trace_context of the first turn only; refining
+    # this to swap the active context per follow-up prompt is a
+    # follow-up to the spike.
+    attach_parent_context(init.trace_context)
+
+    # Auto-instrument the Claude SDK so every Anthropic ``messages.create``
+    # call lands as an OpenInference-conformant generation span (model id,
+    # prompt + completion content, token counts, cache hits, latency). This
+    # MUST happen before ``_create_backend`` — that's where the SDK is
+    # imported, and ``wrapt``-style monkey patching only catches references
+    # captured AFTER ``instrument()``.
+    #
+    # Pi backend uses openai / google-genai / boto3-bedrock. We're holding
+    # those instrumentors until the anthropic spike validates end-to-end
+    # with Langfuse + the credential proxy. Adding them later is a one-
+    # liner per backend.
+    if AGENT_BACKEND == "claude":
+        try:
+            from openinference.instrumentation.anthropic import AnthropicInstrumentor
+
+            AnthropicInstrumentor().instrument()
+        except ImportError:
+            # Extra not installed — silently skip; tool_call spans still
+            # work via TracingHookHandler.
+            pass
 
     # Build tool context
     # V2 P0.4: flatten per-MCP-server reversibility tables so the hook
@@ -333,6 +365,13 @@ async def run_query_loop(
     # backend's PreCompact event via the shared HookRegistry.
     hook_registry = HookRegistry()
     hook_registry.register(TranscriptArchiveHandler(assistant_name=init.assistant_name))
+    # TracingHookHandler converts pre/post tool-use callbacks into OTel
+    # spans. Registered unconditionally because it degrades to a noop
+    # when the OTel SDK / OTLP endpoint isn't configured — same zero-
+    # impact contract as ``rolemesh.observability.install_tracer``.
+    # Both Claude SDK and Pi backends drive the same HookRegistry, so
+    # one handler covers both backends with no per-backend wrap code.
+    hook_registry.register(TracingHookHandler())
     # Register ApprovalHookHandler only when policies are provided. An empty
     # or missing approval_policies list means the approval module is inactive
     # for this run, and we keep the hook chain untouched so behaviour stays

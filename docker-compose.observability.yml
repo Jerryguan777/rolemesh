@@ -1,0 +1,162 @@
+# Self-hosted Langfuse for the observability spike.
+#
+# Boot alongside the dev Postgres + NATS (see docker-compose.dev.yml):
+#
+#   docker compose -f docker-compose.dev.yml \
+#                  -f docker-compose.observability.yml up -d
+#
+# Then point the orchestrator + agent containers at the OTLP intake by
+# exporting in your shell or .env:
+#
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:3000/api/public/otel/v1/traces
+#   OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic <base64(pk:sk)>"
+#
+# (Create the public/secret key pair in the Langfuse UI after first
+# login; ``LANGFUSE_INIT_USER_*`` below seeds the first admin.)
+#
+# Stack consists of three Langfuse services and their datastores. The
+# Langfuse `web` container serves the UI on http://localhost:3000;
+# `worker` ingests OTLP and writes to Clickhouse; the rest are bog-
+# standard datastores. Resource defaults are conservative — fine for
+# a single-developer dev box, scale up for shared environments.
+#
+# Why three datastores: Clickhouse stores spans (analytics scans);
+# Postgres stores metadata (users, projects, dashboards); Redis is
+# the work queue + session cache. Langfuse expects all three.
+#
+# Networks: all services join the default project network. The
+# orchestrator process runs on the host (not in a container) so it
+# reaches `localhost:3000`. If you run the orchestrator inside a
+# container on the same network, swap to `langfuse-web:3000`.
+
+services:
+
+  langfuse-web:
+    image: langfuse/langfuse:3
+    restart: unless-stopped
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_started
+      langfuse-minio:
+        condition: service_started
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-postgres:5432/langfuse
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: "6379"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      # Single-tenant dev secret. Replace before sharing the deployment.
+      NEXTAUTH_SECRET: dev-only-replace-me
+      SALT: dev-only-replace-me
+      ENCRYPTION_KEY: 0000000000000000000000000000000000000000000000000000000000000000
+      NEXTAUTH_URL: http://localhost:3000
+      TELEMETRY_ENABLED: "false"
+      LANGFUSE_DEFAULT_PROJECT_ROLE: ADMIN
+      # Bootstrap a first admin so the spike can finish in one shot.
+      LANGFUSE_INIT_ORG_ID: rolemesh-dev
+      LANGFUSE_INIT_ORG_NAME: RoleMesh Dev
+      LANGFUSE_INIT_PROJECT_ID: rolemesh-spike
+      LANGFUSE_INIT_PROJECT_NAME: RoleMesh Spike
+      LANGFUSE_INIT_USER_EMAIL: dev@rolemesh.local
+      LANGFUSE_INIT_USER_NAME: Dev
+      LANGFUSE_INIT_USER_PASSWORD: rolemesh-dev
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    restart: unless-stopped
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse@langfuse-postgres:5432/langfuse
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: "6379"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: miniosecret
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9000
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      SALT: dev-only-replace-me
+      ENCRYPTION_KEY: 0000000000000000000000000000000000000000000000000000000000000000
+
+  langfuse-postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse
+      POSTGRES_DB: langfuse
+    volumes:
+      - langfuse-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+      CLICKHOUSE_DB: default
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - langfuse-clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user=clickhouse --password=clickhouse --query='SELECT 1'"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  langfuse-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - langfuse-redis-data:/data
+
+  langfuse-minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: miniosecret
+    volumes:
+      - langfuse-minio-data:/data
+
+volumes:
+  langfuse-postgres-data:
+  langfuse-clickhouse-data:
+  langfuse-redis-data:
+  langfuse-minio-data:

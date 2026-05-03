@@ -128,7 +128,12 @@ def get_tracer(name: str) -> Tracer:
 
         return _trace.get_tracer(name)
     except ImportError:
-        return _NoopTracer()  # type: ignore[return-value]
+        # Mypy sees this as a type mismatch only when opentelemetry
+        # IS installed (in which case ``_NoopTracer`` is structurally
+        # compatible with ``Tracer`` for the methods we use). The
+        # ignore is therefore conditionally redundant — silence the
+        # ``warn_unused_ignores`` lint with ``unused-ignore``.
+        return _NoopTracer()  # type: ignore[return-value,unused-ignore]
 
 
 def inject_trace_context() -> dict[str, str]:
@@ -168,6 +173,46 @@ def extract_trace_context(carrier: dict[str, str] | None) -> Any:
         return extract(carrier)
     except ImportError:
         return None
+
+
+def attach_parent_context(carrier: dict[str, str] | None) -> Any:
+    """Make ``carrier``'s span context the active OTel context.
+
+    Convenience for processes (the agent container) that want every
+    subsequently-opened span — explicit ``start_as_current_span`` and
+    auto-instrumentation alike — to inherit the upstream parent
+    without threading a ``context=`` kwarg through every call site.
+
+    Returns an opaque token; pass it to ``detach_parent_context`` on
+    cleanup. Returns ``None`` when the carrier is empty or OTel is
+    missing, in which case ``detach_parent_context`` is a no-op.
+
+    Note: OTel context lives in ``contextvars``, which are async-task
+    local. Attaching from the main task before spawning subtasks
+    propagates correctly because asyncio copies the context on task
+    creation.
+    """
+    parent = extract_trace_context(carrier)
+    if parent is None:
+        return None
+    try:
+        from opentelemetry import context as ctx_api
+
+        return ctx_api.attach(parent)
+    except ImportError:
+        return None
+
+
+def detach_parent_context(token: Any) -> None:
+    """Reverse ``attach_parent_context``. Safe to call with ``None``."""
+    if token is None:
+        return
+    try:
+        from opentelemetry import context as ctx_api
+
+        ctx_api.detach(token)
+    except ImportError:
+        pass
 
 
 # ---------------------------------------------------------------------------

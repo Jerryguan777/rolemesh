@@ -916,39 +916,60 @@ async def _run_agent(
 
         wrapped_on_output = _wrapped
 
-    try:
-        output = await executor.execute(
-            AgentInput(
-                prompt=prompt,
-                session_id=session_id,
-                group_folder=config.folder,
-                chat_jid=conv.channel_chat_id,
-                permissions=permissions.to_dict(),
-                user_id=conv.user_id or "",
-                assistant_name=config.name,
-                system_prompt=config.system_prompt,
-                tenant_id=config.tenant_id,
-                coworker_id=config.id,
-                conversation_id=conv.id,
-            ),
-            lambda container_name, job_id: _queue.register_process(
-                conv.id, container_name, config.folder, job_id
-            ),
-            wrapped_on_output,
-        )
+    # Open a per-turn root span. The carrier produced by
+    # ``inject_trace_context`` is forwarded into ``AgentInput.trace_context``
+    # so the agent container's span tree stitches under this one.
+    # When OTel is disabled, ``get_tracer`` returns a noop tracer,
+    # ``inject_trace_context`` returns ``{}``, and behaviour stays
+    # bit-identical to a build without observability.
+    from rolemesh.observability import get_tracer, inject_trace_context
 
-        if output.new_session_id:
-            conv_state.session_id = output.new_session_id
-            await set_session(conv.id, conv.tenant_id, conv.coworker_id, output.new_session_id)
+    tracer = get_tracer("rolemesh.orchestrator")
+    with tracer.start_as_current_span(
+        "agent.turn",
+        attributes={
+            "rolemesh.tenant_id": config.tenant_id,
+            "rolemesh.coworker_id": config.id,
+            "rolemesh.conversation_id": conv.id,
+            "rolemesh.coworker_name": config.name,
+            "rolemesh.agent_backend": config.agent_backend or "",
+        },
+    ):
+        trace_carrier = inject_trace_context()
+        try:
+            output = await executor.execute(
+                AgentInput(
+                    prompt=prompt,
+                    session_id=session_id,
+                    group_folder=config.folder,
+                    chat_jid=conv.channel_chat_id,
+                    permissions=permissions.to_dict(),
+                    user_id=conv.user_id or "",
+                    assistant_name=config.name,
+                    system_prompt=config.system_prompt,
+                    tenant_id=config.tenant_id,
+                    coworker_id=config.id,
+                    conversation_id=conv.id,
+                    trace_context=trace_carrier or None,
+                ),
+                lambda container_name, job_id: _queue.register_process(
+                    conv.id, container_name, config.folder, job_id
+                ),
+                wrapped_on_output,
+            )
 
-        if output.status == "error":
-            logger.error("Container agent error", coworker=config.name, error=output.error)
+            if output.new_session_id:
+                conv_state.session_id = output.new_session_id
+                await set_session(conv.id, conv.tenant_id, conv.coworker_id, output.new_session_id)
+
+            if output.status == "error":
+                logger.error("Container agent error", coworker=config.name, error=output.error)
+                return "error"
+
+            return "success"
+        except (OSError, RuntimeError, TypeError, ValueError):
+            logger.exception("Agent error", coworker=config.name)
             return "error"
-
-        return "success"
-    except (OSError, RuntimeError, TypeError, ValueError):
-        logger.exception("Agent error", coworker=config.name)
-        return "error"
 
 
 # ---------------------------------------------------------------------------
@@ -1322,6 +1343,13 @@ async def _launch_egress_gateway_once_ready() -> None:
 async def main() -> None:
     """Entry point for the RoleMesh orchestrator."""
     global _transport, _queue, _runtime, _executor, _executors, _gateways
+
+    # Install OTel tracer once on startup. No-op when the optional
+    # ``observability`` extra is missing or ``OTEL_EXPORTER_OTLP_ENDPOINT``
+    # is unset, so default deployments stay bit-identical.
+    from rolemesh.observability import install_tracer
+
+    install_tracer(service_name="rolemesh-orchestrator")
 
     await _ensure_container_system_running()
     await init_database()

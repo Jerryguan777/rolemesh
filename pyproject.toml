@@ -140,6 +140,15 @@ warn_unused_ignores = true
 show_error_codes = true
 mypy_path = "src"
 
+# Optional ``[observability]`` extra. opentelemetry/openinference may
+# not be installed in every dev env (the extras are off by default to
+# keep stock installs slim); ``rolemesh.observability`` lazy-imports
+# them and degrades to a noop. Suppress missing-import errors so
+# mypy on a stock checkout doesn't drown out the real diagnostics.
+[[tool.mypy.overrides]]
+module = ["opentelemetry.*", "openinference.*"]
+ignore_missing_imports = true
+
 [tool.coverage.run]
 source = ["src/rolemesh"]
 omit = [

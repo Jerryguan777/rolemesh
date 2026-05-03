@@ -26,6 +26,8 @@ install of the project still imports cleanly.
 """
 
 from rolemesh.observability.tracer import (
+    attach_parent_context,
+    detach_parent_context,
     extract_trace_context,
     get_tracer,
     inject_trace_context,
@@ -34,6 +36,8 @@ from rolemesh.observability.tracer import (
 )
 
 __all__ = [
+    "attach_parent_context",
+    "detach_parent_context",
     "extract_trace_context",
     "get_tracer",
     "inject_trace_context",
