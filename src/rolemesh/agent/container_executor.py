@@ -381,6 +381,7 @@ class ContainerAgentExecutor:
             approval_policies=approval_policies_dicts,
             safety_rules=safety_rules_dicts,
             slow_check_specs=slow_check_specs,
+            trace_context=inp.trace_context,
         )
         await kv_init.put(job_id, agent_init.serialize())
 

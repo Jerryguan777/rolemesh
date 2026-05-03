@@ -103,6 +103,12 @@ from rolemesh.db import (
 )
 from rolemesh.ipc.nats_transport import NatsTransport
 from rolemesh.ipc.task_handler import process_task_ipc
+from rolemesh.observability import (
+    get_tracer,
+    inject_trace_context,
+    install_tracer,
+    shutdown_tracer,
+)
 from rolemesh.orchestration.remote_control import (
     restore_remote_control,
 )
@@ -916,26 +922,42 @@ async def _run_agent(
 
         wrapped_on_output = _wrapped
 
+    tracer = get_tracer("rolemesh.orchestrator")
+    # ``agent.turn`` is the per-turn root span. ``langfuse.session.id``
+    # opts the trace into Langfuse's Sessions view (auto-grouping by
+    # conversation). The carrier is captured *inside* the span so it
+    # references this turn rather than whatever was active before.
+    span_attrs: dict[str, str] = {
+        "rolemesh.tenant_id": config.tenant_id,
+        "rolemesh.coworker_id": config.id,
+        "rolemesh.conversation_id": conv.id,
+        "rolemesh.coworker_name": config.name,
+        "rolemesh.agent_backend": config.agent_backend or "",
+        "langfuse.session.id": conv.id,
+    }
     try:
-        output = await executor.execute(
-            AgentInput(
-                prompt=prompt,
-                session_id=session_id,
-                group_folder=config.folder,
-                chat_jid=conv.channel_chat_id,
-                permissions=permissions.to_dict(),
-                user_id=conv.user_id or "",
-                assistant_name=config.name,
-                system_prompt=config.system_prompt,
-                tenant_id=config.tenant_id,
-                coworker_id=config.id,
-                conversation_id=conv.id,
-            ),
-            lambda container_name, job_id: _queue.register_process(
-                conv.id, container_name, config.folder, job_id
-            ),
-            wrapped_on_output,
-        )
+        with tracer.start_as_current_span("agent.turn", attributes=span_attrs):
+            carrier = inject_trace_context()
+            output = await executor.execute(
+                AgentInput(
+                    prompt=prompt,
+                    session_id=session_id,
+                    group_folder=config.folder,
+                    chat_jid=conv.channel_chat_id,
+                    permissions=permissions.to_dict(),
+                    user_id=conv.user_id or "",
+                    assistant_name=config.name,
+                    system_prompt=config.system_prompt,
+                    tenant_id=config.tenant_id,
+                    coworker_id=config.id,
+                    conversation_id=conv.id,
+                    trace_context=carrier or None,
+                ),
+                lambda container_name, job_id: _queue.register_process(
+                    conv.id, container_name, config.folder, job_id
+                ),
+                wrapped_on_output,
+            )
 
         if output.new_session_id:
             conv_state.session_id = output.new_session_id
@@ -1323,6 +1345,11 @@ async def main() -> None:
     """Entry point for the RoleMesh orchestrator."""
     global _transport, _queue, _runtime, _executor, _executors, _gateways
 
+    # No-op unless [observability] extra is installed AND
+    # OTEL_EXPORTER_OTLP_ENDPOINT is set. Place before any code that
+    # might emit a span so the global TracerProvider is in place.
+    install_tracer("rolemesh-orchestrator")
+
     await _ensure_container_system_running()
     await init_database()
     logger.info("Database initialized")
@@ -1649,6 +1676,9 @@ async def main() -> None:
     await _transport.close()
     await _runtime.close()
     await close_database()
+    # Force-flush BatchSpanProcessor so the tail of an in-flight
+    # turn isn't dropped on shutdown. Safe under noop tracer.
+    shutdown_tracer()
 
 
 # ---------------------------------------------------------------------------
