@@ -72,6 +72,27 @@ safety-ml = [
     # pin so we don't accidentally force a resolver backtrack.
     "torch==2.3.1",
 ]
+# Observability: OpenTelemetry tracing → OTLP/HTTP → backend
+# (e.g. self-hosted Langfuse). Opt-in is *two-layered*: this extra
+# must be installed AND ``OTEL_EXPORTER_OTLP_ENDPOINT`` (or its
+# ``_AGENT`` counterpart for the container side) must be set.
+# Either gate failing leaves install_tracer() in noop mode so a
+# stock rolemesh run is byte-for-byte unchanged. See
+# ``docs/observability/setup.md`` for the full walkthrough.
+#
+# OpenInference instrumentors are listed for the Pi backend's three
+# in-process LLM SDKs. The Claude backend deliberately omits an
+# Anthropic instrumentor: claude-agent-sdk dispatches Anthropic API
+# calls from a Node.js subprocess, so a Python-side monkey-patch
+# never sees them. See FR-6 in the implementation brief — the
+# Claude path emits its span manually from ResultEvent instead.
+observability = [
+    "opentelemetry-sdk>=1.30",
+    "opentelemetry-exporter-otlp-proto-http>=1.30",
+    "openinference-instrumentation-openai>=0.1",
+    "openinference-instrumentation-bedrock>=0.1",
+    "openinference-instrumentation-google-genai>=0.1",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -120,6 +141,15 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 show_error_codes = true
 mypy_path = "src"
+
+# Optional observability deps. Stubs are not always present and
+# the [observability] extra may not be installed in the env where
+# mypy runs; treat them as untyped to avoid noise.
+# (openinference is loaded via __import__ in agent_runner so it
+# never appears as a static import target — no override needed.)
+[[tool.mypy.overrides]]
+module = ["opentelemetry.*"]
+ignore_missing_imports = true
 
 [tool.coverage.run]
 source = ["src/rolemesh"]

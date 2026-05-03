@@ -66,6 +66,12 @@ class AgentInitData:
     # check behaviour). Each spec carries {check_id, version, stages,
     # cost_class, supported_codes, default_timeout_ms}.
     slow_check_specs: list[dict[str, object]] | None = None
+    # W3C trace-context carrier injected by the orchestrator so the
+    # container's spans can attach to the orchestrator's per-turn
+    # ``agent.turn`` span. ``None`` (or an empty dict) means "no parent"
+    # — the container will start an independent root span. Schema is
+    # the standard W3C dict, e.g. ``{"traceparent": "00-...-...-..."}``.
+    trace_context: dict[str, str] | None = None
 
     def serialize(self) -> bytes:
         return json.dumps(asdict(self)).encode()
@@ -103,4 +109,5 @@ class AgentInitData:
             approval_policies=raw.get("approval_policies"),
             safety_rules=raw.get("safety_rules"),
             slow_check_specs=raw.get("slow_check_specs"),
+            trace_context=raw.get("trace_context"),
         )

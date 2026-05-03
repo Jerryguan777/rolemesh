@@ -31,6 +31,13 @@ class AgentInput:
     assistant_name: str | None = None
     system_prompt: str | None = None
     role_config: dict[str, object] | None = None
+    # W3C trace-context carrier captured from the orchestrator's
+    # active span at dispatch time. Forwarded into ``AgentInitData``
+    # by ``ContainerAgentExecutor`` so the container can attach it as
+    # the parent of its own spans. ``None`` for callers that don't
+    # care about tracing (e.g. tests, or runs without the
+    # observability extra installed).
+    trace_context: dict[str, str] | None = None
 
 
 # Progress statuses are transient UX indicators; terminal statuses carry the
