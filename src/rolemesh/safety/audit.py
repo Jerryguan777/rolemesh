@@ -16,10 +16,6 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from rolemesh.db import (
-    insert_safety_decision,
-)
-
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -67,6 +63,15 @@ class DbAuditSink:
     """Persists AuditEvent to the ``safety_decisions`` table."""
 
     async def write(self, event: AuditEvent) -> None:
+        # Lazy: agent containers ship audit.py (compute_context_digest /
+        # summarize_context are pulled in by pipeline_core) but NOT
+        # rolemesh.db. A top-level import of insert_safety_decision
+        # would crash agent_runner the moment any safety-rule turn
+        # triggers SafetyHookHandler -> pipeline -> pipeline_core ->
+        # audit. Resolving the symbol here keeps the import graph
+        # container-safe; only the orchestrator-side write path ever
+        # touches the DB module.
+        from rolemesh.db import insert_safety_decision
 
         await insert_safety_decision(
             tenant_id=event.tenant_id,
