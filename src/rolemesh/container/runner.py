@@ -502,6 +502,29 @@ def build_container_spec(
     # Placeholder for OpenAI (Pi reads OPENAI_API_KEY from env)
     env["OPENAI_API_KEY"] = "placeholder"
 
+    # Observability — propagate OTLP exporter config so the in-container
+    # ``rolemesh.observability.install_tracer`` actually exports spans
+    # rather than short-circuiting. Two distinct env vars by design:
+    #   * ``OTEL_EXPORTER_OTLP_ENDPOINT_AGENT`` — the URL agents should
+    #     use (e.g. ``http://langfuse-web:3000/...`` when Langfuse is
+    #     attached to ``rolemesh-agent-net``). Read first.
+    #   * ``OTEL_EXPORTER_OTLP_ENDPOINT`` — what the orchestrator uses
+    #     (often ``http://localhost:3000/...`` from the host shell).
+    #     Wrong for the container under EC-1 (Internal=true) but used
+    #     as the fallback for setups where both processes share a
+    #     hostname (e.g. orchestrator also in a container on agent-net).
+    # When neither is set, the container's tracer stays a noop —
+    # bit-identical to the pre-spike default.
+    otel_endpoint = (
+        os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT_AGENT")
+        or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+    )
+    if otel_endpoint:
+        env["OTEL_EXPORTER_OTLP_ENDPOINT"] = otel_endpoint
+        otel_headers = os.environ.get("OTEL_EXPORTER_OTLP_HEADERS")
+        if otel_headers:
+            env["OTEL_EXPORTER_OTLP_HEADERS"] = otel_headers
+
     if backend_config:
         # Pre-filter backend extra_env to catch misconfigured backends early
         # with a clear attribution to which source emitted the bad key.

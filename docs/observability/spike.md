@@ -14,13 +14,18 @@ If the spike clears, this becomes the recommended path for the full observabilit
 |-------|------|--------|
 | Optional dep group `[observability]` (otel-sdk, otlp http exporter, openinference-anthropic) | `pyproject.toml` | done |
 | Tracer wrapper that degrades to noop without the extra or the env var | `src/rolemesh/observability/tracer.py` | done |
+| Tracer flush on process exit (orchestrator + agent runner) | `src/rolemesh/observability/tracer.py` (`shutdown_tracer`) | done |
 | W3C trace-context carrier on `AgentInput` + `AgentInitData` | `src/rolemesh/agent/executor.py`, `src/rolemesh/ipc/protocol.py` | done |
 | Orchestrator: install tracer + open per-turn `agent.turn` span + inject carrier | `src/rolemesh/main.py` | done |
 | Agent runner: install tracer + attach parent context + auto-instrument anthropic | `src/agent_runner/main.py` | done |
 | `TracingHookHandler` — backend-agnostic tool_call spans via HookRegistry | `src/agent_runner/hooks/handlers/tracing.py` | done |
-| Langfuse self-hosted compose | `docker-compose.observability.yml` | done |
+| Agent container image ships `rolemesh.observability` + `opentelemetry-sdk` + `openinference-instrumentation-anthropic` | `container/Dockerfile` | done |
+| Container env propagates `OTEL_EXPORTER_OTLP_ENDPOINT[_AGENT]` + `OTEL_EXPORTER_OTLP_HEADERS` | `src/rolemesh/container/runner.py`, `src/rolemesh/core/config.py` (allowlist) | done |
+| Langfuse self-hosted compose, joined to `rolemesh-agent-net` | `docker-compose.observability.yml` | done (dev-only — see network note below) |
 | Pi backend openai/google-genai/bedrock auto-instrumentation | (deferred) | follow-up |
 | Approval / safety / container-spawn spans | (deferred) | follow-up |
+| Multi-turn parent-context refresh (currently first turn only) | `src/agent_runner/main.py` (TODO comment) | follow-up |
+| NATS->OTLP bridge for prod (so agents don't reach Langfuse directly) | not started | follow-up |
 
 ## How spans nest
 
@@ -43,7 +48,11 @@ Both `agent.turn` and `tool_call:*` carry `rolemesh.tenant_id` / `coworker_id` /
 # 1. Install the project with the new optional extra.
 uv sync --extra dev --extra observability
 
-# 2. Boot the dev infra (Postgres + NATS) and Langfuse.
+# 2. Boot the dev infra (Postgres + NATS) and Langfuse. The
+#    observability compose file declares ``rolemesh-agent-net`` with
+#    Internal=true + ICC=true so the orchestrator's
+#    ``ensure_agent_network`` finds it pre-created and reuses it
+#    without warnings.
 docker compose -f docker-compose.dev.yml \
                -f docker-compose.observability.yml up -d
 
@@ -51,16 +60,25 @@ docker compose -f docker-compose.dev.yml \
 #    public/secret key pair under Settings -> API Keys.
 open http://localhost:3000   # email: dev@rolemesh.local  password: rolemesh-dev
 
-# 4. Export the OTLP env vars into the shell that will run the orchestrator.
-#    The `Authorization` header is the base64 of "<public-key>:<secret-key>".
+# 4. Rebuild the agent container image so it picks up the
+#    observability deps + module copy added in this spike.
+make agent-image           # or: docker build -t rolemesh-agent:latest -f container/Dockerfile .
+
+# 5. Export the OTLP env vars. Two distinct endpoints — the orchestrator
+#    runs on the host and reaches Langfuse at localhost:3000; agents
+#    run on the Internal=true bridge and reach it at langfuse-web:3000.
+#    runner.build_container_spec reads ``..._ENDPOINT_AGENT`` first and
+#    falls back to ``..._ENDPOINT`` for the container env. The
+#    ``Authorization`` header is the base64 of "<public-key>:<secret-key>".
 export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:3000/api/public/otel/v1/traces"
+export OTEL_EXPORTER_OTLP_ENDPOINT_AGENT="http://langfuse-web:3000/api/public/otel/v1/traces"
 export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic $(printf '%s:%s' pk-... sk-... | base64)"
 
-# 5. Run a real turn through the WebUI / Telegram / Slack / eval harness.
+# 6. Run a real turn through the WebUI / Telegram / Slack / eval harness.
 rolemesh &
 rolemesh-webui &
 
-# 6. In Langfuse, the trace shows up under Projects -> RoleMesh Spike ->
+# 7. In Langfuse, the trace shows up under Projects -> RoleMesh Spike ->
 #    Traces. Drill into one trace and confirm you see:
 #      - top-level "agent.turn" span with tenant + coworker attrs
 #      - nested "tool_call:*" spans for each tool the agent fired
@@ -68,6 +86,17 @@ rolemesh-webui &
 #      - the credential proxy is transparent (no errors, no
 #        duplicate requests)
 ```
+
+> **Network note (dev vs prod).** The dev compose pins `langfuse-web`
+> onto `rolemesh-agent-net`, so agents on the Internal=true bridge can
+> reach Langfuse directly. This is acceptable on a single-developer
+> box but **must not ship to production**: a malicious agent could
+> exfiltrate arbitrary data via span attributes. The production path
+> is a NATS→OTLP bridge — agents publish spans to a NATS subject the
+> orchestrator subscribes and forwards (with sanitisation) to
+> Langfuse. That bridge is a follow-up to the spike. Current dev wiring
+> validates the trace-shape and Langfuse intake; prod hardening
+> follows once the shape is confirmed.
 
 ## What "PASS" looks like
 
@@ -80,8 +109,9 @@ rolemesh-webui &
 
 | Symptom | Likely cause | Next step |
 |---------|--------------|-----------|
-| Spans never reach Langfuse | OTLP endpoint / auth header wrong, or BatchSpanProcessor flushes too late | Run with `OTEL_LOG_LEVEL=debug` and tail orchestrator stderr |
-| Only orchestrator spans appear, container spans missing | Container can't reach the OTLP endpoint (egress gateway blocks `localhost:3000`) | Either allow `langfuse-web` in the per-tenant DNS allowlist or design the NATS-OTLP bridge before going further |
+| Spans never reach Langfuse | OTLP endpoint / auth header wrong | Run with `OTEL_LOG_LEVEL=debug` and tail orchestrator stderr |
+| Only orchestrator spans appear, container spans missing | (a) Forgot to rebuild the agent image after this spike (`opentelemetry-sdk` not installed inside) — check `docker run rolemesh-agent:latest python -c "import opentelemetry"`. (b) `OTEL_EXPORTER_OTLP_ENDPOINT_AGENT` set to a host that doesn't resolve from agent-net (e.g. `localhost:3000`) — must be `langfuse-web:3000`. (c) `langfuse-web` not attached to `rolemesh-agent-net` — `docker network inspect rolemesh-agent-net` should list it as a member | Fix the failing condition above |
+| Container spans appear sometimes, drop other times | `BatchSpanProcessor` flushed too late on a sub-5s turn — `shutdown_tracer()` should be running in `run_query_loop`'s `finally`. Verify by stderr-grepping for "OTel tracer installed" + a clean exit | If reproducible, lower the schedule_delay or switch to `SimpleSpanProcessor` for the spike (don't ship that to prod — it's synchronous) |
 | LLM tokens are zero | `AnthropicInstrumentor` was imported after `anthropic.Anthropic` got captured (monkey-patch race) | Move `instrument()` even earlier — or pre-import the SDK lazily |
 | Existing tests fail | Optional extra not actually optional | Re-check that `install_tracer` short-circuits without the env var and lazy-import guards everywhere |
 | Credential proxy returns 401 / 5xx during instrumented runs | OpenInference somehow rewrote URLs (it shouldn't — only wraps methods) | Compare wire traffic with/without the instrumentor; confirm `ANTHROPIC_BASE_URL` still points at the proxy |

@@ -549,6 +549,13 @@ async def run_query_loop(
         await shutdown_sub.unsubscribe()
         await interrupt_sub.unsubscribe()
         await backend.shutdown()
+        # Flush buffered OTel spans before the container exits.
+        # BatchSpanProcessor's default schedule_delay is 5s; without
+        # an explicit shutdown, sub-5s turns drop every span they
+        # emitted. No-op when the tracer was never installed.
+        from rolemesh.observability import shutdown_tracer
+
+        shutdown_tracer()
 
 
 # ---------------------------------------------------------------------------

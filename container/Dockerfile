@@ -36,6 +36,18 @@ RUN pip install --no-cache-dir \
     partial-json-parser pyyaml filelock Pillow mistune wcwidth \
     structlog
 
+# Observability — same package set as the host's [observability] extra in
+# pyproject.toml. Pinned widths matter only when ``OTEL_EXPORTER_OTLP_ENDPOINT``
+# is also injected by the orchestrator; otherwise install_tracer short-circuits
+# and these libs sit idle. Importing them is cheap and the wheels are small,
+# so we ship them unconditionally to keep "image bit-identical regardless of
+# whether observability is on" — operators flip a host env var to enable, no
+# image rebuild required.
+RUN pip install --no-cache-dir \
+    "opentelemetry-sdk>=1.27" \
+    "opentelemetry-exporter-otlp-proto-http>=1.27" \
+    "openinference-instrumentation-anthropic>=0.1"
+
 # Create app directory
 WORKDIR /app
 
@@ -73,6 +85,15 @@ COPY src/rolemesh/safety/tool_reversibility.py ./rolemesh/safety/tool_reversibil
 COPY src/rolemesh/safety/audit.py ./rolemesh/safety/audit.py
 COPY src/rolemesh/safety/checks/pii_regex.py ./rolemesh/safety/checks/pii_regex.py
 COPY src/rolemesh/safety/checks/domain_allowlist.py ./rolemesh/safety/checks/domain_allowlist.py
+
+# Observability facade. agent_runner.hooks.handlers.tracing imports
+# ``rolemesh.observability.get_tracer`` at module load — without this
+# COPY the agent container fails to import on boot with
+# ``ModuleNotFoundError: No module named 'rolemesh.observability'``.
+# The module is pure-Python and lazy-imports OpenTelemetry + OpenInference
+# (installed in the pip step above), so it stays a noop when
+# OTEL_EXPORTER_OTLP_ENDPOINT is not set on the orchestrator side.
+COPY src/rolemesh/observability/ ./rolemesh/observability/
 
 RUN touch ./rolemesh/__init__.py ./rolemesh/ipc/__init__.py ./rolemesh/auth/__init__.py \
     && touch ./rolemesh/core/__init__.py \

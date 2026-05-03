@@ -114,6 +114,33 @@ def install_tracer(
     )
 
 
+def shutdown_tracer() -> None:
+    """Force-flush the tracer provider so buffered spans reach the
+    backend before the process exits.
+
+    Critical for short-lived agent containers: the default
+    ``BatchSpanProcessor`` schedule_delay is 5 seconds, so a turn that
+    finishes in under 5s exits without flushing and every span it
+    emitted is dropped silently. Call this once on the way out of
+    ``run_query_loop``. Safe to call when ``install_tracer`` was
+    skipped — degrades to a no-op.
+    """
+    if not _installed:
+        return
+    try:
+        from opentelemetry import trace
+
+        provider = trace.get_tracer_provider()
+        # ``shutdown`` exists on the SDK's TracerProvider but not on
+        # the ProxyTracerProvider that's installed when the SDK is
+        # missing. ``getattr`` keeps this branch safe for both.
+        shutdown = getattr(provider, "shutdown", None)
+        if shutdown is not None:
+            shutdown()
+    except ImportError:
+        pass
+
+
 def get_tracer(name: str) -> Tracer:
     """Return a tracer; works whether ``install_tracer`` ran or not.
 

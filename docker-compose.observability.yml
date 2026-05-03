@@ -24,10 +24,26 @@
 # Postgres stores metadata (users, projects, dashboards); Redis is
 # the work queue + session cache. Langfuse expects all three.
 #
-# Networks: all services join the default project network. The
-# orchestrator process runs on the host (not in a container) so it
-# reaches `localhost:3000`. If you run the orchestrator inside a
-# container on the same network, swap to `langfuse-web:3000`.
+# Networks: Langfuse datastores live on the compose-default network.
+# ``langfuse-web`` ALSO joins ``rolemesh-agent-net`` so agents on the
+# Internal=true bridge can reach it directly without a forward proxy
+# allowlist entry. The orchestrator host process reaches it via the
+# published ``localhost:3000`` port.
+#
+# DEV-ONLY shortcut: pinning Langfuse onto agent-net works for a
+# single-developer box where every agent is allowed to see every
+# observability hop. For a real multi-tenant deployment, agents must
+# NOT reach Langfuse directly (a malicious agent could exfiltrate
+# arbitrary data into traces). The production design is a NATS->OTLP
+# bridge: agents publish spans to a NATS subject, the orchestrator
+# subscribes and forwards to Langfuse with sanitisation. That bridge
+# is a follow-up to the spike — see docs/observability/spike.md.
+#
+# The ``rolemesh-agent-net`` network is declared at the bottom of this
+# file so ``docker compose up`` can create it before the orchestrator
+# starts. The orchestrator's ``ensure_agent_network`` will detect the
+# existing network and reuse it (Internal=true + ICC=true match its
+# expected invariants).
 
 services:
 
@@ -45,6 +61,9 @@ services:
         condition: service_started
     ports:
       - "3000:3000"
+    networks:
+      - default
+      - rolemesh-agent-net
     environment:
       DATABASE_URL: postgresql://langfuse:langfuse@langfuse-postgres:5432/langfuse
       CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
@@ -160,3 +179,17 @@ volumes:
   langfuse-clickhouse-data:
   langfuse-redis-data:
   langfuse-minio-data:
+
+networks:
+  # Mirror the orchestrator's ``ensure_agent_network`` invariants so the
+  # network this compose creates is structurally identical to the one
+  # the orchestrator would create itself: Internal=true (no default
+  # outbound route) and ICC=true (containers on the same bridge can
+  # talk). Either side can run first — whichever wins the race
+  # creates the bridge; the other reuses it.
+  rolemesh-agent-net:
+    name: rolemesh-agent-net
+    driver: bridge
+    internal: true
+    driver_opts:
+      com.docker.network.bridge.enable_icc: "true"

@@ -33,6 +33,7 @@ from rolemesh.observability.tracer import (
     inject_trace_context,
     install_tracer,
     is_enabled,
+    shutdown_tracer,
 )
 
 __all__ = [
@@ -43,4 +44,5 @@ __all__ = [
     "inject_trace_context",
     "install_tracer",
     "is_enabled",
+    "shutdown_tracer",
 ]

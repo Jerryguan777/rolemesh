@@ -1677,6 +1677,11 @@ async def main() -> None:
     await _transport.close()
     await _runtime.close()
     await close_database()
+    # Flush buffered OTel spans. Pairs with ``install_tracer`` at the
+    # top of ``main`` and is a no-op when observability is disabled.
+    from rolemesh.observability import shutdown_tracer
+
+    shutdown_tracer()
 
 
 # ---------------------------------------------------------------------------

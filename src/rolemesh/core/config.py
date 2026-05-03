@@ -176,6 +176,18 @@ CONTAINER_ENV_ALLOWLIST: frozenset[str] = frozenset({
     "AWS_BEARER_TOKEN_BEDROCK",
     "AWS_REGION",
     "BEDROCK_BASE_URL",
+    # Observability — OTLP exporter config consumed by
+    # rolemesh.observability.install_tracer inside the container. The
+    # endpoint URL value MUST resolve from the agent container's
+    # network position (e.g. ``http://langfuse-web:3000/...`` when
+    # langfuse-web is attached to ``rolemesh-agent-net``); the
+    # orchestrator's own value usually points at ``localhost:3000`` and
+    # is wrong for the container, so runner.build_container_spec reads
+    # ``OTEL_EXPORTER_OTLP_ENDPOINT_AGENT`` first and falls back to the
+    # plain endpoint. HEADERS carries the Basic-auth credential pair
+    # for Langfuse and is forwarded as-is.
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_HEADERS",
 })
 
 # Default AWS region for Bedrock when ``AWS_REGION`` is unset on the
