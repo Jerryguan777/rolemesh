@@ -31,6 +31,15 @@ class AgentInput:
     assistant_name: str | None = None
     system_prompt: str | None = None
     role_config: dict[str, object] | None = None
+    # W3C trace-context carrier (``traceparent`` + optional
+    # ``tracestate``) so the agent container can attach its spans as
+    # children of the orchestrator's per-turn root span. Empty / None
+    # means "no upstream span" — the container will start its own
+    # root if observability is enabled, or no-op otherwise. Populated
+    # by ``rolemesh.observability.inject_trace_context()`` at dispatch
+    # time; consumed by ``extract_trace_context()`` inside the
+    # container. See ``rolemesh.observability``.
+    trace_context: dict[str, str] | None = None
 
 
 # Progress statuses are transient UX indicators; terminal statuses carry the

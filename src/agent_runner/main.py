@@ -155,6 +155,25 @@ async def run_query_loop(
 ) -> None:
     """Main query loop: start backend, run prompts, handle follow-ups."""
 
+    # Observability spike — install the OTel tracer first so any
+    # backend/tool span emitted later in this function attaches to
+    # the parent context the orchestrator forwarded via
+    # ``init.trace_context``. ``install_tracer`` is a no-op when
+    # ``OTEL_EXPORTER_OTLP_ENDPOINT`` is unset or the optional extra
+    # is missing, so default deployments stay bit-identical.
+    from rolemesh.observability import install_tracer
+
+    install_tracer(
+        service_name="rolemesh-agent",
+        **{
+            "rolemesh.tenant_id": init.tenant_id,
+            "rolemesh.coworker_id": init.coworker_id,
+            "rolemesh.conversation_id": init.conversation_id,
+            "rolemesh.job_id": job_id,
+            "rolemesh.agent_backend": AGENT_BACKEND,
+        },
+    )
+
     # Build tool context
     # V2 P0.4: flatten per-MCP-server reversibility tables so the hook
     # handler can resolve ``get_tool_reversibility`` in O(1) without

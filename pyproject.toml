@@ -32,6 +32,25 @@ rolemesh-eval = "rolemesh.evaluation.cli:main"
 eval = [
     "inspect-ai>=0.3",
 ]
+# Observability spike — OpenTelemetry SDK + auto-instrumentation for
+# LLM HTTP clients via OpenInference. Optional: when the extra is not
+# installed (or OTEL_EXPORTER_OTLP_ENDPOINT is unset), every
+# ``rolemesh.observability`` call site degrades to OTel's NoOpTracer,
+# so the main runtime stays bit-identical. Set
+# OTEL_EXPORTER_OTLP_ENDPOINT (e.g. Langfuse's OTLP intake) to turn
+# collection on. See ``docs/observability/spike.md`` for end-to-end
+# wiring against a self-hosted Langfuse.
+observability = [
+    "opentelemetry-sdk>=1.27",
+    "opentelemetry-exporter-otlp-proto-http>=1.27",
+    "opentelemetry-instrumentation>=0.48b0",
+    # OpenInference auto-instruments anthropic at the SDK call layer,
+    # capturing model_id / tokens / cost / request+response as OTel
+    # span attributes. The Pi backend (openai / google-genai /
+    # boto3-bedrock) has its own openinference packages — add them
+    # here when wiring Pi instrumentation.
+    "openinference-instrumentation-anthropic>=0.1",
+]
 pi = [
     "anthropic>=0.49",
     "openai>=1.60",

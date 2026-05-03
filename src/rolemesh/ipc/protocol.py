@@ -66,6 +66,13 @@ class AgentInitData:
     # check behaviour). Each spec carries {check_id, version, stages,
     # cost_class, supported_codes, default_timeout_ms}.
     slow_check_specs: list[dict[str, object]] | None = None
+    # W3C trace-context carrier produced by
+    # ``rolemesh.observability.inject_trace_context()`` on the
+    # orchestrator side. The agent runner extracts this on startup
+    # and uses it as the parent context for every span it emits.
+    # None / empty dict means observability is off (or no upstream
+    # span); the container then runs without attaching to anything.
+    trace_context: dict[str, str] | None = None
 
     def serialize(self) -> bytes:
         return json.dumps(asdict(self)).encode()
@@ -103,4 +110,5 @@ class AgentInitData:
             approval_policies=raw.get("approval_policies"),
             safety_rules=raw.get("safety_rules"),
             slow_check_specs=raw.get("slow_check_specs"),
+            trace_context=raw.get("trace_context"),
         )

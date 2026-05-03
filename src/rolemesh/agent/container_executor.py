@@ -381,6 +381,12 @@ class ContainerAgentExecutor:
             approval_policies=approval_policies_dicts,
             safety_rules=safety_rules_dicts,
             slow_check_specs=slow_check_specs,
+            # Forward the W3C trace-context carrier the orchestrator
+            # assembled on the dispatch side (or None when
+            # observability is off). The container picks this up in
+            # ``agent_runner.main`` and uses it as the parent context
+            # for every span it emits.
+            trace_context=inp.trace_context,
         )
         await kv_init.put(job_id, agent_init.serialize())
 
