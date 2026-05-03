@@ -11,6 +11,7 @@ import os
 import platform
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 from rolemesh.auth.permissions import AgentPermissions
 from rolemesh.container.docker_runtime import _parse_memory
@@ -442,6 +443,26 @@ def build_container_spec(
     #     OPENAI base URLs point at the host-side credential_proxy via
     #     host-gateway. No HTTP(S)_PROXY env is injected — there is no
     #     forward proxy.
+    # Observability OTLP endpoint forwarded to the container. We
+    # prefer the ``_AGENT`` variant because the host and the agent
+    # bridge resolve different addresses for the same Langfuse
+    # service — operator sets e.g. ``http://localhost:3000`` for the
+    # orchestrator and ``http://langfuse-web:3000`` for containers.
+    # If only the unsuffixed value is set, fall back to it (single-
+    # network deployments where both addresses match).
+    otlp_endpoint_for_agent = (
+        os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT_AGENT")
+        or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+        or ""
+    )
+    otlp_headers = os.environ.get("OTEL_EXPORTER_OTLP_HEADERS", "")
+    # Parse the OTLP host so we can punch a hole in NO_PROXY for it.
+    # Without this, HTTP(S)_PROXY captures the OTel exporter's POST
+    # and routes it through the credential proxy (which has no
+    # provider mapping for it and 403s every span). Empty string when
+    # no endpoint is configured — the .add() below is a no-op then.
+    otlp_host = urlparse(otlp_endpoint_for_agent).hostname or ""
+
     if CONTAINER_NETWORK_NAME:
         # Agent bridge is Internal=true — no route to the host. NATS must
         # be reachable by a name that resolves on agent-net. In local dev
@@ -456,16 +477,24 @@ def build_container_spec(
         forward_proxy_url = (
             f"http://{EGRESS_GATEWAY_CONTAINER_NAME}:{EGRESS_GATEWAY_FORWARD_PORT}"
         )
+        no_proxy_hosts = [EGRESS_GATEWAY_CONTAINER_NAME, "localhost", "127.0.0.1"]
+        if otlp_host:
+            no_proxy_hosts.append(otlp_host)
         proxy_env: dict[str, str] = {
             "HTTP_PROXY": forward_proxy_url,
             "HTTPS_PROXY": forward_proxy_url,
-            "NO_PROXY": f"{EGRESS_GATEWAY_CONTAINER_NAME},localhost,127.0.0.1",
+            "NO_PROXY": ",".join(no_proxy_hosts),
         }
     else:
         # Rollback: emulate pre-EC-1 routing.
         nats_url = NATS_URL.replace("localhost", CONTAINER_HOST_GATEWAY)
         proxy_base = f"http://{CONTAINER_HOST_GATEWAY}:{CREDENTIAL_PROXY_PORT}"
-        proxy_env = {}
+        # No HTTP(S)_PROXY in rollback mode — but if the operator has
+        # also set a global proxy via host env, NO_PROXY still needs
+        # the OTLP host so the exporter bypasses it.
+        proxy_env = (
+            {"NO_PROXY": f"localhost,127.0.0.1,{otlp_host}"} if otlp_host else {}
+        )
 
     env: dict[str, str] = {
         "TZ": TIMEZONE,
@@ -492,6 +521,14 @@ def build_container_spec(
         "CLAUDE_CONFIG_DIR": "/home/agent/.claude",
         **proxy_env,
     }
+
+    # OTLP endpoint forwarded to the container — only when set on the
+    # host. Empty value means "observability disabled for this run";
+    # install_tracer in the container short-circuits to noop without it.
+    if otlp_endpoint_for_agent:
+        env["OTEL_EXPORTER_OTLP_ENDPOINT"] = otlp_endpoint_for_agent
+    if otlp_headers:
+        env["OTEL_EXPORTER_OTLP_HEADERS"] = otlp_headers
 
     # Mirror the host's auth method with a placeholder value.
     auth_mode = detect_auth_mode()

@@ -29,6 +29,12 @@ import nats
 from nats.js.api import DeliverPolicy
 
 from rolemesh.ipc.protocol import AgentInitData
+from rolemesh.observability import (
+    attach_parent_context,
+    get_tracer,
+    install_tracer,
+    shutdown_tracer,
+)
 
 from .backend import (
     BackendEvent,
@@ -43,6 +49,7 @@ from .backend import (
 )
 from .hooks import HookRegistry
 from .hooks.handlers import ApprovalHookHandler, TranscriptArchiveHandler
+from .hooks.observability_handler import OtelHookHandler
 from .tools.context import ToolContext
 
 if TYPE_CHECKING:
@@ -132,6 +139,79 @@ async def drain_nats_input(sub: Any) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+# Truncation limit on the response text attribute so Langfuse / OTel
+# backends don't choke on multi-KB attributes for long replies.
+_CLAUDE_RESPONSE_PREVIEW_MAX = 500
+
+
+def _emit_claude_message_span(event: ResultEvent) -> None:
+    """Emit one ``claude.message`` span per Claude ResultEvent.
+
+    Claude Agent SDK dispatches Anthropic API calls from a Node.js
+    subprocess, so a Python-side instrumentor (OpenInference's
+    AnthropicInstrumentor) cannot patch them. The only signal Python
+    sees is the ResultEvent at the *end* of the call, carrying token
+    usage and the final response text. We synthesise a span here:
+
+    - Attributes follow OTel-GenAI semantic conventions
+      (``gen_ai.*``) so Langfuse renders this as a Generation node
+      and computes cost from its model registry automatically.
+    - ``start_time`` is approximated as ``end - 1ms`` because the
+      real provider call duration is unobservable from Python. The
+      span is purely a marker — token counts and cost are accurate;
+      latency is NOT.
+
+    No-op when the tracer is in noop mode or the event has no usage.
+    """
+    if event.text is None and event.usage is None:
+        return
+    end_ns = _time_ns()
+    # 1ms is just enough for Langfuse to render the span as a finite
+    # bar rather than a zero-width point. The brief explicitly accepts
+    # this approximation; see docs/observability/setup.md "Known
+    # limitations" for the rationale.
+    start_ns = end_ns - 1_000_000
+    tracer = get_tracer("rolemesh.agent_runner")
+    span = tracer.start_span("claude.message", start_time=start_ns)
+    try:
+        span.set_attribute("gen_ai.system", "anthropic")
+        usage = event.usage
+        if usage is not None:
+            if usage.model_id:
+                span.set_attribute("gen_ai.request.model", usage.model_id)
+                span.set_attribute("gen_ai.response.model", usage.model_id)
+            span.set_attribute("gen_ai.usage.input_tokens", int(usage.input_tokens))
+            span.set_attribute("gen_ai.usage.output_tokens", int(usage.output_tokens))
+            # Anthropic-specific cache attribution. OTel-GenAI doesn't
+            # standardise these yet but Langfuse recognises them and
+            # surfaces them in its Generation view.
+            if usage.cache_read_tokens:
+                span.set_attribute(
+                    "gen_ai.usage.cache_read_input_tokens",
+                    int(usage.cache_read_tokens),
+                )
+            if usage.cache_write_tokens:
+                span.set_attribute(
+                    "gen_ai.usage.cache_creation_input_tokens",
+                    int(usage.cache_write_tokens),
+                )
+        if event.text:
+            text = event.text
+            if len(text) > _CLAUDE_RESPONSE_PREVIEW_MAX:
+                text = text[:_CLAUDE_RESPONSE_PREVIEW_MAX] + "...(truncated)"
+            span.set_attribute("gen_ai.response.text", text)
+    except Exception:  # noqa: BLE001 — span emit must not break the turn
+        log("emit_claude_message_span: attribute set failed (non-fatal)")
+    span.end(end_time=end_ns)
+
+
+def _time_ns() -> int:
+    """Indirection so tests can monkey-patch the clock."""
+    import time
+
+    return time.time_ns()
+
+
 def _create_backend(backend_name: str) -> Any:
     """Create the appropriate backend based on AGENT_BACKEND env var."""
     if backend_name == "pi":
@@ -140,6 +220,41 @@ def _create_backend(backend_name: str) -> Any:
     else:
         from .claude_backend import ClaudeBackend
         return ClaudeBackend()
+
+
+def _install_pi_instrumentors() -> None:
+    """Install OpenInference instrumentors for Pi backend's LLM SDKs.
+
+    Must run BEFORE the Pi backend imports openai / google-genai /
+    boto3 so the monkey-patches attach to fresh module references —
+    instrumenting after import doesn't reach captured references in
+    the backend code.
+
+    Each instrumentor is independent. We swallow ImportError so an
+    operator who installs the observability extra without a given
+    LLM SDK doesn't see install failures; we log other exceptions so
+    a real bug isn't silently lost.
+    """
+    instrumentors: list[tuple[str, str, str]] = [
+        ("openai", "openinference.instrumentation.openai", "OpenAIInstrumentor"),
+        ("bedrock", "openinference.instrumentation.bedrock", "BedrockInstrumentor"),
+        (
+            "google_genai",
+            "openinference.instrumentation.google_genai",
+            "GoogleGenAIInstrumentor",
+        ),
+    ]
+    for label, module_path, class_name in instrumentors:
+        try:
+            module = __import__(module_path, fromlist=[class_name])
+            cls = getattr(module, class_name)
+            cls().instrument()
+            log(f"OpenInference {label} instrumentor installed")
+        except ImportError:
+            # Optional package not installed — silently skip.
+            pass
+        except Exception as exc:  # noqa: BLE001 — instrumentation must not break startup
+            log(f"OpenInference {label} instrumentor failed: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +293,29 @@ async def run_query_loop(
         mcp_tool_reversibility=mcp_tool_reversibility,
     )
 
+    # Observability bootstrap — must precede backend creation so:
+    #   1. install_tracer registers the global TracerProvider before
+    #      any span is emitted.
+    #   2. attach_parent_context links subsequent spans under the
+    #      orchestrator's agent.turn span (W3C carrier from init).
+    #   3. Pi instrumentors monkey-patch openai/google-genai/boto3
+    #      before backend code captures references to those modules.
+    # Noop unless [observability] extra is installed AND
+    # OTEL_EXPORTER_OTLP_ENDPOINT is set in the container env.
+    install_tracer(
+        "rolemesh-agent",
+        **{
+            "rolemesh.tenant_id": init.tenant_id,
+            "rolemesh.coworker_id": init.coworker_id,
+            "rolemesh.conversation_id": init.conversation_id,
+            "rolemesh.coworker_name": init.assistant_name or "",
+            "rolemesh.agent_backend": AGENT_BACKEND,
+        },
+    )
+    attach_parent_context(init.trace_context)
+    if AGENT_BACKEND == "pi":
+        _install_pi_instrumentors()
+
     # Create and initialize backend
     backend = _create_backend(AGENT_BACKEND)
 
@@ -206,6 +344,14 @@ async def run_query_loop(
             if event.new_session_id:
                 session_id = event.new_session_id
             metadata = _usage_meta(event)
+            # Claude SDK's API call happens in a Node.js subprocess that
+            # OpenInference cannot reach; emit a synthetic span here so
+            # token usage / model id reach Langfuse anyway. Pi backend
+            # is covered by the OpenInference instrumentors installed
+            # in run_query_loop's preamble, so we skip the manual span
+            # there to avoid double-counting.
+            if AGENT_BACKEND == "claude":
+                _emit_claude_message_span(event)
             await publish_output(
                 js, job_id,
                 ContainerOutput(
@@ -314,6 +460,10 @@ async def run_query_loop(
     # backend's PreCompact event via the shared HookRegistry.
     hook_registry = HookRegistry()
     hook_registry.register(TranscriptArchiveHandler(assistant_name=init.assistant_name))
+    # OtelHookHandler is registered unconditionally — it no-ops cleanly
+    # when get_tracer returns the noop fallback, so installing it has
+    # no cost when the observability extra isn't enabled.
+    hook_registry.register(OtelHookHandler())
     # Register ApprovalHookHandler only when policies are provided. An empty
     # or missing approval_policies list means the approval module is inactive
     # for this run, and we keep the hook chain untouched so behaviour stays
@@ -523,15 +673,21 @@ async def main() -> None:
         sys.exit(1)
 
     try:
-        await run_query_loop(init, nc, js, JOB_ID)
-    except Exception as exc:
-        error_message = str(exc)
-        log(f"Agent error: {error_message}")
-        await publish_output(
-            js, JOB_ID,
-            ContainerOutput(status="error", result=None, error=error_message),
-        )
+        try:
+            await run_query_loop(init, nc, js, JOB_ID)
+        except Exception as exc:
+            error_message = str(exc)
+            log(f"Agent error: {error_message}")
+            await publish_output(
+                js, JOB_ID,
+                ContainerOutput(status="error", result=None, error=error_message),
+            )
+            await nc.close()
+            sys.exit(1)
         await nc.close()
-        sys.exit(1)
-
-    await nc.close()
+    finally:
+        # Force-flush BatchSpanProcessor so the tail of the trace
+        # isn't dropped on container exit. SystemExit propagates
+        # through finally — the flush happens on both success and
+        # error paths. Noop unless observability is enabled.
+        shutdown_tracer()

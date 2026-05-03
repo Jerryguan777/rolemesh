@@ -30,11 +30,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ``structlog`` is needed by the rolemesh.core.logger shim that the safety
 # loader + hook handler imports at module load — without it, agent_runner
 # crashes at boot with ``No module named 'structlog'``.
+#
+# OpenTelemetry SDK + OTLP/HTTP exporter ship unconditionally so the
+# tracer can be turned on per-container by env var (no rebuild needed).
+# The OpenInference instrumentors patch openai/google-genai/boto3 in
+# the Pi backend; install_tracer's two-layer gate (env var + runtime)
+# keeps them dormant until OTEL_EXPORTER_OTLP_ENDPOINT is set, so this
+# is zero-cost when observability is not enabled.
 RUN pip install --no-cache-dir \
     claude-agent-sdk croniter nats-py \
     anthropic openai google-genai boto3 httpx mcp \
     partial-json-parser pyyaml filelock Pillow mistune wcwidth \
-    structlog
+    structlog \
+    opentelemetry-sdk \
+    opentelemetry-exporter-otlp-proto-http \
+    openinference-instrumentation-openai \
+    openinference-instrumentation-bedrock \
+    openinference-instrumentation-google-genai
 
 # Create app directory
 WORKDIR /app
@@ -73,6 +85,13 @@ COPY src/rolemesh/safety/tool_reversibility.py ./rolemesh/safety/tool_reversibil
 COPY src/rolemesh/safety/audit.py ./rolemesh/safety/audit.py
 COPY src/rolemesh/safety/checks/pii_regex.py ./rolemesh/safety/checks/pii_regex.py
 COPY src/rolemesh/safety/checks/domain_allowlist.py ./rolemesh/safety/checks/domain_allowlist.py
+
+# Observability shim: install_tracer + W3C carrier helpers. The module
+# already ships its own __init__.py (real, not stubbed) so we just
+# copy the directory wholesale. The tracer no-ops cleanly when
+# OTEL_EXPORTER_OTLP_ENDPOINT is unset, so shipping it is zero-cost
+# for runs that don't enable observability.
+COPY src/rolemesh/observability/ ./rolemesh/observability/
 
 RUN touch ./rolemesh/__init__.py ./rolemesh/ipc/__init__.py ./rolemesh/auth/__init__.py \
     && touch ./rolemesh/core/__init__.py \

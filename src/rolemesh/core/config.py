@@ -176,6 +176,17 @@ CONTAINER_ENV_ALLOWLIST: frozenset[str] = frozenset({
     "AWS_BEARER_TOKEN_BEDROCK",
     "AWS_REGION",
     "BEDROCK_BASE_URL",
+    # Observability — OTLP endpoint + headers honoured by
+    # opentelemetry-exporter-otlp-proto-http inside the container.
+    # Both keys are no-ops unless the [observability] extra is also
+    # present in the container image (it ships with it). The
+    # orchestrator picks ``_AGENT`` for these from the host env at
+    # spawn time so the address resolves on the agent network
+    # (``langfuse-web:3000`` rather than the host's ``localhost:3000``);
+    # the per-spawn injection lands in this allowlist under the bare
+    # name so the container's exporter reads what it expects.
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_HEADERS",
 })
 
 # Default AWS region for Bedrock when ``AWS_REGION`` is unset on the
