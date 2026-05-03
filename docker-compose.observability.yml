@@ -1,0 +1,232 @@
+# Self-hosted Langfuse — DEV ONLY observability backend.
+#
+# Stand this up alongside docker-compose.dev.yml when you want to
+# look at agent traces:
+#
+#   docker compose -f docker-compose.observability.yml up -d
+#
+# The Langfuse web UI lives at http://localhost:3000. Log in with
+# the bootstrap credentials from LANGFUSE_INIT_USER_* below, then
+# create a Project + an OTLP API key pair (pk-... / sk-...) and
+# point the orchestrator at it via OTEL_EXPORTER_OTLP_ENDPOINT /
+# OTEL_EXPORTER_OTLP_ENDPOINT_AGENT / OTEL_EXPORTER_OTLP_HEADERS.
+# Full walkthrough: docs/observability/setup.md.
+#
+# DO NOT SHIP THIS TO PROD AS-IS. Specifically:
+#   1. agent containers reach langfuse-web directly over
+#      ``rolemesh-agent-net`` to keep dev simple. That breaks the
+#      "Internal=true bridge means no agent egress" invariant. A
+#      real production setup needs a NATS → OTLP bridge so agents
+#      never get an outbound route.
+#   2. SALT and ENCRYPTION_KEY values below are static for dev. Each
+#      prod deployment must generate its own with
+#      ``openssl rand -hex 32`` and rotate them on a schedule.
+#   3. NEXTAUTH_SECRET / database passwords are the public dev
+#      defaults — fine for a single-laptop install, not fine
+#      anywhere else.
+#   4. Bootstrap admin user (LANGFUSE_INIT_USER_*) makes the first
+#      login a single command. Real multi-user deploys should turn
+#      this off and rely on SSO / invite flow instead.
+
+services:
+  langfuse-postgres:
+    image: postgres:16
+    container_name: langfuse-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: langfuse
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: langfuse-dev-password
+    volumes:
+      - langfuse-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse -d langfuse"]
+      interval: 5s
+      retries: 10
+
+  langfuse-clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: langfuse-clickhouse
+    restart: unless-stopped
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse-dev-password
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - langfuse-clickhouse-data:/var/lib/clickhouse
+      - langfuse-clickhouse-logs:/var/log/clickhouse-server
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      retries: 10
+
+  langfuse-redis:
+    image: redis:7
+    container_name: langfuse-redis
+    restart: unless-stopped
+    command: --requirepass redis-dev-password
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redis-dev-password", "ping"]
+      interval: 5s
+      retries: 10
+
+  langfuse-minio:
+    image: minio/minio:latest
+    container_name: langfuse-minio
+    restart: unless-stopped
+    entrypoint: sh
+    # Bind to 9090 / 9091 so neither side conflicts with anything
+    # an operator commonly already runs on 9000.
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9090" --console-address ":9091" /data'
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio-dev-password
+    volumes:
+      - langfuse-minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      retries: 10
+
+  # Init container that creates the langfuse bucket on first start.
+  # Without this, Langfuse v3's OTLP intake POSTs spans to MinIO,
+  # gets a NoSuchBucket 404 from S3, retries 3 times and drops the
+  # batch. Symptom is "spans visible in worker logs but never reach
+  # the UI". Listed in brief Section 7 gotcha #5.
+  langfuse-minio-init:
+    image: minio/mc:latest
+    container_name: langfuse-minio-init
+    depends_on:
+      langfuse-minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://langfuse-minio:9090 minio minio-dev-password &&
+      mc mb --ignore-existing local/langfuse &&
+      echo 'langfuse bucket ready'
+      "
+    restart: "no"
+
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    container_name: langfuse-worker
+    restart: unless-stopped
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse-dev-password@langfuse-postgres:5432/langfuse
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse-dev-password
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: 6379
+      REDIS_AUTH: redis-dev-password
+      LANGFUSE_S3_EVENT_UPLOAD_ENABLED: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: minio-dev-password
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9090
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      # 64 hex chars = 256 bits. Langfuse v3 rejects placeholder
+      # all-zeros and other low-entropy values at boot. The value
+      # below is dev-only — generate a fresh one with
+      # ``openssl rand -hex 32`` for any non-throwaway environment.
+      ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      SALT: dev-salt-please-rotate-me
+      TELEMETRY_ENABLED: "false"
+
+  langfuse-web:
+    image: langfuse/langfuse:3
+    container_name: langfuse-web
+    restart: unless-stopped
+    depends_on:
+      langfuse-postgres:
+        condition: service_healthy
+      langfuse-clickhouse:
+        condition: service_healthy
+      langfuse-redis:
+        condition: service_healthy
+      langfuse-minio:
+        condition: service_healthy
+      langfuse-minio-init:
+        condition: service_completed_successfully
+    ports:
+      # Host:3000 → web UI. The OTLP intake lives at
+      # POST /api/public/otel/v1/traces on the same listener, so
+      # exporters point at http://localhost:3000 (orchestrator) or
+      # http://langfuse-web:3000 (containers on agent-net).
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgresql://langfuse:langfuse-dev-password@langfuse-postgres:5432/langfuse
+      CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
+      CLICKHOUSE_URL: http://langfuse-clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse-dev-password
+      CLICKHOUSE_CLUSTER_ENABLED: "false"
+      REDIS_HOST: langfuse-redis
+      REDIS_PORT: 6379
+      REDIS_AUTH: redis-dev-password
+      LANGFUSE_S3_EVENT_UPLOAD_ENABLED: "true"
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: minio
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: minio-dev-password
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://langfuse-minio:9090
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
+      ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+      SALT: dev-salt-please-rotate-me
+      NEXTAUTH_SECRET: dev-nextauth-secret-please-rotate-me
+      NEXTAUTH_URL: http://localhost:3000
+      TELEMETRY_ENABLED: "false"
+      # Bootstrap admin so first login is one command. See top-of-
+      # file note about disabling this in any non-dev install.
+      LANGFUSE_INIT_USER_NAME: admin
+      LANGFUSE_INIT_USER_EMAIL: admin@example.com
+      LANGFUSE_INIT_USER_PASSWORD: changeme
+      LANGFUSE_INIT_ORG_NAME: rolemesh-dev
+      LANGFUSE_INIT_PROJECT_NAME: rolemesh
+      # Next.js v16 binds to a single interface by default when the
+      # container is on multiple networks; agents on rolemesh-agent-net
+      # then see "ECONNREFUSED" because the listener only bound to
+      # the default-network address. Forcing 0.0.0.0 makes both
+      # networks reach the same listener. Brief gotcha #7.
+      HOSTNAME: 0.0.0.0
+    networks:
+      # default: lets the worker / postgres / clickhouse / redis
+      # talk to web (and lets the host reach port 3000).
+      - default
+      # rolemesh-agent-net: lets agent containers POST OTLP spans
+      # directly. Brief §4.6 documents that this breaks the
+      # Internal=true egress invariant in dev — production must
+      # use a NATS → OTLP bridge instead.
+      - rolemesh-agent-net
+
+volumes:
+  langfuse-pgdata:
+  langfuse-clickhouse-data:
+  langfuse-clickhouse-logs:
+  langfuse-minio-data:
+
+networks:
+  # The agent-net is created externally by the orchestrator at
+  # startup (rolemesh.container.runtime). Marking external: true
+  # avoids docker-compose trying to create or destroy it. If you
+  # haven't started rolemesh yet, this network won't exist; start
+  # rolemesh first, or pre-create with:
+  #   docker network create -d bridge --internal rolemesh-agent-net
+  rolemesh-agent-net:
+    external: true
