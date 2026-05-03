@@ -49,6 +49,12 @@ services:
 
   langfuse-web:
     image: langfuse/langfuse:3
+    # Explicit container_name keeps the prefix as ``langfuse-`` rather
+    # than letting compose prepend the project directory name. The
+    # orchestrator's startup ``cleanup_orphans("rolemesh-")`` would
+    # otherwise match on ``rolemesh-2-langfuse-web-1`` and force-remove
+    # Langfuse on every orchestrator restart.
+    container_name: langfuse-web
     restart: unless-stopped
     depends_on:
       langfuse-postgres:
@@ -64,7 +70,14 @@ services:
     networks:
       - default
       - rolemesh-agent-net
+    # Next.js v16 binds to a single interface IP unless HOSTNAME forces
+    # 0.0.0.0. With both ``default`` and ``rolemesh-agent-net``
+    # attached, it picks one and the other side's containers get
+    # ECONNREFUSED — agents on agent-net can't reach Langfuse without
+    # this override.
+    hostname: langfuse-web
     environment:
+      HOSTNAME: 0.0.0.0
       DATABASE_URL: postgresql://langfuse:langfuse@langfuse-postgres:5432/langfuse
       CLICKHOUSE_MIGRATION_URL: clickhouse://langfuse-clickhouse:9000
       CLICKHOUSE_URL: http://langfuse-clickhouse:8123
@@ -82,7 +95,11 @@ services:
       # Single-tenant dev secret. Replace before sharing the deployment.
       NEXTAUTH_SECRET: dev-only-replace-me
       SALT: dev-only-replace-me
-      ENCRYPTION_KEY: 0000000000000000000000000000000000000000000000000000000000000000
+      # 256-bit hex key — Langfuse v3 enforces real entropy (rejects
+      # all-zero placeholder). Regenerate with ``openssl rand -hex 32``
+      # if you fork this compose into a shared deployment; the value
+      # below is dev-only and committed for one-shot bootstrap.
+      ENCRYPTION_KEY: 09fd60bf28ac4a1db428f5257723a5cf7947477555f1fa75901799ed0d822966
       NEXTAUTH_URL: http://localhost:3000
       TELEMETRY_ENABLED: "false"
       LANGFUSE_DEFAULT_PROJECT_ROLE: ADMIN
@@ -97,6 +114,7 @@ services:
 
   langfuse-worker:
     image: langfuse/langfuse-worker:3
+    container_name: langfuse-worker
     restart: unless-stopped
     depends_on:
       langfuse-postgres:
@@ -121,10 +139,15 @@ services:
       LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
       LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: "true"
       SALT: dev-only-replace-me
-      ENCRYPTION_KEY: 0000000000000000000000000000000000000000000000000000000000000000
+      # 256-bit hex key — Langfuse v3 enforces real entropy (rejects
+      # all-zero placeholder). Regenerate with ``openssl rand -hex 32``
+      # if you fork this compose into a shared deployment; the value
+      # below is dev-only and committed for one-shot bootstrap.
+      ENCRYPTION_KEY: 09fd60bf28ac4a1db428f5257723a5cf7947477555f1fa75901799ed0d822966
 
   langfuse-postgres:
     image: postgres:16-alpine
+    container_name: langfuse-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: langfuse
@@ -140,6 +163,7 @@ services:
 
   langfuse-clickhouse:
     image: clickhouse/clickhouse-server:24.8-alpine
+    container_name: langfuse-clickhouse
     restart: unless-stopped
     environment:
       CLICKHOUSE_USER: clickhouse
@@ -159,6 +183,7 @@ services:
 
   langfuse-redis:
     image: redis:7-alpine
+    container_name: langfuse-redis
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
@@ -166,6 +191,7 @@ services:
 
   langfuse-minio:
     image: minio/minio:latest
+    container_name: langfuse-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
@@ -174,6 +200,26 @@ services:
     volumes:
       - langfuse-minio-data:/data
 
+  # One-shot init: create the ``langfuse`` bucket the OTel ingestion
+  # path writes spans into. Without this bucket, the OTLP intake
+  # accepts the request but returns HTTP 500 ("specified bucket does
+  # not exist") and every span gets dropped silently from the
+  # exporter's retry buffer. Run-once: ``mc mb -p`` is idempotent so
+  # restarts are no-ops once the bucket exists.
+  langfuse-minio-init:
+    image: minio/mc:latest
+    container_name: langfuse-minio-init
+    depends_on:
+      langfuse-minio:
+        condition: service_started
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        until mc alias set local http://langfuse-minio:9000 minio miniosecret >/dev/null 2>&1; do sleep 1; done
+        mc mb -p local/langfuse
+        echo "bucket ready"
+    restart: "no"
+
 volumes:
   langfuse-postgres-data:
   langfuse-clickhouse-data:
@@ -181,15 +227,15 @@ volumes:
   langfuse-minio-data:
 
 networks:
-  # Mirror the orchestrator's ``ensure_agent_network`` invariants so the
-  # network this compose creates is structurally identical to the one
-  # the orchestrator would create itself: Internal=true (no default
-  # outbound route) and ICC=true (containers on the same bridge can
-  # talk). Either side can run first — whichever wins the race
-  # creates the bridge; the other reuses it.
+  # Reuse the bridge the orchestrator's ``ensure_agent_network``
+  # creates (Internal=true + ICC=true). Declared external so compose
+  # never tries to manage it — if compose owns creation, restarting
+  # compose between agent runs would briefly disconnect every running
+  # agent container. The bridge MUST exist before this compose comes
+  # up; cold-bootstrap with:
+  #   docker network create rolemesh-agent-net --internal \
+  #     -o "com.docker.network.bridge.enable_icc=true"
+  # or just start the orchestrator once first.
   rolemesh-agent-net:
+    external: true
     name: rolemesh-agent-net
-    driver: bridge
-    internal: true
-    driver_opts:
-      com.docker.network.bridge.enable_icc: "true"

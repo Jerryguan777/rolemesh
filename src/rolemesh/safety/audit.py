@@ -16,10 +16,6 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from rolemesh.db import (
-    insert_safety_decision,
-)
-
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -67,6 +63,16 @@ class DbAuditSink:
     """Persists AuditEvent to the ``safety_decisions`` table."""
 
     async def write(self, event: AuditEvent) -> None:
+        # Lazy-import: ``rolemesh.db`` is an orchestrator-only package
+        # (asyncpg + per-entity submodules) and is intentionally NOT
+        # shipped into the agent container image. A top-level import
+        # here would make the module unloadable inside agents — and
+        # since ``audit.py`` is shared with ``pipeline_core``'s
+        # stateless helpers (``compute_context_digest`` /
+        # ``summarize_context``), agent_runner imports it at boot via
+        # ``safety.loader``. Keeping the DB symbol inside ``write`` is
+        # the contract that makes the agent never trigger this path.
+        from rolemesh.db import insert_safety_decision
 
         await insert_safety_decision(
             tenant_id=event.tenant_id,

@@ -524,6 +524,21 @@ def build_container_spec(
         otel_headers = os.environ.get("OTEL_EXPORTER_OTLP_HEADERS")
         if otel_headers:
             env["OTEL_EXPORTER_OTLP_HEADERS"] = otel_headers
+        # Add the OTLP host to NO_PROXY so the OTel exporter bypasses
+        # the egress forward proxy (HTTPS_PROXY/HTTP_PROXY set above
+        # for LLM/MCP routing). Without this, the exporter's request
+        # is intercepted by the credential proxy, which has no
+        # allowlist entry for langfuse-web and returns 403 — every
+        # span is silently dropped after the SDK's retry budget.
+        # Skip this when we're in the rollback (no Internal bridge)
+        # case — there's no proxy_env to begin with, so NO_PROXY is
+        # not present in env yet.
+        if "NO_PROXY" in env:
+            from urllib.parse import urlparse
+
+            otel_host = urlparse(otel_endpoint).hostname
+            if otel_host:
+                env["NO_PROXY"] = f"{env['NO_PROXY']},{otel_host}"
 
     if backend_config:
         # Pre-filter backend extra_env to catch misconfigured backends early
