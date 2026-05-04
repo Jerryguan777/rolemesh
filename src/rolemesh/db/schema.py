@@ -79,7 +79,7 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             tenant_id UUID NOT NULL REFERENCES tenants(id),
             name TEXT NOT NULL,
             folder TEXT NOT NULL,
-            agent_backend TEXT DEFAULT 'claude-code',
+            agent_backend TEXT DEFAULT 'claude',
             system_prompt TEXT,
             tools JSONB DEFAULT '[]',
             container_config JSONB,
@@ -99,7 +99,7 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         )
         if has_role_id:
             for col, default in [
-                ("agent_backend", "'claude-code'"),
+                ("agent_backend", "'claude'"),
                 ("system_prompt", "NULL"),
                 ("tools", "'[]'::jsonb"),
             ]:
@@ -120,6 +120,14 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     # The skill system is moving to dedicated `skills` / `skill_files` tables;
     # the old per-coworker JSONB list was never consumed by the runner.
     await conn.execute("ALTER TABLE coworkers DROP COLUMN IF EXISTS skills")
+    # Rename legacy backend value: ``claude-code`` was the original name
+    # before the Pi integration (commit c032db0) renamed it to ``claude``.
+    # The alias was kept for back-compat; this idempotent UPDATE retires
+    # it so the alias entry can be removed from BACKEND_CONFIGS.
+    await conn.execute(
+        "UPDATE coworkers SET agent_backend = 'claude' "
+        "WHERE agent_backend = 'claude-code'"
+    )
     # --- Auth: add agent_role + permissions to coworkers ---
     await conn.execute(
         "ALTER TABLE coworkers ADD COLUMN IF NOT EXISTS agent_role TEXT DEFAULT 'agent'"

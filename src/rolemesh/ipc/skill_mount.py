@@ -31,14 +31,11 @@ also COPY it; the ``test_image_has_skill_mount_module`` test in
 from __future__ import annotations
 
 # Backend-specific bind-mount targets. Keys match the canonical
-# names returned by ``BACKEND_CONFIGS`` in ``rolemesh.agent.executor``;
-# the legacy alias ``"claude-code"`` maps to the same path as
-# ``"claude"`` so both routes land in the same dir.
+# names returned by ``BACKEND_CONFIGS`` in ``rolemesh.agent.executor``.
 CLAUDE_SKILLS_PATH: str = "/home/agent/.claude/skills"
 PI_SKILLS_PATH: str = "/home/agent/.pi/skills"
 
 CONTAINER_TARGETS_BY_BACKEND: dict[str, str] = {
     "claude": CLAUDE_SKILLS_PATH,
-    "claude-code": CLAUDE_SKILLS_PATH,
     "pi": PI_SKILLS_PATH,
 }

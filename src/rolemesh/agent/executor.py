@@ -183,6 +183,5 @@ PI_BACKEND = AgentBackendConfig(
 # Map backend names to configs for dispatch.
 BACKEND_CONFIGS: dict[str, AgentBackendConfig] = {
     "claude": CLAUDE_CODE_BACKEND,
-    "claude-code": CLAUDE_CODE_BACKEND,  # legacy alias
     "pi": PI_BACKEND,
 }

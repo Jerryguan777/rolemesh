@@ -19,8 +19,8 @@ The flow is described in detail in docs/skills-architecture.md
 
 The mount target inside the container depends on the backend:
 
-* ``claude`` / ``claude-code`` → ``/home/agent/.claude/skills``
-* ``pi``                       → ``/home/agent/.pi/skills``
+* ``claude`` → ``/home/agent/.claude/skills``
+* ``pi``     → ``/home/agent/.pi/skills``
 """
 
 from __future__ import annotations

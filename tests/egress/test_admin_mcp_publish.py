@@ -46,7 +46,7 @@ def _coworker_with_tools(tools: list[McpServerConfig]) -> Coworker:
         tenant_id="tenant-id",
         name="bot",
         folder="bot-folder",
-        agent_backend="claude-code",
+        agent_backend="claude",
         system_prompt=None,
         tools=tools,
         container_config=None,

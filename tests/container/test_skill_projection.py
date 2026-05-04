@@ -47,7 +47,7 @@ _GOOD_DESC = (
 )
 
 
-async def _make_coworker(tag: str, *, agent_backend: str = "claude-code") -> tuple[str, str]:
+async def _make_coworker(tag: str, *, agent_backend: str = "claude") -> tuple[str, str]:
     t = await create_tenant(name=f"T{tag}", slug=f"sp-{tag}-{uuid.uuid4().hex[:6]}")
     cw = await create_coworker(
         tenant_id=t.id,
@@ -73,7 +73,7 @@ async def _projected_coworker(tag: str, *, agent_backend: str) -> tuple[str, str
 
 
 async def test_projects_to_claude_path_for_claude_backend() -> None:
-    tenant_id, coworker_id = await _projected_coworker("clp", agent_backend="claude-code")
+    tenant_id, coworker_id = await _projected_coworker("clp", agent_backend="claude")
     await create_skill(
         tenant_id=tenant_id, coworker_id=coworker_id, name="echo",
         frontmatter_common={"name": "echo", "description": _GOOD_DESC},
@@ -85,7 +85,7 @@ async def test_projects_to_claude_path_for_claude_backend() -> None:
     job_id = f"job-{uuid.uuid4().hex[:8]}"
     try:
         mount = await materialize_skills_for_spawn(
-            coworker, job_id, backend="claude-code"
+            coworker, job_id, backend="claude"
         )
         assert mount is not None
         assert mount.readonly is True
@@ -162,7 +162,7 @@ async def test_pi_projection_drops_claude_specific_fields() -> None:
 
 
 async def test_claude_projection_drops_pi_specific_fields() -> None:
-    tenant_id, coworker_id = await _projected_coworker("dcf", agent_backend="claude-code")
+    tenant_id, coworker_id = await _projected_coworker("dcf", agent_backend="claude")
     await create_skill(
         tenant_id=tenant_id, coworker_id=coworker_id, name="multi",
         frontmatter_common={"name": "multi", "description": _GOOD_DESC},
@@ -177,7 +177,7 @@ async def test_claude_projection_drops_pi_specific_fields() -> None:
     job_id = f"job-{uuid.uuid4().hex[:8]}"
     try:
         mount = await materialize_skills_for_spawn(
-            coworker, job_id, backend="claude-code"
+            coworker, job_id, backend="claude"
         )
         assert mount is not None
         skill_md_text = (Path(mount.host_path) / "multi" / "SKILL.md").read_text()
@@ -213,7 +213,7 @@ async def test_projects_supporting_files_verbatim() -> None:
     job_id = f"job-{uuid.uuid4().hex[:8]}"
     try:
         mount = await materialize_skills_for_spawn(
-            coworker, job_id, backend="claude-code"
+            coworker, job_id, backend="claude"
         )
         assert mount is not None
         skill_root = Path(mount.host_path) / "three-files"
@@ -256,7 +256,7 @@ async def test_disabled_skills_are_not_projected() -> None:
     job_id = f"job-{uuid.uuid4().hex[:8]}"
     try:
         mount = await materialize_skills_for_spawn(
-            coworker, job_id, backend="claude-code"
+            coworker, job_id, backend="claude"
         )
         assert mount is not None
         host = Path(mount.host_path)
@@ -272,7 +272,7 @@ async def test_no_enabled_skills_returns_none() -> None:
     assert coworker is not None
     job_id = f"job-{uuid.uuid4().hex[:8]}"
     mount = await materialize_skills_for_spawn(
-        coworker, job_id, backend="claude-code"
+        coworker, job_id, backend="claude"
     )
     assert mount is None
     # When there are no skills, the spawn dir should not be created.
@@ -297,7 +297,7 @@ async def test_partial_dir_cleaned_up_after_success() -> None:
     job_id = f"job-{uuid.uuid4().hex[:8]}"
     try:
         mount = await materialize_skills_for_spawn(
-            coworker, job_id, backend="claude-code"
+            coworker, job_id, backend="claude"
         )
         assert mount is not None
         partial = Path(mount.host_path) / ".partial"
@@ -437,7 +437,7 @@ async def test_rejects_symlinked_build_dir(tmp_path: Path) -> None:
     try:
         with pytest.raises(SkillValidationError, match="symlink"):
             await materialize_skills_for_spawn(
-                coworker, job_id, backend="claude-code"
+                coworker, job_id, backend="claude"
             )
         # No bytes ever crossed the symlink to the redirect target.
         assert list(target_dir.iterdir()) == []
@@ -465,7 +465,7 @@ async def test_cleanup_spawn_skills_removes_dir() -> None:
     coworker = await get_coworker(coworker_id, tenant_id=tenant_id)
     assert coworker is not None
     job_id = f"job-{uuid.uuid4().hex[:8]}"
-    await materialize_skills_for_spawn(coworker, job_id, backend="claude-code")
+    await materialize_skills_for_spawn(coworker, job_id, backend="claude")
     assert (SPAWN_ROOT / job_id).exists()
     cleanup_spawn_skills(job_id)
     assert not (SPAWN_ROOT / job_id).exists()
@@ -492,10 +492,10 @@ async def test_cleanup_orphan_spawns_sweeps_abandoned() -> None:
     active = f"alive-{uuid.uuid4().hex[:8]}"
     try:
         await materialize_skills_for_spawn(
-            coworker, abandoned, backend="claude-code"
+            coworker, abandoned, backend="claude"
         )
         await materialize_skills_for_spawn(
-            coworker, active, backend="claude-code"
+            coworker, active, backend="claude"
         )
         assert (SPAWN_ROOT / abandoned).exists()
         assert (SPAWN_ROOT / active).exists()
@@ -563,7 +563,7 @@ async def test_outer_finally_cleans_up_on_exception(
         tenant_id: str = "t-1"
         name: str = "Bot"
         folder: str = "bot"
-        agent_backend: str = "claude-code"
+        agent_backend: str = "claude"
         agent_role: str = "agent"
         permissions: object = None
         tools: object = ()
@@ -611,7 +611,7 @@ def test_container_targets_match_design_doc() -> None:
     those exact paths.
     """
     assert CONTAINER_TARGETS["claude"] == "/home/agent/.claude/skills"
-    assert CONTAINER_TARGETS["claude-code"] == "/home/agent/.claude/skills"
+    assert CONTAINER_TARGETS["claude"] == "/home/agent/.claude/skills"
     assert CONTAINER_TARGETS["pi"] == "/home/agent/.pi/skills"
 
 
@@ -681,7 +681,7 @@ async def test_re_projection_overwrites_cleanly() -> None:
     job_id = f"job-{uuid.uuid4().hex[:8]}"
     try:
         mount1 = await materialize_skills_for_spawn(
-            coworker, job_id, backend="claude-code"
+            coworker, job_id, backend="claude"
         )
         assert mount1 is not None
         # Tamper with the projected dir, then re-project to the same
@@ -689,7 +689,7 @@ async def test_re_projection_overwrites_cleanly() -> None:
         leftover = Path(mount1.host_path) / "stale.tmp"
         leftover.write_text("garbage")
         mount2 = await materialize_skills_for_spawn(
-            coworker, job_id, backend="claude-code"
+            coworker, job_id, backend="claude"
         )
         assert mount2 is not None
         assert not leftover.exists(), "re-projection must wipe stale files"
@@ -720,7 +720,7 @@ async def test_files_world_readable() -> None:
     job_id = f"job-{uuid.uuid4().hex[:8]}"
     try:
         mount = await materialize_skills_for_spawn(
-            coworker, job_id, backend="claude-code"
+            coworker, job_id, backend="claude"
         )
         assert mount is not None
         skill_root = Path(mount.host_path) / "u"
@@ -752,7 +752,7 @@ async def test_projection_does_not_depend_on_cwd(monkeypatch: pytest.MonkeyPatch
     job_id = f"job-{uuid.uuid4().hex[:8]}"
     try:
         mount = await materialize_skills_for_spawn(
-            coworker, job_id, backend="claude-code"
+            coworker, job_id, backend="claude"
         )
         assert mount is not None
         # SPAWN_ROOT is anchored on DATA_DIR (project root), not the cwd.

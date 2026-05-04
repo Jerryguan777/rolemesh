@@ -303,18 +303,15 @@ def merge_frontmatter_for_backend(
     """Build the per-backend frontmatter to write into SKILL.md.
 
     Keys from other backends are dropped — that's the whole point of
-    the structured storage. ``target_backend`` accepts canonical
-    backend names and the alias ``claude-code`` (which maps to
-    ``claude`` in our storage).
+    the structured storage.
     """
-    canonical = "claude" if target_backend in ("claude", "claude-code") else target_backend
-    if canonical not in KNOWN_BACKENDS:
+    if target_backend not in KNOWN_BACKENDS:
         raise SkillValidationError(
             f"unknown target backend {target_backend!r}; "
-            f"must be one of {sorted(KNOWN_BACKENDS) + ['claude-code']}"
+            f"must be one of {sorted(KNOWN_BACKENDS)}"
         )
     merged: dict[str, Any] = dict(frontmatter_common)
-    merged.update(frontmatter_backend.get(canonical, {}))
+    merged.update(frontmatter_backend.get(target_backend, {}))
     return merged
 
 

@@ -372,16 +372,6 @@ def test_merge_drops_other_backend_keys() -> None:
     assert "argument-hint" not in pi_merged
 
 
-def test_merge_treats_claude_code_alias() -> None:
-    """``claude-code`` (the BACKEND_CONFIGS legacy alias) projects to
-    Claude-side files and should pull from frontmatter_backend.claude.
-    """
-    common = {"name": "x", "description": _GOOD_DESC}
-    backend = {"claude": {"model": "claude-haiku-4-5"}}
-    merged = merge_frontmatter_for_backend(common, backend, "claude-code")
-    assert merged["model"] == "claude-haiku-4-5"
-
-
 def test_merge_rejects_unknown_target_backend() -> None:
     with pytest.raises(SkillValidationError):
         merge_frontmatter_for_backend({}, {}, "crystalball")

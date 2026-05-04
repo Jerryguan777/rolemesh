@@ -175,11 +175,8 @@ def test_pi_backend_preset() -> None:
 def test_backend_configs_map() -> None:
     assert "claude" in BACKEND_CONFIGS
     assert "pi" in BACKEND_CONFIGS
-    assert "claude-code" in BACKEND_CONFIGS  # legacy alias
     assert BACKEND_CONFIGS["claude"] is CLAUDE_CODE_BACKEND
     assert BACKEND_CONFIGS["pi"] is PI_BACKEND
-    # Legacy alias must resolve to the same config object
-    assert BACKEND_CONFIGS["claude-code"] is BACKEND_CONFIGS["claude"]
 
 
 def test_agent_backend_config_frozen() -> None:

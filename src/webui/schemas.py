@@ -113,7 +113,7 @@ class AgentDetailResponse(AgentResponse):
 class AgentCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     folder: str = Field(..., min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-    agent_backend: str = "claude-code"
+    agent_backend: str = "claude"
     system_prompt: str | None = None
     tools: list[dict[str, object]] = Field(default_factory=list)
     max_concurrent: int = Field(2, ge=1, le=20)
