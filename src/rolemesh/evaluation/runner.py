@@ -76,8 +76,8 @@ def _backend_for_coworker(coworker: Coworker) -> AgentBackendConfig:
     unknown backend — same behavior as the production scheduler when
     it dispatches a turn.
     """
-    name = coworker.agent_backend or "claude-code"
-    return BACKEND_CONFIGS.get(name, BACKEND_CONFIGS["claude-code"])
+    name = coworker.agent_backend or "claude"
+    return BACKEND_CONFIGS.get(name, BACKEND_CONFIGS["claude"])
 
 
 def _safe_chat_jid(group_folder: str) -> str:

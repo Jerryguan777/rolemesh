@@ -37,7 +37,6 @@ if TYPE_CHECKING:
     from rolemesh.safety.engine import SafetyEngine
 
 from rolemesh.agent import (
-    BACKEND_CONFIGS,
     CLAUDE_CODE_BACKEND,
     PI_BACKEND,
     AgentInput,
@@ -1346,14 +1345,9 @@ async def main() -> None:
         cw = _state.coworkers.get(coworker_id)
         return _coworker_from_state(cw) if cw else None
 
-    # Build one executor per unique config, then add aliases.
-    _unique_configs = [CLAUDE_CODE_BACKEND, PI_BACKEND]
-    for cfg in _unique_configs:
+    # Build one executor per backend.
+    for cfg in (CLAUDE_CODE_BACKEND, PI_BACKEND):
         _executors[cfg.name] = ContainerAgentExecutor(cfg, _runtime, _transport, _get_coworker)
-    # Add aliases so legacy DB values (e.g. "claude-code") resolve correctly.
-    for alias, cfg in BACKEND_CONFIGS.items():
-        if alias not in _executors:
-            _executors[alias] = _executors[cfg.name]
 
     if AGENT_BACKEND_DEFAULT not in _executors:
         logger.warning("Unknown ROLEMESH_AGENT_BACKEND=%r, falling back to 'claude'", AGENT_BACKEND_DEFAULT)

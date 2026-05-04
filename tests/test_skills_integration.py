@@ -86,7 +86,7 @@ def _client(app: FastAPI) -> httpx.AsyncClient:
     )
 
 
-async def _seed(agent_backend: str = "claude-code") -> tuple[AuthenticatedUser, str]:
+async def _seed(agent_backend: str = "claude") -> tuple[AuthenticatedUser, str]:
     """One tenant + one admin user + one coworker on ``agent_backend``.
 
     Returns ``(user_for_app, coworker_id)``.
@@ -143,7 +143,7 @@ def _skill_payload(name: str = "echo") -> dict[str, object]:
 
 
 async def test_rest_to_projection_claude_backend() -> None:
-    user, agent_id = await _seed(agent_backend="claude-code")
+    user, agent_id = await _seed(agent_backend="claude")
     app = _build_app(user)
     async with _client(app) as c:
         resp = await c.post(
@@ -157,7 +157,7 @@ async def test_rest_to_projection_claude_backend() -> None:
     job_id = f"int-{uuid.uuid4().hex[:8]}"
     try:
         mount = await materialize_skills_for_spawn(
-            coworker, job_id, backend="claude-code"
+            coworker, job_id, backend="claude"
         )
         assert mount is not None
         assert mount.container_path == "/home/agent/.claude/skills"
@@ -259,7 +259,7 @@ async def test_disabled_skill_visible_in_rest_invisible_to_projection() -> None:
     The model literally cannot see disabled skills — this is a
     stronger guarantee than relying on a "do not use" description.
     """
-    user, agent_id = await _seed(agent_backend="claude-code")
+    user, agent_id = await _seed(agent_backend="claude")
     app = _build_app(user)
     async with _client(app) as c:
         r = await c.post(
@@ -287,7 +287,7 @@ async def test_disabled_skill_visible_in_rest_invisible_to_projection() -> None:
     job_id = f"int-{uuid.uuid4().hex[:8]}"
     try:
         mount = await materialize_skills_for_spawn(
-            coworker, job_id, backend="claude-code"
+            coworker, job_id, backend="claude"
         )
         # Only the disabled skill exists, so projection returns None.
         assert mount is None
@@ -307,8 +307,8 @@ async def test_cross_tenant_skill_invisible_to_other_tenant_projection() -> None
     coworker, even when A's projection happens to use the same
     skill name in its own tenant.
     """
-    userA, agentA = await _seed(agent_backend="claude-code")
-    userB, agentB = await _seed(agent_backend="claude-code")
+    userA, agentA = await _seed(agent_backend="claude")
+    userB, agentB = await _seed(agent_backend="claude")
 
     # Tenant A creates "shared-name" in their own scope.
     appA = _build_app(userA)
@@ -352,7 +352,7 @@ async def test_cross_tenant_skill_invisible_to_other_tenant_projection() -> None
     job_id = f"int-{uuid.uuid4().hex[:8]}"
     try:
         mount = await materialize_skills_for_spawn(
-            cwA, job_id, backend="claude-code"
+            cwA, job_id, backend="claude"
         )
         assert mount is not None
         skill_md = (Path(mount.host_path) / "shared-name" / "SKILL.md").read_text()
@@ -368,7 +368,7 @@ async def test_cross_tenant_skill_invisible_to_other_tenant_projection() -> None
 
 
 async def test_per_file_patch_visible_in_next_projection() -> None:
-    user, agent_id = await _seed(agent_backend="claude-code")
+    user, agent_id = await _seed(agent_backend="claude")
     app = _build_app(user)
     async with _client(app) as c:
         r = await c.post(
@@ -396,7 +396,7 @@ async def test_per_file_patch_visible_in_next_projection() -> None:
     job_id = f"int-{uuid.uuid4().hex[:8]}"
     try:
         mount = await materialize_skills_for_spawn(
-            coworker, job_id, backend="claude-code"
+            coworker, job_id, backend="claude"
         )
         assert mount is not None
         skill_root = Path(mount.host_path) / "iterative"

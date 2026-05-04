@@ -134,7 +134,7 @@ async def test_create_and_get_coworker() -> None:
     assert cw.agent_role == "super_agent"
     assert cw.max_concurrent == 3
     assert cw.tools == [McpServerConfig(name="my-mcp-server", type="sse", url="http://localhost:9100/mcp/")]
-    assert cw.agent_backend == "claude-code"
+    assert cw.agent_backend == "claude"
 
     fetched = await get_coworker(cw.id, tenant_id=t.id)
     assert fetched is not None

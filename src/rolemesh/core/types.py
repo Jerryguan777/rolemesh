@@ -137,7 +137,7 @@ class Coworker:
     tenant_id: str
     name: str
     folder: str
-    agent_backend: str = "claude-code"
+    agent_backend: str = "claude"
     system_prompt: str | None = None
     tools: list[McpServerConfig] = field(default_factory=list)
     container_config: ContainerConfig | None = None
