@@ -19,6 +19,6 @@ store/
 .claude/
 STEPS.md
 plan_*.md
-docs/
+docs_bk/
 node_modules/
 web/dist/
