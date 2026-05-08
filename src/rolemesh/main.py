@@ -70,7 +70,6 @@ from rolemesh.core.config import (
 from rolemesh.core.logger import get_logger
 from rolemesh.core.orchestrator_state import (
     ConversationState,
-    CoworkerConfig,
     CoworkerState,
     OrchestratorState,
 )
@@ -406,22 +405,7 @@ async def _load_state() -> None:
         convs_by_coworker.setdefault(c.coworker_id, []).append(c)
 
     for cw in all_coworkers:
-        config = CoworkerConfig(
-            id=cw.id,
-            tenant_id=cw.tenant_id,
-            name=cw.name,
-            folder=cw.folder,
-            system_prompt=cw.system_prompt,
-            trigger_pattern=CoworkerConfig.build_trigger_pattern(cw.name),
-            agent_backend=cw.agent_backend,
-            container_image=None,
-            max_concurrent=cw.max_concurrent,
-            tools=cw.tools,
-            agent_role=cw.agent_role,
-            permissions=cw.permissions,
-        )
-
-        cw_state = CoworkerState(config=config)
+        cw_state = CoworkerState.from_coworker(cw)
 
         # Load channel bindings
         for b in bindings_by_coworker.get(cw.id, []):
@@ -567,7 +551,7 @@ async def _handle_incoming(
     # Only store the message if it's relevant to THIS coworker:
     # - conversation doesn't require trigger (DM or admin), OR
     # - message content matches this coworker's trigger pattern
-    if is_group and conv.requires_trigger and not cw_state.config.trigger_pattern.search(text.strip()):
+    if is_group and conv.requires_trigger and not cw_state.trigger_pattern.search(text.strip()):
         return  # Not for this coworker — skip silently
 
     # Sender allowlist check
@@ -623,7 +607,7 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
     if config.agent_role != "super_agent" and conv.requires_trigger:
         allowlist_cfg = load_sender_allowlist()
         has_trigger = any(
-            config.trigger_pattern.search(m.content.strip())
+            cw_state.trigger_pattern.search(m.content.strip())
             and (m.is_from_me or is_trigger_allowed(conv.channel_chat_id, m.sender, allowlist_cfg))
             for m in missed_messages
         )
@@ -1179,7 +1163,7 @@ async def _message_loop(shutdown_event: asyncio.Event) -> None:
                         conv_messages = [msg for cid, msg in results if cid == conv_id]
                         allowlist_cfg = load_sender_allowlist()
                         has_trigger = any(
-                            config.trigger_pattern.search(m.content.strip())
+                            cw_state.trigger_pattern.search(m.content.strip())
                             and (m.is_from_me or is_trigger_allowed(chat_id, m.sender, allowlist_cfg))
                             for m in conv_messages
                         )
