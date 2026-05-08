@@ -88,7 +88,10 @@ services:
     volumes:
       - langfuse-minio-data:/data
     healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+      # Direct HTTP check rather than ``mc ready local`` because the
+      # minio image doesn't ship a pre-configured ``local`` alias and
+      # we moved the API off the default 9000 to 9090.
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9090/minio/health/live || exit 1"]
       interval: 5s
       retries: 10
 
