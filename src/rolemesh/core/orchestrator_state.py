@@ -11,38 +11,12 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from rolemesh.auth.permissions import AgentPermissions
-    from rolemesh.core.types import ChannelBinding, Conversation, McpServerConfig, Tenant
+    from rolemesh.core.types import ChannelBinding, Conversation, Coworker, Tenant
 
 
-@dataclass
-class CoworkerConfig:
-    """Runtime config loaded from coworkers table."""
-
-    id: str
-    tenant_id: str
-    name: str
-    folder: str
-    system_prompt: str | None
-    trigger_pattern: re.Pattern[str]
-    agent_backend: str
-    container_image: str | None
-    max_concurrent: int
-    role_config: dict[str, object] = field(default_factory=dict)
-    tools: list[McpServerConfig] = field(default_factory=list)
-    agent_role: str = "agent"
-    permissions: AgentPermissions | None = None  # filled by __post_init__; always non-None after init
-
-    def __post_init__(self) -> None:
-        if self.permissions is None:
-            from rolemesh.auth.permissions import AgentPermissions as _AgentPermissions
-
-            self.permissions = _AgentPermissions.for_role(self.agent_role)
-
-    @staticmethod
-    def build_trigger_pattern(name: str) -> re.Pattern[str]:
-        """Build trigger pattern from coworker name."""
-        return re.compile(rf"@{re.escape(name)}\b", re.IGNORECASE)
+def build_trigger_pattern(name: str) -> re.Pattern[str]:
+    """Build the @-mention regex for a coworker name."""
+    return re.compile(rf"@{re.escape(name)}\b", re.IGNORECASE)
 
 
 @dataclass
@@ -56,11 +30,26 @@ class ConversationState:
 
 @dataclass
 class CoworkerState:
-    """Per-coworker runtime state."""
+    """Per-coworker runtime state.
 
-    config: CoworkerConfig
+    ``config`` is the DB-row shape (``Coworker``) used as the single source of
+    truth for all coworker fields. Derived/computed values such as the
+    @-mention ``trigger_pattern`` live as sibling fields here, not on
+    ``config`` — keeping the DB shape and the runtime cache cleanly separated.
+    """
+
+    config: Coworker
+    trigger_pattern: re.Pattern[str]
     conversations: dict[str, ConversationState] = field(default_factory=dict)
     channel_bindings: dict[str, ChannelBinding] = field(default_factory=dict)
+
+    @staticmethod
+    def from_coworker(cw: Coworker) -> CoworkerState:
+        """Build a fresh ``CoworkerState`` from a ``Coworker`` DB row."""
+        return CoworkerState(
+            config=cw,
+            trigger_pattern=build_trigger_pattern(cw.name),
+        )
 
 
 class OrchestratorState:

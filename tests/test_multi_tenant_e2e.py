@@ -20,9 +20,9 @@ import pytest
 
 from rolemesh.core.orchestrator_state import (
     ConversationState,
-    CoworkerConfig,
     CoworkerState,
     OrchestratorState,
+    build_trigger_pattern,
 )
 from rolemesh.core.types import (
     ChannelBinding,
@@ -129,19 +129,7 @@ def _build_coworker_state(
     conversations: list[Conversation],
 ) -> CoworkerState:
     """Build runtime CoworkerState from DB entities."""
-    config = CoworkerConfig(
-        id=cw.id,
-        tenant_id=cw.tenant_id,
-        name=cw.name,
-        folder=cw.folder,
-        system_prompt=cw.system_prompt,
-        trigger_pattern=CoworkerConfig.build_trigger_pattern(cw.name),
-        agent_backend=cw.agent_backend,
-        container_image=None,
-        max_concurrent=cw.max_concurrent,
-        agent_role=cw.agent_role,
-    )
-    state = CoworkerState(config=config)
+    state = CoworkerState.from_coworker(cw)
     state.channel_bindings[binding.channel_type] = binding
     for conv in conversations:
         state.conversations[conv.id] = ConversationState(conversation=conv)
@@ -577,18 +565,15 @@ class TestThreeLevelConcurrency:
         state = OrchestratorState(global_limit=10)
         state.tenants["t1"] = Tenant(id="t1", name="T", max_concurrent_containers=10)
 
-        cw_config = CoworkerConfig(
+        cw = Coworker(
             id="cw1",
             tenant_id="t1",
             name="Bot",
             folder="bot",
-            system_prompt=None,
-            trigger_pattern=CoworkerConfig.build_trigger_pattern("Bot"),
             agent_backend="claude",
-            container_image=None,
             max_concurrent=1,
         )
-        state.coworkers["cw1"] = CoworkerState(config=cw_config)
+        state.coworkers["cw1"] = CoworkerState.from_coworker(cw)
 
         assert state.can_start_container("t1", "cw1") is True
         state.increment_active("t1", "cw1")
@@ -1077,7 +1062,7 @@ class TestTaskSchedulingPerCoworker:
 class TestTriggerPatternFromName:
     def test_trigger_pattern_matches_coworker_name(self) -> None:
         """Trigger pattern derived from coworker name, case-insensitive."""
-        pattern = CoworkerConfig.build_trigger_pattern("Sales AI")
+        pattern = build_trigger_pattern("Sales AI")
         assert pattern.search("@Sales AI what's our revenue?")
         assert pattern.search("@sales ai please help")
         assert not pattern.search("Hey sales team")  # No @mention
@@ -1085,7 +1070,7 @@ class TestTriggerPatternFromName:
 
     def test_trigger_pattern_with_dot_in_name(self) -> None:
         """Dots in names are literal, not regex wildcards."""
-        pattern = CoworkerConfig.build_trigger_pattern("Bot.v2")
+        pattern = build_trigger_pattern("Bot.v2")
         assert pattern.search("@Bot.v2 help me")
         assert not pattern.search("@BotXv2 help me")  # Dot must be literal
 
@@ -1095,13 +1080,13 @@ class TestTriggerPatternFromName:
         This is a regex limitation. In practice, coworker names rarely end with
         special chars. Document the behavior rather than work around it.
         """
-        pattern = CoworkerConfig.build_trigger_pattern("Bot (v2.0)")
+        pattern = build_trigger_pattern("Bot (v2.0)")
         # \b after ) is a non-word/non-word boundary, so it doesn't fire before space
         assert pattern.search("@Bot (v2.0)") is None  # Known limitation
 
     def test_trigger_pattern_boundary(self) -> None:
         """@mention must be word-bounded (not just a prefix)."""
-        pattern = CoworkerConfig.build_trigger_pattern("Andy")
+        pattern = build_trigger_pattern("Andy")
         assert pattern.search("@Andy help")
         assert not pattern.search("@Andybot help")  # "Andy" is prefix but not word
 
@@ -1126,18 +1111,15 @@ class TestOrchestratorStateLookups:
             channel_binding_id="b1",
             channel_chat_id="-1001",
         )
-        config = CoworkerConfig(
+        cw = Coworker(
             id="cw1",
             tenant_id="t1",
             name="Bot",
             folder="bot",
-            system_prompt=None,
-            trigger_pattern=CoworkerConfig.build_trigger_pattern("Bot"),
             agent_backend="claude",
-            container_image=None,
             max_concurrent=2,
         )
-        cw_state = CoworkerState(config=config)
+        cw_state = CoworkerState.from_coworker(cw)
         cw_state.channel_bindings["telegram"] = binding
         cw_state.conversations["conv1"] = ConversationState(conversation=conv)
         state.coworkers["cw1"] = cw_state
@@ -1157,18 +1139,15 @@ class TestOrchestratorStateLookups:
         """Known binding but wrong chat_id returns None."""
         state = OrchestratorState()
         binding = ChannelBinding(id="b1", coworker_id="cw1", tenant_id="t1", channel_type="telegram")
-        config = CoworkerConfig(
+        cw = Coworker(
             id="cw1",
             tenant_id="t1",
             name="Bot",
             folder="bot",
-            system_prompt=None,
-            trigger_pattern=CoworkerConfig.build_trigger_pattern("Bot"),
             agent_backend="claude",
-            container_image=None,
             max_concurrent=2,
         )
-        cw_state = CoworkerState(config=config)
+        cw_state = CoworkerState.from_coworker(cw)
         cw_state.channel_bindings["telegram"] = binding
         # No conversations registered
         state.coworkers["cw1"] = cw_state
@@ -1178,18 +1157,15 @@ class TestOrchestratorStateLookups:
     def test_get_coworker_by_folder(self) -> None:
         """Lookup by tenant + folder returns correct coworker."""
         state = OrchestratorState()
-        config = CoworkerConfig(
+        cw = Coworker(
             id="cw1",
             tenant_id="t1",
             name="Bot",
             folder="my-bot",
-            system_prompt=None,
-            trigger_pattern=CoworkerConfig.build_trigger_pattern("Bot"),
             agent_backend="claude",
-            container_image=None,
             max_concurrent=2,
         )
-        state.coworkers["cw1"] = CoworkerState(config=config)
+        state.coworkers["cw1"] = CoworkerState.from_coworker(cw)
 
         found = state.get_coworker_by_folder("t1", "my-bot")
         assert found is not None
