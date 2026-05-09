@@ -432,6 +432,68 @@ async def test_oidc_authenticate_rejects_expired_token(
     assert await provider.authenticate(token) is None
 
 
+async def test_oidc_authenticate_accepts_token_within_leeway(
+    patch_jwks, oidc_env, mock_db, make_token
+):
+    """Tokens expired up to 30s ago are still accepted — clock-skew tolerance."""
+    import time
+
+    from rolemesh.auth.oidc.adapter import DefaultOIDCAdapter
+    from rolemesh.auth.oidc.config import OIDCConfig
+    from rolemesh.auth.oidc.provider import OIDCAuthProvider
+
+    provider = OIDCAuthProvider(
+        OIDCConfig(
+            discovery_url="https://test.example.com/.well-known/openid-configuration",
+            client_id="test-client",
+            audience="test-client",
+        ),
+        adapter=DefaultOIDCAdapter.from_env(),
+    )
+    now = int(time.time())
+    token = make_token(
+        {
+            "sub": "user-leeway-inside",
+            "iss": "https://test.example.com/",
+            "aud": "test-client",
+            "exp": now - 10,
+            "iat": now - 600,
+        }
+    )
+    assert await provider.authenticate(token) is not None
+
+
+async def test_oidc_authenticate_rejects_token_outside_leeway(
+    patch_jwks, oidc_env, mock_db, make_token
+):
+    """A token expired 60s ago is past the 30s leeway window and rejected."""
+    import time
+
+    from rolemesh.auth.oidc.adapter import DefaultOIDCAdapter
+    from rolemesh.auth.oidc.config import OIDCConfig
+    from rolemesh.auth.oidc.provider import OIDCAuthProvider
+
+    provider = OIDCAuthProvider(
+        OIDCConfig(
+            discovery_url="https://test.example.com/.well-known/openid-configuration",
+            client_id="test-client",
+            audience="test-client",
+        ),
+        adapter=DefaultOIDCAdapter.from_env(),
+    )
+    now = int(time.time())
+    token = make_token(
+        {
+            "sub": "user-leeway-outside",
+            "iss": "https://test.example.com/",
+            "aud": "test-client",
+            "exp": now - 60,
+            "iat": now - 600,
+        }
+    )
+    assert await provider.authenticate(token) is None
+
+
 async def test_oidc_authenticate_rejects_garbage_token(patch_jwks, oidc_env, mock_db):
     from rolemesh.auth.oidc.adapter import DefaultOIDCAdapter
     from rolemesh.auth.oidc.config import OIDCConfig
