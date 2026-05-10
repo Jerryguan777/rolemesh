@@ -1,6 +1,6 @@
 # 容器运行时与 Agent Executor 架构
 
-本文档描述位于协调器 (Orchestrator) 与实际容器进程之间的两个抽象层：**ContainerRuntime**（容器如何启动与管理）和 **AgentExecutor**（agent 工作如何派发）。文中涵盖这些抽象解决的问题、其背后的设计决策，以及它们如何使容器后端 (Docker → Kubernetes) 与 agent 后端 (Claude SDK → Pi) 能够独立替换。
+本文档描述位于 orchestrator (Orchestrator) 与实际容器进程之间的两个抽象层：**ContainerRuntime**（容器如何启动与管理）和 **AgentExecutor**（agent 工作如何派发）。文中涵盖这些抽象解决的问题、其背后的设计决策，以及它们如何使容器后端 (Docker → Kubernetes) 与 agent 后端 (Claude SDK → Pi) 能够独立替换。
 
 > **项目演进。** RoleMesh 由 [NanoClaw](https://github.com/qwibitai/nanoclaw) 演进而来；这套两层切分是在重写过程中从一个 340 行的单体函数里梳理出来的，因此下文的历史段落描述的是被替换掉的最初 NanoClaw 形态。抽象本身是 RoleMesh 时代的产物；后续阶段（多租户、容器加固、出向控制）通过为 `ContainerSpec` 增加额外字段扩展了它，但并未改变层次切分。
 
@@ -122,7 +122,7 @@ spec 由 `container/runner.py` 中的纯函数 (`build_volume_mounts`、`build_c
 
 ### 为什么是单一实现，而不是每个后端一个 executor 类
 
-在评估 Pi 后端时我们发现，**协调器侧**的流程对每种 agent 后端都是一样的：
+在评估 Pi 后端时我们发现，**orchestrator 侧**的流程对每种 agent 后端都是一样的：
 
 1. 构建 volume mount
 2. 构建 container spec
