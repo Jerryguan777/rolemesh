@@ -138,11 +138,11 @@ The three layers are **redundant by design**. After RLS is enabled, Layer 1's `W
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│   App Pool   (role: app_user,  NOBYPASSRLS)                 │
+│   App Pool   (role: rolemesh_app,  NOBYPASSRLS)                 │
 │   ├── Used by: webui REST handlers, NATS business handlers  │
 │   └── Wrapped by: tenant_conn(tenant_id) context manager    │
 ├─────────────────────────────────────────────────────────────┤
-│   Admin Pool (role: app_admin, BYPASSRLS)                   │
+│   Admin Pool (role: rolemesh_system, BYPASSRLS)                   │
 │   ├── Used by: maintenance loops, schedulers, resolvers,    │
 │   │           startup migrations                            │
 │   └── Wrapped by: admin_conn() context manager              │
@@ -194,7 +194,7 @@ Two tables deserve explicit mention because they're shaped by RLS:
 
 Two tables explicitly do not have RLS:
 - **`tenants`** is the root table; access is via owner endpoints and admin connection only.
-- **`external_tenant_map`** is the OIDC tenant lookup table; `app_user` has no privileges on it.
+- **`external_tenant_map`** is the OIDC tenant lookup table; `rolemesh_app` has no privileges on it.
 
 ---
 
@@ -216,7 +216,7 @@ Every business call site carries `tenant_id=user.tenant_id` as an explicit keywo
 
 ### Two Pools vs. One Pool
 
-A single pool with `SET ROLE app_user` / `SET ROLE app_admin` would save memory and connection slots. The risk — forgetting to reset role and leaking admin privilege to the next request — was judged unacceptable for this risk profile. The extra pool costs a few connections; it is a cheap form of physical isolation.
+A single pool with `SET ROLE rolemesh_app` / `SET ROLE rolemesh_system` would save memory and connection slots. The risk — forgetting to reset role and leaking admin privilege to the next request — was judged unacceptable for this risk profile. The extra pool costs a few connections; it is a cheap form of physical isolation.
 
 ---
 
@@ -225,7 +225,7 @@ A single pool with `SET ROLE app_user` / `SET ROLE app_admin` would save memory 
 RLS was rolled out in five sequential phases. The phases are designed so that each one can be deployed and rolled back independently, and so that no phase weakens the system relative to the previous one.
 
 1. **Application-layer pinning.** Add `tenant_id` required kwarg to remaining by-id functions; add `resolve_user_for_auth` for JWT resume; rewrite auth providers to use the two-step bootstrap pattern. No DB changes yet.
-2. **Infrastructure.** Create the `current_tenant_id()` SQL function, the `app_user` / `app_admin` roles, the dual pool, and the `tenant_conn` / `admin_conn` wrappers. RLS is still off; no business behavior changes.
+2. **Infrastructure.** Create the `current_tenant_id()` SQL function, the `rolemesh_app` / `rolemesh_system` roles, the dual pool, and the `tenant_conn` / `admin_conn` wrappers. RLS is still off; no business behavior changes.
 3. **Connection migration.** Replace every `pool.acquire()` site with `tenant_conn(tenant_id)` or `admin_conn()` based on the function's class. After this phase, every business path correctly carries tenant context — but RLS is still not enforced.
 4. **Per-table enablement.** Enable RLS one table at a time, starting with the lowest-blast-radius table (`approval_audit_log`) as a canary and ending with `users` and `oidc_user_tokens`. Each table is a single commit, independently rollback-able with one `ALTER TABLE ... DISABLE ROW LEVEL SECURITY` statement.
 5. **Enforcement tests.** Add tests that verify RLS actually blocks cross-tenant access at the DB level (distinct from application-layer tests that verify the WHERE clause). Add static-analysis CI checks that the four-class taxonomy is preserved.
@@ -236,7 +236,7 @@ The order is critical: phase 4 cannot precede phase 3, because turning on RLS wh
 
 ## What This Architecture Does NOT Do
 
-- **It does not protect against compromised `app_admin` credentials.** Anyone holding the admin role has full cross-tenant access. That role's credentials must be treated with the same care as the Postgres superuser.
+- **It does not protect against compromised `rolemesh_system` credentials.** Anyone holding the admin role has full cross-tenant access. That role's credentials must be treated with the same care as the Postgres superuser.
 - **It does not partition the NATS message bus per tenant.** A compromised container could subscribe to subjects like `agent.*.tasks` and observe (but not modify) other tenants' messages. The engine validates tenant on write paths, but read-side observation is documented as an XFAIL in `tests/attack_sim/test_E_tenant_isolation.py` (`test_E6`).
 - **It does not provide per-tenant resource quotas.** Concurrency limits exist (`max_concurrent_containers`), but token/spend/API quotas are out of scope.
 - **It does not retire `resolve_*` resolvers automatically.** Each resolver carries removal metadata, but the actual removal is a manual decision by a future PR when the documented condition is met.
@@ -251,7 +251,7 @@ The order is critical: phase 4 cannot precede phase 3, because turning on RLS wh
 Operator `psql` sessions default to the Postgres superuser, which has `BYPASSRLS` and sees everything. To simulate the application's view:
 
 ```sql
-SET ROLE app_user;
+SET ROLE rolemesh_app;
 SELECT set_config('app.current_tenant_id', '<tenant_uuid>', false);
 -- subsequent queries are RLS-scoped to that tenant
 ```
@@ -269,7 +269,7 @@ If a user reports that data they should see is missing, check in order:
 1. Is the user's JWT being decoded to the correct `tenant_id`? (`auth/oidc/provider.py` logs include the resolved tenant.)
 2. Is the connection going through `tenant_conn`? Add a temporary log of `current_setting('app.current_tenant_id')` at the suspected query.
 3. Is the RLS policy on the relevant table what you expect? `SELECT * FROM pg_policies WHERE tablename = '<table>'`.
-4. Is the role `app_user` or did something fall through to `app_admin`? `SELECT current_user` in the connection.
+4. Is the role `rolemesh_app` or did something fall through to `rolemesh_system`? `SELECT current_user` in the connection.
 
 ### Adding a New Tenant-Scoped Table
 
