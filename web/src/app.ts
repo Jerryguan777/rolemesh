@@ -8,6 +8,8 @@ import './components/sidebar.js';
 import './components/login-page.js';
 import './components/safety-rules-page.js';
 import './components/safety-decisions-page.js';
+import './components/coming-soon.js';
+import './components/app-shell.js';
 import {
   fetchAuthConfig,
   getStoredToken,
@@ -17,16 +19,12 @@ import {
 } from './services/oidc-auth.js';
 
 type AuthState = 'loading' | 'login' | 'authenticated';
-type Route = 'chat' | 'admin-safety-rules' | 'admin-safety-decisions';
 
-// Map from location.hash to Route. Hash-based routing so the Vite dev
-// server + static FastAPI serve work without a history-API fallback.
-function routeFromHash(hash: string): Route {
-  if (hash === '#/admin/safety/rules') return 'admin-safety-rules';
-  if (hash === '#/admin/safety/decisions') return 'admin-safety-decisions';
-  return 'chat';
-}
-
+// `<rm-app>` is the auth state machine + outermost host. Once
+// authenticated, it hands the entire page over to `<rm-app-shell>`
+// which owns the application chrome (sidebar / topbar / outlet).
+// The shell's outlet reads `location.hash` to decide which page
+// component to render — see `web/src/router.ts`.
 @customElement('rm-app')
 export class RmApp extends LitElement {
   protected override createRenderRoot() {
@@ -34,7 +32,6 @@ export class RmApp extends LitElement {
   }
 
   @state() private authState: AuthState = 'loading';
-  @state() private route: Route = routeFromHash(location.hash);
 
   override async connectedCallback() {
     super.connectedCallback();
@@ -44,18 +41,8 @@ export class RmApp extends LitElement {
     window.addEventListener('rm-auth-failed', () => {
       this.authState = 'login';
     });
-    window.addEventListener('hashchange', this.onHashChange);
     await this.resolveAuth();
   }
-
-  override disconnectedCallback() {
-    super.disconnectedCallback();
-    window.removeEventListener('hashchange', this.onHashChange);
-  }
-
-  private onHashChange = (): void => {
-    this.route = routeFromHash(location.hash);
-  };
 
   private async resolveAuth() {
     const params = new URLSearchParams(location.search);
@@ -107,29 +94,16 @@ export class RmApp extends LitElement {
     });
   }
 
-  private renderRouted() {
-    switch (this.route) {
-      case 'admin-safety-rules':
-        return html`<rm-safety-rules-page></rm-safety-rules-page>`;
-      case 'admin-safety-decisions':
-        return html`<rm-safety-decisions-page></rm-safety-decisions-page>`;
-      default:
-        return html`<rm-chat-panel class="flex-1 min-h-0"></rm-chat-panel>`;
-    }
-  }
-
   override render() {
     if (this.authState === 'loading') {
-      return html`<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#666;">Loading...</div>`;
+      return html`<div
+        class="h-full flex items-center justify-center text-ink-2 dark:text-d-ink-2"
+      >Loading...</div>`;
     }
     if (this.authState === 'login') {
       return html`<rm-login-page></rm-login-page>`;
     }
-    return html`
-      <div class="h-full flex flex-col bg-surface-0 dark:bg-d-surface-0">
-        <div class="flex-1 min-h-0 overflow-auto">${this.renderRouted()}</div>
-      </div>
-    `;
+    return html`<rm-app-shell></rm-app-shell>`;
   }
 }
 
