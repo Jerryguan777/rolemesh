@@ -50,7 +50,10 @@ def _record_to_skill(row: asyncpg.Record, files: list[SkillFile] | None = None) 
         enabled=bool(row["enabled"]),
         created_at=row["created_at"].isoformat() if row["created_at"] else "",
         updated_at=row["updated_at"].isoformat() if row["updated_at"] else "",
-        created_by=str(row["created_by"]) if row["created_by"] else None,
+        created_by=(
+            str(row["created_by_user_id"])
+            if row["created_by_user_id"] else None
+        ),
         files={f.path: f for f in (files or [])},
     )
 
@@ -96,7 +99,7 @@ async def create_skill(
             """
             INSERT INTO skills (tenant_id, coworker_id, name,
                                 frontmatter_common, frontmatter_backend,
-                                enabled, created_by)
+                                enabled, created_by_user_id)
             VALUES ($1::uuid, $2::uuid, $3, $4::jsonb, $5::jsonb, $6,
                     $7::uuid)
             RETURNING *

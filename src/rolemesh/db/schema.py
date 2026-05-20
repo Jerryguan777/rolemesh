@@ -207,6 +207,18 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         END $$
     """)
     await conn.execute("ALTER TABLE coworkers DROP COLUMN IF EXISTS is_admin")
+    # v1.1 §2.2: link coworkers to the platform model catalog and the
+    # creating user. Both NULLABLE — the model selector is wired in
+    # Phase 2 and audit FK (created_by_user_id) is the L6 nullable-on-
+    # bootstrap requirement; pre-Phase 2 rows simply have NULL here.
+    await conn.execute(
+        "ALTER TABLE coworkers "
+        "ADD COLUMN IF NOT EXISTS model_id UUID REFERENCES models(id)"
+    )
+    await conn.execute(
+        "ALTER TABLE coworkers "
+        "ADD COLUMN IF NOT EXISTS created_by_user_id UUID REFERENCES users(id)"
+    )
     # User-agent assignment table
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_agent_assignments (
@@ -251,13 +263,51 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             enabled BOOLEAN NOT NULL DEFAULT TRUE,
             created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            created_by UUID REFERENCES users(id) ON DELETE SET NULL,
+            created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
             UNIQUE (coworker_id, name)
         )
+    """)
+    # v1.1 §2.2: greenfield rename of ``created_by`` -> ``created_by_user_id``.
+    # On a fresh testcontainer the CREATE TABLE above already uses the
+    # new name and this DO block is a no-op; on a pre-existing dev DB
+    # (created when the column was still ``created_by``) it renames in
+    # place. Both branches guarded so re-running the schema is safe.
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'skills'
+                         AND column_name = 'created_by')
+               AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                               WHERE table_name = 'skills'
+                                 AND column_name = 'created_by_user_id') THEN
+                ALTER TABLE skills RENAME COLUMN created_by TO created_by_user_id;
+            END IF;
+        END $$
     """)
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_skills_coworker ON skills(coworker_id, enabled)"
     )
+    # v1.1 §2.2: tenant-unique skill names. The future direction (03b)
+    # is per-tenant skills with ``coworker_id`` NULLABLE; until then this
+    # constraint co-exists with the existing UNIQUE (coworker_id, name)
+    # column-level constraint, so a tenant cannot name two skills the
+    # same regardless of which coworker owns them. Use a guarded DO
+    # block because ALTER TABLE ADD CONSTRAINT has no IF NOT EXISTS and
+    # the constraint must be idempotent across schema.py re-runs.
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'skills_tenant_name_unique'
+            ) THEN
+                ALTER TABLE skills
+                    ADD CONSTRAINT skills_tenant_name_unique
+                    UNIQUE (tenant_id, name);
+            END IF;
+        END $$
+    """)
 
     # skill_files holds the file tree. Path validation: positive
     # whitelist (each segment alphanumeric-led, only [A-Za-z0-9_.-]),
@@ -531,6 +581,17 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     )
     await conn.execute(
         "ALTER TABLE messages ADD COLUMN IF NOT EXISTS model_id TEXT"
+    )
+    # v1.1 §2.2: associate each message with the run that produced it.
+    # NULLABLE — Phase 1 (01a) wires the writer for new agent traffic;
+    # legacy rows and external/channel-only messages keep run_id NULL.
+    # FK is ON DELETE SET NULL conceptually but PG default is RESTRICT;
+    # ``runs`` itself ON DELETE CASCADEs from conversations so a run
+    # never outlives its conversation, and orphaned messages would
+    # already be gone via the conversations cascade.
+    await conn.execute(
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS run_id "
+        "UUID REFERENCES runs(id)"
     )
     if not legacy_exists:
         await conn.execute("""
