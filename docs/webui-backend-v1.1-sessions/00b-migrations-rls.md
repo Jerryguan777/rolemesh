@@ -6,7 +6,7 @@
 | Prerequisites | 00a done（INV 基建已落地，audit helper / BOOTSTRAP_USERS 已可用） |
 | Estimated PRs | 2-3 |
 | Estimated LOC | ~600 (SQL + Python migration runner + 测试) |
-| Status | not started |
+| Status | done (2026-05-20) |
 
 ## Goal
 
@@ -174,4 +174,112 @@ ALTER TABLE messages
 
 ## Findings (after execution)
 
-_(empty — 重点记录：schema.py idempotency 实现细节（DO $$ ... EXCEPTION 包还是查 pg_constraint）？INV-1 lint 的 false positive 数量？双层防御测试覆盖到了哪几张表？对 01a 的影响（如新表 CRUD 风格、RLS session 设置惯例）？)_
+执行日期：2026-05-20。两个 PR 各一个 commit，均以 `git commit -s` 累在 `feat/ui`。
+
+### Schema.py idempotency 实现细节
+
+走了两种 PG idempotency 模式，按场景挑选：
+
+| 场景 | 模式 | 例子 |
+|---|---|---|
+| `CREATE TABLE` | 直接 `IF NOT EXISTS` | 全部 6 张新表 |
+| `ADD COLUMN` | 直接 `IF NOT EXISTS` | `coworkers.model_id` 等 4 处 ALTER |
+| `CREATE POLICY` | `DROP POLICY IF EXISTS` 然后 `CREATE` | 现有 `_enable_rls_on()` 助手；新增的 `_enable_rls_via_parent_coworker()` 沿用相同模板 |
+| `ADD CONSTRAINT` | `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = ...) THEN ALTER ...; END IF; END $$` | `skills_tenant_name_unique` |
+| `RENAME COLUMN` | `DO $$ BEGIN IF EXISTS (information_schema) AND NOT EXISTS (...) THEN ALTER ... RENAME; END IF; END $$` | `skills.created_by` → `created_by_user_id` |
+| 平台模型 seed | `INSERT ... ON CONFLICT (provider, model_id) DO NOTHING` | `models` 6 行 |
+
+`ALTER CONSTRAINT` 模式选 **pg_constraint 系统表查询**而非 `EXCEPTION WHEN duplicate_object`，理由：
+- `pg_constraint` 模式 re-run 时 0 DDL；`EXCEPTION` 模式每次都执行 `ADD CONSTRAINT` 拿到 PG 抛错——浪费索引重建（UNIQUE 背后是一个 btree）
+- 可读性更好——`IF NOT EXISTS` 的语义比 `EXCEPTION WHEN` 直观
+- 与 `RENAME COLUMN` 守卫块统一了"先查 information_schema/pg_constraint 再决定"的写法
+
+测试 `tests/test_schema_alters.py::test_create_schema_is_idempotent` 直接调 `_create_schema(conn)` 第二次断言不抛——这是单一硬约束。
+
+### INV-1 lint false positive 数量
+
+启动时的"violations" 共 **8 条**，全部是合法 cross-tenant 维护路径或 join-via-CTE，已用 `# inv-1-ok: <reason>` 显式豁免：
+
+| 位置 | 性质 |
+|---|---|
+| `db/approval.py` `decide_approval_request_full` UPDATE 块 | tenant_id 在前置 CTE `before` 已约束，UPDATE join `b.id` |
+| `db/approval.py` `list_expired_pending_approvals` | reconciler 跨租户扫 expired |
+| `db/approval.py` `list_stuck_approved_approvals` | reconciler 跨租户扫 stuck-approved |
+| `db/approval.py` `list_stuck_executing_approvals` | reconciler 跨租户扫 stuck-executing |
+| `db/safety.py` retention cleanup `WITH cleared AS (UPDATE...)` | 跨租户 retention 清理 |
+| `db/task.py` scheduler 的 else 分支（无 tenant_id 入参时） | 跨租户 scheduler 扫描 |
+| `db/user.py` `update_user_access_token` UPDATE | `oidc_user_tokens.user_id` 是 PRIMARY KEY 全局唯一 |
+| `db/user.py` `update_user_refresh_token` UPDATE | 同上 |
+
+没有"应该有谓词但漏写"的真实 bug。每条 `inv-1-ok` 都说明了**为什么** tenant 谓词在此处冗余/不需要，未来 review 不用反复重新推理。
+
+### Lint 设计上的关键决定
+
+- **scope**：只扫 `src/rolemesh/db/*.py`，跳过 `schema.py`（DDL，不是数据访问）。Junction 表（`coworker_mcp_servers` / `coworker_skills` / `skill_files`）不在 `TENANT_SCOPED_TABLES` 集合内——它们 transitive RLS 走 JOIN，谓词形态不同；这条边界在 design-review 层维护，不在 grep lint 里。
+- **lookback 窗口** 25 行（不是 boundary-walk）：第一版用了"扫到 async with / async def 停"的边界模式，但有些标注（如 approval.py 里）就在 `async with admin_conn():` 那行 *上方*，被边界拦截 → false positive。改成定长 25-行回溯后，自检 `test_inv1_ok_annotation_silences_lint` 通过且实际 8 条豁免全部命中。
+- **变异检查**：两个 self-check 测试断言"若把已豁免行的 inv-1-ok 注释删了，lint 立即红"。这是"测试理念"章里的反 mirror test 写法——lint 不只是顺着实现写一遍，而是真能抓 bug。
+
+### 双层防御覆盖
+
+`tests/test_tenant_isolation_belt_and_braces.py`（10 cases）显式覆盖 v1.1 新表：
+
+| 表 | RLS（braces） | 显式谓词（belt） | 演示泄露（admin 无谓词） |
+|---|---|---|---|
+| `mcp_servers` | ✓ | ✓ | ✓（共用一个 demonstration test） |
+| `tenant_model_credentials` | ✓ | ✓ | — |
+| `runs` | ✓ | ✓ | — |
+| `coworker_mcp_servers` | ✓ via parent | — | — |
+| `coworker_skills` | enabled+forced 已断言 | — | — |
+| `models` | **故意不开 RLS**，单独一个测试断言对所有 tenant 可见 | — | — |
+
+外加 `pg_class.relrowsecurity` / `relforcerowsecurity` 在 5 张新表上的硬断言——防止未来某次 schema 重整漏 ENABLE / FORCE。
+
+### Skills 列 rename：影响范围
+
+设计 §2.2 要求 `skills.created_by_user_id`，原有 schema 是 `skills.created_by`（同语义）。开工前与用户确认走 **RENAME**（greenfield，最干净）。落地范围：
+
+- DB 列：rename + guarded DO-block
+- `src/rolemesh/db/skill.py`：`row["created_by_user_id"]` 读 + INSERT 列名换
+- **Python 数据类、REST surface 不动**——`Skill.created_by` 属性保留；`SkillResponse.created_by` 字段保留；admin.py 不动
+- DB-only 改动避免连带改 frontend 类型
+
+下游 03b session（skills per-tenant 迁移 + UI）将统一把 Python / TS / API 层的 `created_by` 也改成 `created_by_user_id`，与 DB 列对齐。**留 03b 处理是有意决定**——本 session 不动 frontend / OpenAPI（明确 Out of Scope）。
+
+### 平台 models seed 选择
+
+设计 §2.1 列了 Anthropic 三个 model id，OpenAI/Google/Bedrock "从 src/rolemesh/agent/ 找"——但 `src/rolemesh/agent/` 没有 hardcode model list。最终保守 seed 6 行：
+
+```
+anthropic / claude-opus-4-7
+anthropic / claude-sonnet-4-6
+anthropic / claude-haiku-4-5-20251001
+bedrock   / us.anthropic.claude-sonnet-4-6
+openai    / gpt-4o
+google    / gemini-2.5-flash
+```
+
+Bedrock 行对应 `tests/agent/test_executor.py:238` 中已经在用的 model id 字符串；OpenAI / Google 各一条最常用 family entry 让 Phase 2 admin UI 渲染时不空着。如果 Phase 2 admin 要加更多 model，应该走单独的 admin endpoint，不要把 seed 扩成 long list（设计 §3 Phase 2 "Models" 列了 `POST/PATCH/DELETE /api/v1/admin/models/{id}` 但备注 "推迟到 v2"）。
+
+### 对 01a Coworkers + Runs 的影响
+
+- **新 CRUD 风格**：`db/coworker.py` 现有 `tenant_conn(tenant_id) as conn: ... WHERE id = $1::uuid AND tenant_id = $2::uuid` 模式。01a 写 `runs` 的 CRUD 应该照抄这个模式——belt-and-braces 双层防御不打折。新加的 runs 表 RLS 已就位。
+- **`messages.run_id` 写入路径**：FK 已存在，已加 NULLABLE。01a 写入路径要保证 `INSERT INTO runs` 在 `INSERT INTO messages` 之前完成。我加的 `test_messages_run_id_fk_rejects_dangling_uuid` 会立即 catch 顺序错误。
+- **`runs.{status, completed_at, usage}` UPDATE**：INV-6 要求每条终止路径 UPDATE。`idx_runs_status WHERE status = 'running'` partial index 已加，给 01b 的"扫还在跑的 run"reconciler 用。
+- **`coworkers.model_id` 与 backend_capabilities 校验**：01a 的 coworker create endpoint 需要把 `model_id` -> `models` 行 -> `(provider, family)` 映射 -> 调 `validate_combo()`。三跳查询；可以考虑加个 `db/model.py` helper：`get_model_for_coworker(coworker_id, tenant_id) -> Model`。
+
+### 偏离原 prompt 的地方
+
+- **本 session 未实现 `python -m rolemesh.db.schema` 命令行**（acceptance criteria 提到 `\d` 验证）。schema.py 不是 entry-point；走 `_create_schema(conn)` 由 `init_database()` / testcontainer fixture 驱动。等价验收：`test_create_schema_is_idempotent` 直接调 helper 验证 re-run 不抛；`test_v11_new_tables_have_rls_force_enabled` 直接查 `pg_class` 验证 RLS 生效。如果未来真需要 CLI 验证，加 `if __name__ == "__main__"` 块挂一个 `asyncio.run(init_database())` 就能跑。
+- **DELETE 行为表**（设计 §3）未在本 session 实现——属于 API 层职责，留 01a/02a。
+
+### 测试运行
+
+- 三个 acceptance 测试文件（`test_inv1_tenant_predicate_lint` / `test_tenant_isolation_belt_and_braces` / `test_schema_alters`）共 24 cases 全绿，139 秒。
+- 整个 `tests/db/` 套（含原有 RLS 测试）77 cases 全绿，537 秒。
+- 现有 skills 套 30 cases 全绿，173 秒（验证 rename 没退化）。
+
+### 后续 cleanup（不在本 session 范围）
+
+- `skills.created_by_user_id` 在 Python / TS / OpenAPI 三处保留旧名 `created_by`：留 03b 时统一改。
+- `coworker.tools` JSONB 列还在：02b 双写 + 03+ drop。
+- `eval_runs.created_by` 是另一张表，**不要**也一起改——它的 admin UI / CLI 还在用。

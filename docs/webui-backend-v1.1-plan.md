@@ -51,7 +51,7 @@ Phase 4   04  (safety UI to v1)
 | Session | 标题 | 状态 | 完成日期 | 备注 |
 |---|---|---|---|---|
 | 00a | INV foundations | done | 2026-05-20 | 7 个 punch list 项；无 migration |
-| 00b | Migrations + RLS | not started | — | 6 张新表 + 4 处 ALTER；不可逆 |
+| 00b | Migrations + RLS | done | 2026-05-20 | 6 张新表 + 4 处 ALTER；2 个 commit；greenfield rename of skills.created_by |
 | 00c | OpenAPI 脚手架 + shell 抽离 | not started | — | 前端 codegen + `<rm-app-shell>` |
 | 01a | Coworkers CRUD + runs 写入责任人 | not started | — | 明确 runs INSERT 时机 |
 | 01b | WS 新协议 + run state machine | not started | — | INV-6 pinned test 同 session 内完成 |
