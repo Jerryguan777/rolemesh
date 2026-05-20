@@ -25,7 +25,7 @@
 
 ## Scope — PR breakdown
 
-每个 PR 单独 commit + push + 单独 PR（除非备注说"可合并"）。
+**Workflow（已锁定）**：本 session 不开子 PR，所有 commit 直接累在 `feat/ui` 分支上。下面每一个"PR N"对应一个独立 commit（或几个小 commit 一组）。session 结束时一次性 `git push` 到 origin/feat/ui。Phase 0 完工后再把 feat/ui 整体合 main。每个 commit 用 `git commit -s`（用户全局规则）。
 
 ### PR 1 — `core/skills.py` 常量抽取
 
@@ -236,7 +236,7 @@
 - [ ] `bash scripts/smoke_bootstrap.sh` 全绿
 - [ ] 全套现有测试不退化（`pytest`）
 - [ ] `grep -rn '"SKILL.md"' src/rolemesh/ src/webui/ | grep -v "skills.py:" | grep -v docstring` 输出为空（PR1）
-- [ ] `git diff main..HEAD` 不含 `coworkers.tools`、`models`、`mcp_servers` 等表的 schema 变更（migration 留给 00b）
+- [ ] `git diff main..feat/ui` 不含 `coworkers.tools`、`models`、`mcp_servers` 等表的 schema 变更（migration 留给 00b；本 session commit 都在 feat/ui 上累积）
 - [ ] 更新 `docs/webui-backend-v1.1-plan.md` 状态表为 `done` + 日期
 
 ## Out of scope（明确不做）
@@ -247,11 +247,13 @@
 - ❌ `coworker.tools` 双写 —— 留 02b
 - ❌ Coworker CRUD / runs 表 —— 留 01a
 
-## Open questions（执行前问用户）
+## Open questions
 
-1. **`BACKEND_INCOMPAT` 错误码 HTTP status**：设计文档写 422，plan critique 建议 400。哪个？
-2. **`BOOTSTRAP_USERS` 中 user_id 字段**：希望是字符串 slug（如 `"alice"`，内部 uuid5 生成）还是用户手写 UUID？前者更易用，后者更显式。推荐前者。
-3. **`SKILL_MD_FILENAME` 旧名保留多久**：保留一个 PR cycle（PR1 改名时 alias，下次 PR 删）还是直接删？
+已锁定（执行前 prompt 阶段已确认，不要再问用户）：
+
+1. **`BACKEND_INCOMPAT` HTTP status** = **400 Bad Request**（理由：422 留给 schema validation；"组合不存在"语义上更像 invalid_request）
+2. **`BOOTSTRAP_USERS` 中 user_id 字段** = **slug + uuid5**（spec 里写 `"alice"`，代码内部 `uuid5(NAMESPACE_URL, "bootstrap:" + spec.user_id)` 生成稳定 UUID）
+3. **`SKILL_MD_FILENAME` 旧名** = **保留一个 PR cycle**（PR1 改名 + 旧名 alias 同 commit；后续 commit 内删 alias）
 
 ## Pitfalls
 
@@ -262,6 +264,99 @@
 
 ## Findings (after execution)
 
-> 执行完后补：发现的拆 PR、新发现的不变量、对下游 session 的影响。
+执行日期：2026-05-20。所有 7 个 PR 均以单 commit 形式累在 `feat/ui` 上。
 
-_(empty)_
+### 与原 prompt 的偏差
+
+1. **文档段未补**：PR3 prompt 要求在 `docs/14-container-hardening-architecture.md`
+   追加一段 image whitelist 策略说明，但该文件不存在（docs/ 目录仅有
+   `webui-backend-v1.1-*` 与 `egress/`；`docs_bk/safety/container-hardening.md`
+   是历史备份）。和用户确认后选择**跳过文档段**，待 hardening 架构文档重新
+   引入 docs/ 时一并补回。不影响 PR3 的代码 + 测试落地。
+
+### 实际范围调整
+
+* **PR1 SKILL.md 常量**：`src/pi/` 下的 `coding_agent/core/skills.py:304` 与
+  `core/package_manager.py:221` 仍有 `"SKILL.md"` 字面量。这是 Pi 的内部
+  skill loader，**保留不动**——acceptance criteria 限制范围在
+  `src/rolemesh/ src/webui/`；且与 memory `[[pi-in-tree]]` 中"Pi 内部规约自治"
+  原则一致。
+* **PR3 cleanup_orphans 签名变更**：原 `exclude_infra` 黑名单参数与
+  `_infra_suffixes` 一起删除（whitelist 已覆盖该意图，不与黑名单并存）。
+  调用方仅一处 (`main._ensure_container_system_running`)，已同步更新；
+  现有单测 `tests/container/test_docker_runtime.py::test_cleanup_orphans`
+  也跟着改了。`tests/container/test_startup_order.py` 用 `AsyncMock`
+  打 stub，未做 args 断言，不需要改。
+* **PR4 范围扩展**：除了文档列出的 safety create/update/delete 三处，
+  approval decide endpoint (`webui.admin.decide_approval_ep`) 也在 audit
+  写入路径上——`engine.handle_decision(user_id=...)` 最终落到
+  `decide_approval_request_full` 的 `actor_user_id` 列。已统一改成在
+  REST handler 边界 resolve 后再传入 engine。如果将来 engine 也从
+  channel 路径直接被调用，那条路径的 `user_id` 已是真实 UUID（无 bootstrap），
+  无需再过 helper。
+* **PR5 多 user fast-path**：在 `webui.authenticate_ws` 中把多 user 路径
+  **排在** legacy `ADMIN_BOOTSTRAP_TOKEN` 之前；同时配置两者时多 user 拿到的
+  身份更丰富，更符合 §5.2.1 的意图。Spec 引用不存在的 tenant slug 选择
+  **fail-closed**（返回 None → 401），不伪造 tenant_id。
+
+### 新发现的不变量 / 潜在风险
+
+* **INV-2 mixin 与 `from dataclasses import MISSING` 的语义**：
+  `from_dict_filter_unknown` 用 `spec.default is MISSING` + `spec.default_factory is MISSING`
+  来判定 required；某些后续 dataclass 若引入 `field(default=None)`（None 是
+  合法 default）需要小心——他们就是 optional，filter 会接受缺失字段。这与
+  pre-refactor 的 `raw.get(...)` 行为一致，但和 `d["x"]` 严格写法不同。下游
+  写新的 IPC dataclass 时要意识到：**有 default 就是 optional，没 default 就
+  抛 KeyError**——不再有"我用 d.get 但语义上是 required"的灰色地带。
+* **INV-3 image normalization**：只 strip 了 docker.io 系列前缀。如果未来
+  agent runner 自带的 image 来自其它 registry（如 ghcr.io / 私有 harbor），
+  whitelist 里要写完整的 ref。同样的 normalization 对其它 registry **不生效**，
+  这是有意的——避免把 `ghcr.io/owner/x` 与 `gcr.io/owner/x` 误判为同一个。
+* **INV-4 bootstrap actor**：helper 选 "oldest owner by created_at"。如果
+  租户中多个 owner 同毫秒插入（unlikely 但理论上可能），返回结果 deterministic
+  程度依赖 PG 内部排序。下游 audit 分析可能出现 owner 名漂移；可考虑改成
+  `ORDER BY created_at, id` 兜底——本 session 没改，记录在此。
+* **PR5 in-process upsert cache**：`_upserted` set 是 process-local。多
+  worker 部署时每个 worker 第一次见到 token 都会跑一次 `ON CONFLICT DO NOTHING`，
+  不会写脏数据但会多一次 DB round-trip——可接受。
+
+### 对下游 session 的影响
+
+* **00b migration**：
+  * INV-4 helper 已依赖 `users.created_at` 上的索引（`ORDER BY created_at ASC LIMIT 1`）。
+    现有 schema 没有这个索引，目前数据量小不会成本爆炸；00b 可考虑追加
+    `CREATE INDEX users_tenant_role_created ON users (tenant_id, role, created_at)`，
+    作为 bootstrap fast-path 的优化（**非阻塞**）。
+  * INV-4 helper 也假设 `users(id)` 在 `INSERT ... ON CONFLICT (id) DO NOTHING`
+    下行为正确——schema 里已经是 PRIMARY KEY，但 00b 触碰 users 表时要
+    保持这点不变。
+  * PR5 用 `INSERT users(id, tenant_id, name, role)` 显式传 UUID。schema
+    里 `id UUID PRIMARY KEY DEFAULT gen_random_uuid()` 允许显式赋值；00b
+    如果迁移这个表（重命名列、加 NOT NULL 约束等），需要保留这个能力。
+* **01a Coworkers CRUD**：`/api/v1` 路由已经骨架化（PR6），新 endpoint
+  挂到 `webui.api_v1.router` 上即可，不要再去 `webui/main.py` 加。
+* **01b WS 协议**：INV-2 mixin 是 ipc 层的强约束——新加 ws/protocol dataclass 时
+  请走 `from_dict_filter_unknown` 而不是直接 `cls(**d)`，否则 pinned test 不会
+  抓到（test 只覆盖现有 dataclass）。考虑把这一行 lint 化（grep `cls\(\*\*` 在
+  `ipc/`）。
+* **03a Approvals**：BOOTSTRAP_USERS 路径已落地，新 user 都拿到真实 UUID，
+  approval decide 不再需要单独处理 bootstrap literal。但**用 BOOTSTRAP_USERS
+  跑的 user 也要插 `approval.actor_user_id`**——helper 会 short-circuit 返回原
+  UUID，已 OK。
+
+### 全套测试回归状态
+
+* 总计 ~23,866 passing + 21 skipped + 3 xfailed across the tree（分三组并行跑）。
+* **一个 pre-existing failure，不是本 session 引入**：
+  `tests/test_agent_runner/test_amazon_bedrock_tool_limit.py::test_realistic_long_mcp_name_raises`
+  在 stash 后切回 `feat/ui` 起始状态依然 fail（断言 `len(bad) > 64`，
+  而字面量长度刚好是 64）——属于 b0043f5 (`fix(bedrock)`...) 引入的失误，
+  应在独立的 chore PR 中修，不影响 Phase 0 acceptance。
+
+### 后续 cleanup（不在本 session 范围）
+
+* `SKILL_MD_FILENAME` 别名按约定保留一个 PR cycle，**下次触碰 core/skills.py
+  时移除**。
+* `BootstrapUserSpec.user_id_slug` 这个字段名是为了避免和 ``user_id`` (UUID)
+  混淆，但 spec JSON 里仍写 `"user_id"`——长期一致性上略别扭，等 frontend 接入
+  时统一改成 `"slug"` 更显式。
