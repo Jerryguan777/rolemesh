@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from rolemesh.core.skills_consts_pin import SKILL_MANIFEST_NAME
 from rolemesh.core.types import Skill, SkillFile
 from rolemesh.db._pool import tenant_conn
 
@@ -86,8 +87,8 @@ async def create_skill(
     cannot express "every skill has a row with path = 'SKILL.md'"
     as a single CHECK; the application enforces it on every write.
     """
-    if "SKILL.md" not in files:
-        raise ValueError("skill files must contain SKILL.md")
+    if SKILL_MANIFEST_NAME not in files:
+        raise ValueError(f"skill files must contain {SKILL_MANIFEST_NAME}")
     fc_json = json.dumps(frontmatter_common)
     fb_json = json.dumps(frontmatter_backend)
     async with tenant_conn(tenant_id) as conn:
@@ -240,8 +241,8 @@ async def update_skill(
         values.append(enabled)
         param_idx += 1
 
-    if files is not None and "SKILL.md" not in files:
-        raise ValueError("skill files must contain SKILL.md")
+    if files is not None and SKILL_MANIFEST_NAME not in files:
+        raise ValueError(f"skill files must contain {SKILL_MANIFEST_NAME}")
 
     async with tenant_conn(tenant_id) as conn:
         if fields:
@@ -370,8 +371,8 @@ async def delete_skill_file(
     Refuses to delete ``SKILL.md`` — that is the application-layer
     invariant. Returns True if a row was actually deleted.
     """
-    if path == "SKILL.md":
-        raise ValueError("SKILL.md cannot be deleted from a skill")
+    if path == SKILL_MANIFEST_NAME:
+        raise ValueError(f"{SKILL_MANIFEST_NAME} cannot be deleted from a skill")
     async with tenant_conn(tenant_id) as conn:
         # Defense in depth: verify the parent skill belongs to this
         # tenant before deleting (the EXISTS subquery on skills carries

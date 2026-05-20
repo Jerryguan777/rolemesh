@@ -34,6 +34,7 @@ from rolemesh.container.runtime import VolumeMount
 from rolemesh.core.config import DATA_DIR
 from rolemesh.core.logger import get_logger
 from rolemesh.core.skills import (
+    SKILL_MANIFEST_NAME,
     SkillValidationError,
     merge_frontmatter_for_backend,
     serialize_skill_md,
@@ -159,9 +160,10 @@ def _materialize_one_skill(
         shutil.rmtree(skill_partial)
     skill_partial.mkdir(parents=True, exist_ok=False)
 
-    if "SKILL.md" not in skill.files:
+    if SKILL_MANIFEST_NAME not in skill.files:
         raise SkillValidationError(
-            f"skill {skill.name!r} is missing SKILL.md (application invariant)"
+            f"skill {skill.name!r} is missing {SKILL_MANIFEST_NAME} "
+            f"(application invariant)"
         )
 
     for path, file in skill.files.items():
@@ -175,7 +177,7 @@ def _materialize_one_skill(
         _resolved_path_inside(skill_partial, target)
         _verify_no_symlink(target.parent, skill_partial)
 
-        if path == "SKILL.md":
+        if path == SKILL_MANIFEST_NAME:
             merged = merge_frontmatter_for_backend(
                 skill.frontmatter_common,
                 skill.frontmatter_backend,

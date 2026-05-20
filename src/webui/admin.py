@@ -16,6 +16,7 @@ from rolemesh.auth.permissions import AgentPermissions
 from rolemesh.auth.provider import AuthenticatedUser
 from rolemesh.core.group_folder import is_valid_group_folder
 from rolemesh.core.skills import (
+    SKILL_MANIFEST_NAME,
     SkillValidationError,
     parse_inbound_skill_md,
     validate_skill_file_path,
@@ -1642,22 +1643,24 @@ async def create_skill(
     try:
         validate_skill_name(body.name)
         files = _normalize_files(body.files)
-        if "SKILL.md" not in files:
-            raise SkillValidationError("payload must include SKILL.md in 'files'")
+        if SKILL_MANIFEST_NAME not in files:
+            raise SkillValidationError(
+                f"payload must include {SKILL_MANIFEST_NAME} in 'files'"
+            )
         common, backend, body_text = parse_inbound_skill_md(
-            files["SKILL.md"].content,
+            files[SKILL_MANIFEST_NAME].content,
             frontmatter_common_override=body.frontmatter_common,
             frontmatter_backend_override=body.frontmatter_backend,
             expected_skill_name=body.name,
         )
     except SkillValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    # Replace SKILL.md content with the body-only form so the splitter
+    # Replace manifest content with the body-only form so the splitter
     # round-trips cleanly: frontmatter lives in the JSONB columns.
-    files["SKILL.md"] = SkillFile(
-        path="SKILL.md",
+    files[SKILL_MANIFEST_NAME] = SkillFile(
+        path=SKILL_MANIFEST_NAME,
         content=body_text,
-        mime_type=files["SKILL.md"].mime_type or "text/markdown",
+        mime_type=files[SKILL_MANIFEST_NAME].mime_type or "text/markdown",
     )
     # Bootstrap admin has user_id="bootstrap" (not a real UUID).
     # Store NULL in created_by rather than letting asyncpg blow up.
@@ -1723,26 +1726,28 @@ async def update_skill(
     try:
         if body.files is not None:
             files = _normalize_files(body.files)
-            if "SKILL.md" not in files:
-                raise SkillValidationError("'files' must include SKILL.md")
-            # Re-parse SKILL.md frontmatter (overrides applied on top).
+            if SKILL_MANIFEST_NAME not in files:
+                raise SkillValidationError(
+                    f"'files' must include {SKILL_MANIFEST_NAME}"
+                )
+            # Re-parse manifest frontmatter (overrides applied on top).
             parsed_common, parsed_backend, body_text = parse_inbound_skill_md(
-                files["SKILL.md"].content,
+                files[SKILL_MANIFEST_NAME].content,
                 frontmatter_common_override=body.frontmatter_common,
                 frontmatter_backend_override=body.frontmatter_backend,
                 expected_skill_name=existing.name,
             )
             common, backend = parsed_common, parsed_backend
-            files["SKILL.md"] = SkillFile(
-                path="SKILL.md",
+            files[SKILL_MANIFEST_NAME] = SkillFile(
+                path=SKILL_MANIFEST_NAME,
                 content=body_text,
-                mime_type=files["SKILL.md"].mime_type or "text/markdown",
+                mime_type=files[SKILL_MANIFEST_NAME].mime_type or "text/markdown",
             )
         elif body.frontmatter_common is not None or body.frontmatter_backend is not None:
             # Frontmatter-only update: re-validate against existing
             # body so description bounds stay consistent. Pull body
-            # text from the stored SKILL.md row to feed the splitter.
-            current_md = existing.files.get("SKILL.md")
+            # text from the stored manifest row to feed the splitter.
+            current_md = existing.files.get(SKILL_MANIFEST_NAME)
             current_body = current_md.content if current_md else ""
             # Important: ``A or B`` treats an explicitly-empty dict as
             # "not provided" because ``{}`` is falsy. Use ``is not None``
@@ -1860,10 +1865,13 @@ async def delete_skill_file(
     skill = await db.get_skill(skill_id, tenant_id=user.tenant_id, with_files=False)
     if skill is None or skill.coworker_id != agent_id:
         raise HTTPException(status_code=404, detail="Skill not found")
-    if path == "SKILL.md":
+    if path == SKILL_MANIFEST_NAME:
         raise HTTPException(
             status_code=400,
-            detail="SKILL.md cannot be deleted; delete the whole skill or update it",
+            detail=(
+                f"{SKILL_MANIFEST_NAME} cannot be deleted; "
+                "delete the whole skill or update it"
+            ),
         )
     try:
         validate_skill_file_path(path)
