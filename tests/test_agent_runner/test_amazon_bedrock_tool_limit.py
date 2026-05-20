@@ -53,8 +53,8 @@ def test_realistic_long_mcp_name_raises() -> None:
     # The exact failure mode this guard exists for: an MCP tool name
     # with a long server prefix that's fine on Anthropic-direct but
     # exceeds Bedrock's limit. Should fail loud, not truncate.
-    bad = "mcp__internal_dev_tools_v2__github_search_issues_advanced_filter"
-    assert len(bad) > 64
+    bad = "mcp__internal_dev_tools_v2__github_search_issues_advanced_filtering"
+    assert len(bad) > 64, f"test setup bug: bad={len(bad)} chars, need >64"
     with pytest.raises(ValueError, match="Bedrock Converse"):
         _convert_tool_config([_tool(bad)], "auto")
 
