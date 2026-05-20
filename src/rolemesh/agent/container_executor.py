@@ -109,11 +109,20 @@ class ContainerAgentExecutor:
         runtime: ContainerRuntime,
         transport: NatsTransport,
         get_coworker: Callable[[str], Coworker | None],
+        render_catalog: Callable[[str, str], str] | None = None,
     ) -> None:
         self._config = config
         self._runtime = runtime
         self._transport = transport
         self._get_coworker = get_coworker
+        # Frontdesk v1.2: optional callback that renders the
+        # delegatable-specialist catalog for a tenant. Signature:
+        # ``(tenant_id, exclude_coworker_id) -> str``. Invoked at spawn
+        # time when ``coworker.is_frontdesk`` is True so the catalog +
+        # FRONTDESK_RULES land on the target's effective system prompt
+        # (handbook §6 Step 6). Defaulting to None keeps tests and
+        # non-frontdesk deployments from having to wire it through.
+        self._render_catalog = render_catalog
 
     @property
     def name(self) -> str:
@@ -361,6 +370,29 @@ class ContainerAgentExecutor:
             if specs:
                 slow_check_specs = specs
 
+        # Frontdesk v1.2: append the delegation catalog + FRONTDESK_RULES
+        # to the effective system prompt at spawn time when this coworker
+        # is the tenant's frontdesk. The catalog is read from
+        # OrchestratorState via the injected ``render_catalog`` callback
+        # (handbook §6 Step 6). Specialists and non-frontdesk agents are
+        # unaffected. Depends on the Phase A ``_coworker_from_state``
+        # fix — without it ``coworker.is_frontdesk`` is always False and
+        # the injection silently never fires.
+        effective_system_prompt = inp.system_prompt
+        if coworker.is_frontdesk and self._render_catalog is not None:
+            from rolemesh.orchestration.catalog import (
+                compose_frontdesk_system_prompt,
+            )
+
+            catalog_body = self._render_catalog(
+                coworker.tenant_id, coworker.id,
+            )
+            effective_system_prompt = compose_frontdesk_system_prompt(
+                is_frontdesk=True,
+                base_system_prompt=inp.system_prompt,
+                catalog_body=catalog_body,
+            )
+
         # Channel 1: Write initial input to KV before starting container
         kv_init = await self._transport.js.key_value("agent-init")
         agent_init = AgentInitData(
@@ -375,7 +407,7 @@ class ContainerAgentExecutor:
             session_id=inp.session_id,
             is_scheduled_task=inp.is_scheduled_task,
             assistant_name=inp.assistant_name,
-            system_prompt=inp.system_prompt,
+            system_prompt=effective_system_prompt,
             role_config=inp.role_config,
             mcp_servers=mcp_specs,
             approval_policies=approval_policies_dicts,

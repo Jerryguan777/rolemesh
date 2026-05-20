@@ -1345,9 +1345,24 @@ async def main() -> None:
         cw = _state.coworkers.get(coworker_id)
         return _coworker_from_state(cw) if cw else None
 
+    # Frontdesk v1.2: render the delegation catalog from the live
+    # OrchestratorState. Spawn-time only; ``list_agents`` is the
+    # in-turn refresh path. Defined here (not as a module-level fn)
+    # because _state is the process-local orchestrator state and
+    # threading it through ContainerAgentExecutor's interface as a
+    # callable keeps the executor decoupled from the orchestrator
+    # state object's exact shape.
+    def _render_catalog_for_executor(tenant_id: str, exclude_id: str) -> str:
+        from rolemesh.orchestration.catalog import render_agent_catalog
+
+        return render_agent_catalog(_state, tenant_id, exclude=exclude_id)
+
     # Build one executor per backend.
     for cfg in (CLAUDE_CODE_BACKEND, PI_BACKEND):
-        _executors[cfg.name] = ContainerAgentExecutor(cfg, _runtime, _transport, _get_coworker)
+        _executors[cfg.name] = ContainerAgentExecutor(
+            cfg, _runtime, _transport, _get_coworker,
+            render_catalog=_render_catalog_for_executor,
+        )
 
     if AGENT_BACKEND_DEFAULT not in _executors:
         logger.warning("Unknown ROLEMESH_AGENT_BACKEND=%r, falling back to 'claude'", AGENT_BACKEND_DEFAULT)

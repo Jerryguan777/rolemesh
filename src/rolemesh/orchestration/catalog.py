@@ -101,6 +101,34 @@ Routing rules:
 """
 
 
+def compose_frontdesk_system_prompt(
+    *,
+    is_frontdesk: bool,
+    base_system_prompt: str | None,
+    catalog_body: str,
+) -> str | None:
+    """Append the catalog + ``FRONTDESK_RULES`` to ``base_system_prompt``
+    when ``is_frontdesk`` is True; return ``base_system_prompt``
+    unchanged otherwise.
+
+    Pure function so the Phase B Step 6 injection logic can be unit-
+    tested without standing up a container. The caller (the
+    ``ContainerAgentExecutor.execute`` spawn path) renders the catalog
+    via the ``render_catalog`` callback it was constructed with and
+    feeds the body in here.
+
+    Returns ``None`` if ``base_system_prompt`` is None AND
+    ``is_frontdesk`` is False — preserves the "no system prompt set"
+    signal for non-frontdesk agents.
+    """
+    if not is_frontdesk:
+        return base_system_prompt
+    appended = f"{catalog_body}\n\n{FRONTDESK_RULES}"
+    if base_system_prompt:
+        return f"{base_system_prompt}\n\n{appended}"
+    return appended
+
+
 async def handle_list_agents_request(
     msg: object,
     *,
