@@ -59,8 +59,10 @@ from rolemesh.core.config import (
     AGENT_BACKEND_DEFAULT,
     ASSISTANT_NAME,
     CONTAINER_EGRESS_NETWORK_NAME,
+    CONTAINER_IMAGE,
     CONTAINER_NETWORK_NAME,
     CREDENTIAL_PROXY_PORT,
+    EGRESS_GATEWAY_IMAGE,
     GLOBAL_MAX_CONTAINERS,
     IDLE_TIMEOUT,
     NATS_URL,
@@ -1266,7 +1268,14 @@ async def _ensure_container_system_running() -> None:
     if CONTAINER_NETWORK_NAME and hasattr(_runtime, "ensure_egress_network"):
         await _runtime.ensure_egress_network(CONTAINER_EGRESS_NETWORK_NAME)
 
-    await _runtime.cleanup_orphans("rolemesh-")
+    # INV-3: name prefix alone is not safe — a foreign container the
+    # user happens to name with "rolemesh-" could be killed. The image
+    # whitelist is the positive identity signal that says "we launched
+    # this one".
+    await _runtime.cleanup_orphans(
+        "rolemesh-",
+        allowed_images=frozenset({CONTAINER_IMAGE, EGRESS_GATEWAY_IMAGE}),
+    )
 
 
 async def _launch_egress_gateway_once_ready() -> None:

@@ -57,6 +57,23 @@ def _parse_memory(value: str) -> int:
 _DOCKER_VERSION_RE = re.compile(r"^\s*(\d+)\.(\d+)")
 
 
+def _normalize_image_ref(ref: str) -> str:
+    """Strip ambient Docker Hub prefixes so equivalent refs compare equal.
+
+    Docker reports ``Image`` as written when the container was created.
+    A user-side ``rolemesh-agent:latest`` and a registry-qualified
+    ``docker.io/library/rolemesh-agent:latest`` point at the same image
+    but compare ``!=`` as plain strings; normalize the well-known
+    library form to the bare name so the whitelist works for both.
+    """
+    if not ref:
+        return ""
+    for prefix in ("docker.io/library/", "docker.io/", "index.docker.io/library/", "index.docker.io/"):
+        if ref.startswith(prefix):
+            return ref[len(prefix):]
+    return ref
+
+
 def _parse_docker_version(value: str) -> tuple[int, int] | None:
     """Parse a dockerd version string into (major, minor).
 
@@ -248,19 +265,43 @@ class DockerRuntime:
             await container.delete(force=True)
 
     async def cleanup_orphans(
-        self, prefix: str, *, exclude_infra: bool = True,
+        self,
+        prefix: str,
+        *,
+        allowed_images: frozenset[str],
     ) -> list[str]:
+        """Stop and remove containers whose name starts with ``prefix``
+        AND whose image is in ``allowed_images``.
+
+        INV-3 (cleanup-safety): name prefix alone is not a strong enough
+        filter — a user might run an unrelated container whose name
+        happens to overlap ours (e.g. ``rolemesh-`` prefixed local
+        experiment) and we must never touch it. The image whitelist
+        gives us a positive identity signal: only containers we
+        actually launched (from images we control) qualify.
+
+        ``allowed_images`` is taken from the caller rather than
+        hard-coded so adding a new image type (e.g. a future runner
+        flavor) updates one place and propagates here without changes
+        in this module.
+        """
         client = self._ensure_client()
         containers = await client.containers.list(
             all=True,
             filters={"name": [prefix]},
         )
-        # Skip infrastructure containers managed by docker compose
-        _infra_suffixes = ("-postgres-", "-nats-", "-redis-")
+        normalized_whitelist = {_normalize_image_ref(i) for i in allowed_images}
         removed: list[str] = []
         for c in containers:
             cname: str = c._container.get("Names", [""])[0].lstrip("/")
-            if exclude_infra and any(s in cname for s in _infra_suffixes):
+            if not cname.startswith(prefix):
+                # Docker's ``name`` filter is a substring match, not a
+                # prefix match. Re-check explicitly so a container
+                # *containing* the prefix as a substring is not
+                # mistaken for a prefix match.
+                continue
+            image_ref = c._container.get("Image", "")
+            if _normalize_image_ref(image_ref) not in normalized_whitelist:
                 continue
             await self.stop(cname)
             removed.append(cname)
