@@ -61,6 +61,7 @@ def _make_ctx(
         permissions["data_scope"] = "tenant"
     ctx = ToolContext(
         js=fake_js,  # type: ignore[arg-type]
+        nc=AsyncMock(),  # type: ignore[arg-type]
         job_id="job-123",
         chat_jid="chat-abc",
         group_folder="test-group",

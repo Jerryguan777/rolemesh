@@ -18,6 +18,7 @@ import json
 import sys
 import types
 from dataclasses import dataclass
+from unittest.mock import AsyncMock
 from typing import Any
 
 import pytest
@@ -85,6 +86,7 @@ def _setup_registry() -> tuple[HookRegistry, _FakeJS]:
     js = _FakeJS()
     ctx = ToolContext(
         js=js,  # type: ignore[arg-type]
+        nc=AsyncMock(),  # type: ignore[arg-type]
         job_id="job-P",
         chat_jid="chat",
         group_folder="grp",

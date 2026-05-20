@@ -30,6 +30,7 @@ def _make_ctx() -> Any:
 
     return ToolContext(
         js=FakeJetStream(),  # type: ignore[arg-type]
+        nc=AsyncMock(),  # type: ignore[arg-type]
         job_id="j-1",
         chat_jid="c-1",
         group_folder="grp",
@@ -141,6 +142,7 @@ class TestScheduleTaskViaPiAdapter:
 
         ctx = ToolContext(
             js=FakeJetStream(),  # type: ignore[arg-type]
+            nc=AsyncMock(),  # type: ignore[arg-type]
             job_id="j",
             chat_jid="c",
             group_folder="g",

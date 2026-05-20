@@ -392,6 +392,7 @@ class TestChannel5And6ToolPublishes:
 
         ctx = ToolContext(
             js=js,
+            nc=nc,
             job_id=job_id,
             chat_jid="chat-1",
             group_folder="grp",
@@ -423,6 +424,7 @@ class TestChannel5And6ToolPublishes:
 
         ctx = ToolContext(
             js=js,
+            nc=nc,
             job_id=job_id,
             chat_jid="chat-1",
             group_folder="grp",

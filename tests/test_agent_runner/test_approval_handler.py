@@ -19,6 +19,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -46,6 +47,7 @@ def _ctx(user_id: str = "user-x", job_id: str = "job-1") -> tuple[ToolContext, _
     return (
         ToolContext(
             js=js,  # type: ignore[arg-type]
+            nc=AsyncMock(),  # type: ignore[arg-type]
             job_id=job_id,
             chat_jid="chat",
             group_folder="grp",

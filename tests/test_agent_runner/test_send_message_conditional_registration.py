@@ -81,6 +81,7 @@ from agent_runner.tools.context import ToolContext  # noqa: E402
 def _ctx() -> ToolContext:
     return ToolContext(
         js=None,  # type: ignore[arg-type]
+        nc=None,  # type: ignore[arg-type]
         job_id="test-job",
         chat_jid="test-chat",
         group_folder="test-group",
