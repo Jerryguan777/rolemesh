@@ -10,7 +10,7 @@ to be done in **its own fresh Claude Code session**.
 |---|---|
 | [`handbook.md`](handbook.md) | Source of truth. Full v1.2 design + 9-step plan + verified facts + 35 pitfalls. Every phase doc references it. |
 | [`phase-a-foundation.md`](phase-a-foundation.md) | Phase A scope (Step 1-3): DB schema + DB helpers + `_coworker_from_state` fix + ToolContext NATS RPC. Includes the session prompt. |
-| [`phase-b-delegation-core.md`](phase-b-delegation-core.md) | Phase B scope (Step 4-6): `list_agents` + `delegate_to_agent` handler + catalog injection. 22-test matrix. Includes the session prompt. |
+| [`phase-b-delegation-core.md`](phase-b-delegation-core.md) | Phase B scope (Step 4-6): `list_agents` + `delegate_to_agent` handler + catalog injection. 23-test matrix. Includes the session prompt. |
 | [`phase-c-integration.md`](phase-c-integration.md) | Phase C scope (Step 7-9): WebUI admin + channel-level approval fan-out + routing eval + docs update. Includes the session prompt. |
 
 ## How to run a phase
@@ -26,9 +26,13 @@ to be done in **its own fresh Claude Code session**.
 
 ## Why split into 3 phases
 
-Total scope is ~4,200 LOC (1,400 prod + 2,200 tests + 500 docs +
-schema). Detailed reasoning is in the chat thread that produced this
-plan, but in brief:
+Total scope is ~4,290 LOC (1,380 prod + 2,350 tests + 500 docs + 60
+schema). The bump from the original 4,200 estimate reflects the v1.2
+review additions: explicit `requires_trigger=False` named parameter
+in Phase A, the loader-exclusion belt-and-suspenders test in Phase A,
+and the four 13-subcases + #23 startup-cleanup test in Phase B's
+matrix (22 → 23 scenarios). Detailed reasoning is in the chat thread
+that produced this plan, but in brief:
 
 - **Phase A** completes a latent-bug fix (`_coworker_from_state`) and
   the schema groundwork. The repo is healthier after Phase A even if

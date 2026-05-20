@@ -1,7 +1,7 @@
 # Phase A — Foundation (Step 1, 2, 3)
 
-> Branch: `feat/frontdesk` · Estimated session length: ~600 LOC
-> (60 schema + 160 prod + 380 tests).
+> Branch: `feat/frontdesk` · Estimated session length: ~620 LOC
+> (60 schema + 210 prod + 350 tests).
 > Output: 3 commits on `feat/frontdesk`. Not pushed.
 
 ---
@@ -40,6 +40,23 @@ CRITICAL: The _coworker_from_state fix (Step 2.3) is a real latent
 bug — current implementation drops 6 of 14 fields including
 permissions and agent_role. Read handbook §3 fact #22 and §6 Step
 2.3 carefully.
+
+CRITICAL: `create_child_conversation` (handbook §6 Step 2.4) MUST
+declare `requires_trigger: bool = False` as an explicit named
+parameter and pass it through to the INSERT. The conversations table
+default for that column is TRUE. If a child conv ever gets created
+with TRUE, the orchestrator's _message_loop picks it up and the
+entire "child conv never enters _state" invariant collapses — every
+downstream design assumption in Phase B and C breaks. Read handbook
+§6 Step 2.4 docstring.
+
+CRITICAL: In addition to the manual grep audit, add
+`tests/core/test_loader_excludes_children.py` — a unit-style
+assertion that `_load_state_from_db()` against a fixture with one
+parent + one child conv produces a `CoworkerState.conversations`
+that does NOT contain the child id. This is belt-and-suspenders for
+the audit invariant; future PRs that flip the default to True will
+fail this test instead of silently breaking the system.
 
 Work commit-by-commit. After each commit:
   uv run pytest && uv run mypy src && uv run ruff check src tests
@@ -124,8 +141,9 @@ conversations." If yes, document why the post-Phase-A loader default
 
 | File | What |
 |---|---|
-| `tests/db/test_delegation.py` | DB helpers — idempotent binding, find with chat_id filter, ON CONFLICT create, conditional terminal UPDATE, cleanup_running_delegations |
+| `tests/db/test_delegation.py` | DB helpers — idempotent binding, find with chat_id filter, ON CONFLICT create, conditional terminal UPDATE, cleanup_running_delegations. **Plus**: assert `create_child_conversation()` produces a row with `requires_trigger=False` (regression guard for the named-parameter contract in handbook §6 Step 2.4). |
 | `tests/core/test_coworker_from_state_full_copy.py` | Builds a fully-populated Coworker (all 14 fields including `is_frontdesk=True`, `permissions`, `agent_role`, `status`, `container_config`), wraps in `CoworkerState`, calls `_coworker_from_state(cs)`, asserts every field round-trips |
+| `tests/core/test_loader_excludes_children.py` | Belt-and-suspenders for the §2.5 grep audit: `_load_state_from_db()` against a fixture DB with 1 parent + 1 child conv → assert `CoworkerState.conversations` for the target coworker does NOT contain the child id. Catches future regressions of `include_children` default flipping to True without anyone re-running the manual audit. |
 | `tests/agent_runner/test_tool_context.py` | `request()` happy + timeout, role_config None→{}, role_config shallow-copy isolation |
 
 Phase B's tests come later and depend on these being in place.
@@ -160,6 +178,11 @@ Things that look related but belong to later phases:
       annotations.
 - [ ] `_coworker_from_state` is now `return cw_state.config` and the
       tests in `test_coworker_from_state_full_copy.py` pass.
+- [ ] `create_child_conversation` signature includes
+      `requires_trigger: bool = False` as a named parameter (not
+      hardcoded), and the DB-helper test asserts the resulting row.
+- [ ] `test_loader_excludes_children.py` passes (locks the audit
+      invariant automatically).
 - [ ] No tests modified to fit code (the constraint, not a checklist
       item the session can self-verify — humans verify on review).
 

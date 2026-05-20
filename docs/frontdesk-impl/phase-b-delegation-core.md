@@ -1,7 +1,7 @@
 # Phase B — Delegation core (Step 4, 5, 6)
 
-> Branch: `feat/frontdesk` · Estimated session length: ~2,180 LOC
-> (630 prod + 1,550 tests). **The heaviest phase. One dedicated session.**
+> Branch: `feat/frontdesk` · Estimated session length: ~2,280 LOC
+> (630 prod + 1,650 tests). **The heaviest phase. One dedicated session.**
 > Output: 3 commits on `feat/frontdesk`. Not pushed.
 > Depends on: Phase A merged into `feat/frontdesk` (commits done).
 
@@ -30,8 +30,8 @@ Phase B covers Steps 4, 5, 6 only:
           (orchestration/delegation.py). This is the CORE.
   Step 6: Frontdesk catalog injection at agent spawn time.
 
-This is roughly half the total feature LOC. ~1,300 lines of that is
-tests — the 22-scenario matrix in handbook §6 Step 5.5.
+This is roughly half the total feature LOC. ~1,400 lines of that is
+tests — the 23-scenario matrix in handbook §6 Step 5.5.
 
 NON-NEGOTIABLE CONTRACTS you must internalize before writing code:
 
@@ -59,6 +59,12 @@ NON-NEGOTIABLE CONTRACTS you must internalize before writing code:
       uses "agent id" NOT "folder slug". This is to keep the LLM from
       treating specialists as filesystem paths (real observed bug
       because frontdesk inherits super_agent bash perms).
+      Corollary: `_resolve_target` matches by `folder` FIRST, then
+      falls back to `id` (UUID) — because the label "id:" in the
+      catalog occasionally nudges a model to pass the actual UUID
+      rather than the folder slug. Folder-only matching quietly
+      fails in that case. Test #5 must cover both wrong-folder and
+      wrong-UUID inputs.
 
   (f) MAX_DELEGATION_DEPTH = 1. depth=0 in payload → allowed
       (frontdesk's initial call). depth=1 → rejected. Strictly 1 hop.
@@ -94,14 +100,17 @@ Stop and ask when:
 Suggested workflow:
   1. Read handbook.md fully.
   2. Read phase-b-delegation-core.md.
-  3. Open a TaskCreate task list with the 22 test scenarios from
+  3. Open a TaskCreate task list with the 23 test scenarios from
      handbook §6 Step 5.5 — keep them visible the whole session.
   4. Step 4 first (smaller, gives infrastructure for Step 5 tests).
   5. Step 5: write delegation.py skeleton with all helper signatures
      and the merge + OUTER_GUARD try/except shapes BEFORE filling in
      bodies. The shape is where the contracts live.
   6. Step 5 tests in numerical order from the matrix; each one is
-     ~60-80 lines with testcontainers/NATS setup.
+     ~60-80 lines with testcontainers/NATS setup. Pay extra attention
+     to test #13's four sub-cases (a/b/c/d) and #23 startup cleanup
+     ordering — these are the ones most likely to get cut under time
+     pressure and the ones most likely to catch real future regressions.
   7. Step 6 last — small, depends on Steps 4-5 catalog code.
 
 Start by confirming Phase A is in (git log) and reading both docs.
@@ -141,7 +150,7 @@ Three commits, in this order. Each builds on the previous.
 
 ### Commit 5 — `feat(frontdesk): delegate_to_agent tool + delegation handler`
 
-The big one. ~440 prod + ~1300 tests.
+The big one. ~440 prod + ~1400 tests.
 
 - New file `src/rolemesh/orchestration/delegation.py` with
   `handle_delegate_request`, `_process_one`,
@@ -172,38 +181,43 @@ The big one. ~440 prod + ~1300 tests.
 
 ---
 
-## Test matrix detail (22 scenarios — Step 5)
+## Test matrix detail (23 scenarios — Step 5)
 
-Open a TaskCreate task list at session start with these 22 entries.
+Open a TaskCreate task list at session start with these 23 entries.
 Mark in_progress while writing each; completed when its test passes.
 
 | # | Name | Critical assertion |
 |---:|---|---|
-| 1 | happy path | child conv created with `parent_conversation_id`, audit `success`, reply reaches frontdesk |
+| 1 | happy path | child conv created with `parent_conversation_id` AND `requires_trigger=False`, audit `success`, reply reaches frontdesk |
 | 2 | permission rejected | both agent-side and orchestrator-side gates fire |
 | 3 | self-delegation rejected | handler returns error |
 | 4 | cross-tenant rejected | handler returns "Tenant mismatch" |
-| 5 | target not found | error text contains catalog |
-| 6 | depth limit | `depth=0` allowed, `depth=1` rejected |
+| 5 | target not found (folder AND UUID) | error text contains catalog. Two sub-cases: wrong folder slug → not found; wrong UUID → not found. Validates `_resolve_target` exhausted both keys before giving up |
+| 6 | depth limit | `depth=0` allowed, `depth=1` rejected. **Mutation guard**: assert rejection message contains the literal "max 1 hop" — a loose `assert response.isError` would silently pass if someone flipped `MAX_DELEGATION_DEPTH=2` |
 | 7 | target is frontdesk / super_agent | both rejected by `_resolve_target` |
 | 8 | isolated | `session_id=None`; each call creates new child conv |
-| 9 | sticky round-trip | 1st: handler **explicit** `set_session(child, S1)`; assert `get_session(child)==S1` AND `get_session(parent)==BEFORE_DELEGATE`; 2nd: same child reused, `resume=S1` flows in. Plus A3: isolated-then-sticky must NOT reuse |
+| 9 | sticky round-trip | 1st: handler **explicit** `set_session(child, S1)`; assert `get_session(child)==S1` AND `get_session(parent)==BEFORE_DELEGATE` (mutation guard: catches an accidental `set_session(parent_conv.id, ...)`); 2nd: same child reused, `resume=S1` flows in. Plus A3: isolated-then-sticky must NOT reuse |
 | 10 | safety_blocked passthrough | isError=true, reason text intact |
-| 11 | business deadline | target sleeps 400s; inner `wait_for(300)` trips; audit `status='timeout'`, message contains `"took too long"` |
-| 12 | audit idempotency | write `timeout` then try write `success`; second call returns False; DB row stays `timeout` |
-| 13 | multi-reply target merge (A2) | Two events: `(success, is_final=False, result='Hi')` + `(success, is_final=True, result=None, new_session_id='S')`. Merged response text = `'Hi'`, new_session_id = `'S'` |
+| 11 | business deadline | target sleeps 400s; inner `wait_for(300)` trips → `set_exception(TimeoutError)` → `except Exception` branch with `is_business_timeout=True` → audit `status='timeout'`, message contains `"took too long"` |
+| 12 | audit idempotency | write `timeout` then try write `success`; second call returns False; DB row stays `timeout`. **Mutation guard**: assert BOTH the bool return AND the final DB row state — catches removal of the `WHERE status='running'` clause |
+| 13a | multi-reply Pi merge | Two events: `(success, is_final=False, result='Hi')` + `(success, is_final=True, result=None, new_session_id='S')`. Merged response text = `'Hi'`, new_session_id = `'S'` |
+| 13b | single-event Claude merge | One event `(success, is_final=True, result='Hi', new_session_id='S')`. Same merged response as 13a |
+| 13c | terminal beats marker (out-of-order) | Event 1 text + Event 2 marker + Event 3 `safety_blocked` (late hook). Merged result = the `safety_blocked` event, NOT the partial success. Pins the `terminal_event > final_marker` precedence in `_merge_pi_two_event_pattern` |
+| 13d | text-only, no marker | Only Event 1 arrives; closure completes via `executor.execute()` returning normally. Merged result has text but `new_session_id=None`. Defensive warning logged if the inverse case ever happens |
 | 14 | parallel delegation | one turn, two delegates to different targets, both complete concurrently |
 | 15 | OIDC pass-through | stub MCP receiver asserts `X-RoleMesh-User-Id` = parent's user_id |
 | 16 | `send_message` blocked in delegated | refusal with `is_error=True` |
-| 17 | role_config isolation (A) | unit test: `_build_agent_input(...)` returns `AgentInput.role_config == {is_delegated_call, delegated_by, delegation_depth=1, parent_conversation_id, delegation_id}` EXACTLY |
-| 17 | role_config isolation (B) | integration: fixture subscribes to the `AgentInitData` write path (grep `AgentInitData` to locate); real delegation → captured init_data.role_config matches A's dict |
-| 18 | GroupQueue shutting down | `queue._shutting_down=True`. No `enqueue_task` call. Error response. Audit row `status='error'`, message `'GroupQueue is shutting down; delegation refused.'` |
+| 17a | role_config isolation (unit) | unit test: `_build_agent_input(...)` returns `AgentInput.role_config == {is_delegated_call, delegated_by, delegation_depth=1, parent_conversation_id, delegation_id}` EXACTLY |
+| 17b | role_config isolation (integration) | fixture subscribes to the `AgentInitData` write path (**grep `AgentInitData` in `agent_runner/` FIRST to locate the actual subject/KV key**; do not guess); real delegation → captured `init_data.role_config` matches 17a's dict |
+| 18 | GroupQueue shutting down | `queue._shutting_down=True`. No `enqueue_task` call. Error response. Audit row `status='error'`, message exactly `'GroupQueue is shutting down; delegation refused.'` |
 | 19 | child conv NOT in `_state.coworkers` | run `_message_loop` one tick; assert child conv id absent from `_state.coworkers[target].config.conversations` |
 | 20 | sticky concurrency race | `asyncio.gather` two concurrent sticky calls to same (parent, target). Exactly one child conv row. Both reuse the same session. |
 | 21 | explicit request_shutdown (A1) | Mock `queue.request_shutdown` with counter. Assert it was called on each terminal path: success, error, safety_blocked, business timeout. Also assert `result_future.get_loop() is asyncio.get_running_loop()` |
 | 22 | OUTER_GUARD vs business timeout — distinct audit | Variant a: monkey-patch `queue.enqueue_task` to no-op → OUTER_GUARD fires → audit `status='error'`, message `'Delegation task never started (queue stalled).'`. Variant b: closure runs but `wait_for(300)` trips → audit `status='timeout'`. **The two error_message strings MUST differ.** |
+| 23 | startup cleanup of stale `running` rows | Pre-insert two `delegations` rows with `status='running'`. Spin up orchestrator. Assert `cleanup_running_delegations()` ran **before** any `nc.subscribe(...)` (fixture records ordering). Both rows now `status='error'` with explanatory message. Verifies the startup-ordering invariant, not just the SQL (Step 2.6 already covers the SQL in isolation) |
 
-Total ≈ 1300 lines of test code.
+Total ≈ 1400 lines of test code. The four 13-subcases and #23 alone
+account for ~250 lines; sizing them correctly matters.
 
 ---
 
@@ -274,10 +288,16 @@ assembled. Do NOT inject anywhere else.
 - [ ] `uv run pytest && uv run mypy src && uv run ruff check src tests`
       green after each commit.
 - [ ] `git commit -s`, prefix `feat(frontdesk):`.
-- [ ] 22 tests pass. (Look at TaskList in the session to confirm
-      every scenario got its test.)
+- [ ] 23 tests pass. (Look at TaskList in the session to confirm
+      every scenario got its test, including the four 13-subcases and
+      #23 startup cleanup ordering.)
 - [ ] `_merge_pi_two_event_pattern` handles all three input shapes
-      explicitly.
+      explicitly and tests 13a-d all pass.
+- [ ] `_resolve_target` matches by `folder` first and falls back to
+      `id` (UUID); test #5 covers both wrong-folder and wrong-UUID
+      inputs.
+- [ ] `delegate_to_agent` over-length prompt error text instructs the
+      LLM to split the task or use file tools (handbook §6 Step 5.1).
 - [ ] `queue.request_shutdown(queue_key)` is called on EVERY terminal
       path. Verified by test #21.
 - [ ] OUTER_GUARD vs business timeout produce distinct

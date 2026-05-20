@@ -164,13 +164,19 @@ coupled by the "frontdesk is visible to admin + users" UX surface:**
    **Record the finding in the commit message.**
 
 2. **Dataset** `tests/data/routing_dataset.jsonl`:
-   - ≥ 50 cases.
+   - ≥ 50 cases (v1.2 launch floor).
    - ≥ 20% adversarial.
    - Each routing target has ≥ 5 cases.
    - 5-10 no-match cases (`expected_target=null`).
    - At least 5 cases for the failure-passthrough contract:
      target returns safety_blocked → verify frontdesk reply contains
      specialist name + literal reason.
+   - **Document the 3-month growth plan** from handbook §6 Step 8.2 in
+     the commit message and in `docs/frontdesk-architecture.md`: grow
+     to ≥ 150 cases + ≥ 30 adversarial within 3 months of ship, mined
+     from real routing mistakes in the `delegations` audit table. A
+     release-blocking gate that never grows past 50 becomes a rubber
+     stamp.
 
 3. **Scorer rules** (handbook §6 Step 8.3).
 
@@ -193,7 +199,10 @@ Update `docs/frontdesk-architecture.md` from v1 to v1.2:
 - Safety / approval / OIDC. Async approval explicitly.
 - **Approval UI parent-walk + outcome fan-out (both paths) with the
   channel-adapter rationale.**
-- All 12 known v1 trade-offs from handbook §9 listed verbatim.
+- All 13 known v1 trade-offs from handbook §9 listed verbatim
+  (including #13 sticky-mode cold-start latency — explain the
+  contrast with `task_scheduler.py:_TASK_CLOSE_DELAY_S` and why v1
+  intentionally does not replicate the warm-keep delay).
 
 Add one line to `README.md` Features section: "Frontdesk: single
 user-facing entry point per tenant that delegates to specialist
@@ -256,7 +265,8 @@ fan-out logic might need to be in a different layer.
 
 5. **Docs drift**. `docs/frontdesk-architecture.md` exists as v1.
    Replace, don't append. Make sure the "known v1 trade-offs"
-   section matches handbook §9 word-for-word (12 items).
+   section matches handbook §9 word-for-word (13 items, including
+   the sticky cold-start trade-off added during the v1.2 review).
 
 ---
 
@@ -279,7 +289,9 @@ fan-out logic might need to be in a different layer.
 - [ ] Eval wired into nightly (or documented as follow-up if CI
       slot is unavailable).
 - [ ] `docs/frontdesk-architecture.md` is v1.2 and matches handbook
-      §9 trade-off list.
+      §9 trade-off list (13 items) word-for-word.
+- [ ] Dataset growth plan (≥150/≥30 in 3 months) is mentioned in
+      both Commit 8 message and `docs/frontdesk-architecture.md`.
 - [ ] `README.md` Features mentions frontdesk.
 
 After Phase C, the feature is production-ready and the branch is

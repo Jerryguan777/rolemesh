@@ -434,14 +434,23 @@ async def create_child_conversation(
     target_internal_binding_id: str,
     user_id: str | None,
     mode: ChildConvMode,
+    requires_trigger: bool = False,  # MUST be False; explicit to prevent regression
 ) -> Conversation:
     """channel_chat_id format:
          sticky:    "internal:{parent_conv_id}:{target_coworker_id}"
          isolated:  "internal:{parent_conv_id}:{target_coworker_id}:{uuid4()}"
-       
+
        INSERT ... ON CONFLICT (channel_binding_id, channel_chat_id)
        DO NOTHING RETURNING + fallback SELECT.
-       requires_trigger=False.
+
+       ★ `requires_trigger` is a named parameter (default False) on purpose:
+       `conversations.requires_trigger` defaults to TRUE in schema, and
+       the existing `db/chat.py:create_conversation` helper threads it
+       through. If a child conv ever gets created with
+       requires_trigger=TRUE, the orchestrator's `_message_loop` will pick
+       it up — breaking the "child conv never enters _state" invariant
+       that the entire §2.5 grep audit depends on. The Step 5.5 happy-path
+       test (#1) asserts `requires_trigger=False` to catch regressions.
     """
 
 
@@ -486,15 +495,33 @@ grep -rn "get_all_conversations\|get_conversations_for_coworker\|FROM conversati
   > /tmp/audit_conv_queries.txt
 ```
 
-Expected counts: ~12-15 entries in A, fewer in B. For every line,
-answer:
+Expected counts: ~12-15 entries in A, fewer in B. The audit target in
+grep A is specifically the `CoworkerState.conversations` dict (i.e.
+`_state.coworkers[id].conversations`) — **not** any field on
+`Coworker.config`. The invariant the audit upholds is: that dict only
+contains user-facing conversations (`parent_conversation_id IS NULL`),
+because the loader populates it via `get_conversations_for_coworker`
+which defaults to `include_children=False`.
 
-- Does this site read the `conversations` dict assuming all entries
-  are user conversations?
-- If yes, is the "child conversations don't enter `_state`" invariant
-  upheld here (loader defaults to `include_children=False`)?
+For every line in grep A, answer:
+
+- Does this site iterate or look up by id in the
+  `CoworkerState.conversations` dict, assuming every entry is a user
+  conversation (e.g. for trigger gating, idle accounting, broadcast
+  fan-out)?
+- If yes, is the "child conv never enters `_state`" invariant upheld
+  here (loader defaults to `include_children=False`, and nothing in
+  this site re-loads with `include_children=True`)?
 - Does any site explicitly need to see child convs? **If so, stop and
   report — don't change the design on a hunch.**
+
+**Belt and suspenders**: before doing the manual audit, add a
+unit-style assertion `tests/core/test_loader_excludes_children.py`
+that calls `_load_state_from_db()` against a fixture DB containing one
+parent + one child conv, and asserts the resulting
+`CoworkerState.conversations` for the target coworker does NOT contain
+the child id. This catches "future PR accidentally flipped the default
+to True" without relying on humans grep-reading 15 sites every release.
 
 For grep B: does the call pass `include_children=True`? If not, is the
 default `False` safe? WebUI direct SQL must `WHERE
@@ -766,7 +793,14 @@ async def delegate_to_agent(args, ctx) -> ToolResult:
         return _text_result("target and prompt are required.", is_error=True)
     if len(prompt) > MAX_DELEGATE_PROMPT_CHARS:
         return _text_result(
-            f"prompt exceeds {MAX_DELEGATE_PROMPT_CHARS} chars.", is_error=True,
+            f"prompt exceeds {MAX_DELEGATE_PROMPT_CHARS} chars "
+            f"({len(prompt)} given). Self-contained prompts must fit "
+            f"in one tool call — split the task into smaller delegations "
+            f"(e.g. one call per question or per document section), or "
+            f"ask the user to upload long content via file tools that the "
+            f"specialist can read directly. Do NOT retry with the same "
+            f"oversized prompt.",
+            is_error=True,
         )
     if context_mode not in ("isolated", "sticky"):
         return _text_result(
@@ -1135,8 +1169,19 @@ def _merge_pi_two_event_pattern(
 Helpers `_resolve_target / _map_output_to_response / _err /
 _timeout_response / _error_response` live in the same file.
 `_resolve_target` filters: same tenant, `status='active'`,
-`agent_role='agent'`, not `is_frontdesk`, not self; matches by
-`folder`.
+`agent_role='agent'`, not `is_frontdesk`, not self. Match key: try
+`folder` first, then fall back to `id` (UUID).
+
+**Why two match keys**: the catalog renders `(id: {c.folder})` and the
+FRONTDESK_RULES tell the LLM to use the "agent id" — so 99% of the
+time the LLM passes the folder slug verbatim. But occasionally a model
+will see the literal label "id:" and try to look up by UUID instead.
+A folder-only lookup quietly fails in that case, surfacing as "Agent
+'5f3a...' not found." with a catalog re-render that won't help (the
+catalog still uses folders). The UUID fallback handles this with one
+extra dict lookup and no ambiguity (folder and UUID don't collide).
+Test #5 (target not found) must cover the "passed a wrong UUID" case
+as well as the "passed a wrong folder" case.
 
 `_map_output_to_response`:
 
@@ -1165,7 +1210,7 @@ await transport.nc.subscribe(
 )
 ```
 
-#### 5.5 Tests — the 22-scenario matrix
+#### 5.5 Tests — the 23-scenario matrix
 
 `tests/integration/test_delegate_to_agent.py` must cover:
 
@@ -1180,6 +1225,11 @@ await transport.nc.subscribe(
 6. **depth limit**:
    - `depth=0` payload (frontdesk's initial call) → allowed.
    - `depth=1` payload (caller is already a delegate) → rejected.
+   - **Mutation test value**: this test must fail if someone flips
+     `MAX_DELEGATION_DEPTH` from 1 to 2 — assertion on the exact value
+     in the rejection error message (e.g. `"max 1 hop"`) catches this.
+     A loose `assert response.isError` would silently pass under the
+     mutation and let A→B→C chaining ship.
 7. **target is frontdesk rejected**; **target is super_agent rejected**.
 8. **isolated** — `session_id=None`; each call creates a new child conv.
 9. **sticky round-trip** (core):
@@ -1206,11 +1256,40 @@ await transport.nc.subscribe(
     - Step b: call `update_delegation_terminal(id, status='success')`.
     - Assert: step b returns `False`. Assert: DB row remains
       `status='timeout'`.
-13. **multi-reply target merge (A2)** — Pi-style two-event success:
-    - Event 1: `AgentOutput(status='success', is_final=False, result='Hi')`.
-    - Event 2: `AgentOutput(status='success', is_final=True, result=None,
-      new_session_id='S')`.
-    - Assert: response text = `'Hi'`; new_session_id captured = `'S'`.
+    - **Mutation test value**: this test must fail if someone weakens
+      the SQL `WHERE id=$1 AND status='running'` to just
+      `WHERE id=$1`. Without the status guard, late events would
+      overwrite terminal state and corrupt audit history. Assert on
+      both the bool return AND the final DB row contents — a test that
+      only asserts the bool would pass under the mutation.
+13. **multi-reply target merge (A2)** — Pi-style two-event success
+    AND terminal-event ordering:
+    - **a. Normal Pi pattern**:
+      - Event 1: `AgentOutput(status='success', is_final=False, result='Hi')`.
+      - Event 2: `AgentOutput(status='success', is_final=True, result=None,
+        new_session_id='S')`.
+      - Assert: response text = `'Hi'`; new_session_id captured = `'S'`.
+    - **b. Single-event Claude pattern**:
+      - One event `AgentOutput(status='success', is_final=True,
+        result='Hi', new_session_id='S')`.
+      - Assert: same merged response as (a).
+    - **c. Terminal beats marker (out-of-order)**: a `safety_blocked`
+      event arrives AFTER a success marker was already observed (Pi
+      backend can interleave hook results late):
+      - Event 1: `AgentOutput(status='success', is_final=False, result='partial')`.
+      - Event 2: `AgentOutput(status='success', is_final=True, result=None)`.
+      - Event 3: `AgentOutput(status='safety_blocked', result='disallowed_topic')`.
+      - Assert: merged result is the `safety_blocked` event, NOT the
+        partial success — `_merge_pi_two_event_pattern` must prefer
+        `terminal_event` over `final_marker`. (The current impl does;
+        this test pins the contract.)
+    - **d. Text-only with no marker**: only Event 1 arrives; closure
+      completes via `executor.execute()` returning normally rather than
+      via the marker path.
+      - Assert: merged result has the text but `new_session_id=None`.
+        Logs contain a defensive warning `"got marker without prior
+        text event"` if the inverse case happens (signal of backend
+        behavior drift).
 14. **parallel delegation** — one turn, two delegates to different
     targets, both complete concurrently.
 15. **OIDC pass-through** — stub MCP receiver asserts
@@ -1265,12 +1344,33 @@ await transport.nc.subscribe(
       `'took too long'`.
     - The two `error_message` strings MUST be distinct so ops can tell
       them apart.
+23. **startup cleanup of stale `running` rows** — end-to-end startup
+    ordering test:
+    - Pre-insert into `delegations` two rows with `status='running'`
+      and an old `started_at` (simulate prior orchestrator crash).
+    - Spin up orchestrator. Assert `cleanup_running_delegations()`
+      runs **before** any `nc.subscribe(...)` call (use a fixture that
+      records subscribe order, or asserts the cleanup function was
+      called and returned >= 2 BEFORE the first `delegate.request`
+      subscribe).
+    - Assert: both rows now `status='error'`, with an explanatory
+      `error_message` like `'cleanup: orchestrator restarted'`.
+    - **Why this test, not just the Step 2.6 DB-helper test**: the
+      Step 2.6 test verifies the SQL works in isolation. This test
+      verifies the **ordering invariant** in `_load_state_from_db` /
+      startup — easy to regress when someone refactors startup later
+      and moves cleanup after subscribe, which would briefly accept
+      new requests while old running rows are still "in flight" in
+      audit.
 
-**Sizing reality check**: 22 tests × ~60-80 lines each with
-testcontainers/NATS setup is **~1300 lines of test code**, not the
-~800 a casual estimate would produce. Budget accordingly.
+**Sizing reality check**: 23 tests × ~60-80 lines each with
+testcontainers/NATS setup is **~1400 lines of test code**, not the
+~800 a casual estimate would produce. Budget accordingly. The 13c/d
+ordering sub-cases and #23 startup-cleanup are the ones most likely
+to be skipped under time pressure — they are also the ones most
+likely to catch a future regression, so don't skip them.
 
-**Sizing**: ~440 prod + ~1300 tests.
+**Sizing**: ~440 prod + ~1400 tests.
 
 ---
 
@@ -1493,13 +1593,29 @@ finding in the commit message.
 
 `tests/data/routing_dataset.jsonl`:
 
-- ≥ **50 cases**.
+- ≥ **50 cases** at v1.2 launch (starting floor).
 - ≥ **20% adversarial** ("looks like A, actually B").
 - Each routing target has ≥ 5 cases.
 - 5-10 "no-match" cases (`expected_target=null`).
 - Cases that test the failure-passthrough contract: target returns
   `safety_blocked` → verify frontdesk reply contains specialist name
   + literal reason.
+
+**Follow-on dataset growth plan** (not blocking v1.2 launch, but
+written into Step 9 docs as commitment): 50 cases is the minimum a
+release-blocking gate can run on without flapping. Within 3 months of
+shipping, grow to **≥ 150 cases with ≥ 30 adversarial**, drawn from:
+
+- Real user prompts that produced routing mistakes in prod (mined from
+  the `delegations` audit table — look for sequences where the user's
+  next turn corrected the target).
+- Adversarial templates for each new domain agent added.
+- Hard "no-match" cases as new domain capabilities encroach on each
+  other's territory.
+
+Track dataset size on a dashboard so it doesn't silently stagnate at
+50 forever; a release-blocking gate that never grows becomes a rubber
+stamp.
 
 #### 8.3 Scorer rules
 
@@ -1684,6 +1800,25 @@ non-goals — not bugs.
     prompts SHA-256 to ~identifiable hashes.
 12. **Child conv rows accumulate**. RLS isolates them and UI hides
     them, but storage grows. Archival is a follow-on.
+13. **Sticky follow-up turns cold-start the target container**. The
+    delegation handler calls `queue.request_shutdown(queue_key)` on
+    every terminal event (success, error, safety_blocked, timeout) so
+    the target container exits and `executor.execute()` can return.
+    The existing `task_scheduler.py:_run_task` instead uses
+    `_TASK_CLOSE_DELAY_S = 10s` + `notify_idle` to keep the container
+    warm across back-to-back tasks on the same `chat_jid`. We
+    intentionally do NOT replicate that delay here because (a)
+    delegation queue keys are per-child-conv (`delegate:{child_id}`)
+    so no other task is waiting to preempt the slot, and (b) the
+    simpler shutdown semantics are worth the cold-start cost in v1.
+
+    **User-visible consequence**: when a user has a sticky multi-turn
+    flow with the same specialist ("then place the order" after "show
+    holdings"), the 2nd turn pays a fresh 20-40s container cold start.
+    Functionally correct because we explicitly persist `set_session`
+    and the SDK resumes via `resume=session_id`, but the latency is
+    real. v1.5 backlog: optional warm-keep window for sticky mode (mirror
+    `_TASK_CLOSE_DELAY_S` only when `context_mode='sticky'`).
 
 ---
 
@@ -1706,6 +1841,9 @@ non-goals — not bugs.
 - `wrap_on_output_with_session_save` generalization (v1.5 backlog)
 - `role_config` typed accessor / namespacing (v1.5 backlog — kill the
   "dict-for-multiple-purposes" namespace debt)
+- Warm-keep window for sticky-mode target containers (v1.5 backlog —
+  mirror `_TASK_CLOSE_DELAY_S` only when `context_mode='sticky'`; see
+  §9 #13 for the latency this leaves on the table in v1)
 - HMAC over `prompt_sha256`
 - Adaptive capacity monitoring
 
