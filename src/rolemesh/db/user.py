@@ -199,6 +199,10 @@ async def update_user_access_token(
     access_token_expires_at: datetime,
 ) -> None:
     """Update only the cached access_token (after refresh)."""
+    # inv-1-ok: oidc_user_tokens.user_id is PRIMARY KEY; the parent
+    # users.tenant_id propagates via FK + the BEFORE-INSERT trigger
+    # ``trg_oidc_user_tokens_set_tenant``. UPDATE-by-user_id cannot
+    # cross tenants because (user_id) is unique globally.
     async with admin_conn() as conn:
         await conn.execute(
             """
@@ -219,6 +223,9 @@ async def update_user_refresh_token(
     refresh_token_encrypted: bytes,
 ) -> None:
     """Update only the refresh_token (after IdP rotation)."""
+    # inv-1-ok: see update_user_access_token — user_id is globally
+    # unique on oidc_user_tokens, so the tenant predicate would be
+    # redundant.
     async with admin_conn() as conn:
         await conn.execute(
             "UPDATE oidc_user_tokens SET refresh_token_encrypted = $1, updated_at = now() "

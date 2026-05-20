@@ -62,6 +62,60 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         "CHECK (approval_default_mode IN ("
         "'auto_execute', 'require_approval', 'deny'))"
     )
+
+    # ----- Platform model catalog (v1.1 §2.1) -----------------------------
+    # Tenant-agnostic; no RLS. ``is_platform`` is reserved for the v2
+    # extension where a tenant can register its own model (then FALSE
+    # for those rows). v1 only ships platform-curated entries.
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS models (
+            id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            provider        VARCHAR(50) NOT NULL,
+            model_id        VARCHAR(200) NOT NULL,
+            model_family    VARCHAR(50) NOT NULL,
+            display_name    VARCHAR(200) NOT NULL,
+            is_platform     BOOLEAN NOT NULL DEFAULT TRUE,
+            is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at      TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE (provider, model_id)
+        )
+    """)
+
+    # Tenant-scoped credential pointers — the real key lives in a
+    # secret store, only the ``credential_ref`` is in the DB.
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS tenant_model_credentials (
+            id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            tenant_id        UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            provider         VARCHAR(50) NOT NULL,
+            credential_ref   TEXT NOT NULL,
+            created_at       TIMESTAMPTZ DEFAULT NOW(),
+            updated_at       TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE (tenant_id, provider)
+        )
+    """)
+
+    # MCP server registry. ``tool_reversibility`` is a {tool_name: bool}
+    # map; an empty object means "no per-tool override, fall back to
+    # tenant default".
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS mcp_servers (
+            id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            tenant_id           UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            name                VARCHAR(200) NOT NULL,
+            type                VARCHAR(50) NOT NULL,
+            url                 TEXT NOT NULL,
+            auth_mode           VARCHAR(50) NOT NULL,
+            credential_ref      TEXT,
+            extra_headers       JSONB DEFAULT '{}',
+            tool_reversibility  JSONB DEFAULT '{}',
+            description         TEXT,
+            created_at          TIMESTAMPTZ DEFAULT NOW(),
+            updated_at          TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE (tenant_id, name)
+        )
+    """)
+
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -167,6 +221,20 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_uaa_user ON user_agent_assignments(user_id)")
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_uaa_coworker ON user_agent_assignments(coworker_id)")
 
+    # Coworker <-> MCP server association (v1.1 §2.1). ``enabled_tools``
+    # = NULL means "all tools enabled" (the common case); an empty
+    # array ``'{}'`` means "all disabled" — semantically distinct, do
+    # not default to ``'{}'``. RLS is enforced transitively via
+    # ``coworkers.tenant_id`` (see ``_enable_rls_via_parent_coworker``).
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS coworker_mcp_servers (
+            coworker_id     UUID NOT NULL REFERENCES coworkers(id) ON DELETE CASCADE,
+            mcp_server_id   UUID NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
+            enabled_tools   TEXT[] DEFAULT NULL,
+            PRIMARY KEY (coworker_id, mcp_server_id)
+        )
+    """)
+
     # Skills: per-coworker capability folders. SKILL.md (frontmatter +
     # body) lives in the row keyed by ``path = 'SKILL.md'`` in
     # ``skill_files``. Frontmatter is split between common (carries
@@ -243,6 +311,20 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         CREATE TRIGGER trg_skills_check_coworker_tenant
             BEFORE INSERT OR UPDATE OF coworker_id, tenant_id ON skills
             FOR EACH ROW EXECUTE FUNCTION skills_check_coworker_tenant();
+    """)
+
+    # Coworker <-> skill association (v1.1 §2.1). Skills will move to
+    # per-tenant catalog in 03b; this junction table is the future
+    # binding mechanism. ``enabled`` defaults TRUE so adding a binding
+    # is a single INSERT. RLS is enforced transitively via the parent
+    # ``coworkers.tenant_id``.
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS coworker_skills (
+            coworker_id   UUID NOT NULL REFERENCES coworkers(id) ON DELETE CASCADE,
+            skill_id      UUID NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+            enabled       BOOLEAN NOT NULL DEFAULT TRUE,
+            PRIMARY KEY (coworker_id, skill_id)
+        )
     """)
 
     # Password hash for future builtin auth
@@ -362,6 +444,33 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     # Auth: add user_id to conversations (nullable — Telegram/Slack groups have no single owner)
     await conn.execute(
         "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id)"
+    )
+
+    # Runs (v1.1 §2.1). One row per agent invocation; WS streaming +
+    # cancel + scheduled paths all UPDATE ``status / completed_at /
+    # usage`` (INV-6, covered by 01b). ``error`` carries structured
+    # failure detail when status='failed'. ``awaiting_reauth`` is the
+    # user-mode MCP token-vault-stalled state (architecture preserved;
+    # not exercised under bootstrap fast-path).
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS runs (
+            id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            tenant_id       UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+            status          VARCHAR(20) NOT NULL,
+            started_at      TIMESTAMPTZ DEFAULT NOW(),
+            completed_at    TIMESTAMPTZ,
+            usage           JSONB,
+            error           JSONB
+        )
+    """)
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_runs_tenant_conv_started "
+        "ON runs (tenant_id, conversation_id, started_at DESC)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_runs_status "
+        "ON runs (tenant_id, status) WHERE status = 'running'"
     )
 
     # --- Tables that exist in both legacy (Step 4) and new (Step 5) formats ---
@@ -965,6 +1074,39 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         """
     )
 
+    # ----- Platform models seed (v1.1 §2.1) -------------------------------
+    # Curated catalog of provider × model_id combinations the platform
+    # ships with. Each tuple is a ``(provider, model_id, model_family,
+    # display_name)``. The list is intentionally conservative: Claude
+    # entries match knowledge cutoff + agent compatibility (see
+    # ``rolemesh.core.backend_capabilities``); Bedrock entries use the
+    # ``us.anthropic.*`` cross-region inference profile pattern that
+    # Pi already expects via ``PI_MODEL_ID`` (see README §"Pi backend"
+    # and ``tests/agent/test_executor.py``); OpenAI / Google entries
+    # are placeholders to make the credential / Phase 2 selector UI
+    # rendering plausible — code paths that actually exercise these
+    # models live in Pi, not rolemesh, so they remain ``is_platform=
+    # TRUE`` and the catalog is the source of truth.
+    #
+    # ``ON CONFLICT DO NOTHING`` makes the seed idempotent against
+    # re-runs; rows are matched on the UNIQUE (provider, model_id)
+    # constraint.
+    _MODEL_SEED: list[tuple[str, str, str, str]] = [
+        ("anthropic", "claude-opus-4-7",            "claude", "Claude Opus 4.7"),
+        ("anthropic", "claude-sonnet-4-6",          "claude", "Claude Sonnet 4.6"),
+        ("anthropic", "claude-haiku-4-5-20251001",  "claude", "Claude Haiku 4.5"),
+        ("bedrock",   "us.anthropic.claude-sonnet-4-6", "claude", "Claude Sonnet 4.6 (Bedrock)"),
+        ("openai",    "gpt-4o",                     "gpt",    "GPT-4o"),
+        ("google",    "gemini-2.5-flash",           "gemini", "Gemini 2.5 Flash"),
+    ]
+    for provider, model_id, family, display in _MODEL_SEED:
+        await conn.execute(
+            "INSERT INTO models (provider, model_id, model_family, display_name) "
+            "VALUES ($1, $2, $3, $4) "
+            "ON CONFLICT (provider, model_id) DO NOTHING",
+            provider, model_id, family, display,
+        )
+
     # ----- RLS infrastructure (PR-B) ---------------------------------------
     # current_tenant_id() reads the per-connection GUC set by
     # tenant_conn(). Returns NULL when unset → policies of the form
@@ -1054,6 +1196,49 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     await _enable_rls_on(conn, "skills")               # skills feature: standard tenant_id scope
     await _enable_rls_on_transitive_skill_files(conn)
     await _enable_rls_on(conn, "eval_runs")            # eval framework
+
+    # ----- v1.1 §2.1 RLS additions ---------------------------------------
+    # New tenant-scoped tables get the standard four-policy treatment.
+    # Junction tables that carry no tenant_id of their own (coworker_*
+    # pair tables) inherit RLS transitively via ``coworkers.tenant_id``.
+    # ``models`` is deliberately NOT enabled — it's a platform-level
+    # catalog and rolemesh_app needs unfiltered SELECT to render the
+    # model picker.
+    await _enable_rls_on(conn, "tenant_model_credentials")
+    await _enable_rls_on(conn, "mcp_servers")
+    await _enable_rls_on(conn, "runs")
+    await _enable_rls_via_parent_coworker(conn, "coworker_mcp_servers")
+    await _enable_rls_via_parent_coworker(conn, "coworker_skills")
+
+
+async def _enable_rls_via_parent_coworker(
+    conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record], table: str,
+) -> None:
+    """RLS for a junction table keyed transitively through ``coworkers.tenant_id``.
+
+    Used for ``coworker_mcp_servers`` / ``coworker_skills`` — pure
+    association tables with no ``tenant_id`` column of their own. The
+    EXISTS subquery is itself RLS-bound on ``coworkers`` so a
+    cross-tenant lookup sees zero parent rows and the join row is
+    hidden / write rejected. Mirrors the pattern documented in
+    ``_enable_rls_on_transitive_skill_files``.
+    """
+    await conn.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
+    await conn.execute(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
+    parent_check = (
+        f"EXISTS (SELECT 1 FROM coworkers "
+        f"WHERE coworkers.id = {table}.coworker_id "
+        f"AND coworkers.tenant_id = current_tenant_id())"
+    )
+    for op, body in (
+        ("SELECT", f"USING ({parent_check})"),
+        ("INSERT", f"WITH CHECK ({parent_check})"),
+        ("UPDATE", f"USING ({parent_check}) WITH CHECK ({parent_check})"),
+        ("DELETE", f"USING ({parent_check})"),
+    ):
+        policy = f"rls_{op.lower()}"
+        await conn.execute(f"DROP POLICY IF EXISTS {policy} ON {table}")
+        await conn.execute(f"CREATE POLICY {policy} ON {table} FOR {op} {body}")
 
 
 async def _enable_rls_on_transitive_skill_files(
