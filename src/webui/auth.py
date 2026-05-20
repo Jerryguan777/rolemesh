@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from rolemesh.auth.bootstrap_users import (
+    ensure_bootstrap_user_row,
+    get_spec_for_token,
+)
+
 if TYPE_CHECKING:
     import asyncpg
 
@@ -46,16 +51,40 @@ BOOTSTRAP_USER_ID = "bootstrap"
 
 
 async def authenticate_ws(token: str) -> AuthenticatedUser | None:
-    """Authenticate a token (JWT or bootstrap). Returns None on failure.
+    """Authenticate a token (JWT, BOOTSTRAP_USERS, or single bootstrap).
 
-    Used by both WebSocket and REST endpoints.
+    Returns None on failure. Used by both WebSocket and REST endpoints.
+
+    Resolution order:
+      1. ``BOOTSTRAP_USERS`` multi-user map (if any token matches);
+      2. ``ADMIN_BOOTSTRAP_TOKEN`` legacy single-user fast-path;
+      3. configured AuthProvider (external JWT / OIDC / builtin).
+
+    The multi-user map sits ahead of the legacy single-user path so a
+    dev who configures both gets the richer identity. A request whose
+    token matches neither bootstrap source falls through to the
+    provider — never short-circuited.
     """
     from rolemesh.auth.provider import AuthenticatedUser as AuthUser
+    from rolemesh.db import get_tenant_by_slug
     from webui.config import ADMIN_BOOTSTRAP_TOKEN
 
-    if ADMIN_BOOTSTRAP_TOKEN and token == ADMIN_BOOTSTRAP_TOKEN:
-        from rolemesh.db import get_tenant_by_slug
+    spec = get_spec_for_token(token)
+    if spec is not None:
+        tenant = await get_tenant_by_slug(spec.tenant_slug)
+        if tenant is None:
+            # Spec referenced a tenant slug that isn't in the DB. Fail
+            # closed: don't manufacture a fictitious tenant_id.
+            return None
+        user_uuid = await ensure_bootstrap_user_row(spec, tenant.id)
+        return AuthUser(
+            user_id=user_uuid,
+            tenant_id=tenant.id,
+            role=spec.role,
+            name=spec.user_id_slug,
+        )
 
+    if ADMIN_BOOTSTRAP_TOKEN and token == ADMIN_BOOTSTRAP_TOKEN:
         tenant = await get_tenant_by_slug("default")
         tenant_id = tenant.id if tenant else "default"
         return AuthUser(

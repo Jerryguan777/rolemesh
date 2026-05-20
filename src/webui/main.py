@@ -26,6 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from nats.js.api import StreamConfig
 from rolemesh.auth.bootstrap_actor import BootstrapActorError
+from rolemesh.auth.bootstrap_users import init_bootstrap_users
 from rolemesh.db import (
     _get_pool,
     close_database,
@@ -88,6 +89,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Load web bindings using the shared pool
     await auth.init_auth(_get_pool())
     await auth.init_auth_provider()
+
+    # BOOTSTRAP_USERS multi-user fast-path (§5.2.1). Parsing happens
+    # once at startup so a malformed spec fails the process boot
+    # instead of intermittently failing requests. The function is a
+    # no-op when the env var is unset.
+    init_bootstrap_users()
 
     # Initialize TokenVault for OIDC token mirroring (mirrors orchestrator init).
     # This is per-process: orchestrator and webui each hold their own vault.
