@@ -1307,6 +1307,24 @@ async def main() -> None:
     await _ensure_container_system_running()
     await init_database()
     logger.info("Database initialized")
+
+    # Frontdesk v1.2: sweep stale ``running`` delegations BEFORE
+    # ``_load_state()`` and BEFORE any core NATS subscription that
+    # accepts new ones. Handbook §6 Step 5.4 startup ordering invariant
+    # — if a prior orchestrator crashed mid-delegation, the audit row
+    # is still ``running``; leaving it that way past the moment we
+    # start accepting new requests would corrupt audit history.
+    # ``cleanup_running_delegations`` is admin-conn (no GUC); the
+    # orchestrator owns audit completeness across tenants.
+    from rolemesh.db.delegation import cleanup_running_delegations
+
+    cleaned = await cleanup_running_delegations()
+    if cleaned:
+        logger.info(
+            "delegations: cleaned up stale running rows on startup",
+            count=cleaned,
+        )
+
     await _load_state()
     restore_remote_control()
 
@@ -1597,6 +1615,30 @@ async def main() -> None:
         "agent.*.list_agents.request", cb=_list_agents_cb,
     )
     egress_responder_subs.append(list_agents_sub)
+
+    # Frontdesk v1.2: core NATS responder for the ``delegate_to_agent``
+    # tool. Request-reply (not JetStream) because the calling
+    # frontdesk's turn is blocked synchronously on the RPC — the
+    # business deadline is enforced inside the handler. Registered
+    # AFTER ``cleanup_running_delegations()`` + ``_load_state()`` so
+    # in-flight stale audit rows from a prior crash are sealed off
+    # before we start producing new ones (handbook §6 Step 5.4).
+    from rolemesh.orchestration.delegation import handle_delegate_request
+
+    def _get_executor_for_backend(backend: str) -> object:
+        return _executors.get(backend) if _executors else None
+
+    async def _delegate_cb(msg: object) -> None:
+        assert _queue is not None
+        await handle_delegate_request(
+            msg, state=_state, queue=_queue,
+            get_executor=_get_executor_for_backend,
+        )
+
+    delegate_sub = await _transport.nc.subscribe(
+        "agent.*.delegate.request", cb=_delegate_cb,
+    )
+    egress_responder_subs.append(delegate_sub)
 
     # Token vault RPC: gateway's RemoteTokenVault forwards each
     # user-mode MCP request here so we can decrypt + refresh tokens

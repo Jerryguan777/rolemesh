@@ -111,6 +111,26 @@ def create_rolemesh_mcp_server(
     async def list_agents(args: dict[str, Any]) -> dict[str, Any]:
         return await rt.list_agents(args, ctx)
 
+    @tool(
+        "delegate_to_agent",
+        # Description must stay in sync with rolemesh_tools.TOOL_DEFINITIONS.
+        "Delegate the user's request to a domain specialist and return "
+        "their answer.\n\n"
+        "RULES:\n"
+        "- Identify target by its agent id (e.g. 'trading'). Not a path.\n"
+        "- Write a self-contained prompt; the target cannot see this "
+        "conversation.\n"
+        "- Use 'isolated' for one-shot questions; 'sticky' for a "
+        "multi-turn workflow with the same specialist.\n"
+        "- You may call this multiple times per turn, including in "
+        "parallel.\n"
+        "- If isError=true, your reply MUST quote the literal reason. "
+        "See system prompt.",
+        {"target": str, "prompt": str, "context_mode": str},
+    )
+    async def delegate_to_agent(args: dict[str, Any]) -> dict[str, Any]:
+        return await rt.delegate_to_agent(args, ctx)
+
     tool_list: list[Any] = [
         schedule_task,
         list_tasks,
@@ -119,6 +139,7 @@ def create_rolemesh_mcp_server(
         cancel_task,
         update_task,
         list_agents,
+        delegate_to_agent,
     ]
     if register_send_message:
         tool_list.insert(0, send_message)
