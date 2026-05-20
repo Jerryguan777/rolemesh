@@ -54,6 +54,12 @@ run_pytest_pinned_file "INV-3 cleanup_orphans whitelist"   tests/test_container_
 run_pytest_pinned_file "INV-4 audit actor resolution"      tests/test_audit_actor_resolution.py
 run_pytest_pinned_file "BOOTSTRAP_USERS multi-user map"    tests/test_bootstrap_multi_user.py
 run_pytest_pinned_file "Backends API"                      tests/test_backend_capabilities.py
+# OpenAPI codegen freshness is best-effort here: the test self-skips
+# if `web/node_modules` was not bootstrapped on this machine, so the
+# overall smoke still passes for hands-off envs. The contract test
+# next to it has no node dependency and always runs.
+run_pytest_pinned_file "OpenAPI yaml/ts freshness"         tests/test_openapi_codegen_freshness.py
+run_pytest_pinned_file "OpenAPI yaml/Python contract"      tests/test_openapi_contract.py
 
 # Live foreign-container check for INV-3 — only run when dockerd is
 # reachable; otherwise skip (the pinned test above already covers

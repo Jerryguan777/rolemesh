@@ -130,4 +130,70 @@
 
 ## Findings (after execution)
 
-_(empty — 重点记录：openapi.yaml 覆盖的 endpoints 是不是完全跟 §3 一致？codegen pipeline 用的什么 freshness check 方式？shell 抽离时发现的 chat-panel 隐藏 dependency？)_
+Completed 2026-05-20 in 3 commits on `feat/ui`. Notes for 01a / 01c:
+
+### 现有 bundler / openapi-gen hook 方式
+- `web/` 已经是 Vite 6 + Tailwind 4（class-based dark via `prefers-color-scheme`）。没有引入新的 bundler / 编译链。
+- Codegen 用 `openapi-typescript@^7` 跑 `npm run openapi:gen`（输出到 `web/src/api/generated/types.ts`，committed）。
+- Freshness gate 走两路：
+  - `npm run openapi:check`：再跑一次 codegen 到 `/tmp/` 然后 `diff -u`；适合本地、Husky 等同步 hook。
+  - `tests/test_openapi_codegen_freshness.py`：跑同一个 `node_modules/.bin/openapi-typescript`，自动 skip 当 `web/node_modules` 没安装；CI 跑 pytest 就会自然触发。
+- 没有把 codegen 串进 `vite build`——意图是把 yaml 当成显式的 contract artifact，不让 dev 启动时"顺手把 yaml 改了 ts 没更新"溜过去。CI 红线由 pytest 守。
+
+### openapi.yaml 覆盖范围
+完全对齐设计 §3 Phase 1 表 + `/api/v1/backends`：
+
+```
+GET   /api/v1/auth/config
+POST  /api/v1/auth/ws-ticket
+GET   /api/v1/me
+GET   /api/v1/backends                       (实现 + response_model=)
+GET   /api/v1/coworkers
+POST  /api/v1/coworkers
+GET   /api/v1/coworkers/{id}
+PATCH /api/v1/coworkers/{id}
+DELETE /api/v1/coworkers/{id}                (级联 — 见 §3 表)
+GET   /api/v1/coworkers/{id}/conversations
+POST  /api/v1/coworkers/{id}/conversations
+GET   /api/v1/conversations/{id}
+DELETE /api/v1/conversations/{id}            (级联)
+GET   /api/v1/conversations/{id}/messages
+GET   /api/v1/runs/{id}
+POST  /api/v1/runs/{id}/cancel               (409 = 已终态)
+```
+
+`/api/v1/conversations/{id}/stream` (WS) 故意没列：OpenAPI 3 不能干净表达 WS event protocol，转而通过 yaml 顶部 `info.description` 指向设计 §4。
+
+### chat-panel 抽进 shell 时发现的隐藏依赖
+- `rm-chat-panel` 在 constructor 直接读 `location.search`（`agent_id` / `token` / `chat_id`）和 `sessionStorage.getItem('rm_id_token')`，并构造 `AgentClient`。这是在路由变化时**每次重新挂载**就会发生的——目前不算 bug，因为 query string 不会跨页面变化；但等 Phase 1 把 chat URL 改成 `#/coworkers/:id/conversations/:cid`，要把这些字段移到 props 或 hash params。
+- `rm-chat-panel` 自身包含 `rm-sidebar`（conversation 列表 sub-sidebar）。设计 §6.2 sidebar 是**应用级 nav** (Chat/Coworkers/...)；本 session 没合并这两个 sidebar，所以 chat 页面会出现"app-nav (w-52) + conversation-list (w-64)"两个左侧栏。可接受为 v1（spec 明确说"不要重写 chat-panel 逻辑"）；UX 优化留给 01c。
+- `rm-chat-panel` 在 `connectedCallback` 直接 `style.height = '100%'`。要求父容器有 resolved height——shell 的 `<main class="flex-1 min-h-0 flex flex-col overflow-hidden">` 满足这个，build 通过。
+- 全局事件 `rm-token-refreshed` / `rm-auth-failed` 都监听在 `window`，与 mount/unmount 解耦，shell 切换路由不会丢监听。
+
+### sidebar 占位页实现
+独立 component `<rm-coming-soon>`（`web/src/components/coming-soon.ts`），通过 `label` + `phase` 两个 prop 区分。路由表 `web/src/router.ts` 把每个未实现 route 的 `render` factory 直接绑到这个 component 上——加新 sidebar item 只需要在 `ROUTES` 加一行，sidebar / 占位 / 路由匹配三处自动跟上。
+
+`<rm-router-outlet>` 单独写成一个 component（不直接塞进 `<rm-app-shell>` 的 render），是因为 outlet 自己监听 `hashchange` + 维护 `route` state；如果挂到 shell 里，shell 还要分清"我自己需要重渲染的 currentHash"与"outlet 需要重渲染的 route"，两路重渲染竞争反而比拆分复杂。
+
+### Codegen freshness check 实现路径
+- `web/src/api/generated/types.ts` 被 commit 进 git（明确头部带 `auto-generated` 标记）。
+- `tests/test_openapi_codegen_freshness.py` 用同一个本地 `node_modules/.bin/openapi-typescript` 重新生成到 `tmp_path` 然后字节级比较；不一致直接 `pytest.fail` 并打印 `diff -u` 前 80 行。
+- 第二个测试 `test_codegen_output_carries_do_not_edit_marker` 始终运行（不依赖 node），守"有人手改 types.ts"这条线。
+- 第三个测试文件 `tests/test_openapi_contract.py` 是 codegen 不能管的横向漂移：yaml↔Pydantic（schemas_v1）↔实际 HTTP 响应↔code 常量（ALL_BACKENDS）。`required` 集合**强相等**（不是 subset），所以"yaml 加字段但 handler 没返"也会红。
+- smoke_bootstrap.sh 已 hook 上述两个测试。
+
+### 对 01a / 01c 的影响
+
+**Typed client 用法约定（给 01a 用）**：
+- 所有新 endpoint 必须**先**改 yaml、跑 `npm run openapi:gen`、commit 生成的 `types.ts`；然后在 `web/src/api/client.ts` 里加对应方法。一个端点一个方法；不要折腾运行时 path-builder。
+- Pydantic 一侧：每个新 endpoint 加 `response_model=` 指向 `webui.schemas_v1` 里对应的 model。在 `tests/test_openapi_contract.py` 里加一个 `Backend`-风格的 yaml/Pydantic `required` 集合相等测试。这是廉价的回归保险，加一个 endpoint 大概 5 行测试。
+- 错误响应**必须**用 `ErrorResponse`（schemas_v1）即 `{code, message, details?}`；handler 抛 `HTTPException` 时把这个塞进 `detail` 字段（FastAPI 默认把 detail 当 body 顶层"detail"，需要自己 wrap——这块到 01a 实际 wire approval / coworker DELETE 409 时再决定确切 helper 函数）。
+
+**Shell 子路由 outlet 怎么挂（给 01c 用）**：
+- 默认全用 `<rm-router-outlet>`。如果 Phase 1+ 某个页面要 sub-tab（例如设计 §6.3 C `#/coworkers/:id/{overview,skills,...}`），**不要**新建一个 outlet——在 page component 内部消化 hash 后缀。`web/src/router.ts` 的 longest-prefix 匹配机制已经验证（hash `#/coworkers/abc` 正确解析为 `coworkers` route）。
+- 占位页迁移真实现：把 `ROUTES[i].render` 改成 `() => html\`<rm-coworkers-page></rm-coworkers-page>\`` 即可；旧的 coming-soon 组件保留——下游 Phase 还要复用。
+- App-shell 的 topbar 目前对 chat 页**隐藏**（chat-panel 自有 header），对其它页显示。01c 若要在 chat 上加 topbar，需要先把 chat-panel 里的 brand/header 收掉，避免双 header。建议在 01c 那个 session 一起处理。
+- App-shell 的 nav 没做 collapse（chat-panel 自带的 sub-sidebar 还能 collapse）。如果 Phase 2+ 要让 app-nav 也能 collapse，加一个 `@state collapsed` 即可，没有结构层阻碍。
+
+### Live UI smoke 限制
+本 worktree (`/home/jerry/ai/rolemesh`) 没起 Postgres / NATS / orchestrator，所以没能真跑一遍 chat 全流程（发消息 / token streaming / 中断重连 / 切 conversation）。验证只到 `npm run build` 干净 + custom-element 都在 bundle 里 + 路由 matchRoute 单元测试 10/10。**Merge 前请人工跑一遍 chat 流程**（chat-panel 没改逻辑，应该不退化，但 spec 明确要求手动验）。
