@@ -1581,6 +1581,23 @@ async def main() -> None:
     mcp_sub = await subscribe_mcp_changes(_transport.nc)
     egress_responder_subs.append(mcp_sub)
 
+    # Frontdesk v1.2: core NATS responder for the ``list_agents`` tool.
+    # Request-reply (not JetStream) — the tool is an in-turn refresh
+    # path; a missed reply surfaces as a 10s timeout to the LLM and the
+    # spawn-time catalog is still usable. Registered AFTER
+    # ``_load_state()`` (handbook §6 Step 5.4 startup ordering — Step 5
+    # adds the delegation responder beside this one with the same
+    # invariant).
+    from rolemesh.orchestration.catalog import handle_list_agents_request
+
+    async def _list_agents_cb(msg: object) -> None:
+        await handle_list_agents_request(msg, state=_state)
+
+    list_agents_sub = await _transport.nc.subscribe(
+        "agent.*.list_agents.request", cb=_list_agents_cb,
+    )
+    egress_responder_subs.append(list_agents_sub)
+
     # Token vault RPC: gateway's RemoteTokenVault forwards each
     # user-mode MCP request here so we can decrypt + refresh tokens
     # using THIS process's TokenVault (which holds the DB conn and

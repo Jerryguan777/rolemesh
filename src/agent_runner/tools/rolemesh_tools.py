@@ -124,6 +124,17 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "list_agents",
+        "description": (
+            "List the domain specialist agents available in this tenant. "
+            "Returns each specialist's name, id, and short description. "
+            "Use when unsure which specialist matches the user's request, "
+            "or to refresh your view of available agents (the catalog you "
+            "received at spawn may be stale if specialists changed since)."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
         "name": "submit_proposal",
         "description": (
             "Submit a proposal for high-risk operations that require human approval. "
@@ -359,6 +370,35 @@ async def update_task(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     return _text_result(f"Task {task_id} update requested.")
 
 
+async def list_agents(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    """Refresh the domain-specialist roster mid-turn (Frontdesk v1.2).
+
+    The spawn-time catalog injected into the system prompt may be stale
+    when specialists were added or removed since the frontdesk
+    container started. This tool hits the orchestrator's core NATS RPC
+    responder for a fresh roster. Always returns either the catalog
+    text or an explicit error string — never raises out of the tool.
+    """
+    payload = {
+        "tenantId": ctx.tenant_id,
+        "fromCoworkerId": ctx.coworker_id,
+    }
+    try:
+        resp = await ctx.request(
+            f"agent.{ctx.job_id}.list_agents.request",
+            payload,
+            timeout=10.0,
+        )
+    except TimeoutError:
+        return _text_result("list_agents timed out.", is_error=True)
+    text = str(resp.get("text", ""))
+    if resp.get("error"):
+        return _text_result(
+            f"list_agents failed: {resp['error']}", is_error=True
+        )
+    return _text_result(text)
+
+
 async def submit_proposal(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     """Forward a batch approval proposal to the orchestrator.
 
@@ -408,5 +448,6 @@ TOOL_FUNCTIONS: dict[str, Any] = {
     "resume_task": resume_task,
     "cancel_task": cancel_task,
     "update_task": update_task,
+    "list_agents": list_agents,
     "submit_proposal": submit_proposal,
 }

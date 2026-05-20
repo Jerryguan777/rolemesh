@@ -98,6 +98,19 @@ def create_rolemesh_mcp_server(
     async def update_task(args: dict[str, Any]) -> dict[str, Any]:
         return await rt.update_task(args, ctx)
 
+    @tool(
+        "list_agents",
+        # Description must stay in sync with rolemesh_tools.TOOL_DEFINITIONS.
+        "List the domain specialist agents available in this tenant. "
+        "Returns each specialist's name, id, and short description. "
+        "Use when unsure which specialist matches the user's request, "
+        "or to refresh your view of available agents (the catalog you "
+        "received at spawn may be stale if specialists changed since).",
+        {},
+    )
+    async def list_agents(args: dict[str, Any]) -> dict[str, Any]:
+        return await rt.list_agents(args, ctx)
+
     tool_list: list[Any] = [
         schedule_task,
         list_tasks,
@@ -105,6 +118,7 @@ def create_rolemesh_mcp_server(
         resume_task,
         cancel_task,
         update_task,
+        list_agents,
     ]
     if register_send_message:
         tool_list.insert(0, send_message)
