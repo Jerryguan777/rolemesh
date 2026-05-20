@@ -67,6 +67,8 @@ async def create_coworker(
     max_concurrent: int = 2,
     agent_role: str = "agent",
     permissions: AgentPermissions | None = None,
+    is_frontdesk: bool = False,
+    routing_description: str | None = None,
 ) -> Coworker:
     """Create a new coworker."""
     cc_json: str | None = None
@@ -85,8 +87,10 @@ async def create_coworker(
         row = await conn.fetchrow(
             """
             INSERT INTO coworkers (tenant_id, name, folder, agent_backend, system_prompt,
-                tools, container_config, max_concurrent, agent_role, permissions)
-            VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10::jsonb)
+                tools, container_config, max_concurrent, agent_role, permissions,
+                is_frontdesk, routing_description)
+            VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10::jsonb,
+                    $11, $12)
             RETURNING *
             """,
             tenant_id,
@@ -113,6 +117,8 @@ async def create_coworker(
             max_concurrent,
             agent_role,
             json.dumps(effective_perms.to_dict()),
+            is_frontdesk,
+            routing_description,
         )
     assert row is not None
     return _record_to_coworker(row)
@@ -169,6 +175,8 @@ def _record_to_coworker(row: asyncpg.Record) -> Coworker:
         created_at=row["created_at"].isoformat() if row["created_at"] else "",
         agent_role=agent_role,
         permissions=permissions,
+        is_frontdesk=bool(row.get("is_frontdesk")),
+        routing_description=row.get("routing_description"),
     )
 
 
@@ -229,6 +237,8 @@ async def update_coworker(
     status: str | None = None,
     agent_role: str | None = None,
     permissions: AgentPermissions | None = None,
+    is_frontdesk: bool | None = None,
+    routing_description: str | None = None,
 ) -> Coworker | None:
     """Update selected fields on a coworker, scoped to ``tenant_id``."""
     fields: list[str] = []
@@ -276,6 +286,14 @@ async def update_coworker(
     if permissions is not None:
         fields.append(f"permissions = ${param_idx}::jsonb")
         values.append(json.dumps(permissions.to_dict()))
+        param_idx += 1
+    if is_frontdesk is not None:
+        fields.append(f"is_frontdesk = ${param_idx}")
+        values.append(is_frontdesk)
+        param_idx += 1
+    if routing_description is not None:
+        fields.append(f"routing_description = ${param_idx}")
+        values.append(routing_description)
         param_idx += 1
 
     if not fields:

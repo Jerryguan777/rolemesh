@@ -73,7 +73,6 @@ from rolemesh.core.orchestrator_state import (
     CoworkerState,
     OrchestratorState,
 )
-from rolemesh.core.types import ChannelBinding, Conversation, Coworker
 from rolemesh.db import (
     DEFAULT_TENANT,
     close_database,
@@ -116,7 +115,7 @@ from rolemesh.security.sender_allowlist import (
 
 if TYPE_CHECKING:
     from rolemesh.container.runtime import ContainerRuntime
-    from rolemesh.core.types import NewMessage
+    from rolemesh.core.types import ChannelBinding, Conversation, Coworker, NewMessage
 
 logger = get_logger()
 
@@ -195,18 +194,17 @@ def _extract_usage(metadata: dict[str, object] | None) -> _UsageFields:
 
 
 def _coworker_from_state(cw_state: CoworkerState) -> Coworker:
-    """Build a full Coworker dataclass from runtime CoworkerState."""
-    c = cw_state.config
-    return Coworker(
-        id=c.id,
-        tenant_id=c.tenant_id,
-        name=c.name,
-        folder=c.folder,
-        agent_backend=c.agent_backend,
-        system_prompt=c.system_prompt,
-        tools=c.tools,
-        max_concurrent=c.max_concurrent,
-    )
+    """Return the full Coworker stored in this CoworkerState.
+
+    Post PR #27 the previous partial-copy version dropped status /
+    agent_role / permissions / container_config / created_at — a
+    latent bug that frontdesk v1.2 would surface (catalog injection
+    keys off ``is_frontdesk`` which the partial copy reset to False,
+    permission errors silently swallowed because permissions were
+    reset to role-defaults). Returning the config directly preserves
+    all 15 fields and is independently valuable.
+    """
+    return cw_state.config
 
 
 _transport: NatsTransport | None = None

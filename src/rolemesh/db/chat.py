@@ -211,13 +211,23 @@ async def create_conversation(
     name: str | None = None,
     requires_trigger: bool = True,
     user_id: str | None = None,
+    parent_conversation_id: str | None = None,
 ) -> Conversation:
-    """Create a conversation."""
+    """Create a conversation.
+
+    ``parent_conversation_id`` is the frontdesk-v1.2 link from a child
+    delegation conversation to its parent user-facing conversation.
+    Callers that create user-facing conversations leave it None; the
+    delegation handler in ``db.delegation.create_child_conversation``
+    threads the parent id through.
+    """
     async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO conversations (tenant_id, coworker_id, channel_binding_id, channel_chat_id, name, requires_trigger, user_id)
-            VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7::uuid)
+            INSERT INTO conversations (tenant_id, coworker_id, channel_binding_id,
+                channel_chat_id, name, requires_trigger, user_id,
+                parent_conversation_id)
+            VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7::uuid, $8::uuid)
             RETURNING *
             """,
             tenant_id,
@@ -227,6 +237,7 @@ async def create_conversation(
             name,
             requires_trigger,
             user_id,
+            parent_conversation_id,
         )
     assert row is not None
     return _record_to_conversation(row)
@@ -235,6 +246,7 @@ async def create_conversation(
 def _record_to_conversation(row: asyncpg.Record) -> Conversation:
     lai = row["last_agent_invocation"]
     uid = row.get("user_id")
+    pcid = row.get("parent_conversation_id")
     return Conversation(
         id=str(row["id"]),
         tenant_id=str(row["tenant_id"]),
@@ -246,6 +258,7 @@ def _record_to_conversation(row: asyncpg.Record) -> Conversation:
         last_agent_invocation=lai.isoformat() if lai else None,
         created_at=row["created_at"].isoformat() if row["created_at"] else "",
         user_id=str(uid) if uid else None,
+        parent_conversation_id=str(pcid) if pcid else None,
     )
 
 
@@ -291,13 +304,23 @@ async def get_conversation_for_notification(conversation_id: str) -> Conversatio
 
 
 async def get_conversations_for_coworker(
-    coworker_id: str, *, tenant_id: str
+    coworker_id: str, *, tenant_id: str, include_children: bool = False,
 ) -> list[Conversation]:
-    """Get all conversations for a coworker."""
+    """Get all conversations for a coworker.
+
+    ``include_children`` defaults to False so child delegation
+    conversations (parent_conversation_id IS NOT NULL) are excluded —
+    they must NOT enter ``_state.coworkers[*].conversations`` (see
+    handbook §6 Step 2.5 audit). Callers that legitimately need to
+    see child convs (admin tooling, delegation handler internals)
+    must opt in with ``include_children=True``.
+    """
+    where_child = "" if include_children else "AND parent_conversation_id IS NULL "
     async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(
             "SELECT * FROM conversations "
             "WHERE coworker_id = $1::uuid AND tenant_id = $2::uuid "
+            f"{where_child}"
             "ORDER BY created_at",
             coworker_id,
             tenant_id,
@@ -305,10 +328,21 @@ async def get_conversations_for_coworker(
     return [_record_to_conversation(row) for row in rows]
 
 
-async def get_all_conversations() -> list[Conversation]:
-    """Get all conversations."""
+async def get_all_conversations(
+    *, include_children: bool = False,
+) -> list[Conversation]:
+    """Get all conversations (admin / cross-tenant).
+
+    Default-False matches ``get_conversations_for_coworker``; same
+    rationale — the orchestrator state loader funnels through here
+    and child convs must stay out of ``_state``.
+    """
+    where_child = "" if include_children else "WHERE parent_conversation_id IS NULL "
     async with admin_conn() as conn:
-        rows = await conn.fetch("SELECT * FROM conversations ORDER BY tenant_id, coworker_id")
+        rows = await conn.fetch(
+            f"SELECT * FROM conversations {where_child}"
+            "ORDER BY tenant_id, coworker_id"
+        )
     return [_record_to_conversation(row) for row in rows]
 
 
