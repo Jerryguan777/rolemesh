@@ -396,22 +396,38 @@ BOOTSTRAP_USERS='[
 ]'
 ```
 
-修改局限在 `src/webui/auth.py:authenticate_ws()`：
+实际实现位于 `src/webui/auth.py:authenticate_ws()` + `src/rolemesh/auth/bootstrap_users.py`（spec 解析、token 索引、`ensure_bootstrap_user_row` upsert）。`authenticate_ws` 内仅串两路 fast-path，spec 索引与 upsert 在 `bootstrap_users.py` 中：
 
 ```python
 async def authenticate_ws(token: str) -> AuthenticatedUser | None:
-    # 1. single token compat
-    if ADMIN_BOOTSTRAP_TOKEN and token == ADMIN_BOOTSTRAP_TOKEN:
-        return _build_bootstrap_user(user_id="bootstrap", tenant_slug="default", role="owner")
+    # Resolution order (multi-user first so a dev configuring both
+    # gets the richer identity, not the impoverished bootstrap one):
+    #
+    #   1. BOOTSTRAP_USERS multi-user map
+    #   2. ADMIN_BOOTSTRAP_TOKEN single-user legacy fast-path
+    #   3. configured AuthProvider (external JWT / OIDC / builtin)
 
-    # 2. multi-user map (new)
-    for spec in BOOTSTRAP_USERS:
-        if token == spec["token"]:
-            return _build_bootstrap_user(
-                user_id=spec["user_id"],
-                tenant_slug=spec["tenant"],
-                role=spec["role"],
-            )
+    # 1. multi-user map
+    spec = get_spec_for_token(token)
+    if spec is not None:
+        tenant = await get_tenant_by_slug(spec.tenant_slug)
+        if tenant is None:
+            # Fail closed: spec references a tenant that isn't in
+            # the DB. Don't manufacture a fictitious tenant_id;
+            # return None so the request is rejected as
+            # unauthenticated.
+            return None
+        user_uuid = await ensure_bootstrap_user_row(spec, tenant.id)
+        return AuthUser(
+            user_id=user_uuid, tenant_id=tenant.id,
+            role=spec.role, name=spec.user_id_slug,
+        )
+
+    # 2. single-token legacy fast-path
+    if ADMIN_BOOTSTRAP_TOKEN and token == ADMIN_BOOTSTRAP_TOKEN:
+        return _build_bootstrap_user(
+            user_id="bootstrap", tenant_slug="default", role="owner",
+        )
 
     # 3. fall through to provider
     return await authenticate_request(token)
@@ -423,6 +439,7 @@ async def authenticate_ws(token: str) -> AuthenticatedUser | None:
 - `BOOTSTRAP_USERS` 仅 dev/CI 生效；生产 deployment 不带该 env var（启动时若 `AUTH_MODE` 非 `external` 且未显式 opt-in，warn-log）
 - 每个 spec 的 token 强度自管理；dev 用 `openssl rand -hex 32`
 - spec 修改后需重启 webui（不 hot-reload）
+- spec 引用的 `tenant_slug` 必须在 DB 中真实存在；找不到对应 tenant 时 `authenticate_ws` 返回 `None`（请求被拒为未鉴权），不伪造 `tenant_id`。这是有意的 fail-closed 行为，确保 audit FK 不会指向幽灵 tenant。
 
 #### 5.2.2 OIDC / user-mode MCP 链路验收推迟
 
