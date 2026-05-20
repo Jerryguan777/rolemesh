@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 
 from rolemesh import db
 from rolemesh.approval.engine import ApprovalEngine, ConflictError, ForbiddenError
+from rolemesh.auth.bootstrap_actor import resolve_actor_user_id
 from rolemesh.auth.permissions import AgentPermissions
 from rolemesh.auth.provider import AuthenticatedUser
 from rolemesh.core.group_folder import is_valid_group_folder
@@ -962,12 +963,13 @@ async def decide_approval_ep(
     req = await db.get_approval_request(request_id, tenant_id=user.tenant_id)
     if req is None:
         raise HTTPException(status_code=404, detail="Approval not found")
+    actor = await resolve_actor_user_id(user.tenant_id, user.user_id)
     try:
         updated = await engine.handle_decision(
             request_id=request_id,
             tenant_id=user.tenant_id,
             action=body.action,
-            user_id=user.user_id,
+            user_id=actor,
             note=_sanitize_note(body.note),
         )
     except ForbiddenError as exc:
@@ -1156,6 +1158,7 @@ async def create_safety_rule_ep(
         tenant_id=user.tenant_id,
         coworker_id=body.coworker_id,
     )
+    actor = await resolve_actor_user_id(user.tenant_id, user.user_id)
     rule = await db.create_safety_rule(
         tenant_id=user.tenant_id,
         coworker_id=body.coworker_id,
@@ -1165,7 +1168,7 @@ async def create_safety_rule_ep(
         priority=body.priority,
         enabled=body.enabled,
         description=body.description,
-        actor_user_id=user.user_id,
+        actor_user_id=actor,
     )
     await _publish_rule_changed("created", rule)
     return _safety_rule_to_response(rule)
@@ -1230,6 +1233,7 @@ async def update_safety_rule_ep(
             coworker_id=existing.coworker_id,
         )
 
+    actor = await resolve_actor_user_id(user.tenant_id, user.user_id)
     updated = await db.update_safety_rule(
         rule_id,
         tenant_id=user.tenant_id,
@@ -1239,7 +1243,7 @@ async def update_safety_rule_ep(
         priority=body.priority,
         enabled=body.enabled,
         description=body.description,
-        actor_user_id=user.user_id,
+        actor_user_id=actor,
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="Rule not found")
@@ -1255,8 +1259,9 @@ async def delete_safety_rule_ep(
     existing = await db.get_safety_rule(rule_id, tenant_id=user.tenant_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Rule not found")
+    actor = await resolve_actor_user_id(user.tenant_id, user.user_id)
     await db.delete_safety_rule(
-        rule_id, tenant_id=user.tenant_id, actor_user_id=user.user_id
+        rule_id, tenant_id=user.tenant_id, actor_user_id=actor
     )
     await _publish_rule_changed("deleted", existing)
 

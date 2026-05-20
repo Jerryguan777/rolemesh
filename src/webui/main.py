@@ -25,6 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from nats.js.api import StreamConfig
+from rolemesh.auth.bootstrap_actor import BootstrapActorError
 from rolemesh.db import (
     _get_pool,
     close_database,
@@ -152,6 +153,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(lifespan=lifespan)
+
+
+@app.exception_handler(BootstrapActorError)
+async def _bootstrap_actor_error_handler(
+    request: object, exc: BootstrapActorError
+) -> JSONResponse:
+    """INV-4: surface a deterministic 503 + error code when an audit
+    write needs a real actor but the bootstrap pseudo-user is in use
+    and the tenant has no owner. The frontend distinguishes this from
+    a generic failure via the ``code`` field.
+    """
+    return JSONResponse(
+        status_code=exc.status,
+        content={
+            "code": exc.code,
+            "message": str(exc),
+            "details": {"tenant_id": exc.tenant_id},
+        },
+    )
 
 # CORS for embedded SaaS scenarios where the browser sends credentials
 # (httpOnly refresh cookie) cross-origin. Only enabled when CORS_ORIGINS is set.
