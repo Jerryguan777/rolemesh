@@ -309,8 +309,13 @@ async def websocket_chat(
     await ws.handle_ws(websocket, agent_id, token, chat_id)
 
 
-# Admin API router
+# Admin API router (legacy /api/admin)
 app.include_router(admin_router)
+
+# v1 router: new prefixed surface introduced by webui-backend v1.1.
+from webui.api_v1 import router as api_v1_router  # noqa: E402
+
+app.include_router(api_v1_router)
 
 # OIDC PKCE router (only when AUTH_MODE=oidc)
 if os.environ.get("AUTH_MODE", "external") == "oidc":
