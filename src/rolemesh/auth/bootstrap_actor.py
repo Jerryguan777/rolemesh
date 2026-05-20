@@ -89,7 +89,7 @@ async def resolve_actor_user_id(
             """
             SELECT id FROM users
             WHERE tenant_id = $1::uuid AND role = 'owner'
-            ORDER BY created_at ASC
+            ORDER BY created_at ASC, id ASC
             LIMIT 1
             """,
             tenant_id,
