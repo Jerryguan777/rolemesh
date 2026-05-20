@@ -1416,7 +1416,26 @@ async def main() -> None:
         # last_agent_invocation. Falling back to all conversations for
         # the coworker when user_id match is absent (e.g. Telegram
         # group conversations have no single user).
-        all_for_cw = await pg_get_conversations_for_coworker(coworker_id)
+        #
+        # The DB helper requires `tenant_id` (RLS), but the
+        # `NotificationTargetResolver` Protocol does NOT thread tenant
+        # through this callback. We look it up from the in-memory
+        # `_state.coworkers` cache. Defence-in-depth: if the coworker
+        # isn't there (state stale, coworker hard-deleted under us),
+        # return [] rather than crashing the approval notification.
+        cw_state = _state.coworkers.get(coworker_id)
+        if cw_state is None:
+            logger.warning(
+                "approval: _convs_for_user_and_cw could not resolve "
+                "coworker_id in _state; returning empty candidate list",
+                coworker_id=coworker_id,
+                user_id=user_id,
+            )
+            return []
+        tenant_id = cw_state.config.tenant_id
+        all_for_cw = await pg_get_conversations_for_coworker(
+            coworker_id, tenant_id=tenant_id,
+        )
         ranked = [
             c.id
             for c in all_for_cw
