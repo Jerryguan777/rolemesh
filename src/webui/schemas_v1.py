@@ -186,3 +186,88 @@ class CoworkerUpdate(BaseModel):
     model_id: str | None = None
     status: CoworkerStatus | None = None
     max_concurrent: int | None = Field(default=None, ge=1, le=20)
+
+
+# ---------------------------------------------------------------------------
+# Conversations / Messages / Runs (design §3 Phase 1)
+# ---------------------------------------------------------------------------
+
+
+MessageRole = Literal["user", "assistant"]
+RunStatus = Literal[
+    "running", "completed", "failed", "cancelled", "awaiting_reauth"
+]
+
+
+class Conversation(BaseModel):
+    """Wire-side projection of a ``conversations`` row.
+
+    The fields kept here are exactly what the SPA renders in its
+    conversation list — ``user_id`` and ``last_agent_invocation``
+    are intentionally omitted because Phase 1 surfaces neither in
+    the UI and adding them later is contract-compatible (additive
+    optional field).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    tenant_id: str
+    coworker_id: str
+    channel_binding_id: str
+    channel_chat_id: str
+    name: str | None = None
+    requires_trigger: bool = True
+    created_at: str
+
+
+class ConversationCreate(BaseModel):
+    """``POST /api/v1/coworkers/{id}/conversations`` body.
+
+    Web-chat creation is server-driven: the handler auto-creates
+    the coworker's ``web`` channel binding (if missing) and a fresh
+    ``channel_chat_id`` so the SPA doesn't have to know about
+    binding internals. ``name`` is purely a display label.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = None
+
+
+class Message(BaseModel):
+    """Wire projection of a ``messages`` row.
+
+    The ``role`` field is the wire-level projection of
+    ``is_from_me`` / ``is_bot_message``; the persisted row carries
+    more (``sender``, ``sender_name``, token counts) but those are
+    not needed for the chat-history render path the SPA uses.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    role: MessageRole
+    content: str
+    timestamp: str
+    run_id: str | None = None
+
+
+class Run(BaseModel):
+    """Wire projection of a ``runs`` row.
+
+    Matches the lifecycle helper's snapshot shape (id /
+    conversation_id / status / started_at / completed_at / usage /
+    error). The SPA's reconnect path calls ``GET /api/v1/runs/{id}``
+    to decide whether to re-subscribe — see design §4 "重连".
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    conversation_id: str
+    status: RunStatus
+    usage: dict[str, object] | None = None
+    error: dict[str, object] | None = None
+    started_at: str | None = None
+    completed_at: str | None = None

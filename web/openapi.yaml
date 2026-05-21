@@ -352,15 +352,23 @@ paths:
     post:
       tags: [Runs]
       operationId: cancelRun
-      summary: Request cancellation of an in-flight run
+      summary: Request cancellation of an in-flight run (async)
       description: |
-        Returns the run with status moved to `cancelled` when the
-        cancellation succeeded synchronously, or 409 when the run
-        was already terminal.
+        Fire-and-forget: publishes `web.run.cancel.{run_id}` on
+        JetStream and returns 202 immediately. The orchestrator stops
+        the agent container and the lifecycle helper writes
+        `status='cancelled'` once the container has actually halted —
+        clients GET `/api/v1/runs/{id}` to observe the terminal state.
+
+        409 with `code="ALREADY_TERMINAL"` is returned when the run
+        is already in a terminal state at request time (no NATS
+        publish happens in that case).
       security: [ { bearerAuth: [] } ]
       responses:
-        '200':
-          description: OK
+        '202':
+          description: |
+            Cancellation request accepted; orchestrator handles the
+            actual container stop and DB UPDATE asynchronously.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Run' }
@@ -369,7 +377,8 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          description: Run is already in a terminal state.
+          description: |
+            Run is already in a terminal state (`code="ALREADY_TERMINAL"`).
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
@@ -649,25 +658,32 @@ components:
 
     ConversationCreate:
       type: object
-      required: [channel_binding_id, channel_chat_id]
+      description: |
+        v1 web-chat creation: the server auto-creates the
+        `web` channel binding (if missing) and a fresh
+        `channel_chat_id` so the client does not have to know
+        about channel internals.
       properties:
-        channel_binding_id: { type: string, format: uuid }
-        channel_chat_id: { type: string }
         name:
           type: string
           nullable: true
-        requires_trigger:
-          type: boolean
-          default: true
+          description: Optional display label for the SPA conversation list.
 
     MessageRole:
       type: string
-      enum: [user, assistant, system, safety]
+      enum: [user, assistant]
+      description: |
+        Wire-level role projection: `is_from_me=TRUE` or
+        `is_bot_message=TRUE` rows surface as `assistant`; everything
+        else as `user`. `system` / `safety` frames are delivered via
+        the WS event stream (design §4) rather than the persisted
+        message log.
 
     Message:
       type: object
-      required: [role, content, timestamp]
+      required: [id, role, content, timestamp]
       properties:
+        id: { type: string }
         role: { $ref: '#/components/schemas/MessageRole' }
         content: { type: string }
         timestamp: { type: string, format: date-time }
@@ -678,11 +694,13 @@ components:
 
     RunStatus:
       type: string
-      enum: [queued, running, completed, failed, cancelled, awaiting_reauth]
+      enum: [running, completed, failed, cancelled, awaiting_reauth]
       description: |
         Engine-wide closed set (design §4 / INV-6).
         `awaiting_reauth` is reserved for the user-mode MCP path
-        (architecturally present, e2e gated on the OIDC branch).
+        (architecturally present, e2e gated on the OIDC branch) and
+        is treated as terminal: the SPA prompts the user to re-auth
+        and the next agent invocation starts a fresh run.
 
     RunUsage:
       type: object
@@ -694,23 +712,34 @@ components:
         present.
       additionalProperties: true
 
+    RunError:
+      type: object
+      description: |
+        Structured failure detail recorded by the lifecycle helper
+        when a run terminates in `failed`, `cancelled`, or
+        `awaiting_reauth`. Keys are intentionally open — engine
+        callers populate `code` / `message` and may attach extra
+        details (`reason` for `awaiting_reauth`, `exit_code` for
+        container crashes).
+      additionalProperties: true
+
     Run:
       type: object
-      required: [id, conversation_id, status, created_at]
+      required: [id, conversation_id, status]
       properties:
         id: { type: string, format: uuid }
         conversation_id: { type: string, format: uuid }
-        coworker_id: { type: string, format: uuid }
         status: { $ref: '#/components/schemas/RunStatus' }
         usage:
           $ref: '#/components/schemas/RunUsage'
-        error_code:
-          type: string
+        error:
+          allOf:
+            - $ref: '#/components/schemas/RunError'
           nullable: true
-        error_message:
+        started_at:
           type: string
+          format: date-time
           nullable: true
-        created_at: { type: string, format: date-time }
         completed_at:
           type: string
           format: date-time

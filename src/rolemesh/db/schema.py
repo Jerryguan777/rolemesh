@@ -540,11 +540,16 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
                 session_id TEXT NOT NULL
             )
         """)
+        # ``conversation_id`` FK uses ON DELETE CASCADE so a DELETE
+        # on conversations (design §3 "DELETE 语义") propagates to the
+        # message log. Without the cascade a v1 DELETE on a busy
+        # conversation would 500 on a FK violation — the schema, not
+        # the handler, is the right place to enforce the policy.
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id TEXT NOT NULL,
                 tenant_id UUID NOT NULL REFERENCES tenants(id),
-                conversation_id UUID NOT NULL REFERENCES conversations(id),
+                conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
                 sender TEXT,
                 sender_name TEXT,
                 content TEXT,
@@ -557,6 +562,44 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         await conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(tenant_id, conversation_id, timestamp)"
         )
+    # Idempotent migration: upgrade the conversation_id FK to
+    # ON DELETE CASCADE on databases created before the v1.1 design
+    # locked the cascade in (legacy installs would otherwise 500 on
+    # DELETE /api/v1/conversations/{id} with FK violation). The
+    # constraint name is asyncpg's auto-generated default — we look
+    # it up rather than hard-coding so a schema rebuild that picks a
+    # different name doesn't break this migration.
+    await conn.execute(
+        """
+        DO $$
+        DECLARE
+            cname text;
+            current_action text;
+        BEGIN
+            SELECT con.conname,
+                   CASE con.confdeltype
+                       WHEN 'a' THEN 'NO ACTION'
+                       WHEN 'r' THEN 'RESTRICT'
+                       WHEN 'c' THEN 'CASCADE'
+                       WHEN 'n' THEN 'SET NULL'
+                       WHEN 'd' THEN 'SET DEFAULT'
+                   END
+              INTO cname, current_action
+              FROM pg_constraint con
+              JOIN pg_class rel ON rel.oid = con.conrelid
+              JOIN pg_class fkrel ON fkrel.oid = con.confrelid
+             WHERE rel.relname  = 'messages'
+               AND fkrel.relname = 'conversations'
+               AND con.contype   = 'f';
+            IF cname IS NOT NULL AND current_action <> 'CASCADE' THEN
+                EXECUTE 'ALTER TABLE messages DROP CONSTRAINT ' || quote_ident(cname);
+                EXECUTE 'ALTER TABLE messages ADD CONSTRAINT ' ||
+                        quote_ident(cname) ||
+                        ' FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE';
+            END IF;
+        END$$;
+        """
+    )
     # Token usage columns on messages — applied unconditionally (outside
     # the legacy branch above) so existing deployments running on the
     # already-migrated schema also get the new columns. Idempotent ADD

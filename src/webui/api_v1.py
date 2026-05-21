@@ -18,7 +18,12 @@ from rolemesh.core.backend_capabilities import backends_as_json
 from webui.schemas_v1 import Backend
 from webui.v1.auth import me_router as auth_me_router
 from webui.v1.auth import router as auth_router
+from webui.v1.conversations import (
+    conversations_router,
+    coworker_conversations_router,
+)
 from webui.v1.coworkers import router as coworkers_router
+from webui.v1.runs import router as runs_router
 
 router = APIRouter(prefix="/api/v1")
 
@@ -48,3 +53,6 @@ async def get_backends(response: Response) -> list[dict[str, object]]:
 router.include_router(auth_router)
 router.include_router(auth_me_router)
 router.include_router(coworkers_router)
+router.include_router(coworker_conversations_router)
+router.include_router(conversations_router)
+router.include_router(runs_router)

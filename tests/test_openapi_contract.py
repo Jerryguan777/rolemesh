@@ -26,7 +26,13 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from webui.api_v1 import router
-from webui.schemas_v1 import Backend, ErrorResponse
+from webui.schemas_v1 import (
+    Backend,
+    Conversation,
+    ErrorResponse,
+    Message,
+    Run,
+)
 
 OPENAPI_PATH = Path(__file__).resolve().parent.parent / "web" / "openapi.yaml"
 
@@ -146,6 +152,62 @@ def test_backend_name_enum_matches_code_constants() -> None:
     yaml_enum = set(_schema(spec, "BackendName")["enum"])  # type: ignore[arg-type]
     assert yaml_enum == set(ALL_BACKENDS.keys()), (
         f"BackendName enum drift: yaml={yaml_enum} code={set(ALL_BACKENDS)}"
+    )
+
+
+def test_v1_runs_required_matches_pydantic_model() -> None:
+    """``required`` for ``Run`` must agree on both sides.
+
+    A field promoted to required in the yaml but optional in
+    Pydantic would let the handler return ``null`` for what the
+    typed client expects to always be present.
+    """
+    spec = _load_spec()
+    yaml_required = set(_schema(spec, "Run")["required"])  # type: ignore[arg-type]
+    py_required = {
+        name for name, f in Run.model_fields.items() if f.is_required()
+    }
+    assert yaml_required == py_required, (
+        f"Run.required drift: yaml={yaml_required} python={py_required}"
+    )
+
+
+def test_v1_conversation_required_matches_pydantic_model() -> None:
+    spec = _load_spec()
+    yaml_required = set(_schema(spec, "Conversation")["required"])  # type: ignore[arg-type]
+    py_required = {
+        name
+        for name, f in Conversation.model_fields.items()
+        if f.is_required()
+    }
+    assert yaml_required == py_required, (
+        f"Conversation.required drift: yaml={yaml_required} python={py_required}"
+    )
+
+
+def test_v1_message_required_matches_pydantic_model() -> None:
+    spec = _load_spec()
+    yaml_required = set(_schema(spec, "Message")["required"])  # type: ignore[arg-type]
+    py_required = {
+        name for name, f in Message.model_fields.items() if f.is_required()
+    }
+    assert yaml_required == py_required, (
+        f"Message.required drift: yaml={yaml_required} python={py_required}"
+    )
+
+
+def test_run_status_enum_matches_lifecycle_terminal_set() -> None:
+    """The yaml RunStatus enum must include every status the
+    lifecycle helper can write (``running`` + the four terminal
+    states). A drift would let the engine emit a status the typed
+    client rejects."""
+    from rolemesh.runs.lifecycle import _TERMINAL_STATUSES
+
+    spec = _load_spec()
+    yaml_enum = set(_schema(spec, "RunStatus")["enum"])  # type: ignore[arg-type]
+    expected = set(_TERMINAL_STATUSES) | {"running"}
+    assert yaml_enum == expected, (
+        f"RunStatus enum drift: yaml={yaml_enum} expected={expected}"
     )
 
 

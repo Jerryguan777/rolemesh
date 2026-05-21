@@ -241,10 +241,16 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Request cancellation of an in-flight run
-         * @description Returns the run with status moved to `cancelled` when the
-         *     cancellation succeeded synchronously, or 409 when the run
-         *     was already terminal.
+         * Request cancellation of an in-flight run (async)
+         * @description Fire-and-forget: publishes `web.run.cancel.{run_id}` on
+         *     JetStream and returns 202 immediately. The orchestrator stops
+         *     the agent container and the lifecycle helper writes
+         *     `status='cancelled'` once the container has actually halted —
+         *     clients GET `/api/v1/runs/{id}` to observe the terminal state.
+         *
+         *     409 with `code="ALREADY_TERMINAL"` is returned when the run
+         *     is already in a terminal state at request time (no NATS
+         *     publish happens in that case).
          */
         post: operations["cancelRun"];
         delete?: never;
@@ -379,17 +385,27 @@ export interface components {
             /** Format: date-time */
             created_at: string;
         };
+        /**
+         * @description v1 web-chat creation: the server auto-creates the
+         *     `web` channel binding (if missing) and a fresh
+         *     `channel_chat_id` so the client does not have to know
+         *     about channel internals.
+         */
         ConversationCreate: {
-            /** Format: uuid */
-            channel_binding_id: string;
-            channel_chat_id: string;
+            /** @description Optional display label for the SPA conversation list. */
             name?: string | null;
-            /** @default true */
-            requires_trigger: boolean;
         };
-        /** @enum {string} */
-        MessageRole: "user" | "assistant" | "system" | "safety";
+        /**
+         * @description Wire-level role projection: `is_from_me=TRUE` or
+         *     `is_bot_message=TRUE` rows surface as `assistant`; everything
+         *     else as `user`. `system` / `safety` frames are delivered via
+         *     the WS event stream (design §4) rather than the persisted
+         *     message log.
+         * @enum {string}
+         */
+        MessageRole: "user" | "assistant";
         Message: {
+            id: string;
             role: components["schemas"]["MessageRole"];
             content: string;
             /** Format: date-time */
@@ -400,10 +416,12 @@ export interface components {
         /**
          * @description Engine-wide closed set (design §4 / INV-6).
          *     `awaiting_reauth` is reserved for the user-mode MCP path
-         *     (architecturally present, e2e gated on the OIDC branch).
+         *     (architecturally present, e2e gated on the OIDC branch) and
+         *     is treated as terminal: the SPA prompts the user to re-auth
+         *     and the next agent invocation starts a fresh run.
          * @enum {string}
          */
-        RunStatus: "queued" | "running" | "completed" | "failed" | "cancelled" | "awaiting_reauth";
+        RunStatus: "running" | "completed" | "failed" | "cancelled" | "awaiting_reauth";
         /**
          * @description Free-form per-turn usage attribution (token counts, cost,
          *     per-tool stats). Schema intentionally open — exact keys are
@@ -414,19 +432,27 @@ export interface components {
         RunUsage: {
             [key: string]: unknown;
         };
+        /**
+         * @description Structured failure detail recorded by the lifecycle helper
+         *     when a run terminates in `failed`, `cancelled`, or
+         *     `awaiting_reauth`. Keys are intentionally open — engine
+         *     callers populate `code` / `message` and may attach extra
+         *     details (`reason` for `awaiting_reauth`, `exit_code` for
+         *     container crashes).
+         */
+        RunError: {
+            [key: string]: unknown;
+        };
         Run: {
             /** Format: uuid */
             id: string;
             /** Format: uuid */
             conversation_id: string;
-            /** Format: uuid */
-            coworker_id?: string;
             status: components["schemas"]["RunStatus"];
             usage?: components["schemas"]["RunUsage"];
-            error_code?: string | null;
-            error_message?: string | null;
+            error?: components["schemas"]["RunError"] | null;
             /** Format: date-time */
-            created_at: string;
+            started_at?: string | null;
             /** Format: date-time */
             completed_at?: string | null;
         };
@@ -879,8 +905,11 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description OK */
-            200: {
+            /**
+             * @description Cancellation request accepted; orchestrator handles the
+             *     actual container stop and DB UPDATE asynchronously.
+             */
+            202: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -890,7 +919,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
-            /** @description Run is already in a terminal state. */
+            /** @description Run is already in a terminal state (`code="ALREADY_TERMINAL"`). */
             409: {
                 headers: {
                     [name: string]: unknown;
