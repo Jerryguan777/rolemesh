@@ -7,6 +7,57 @@ export type AgentStatus =
   | 'tool_use'
   | 'stopped';
 
+/**
+ * Frontdesk v1.5 delegation child-chip event.
+ *
+ * Surfaces a target agent's progress to the parent UI as an indented
+ * single-line ephemeral chip. Mounted on ``open``, updated on
+ * ``status`` / ``tool_use``, unmounted on ``close``. The wire payload
+ * is keyed by ``child_conv_id`` so multiple concurrent delegations
+ * render as separate sub-chips.
+ */
+export type ChildChipEvent =
+  | {
+      type: 'child_chip_event';
+      phase: 'open';
+      child_conv_id: string;
+      delegation_id: string;
+      target_folder: string;
+      target_name: string;
+      context_mode?: string;
+      initial_status?: string;
+    }
+  | {
+      type: 'child_chip_event';
+      phase: 'status';
+      child_conv_id: string;
+      delegation_id: string;
+      target_folder: string;
+      target_name: string;
+      // Backend-emitted progress status (running / queued / container_starting).
+      status: AgentStatus | string;
+    }
+  | {
+      type: 'child_chip_event';
+      phase: 'tool_use';
+      child_conv_id: string;
+      delegation_id: string;
+      target_folder: string;
+      target_name: string;
+      tool_name: string | null;
+      tool_input?: string | null;
+    }
+  | {
+      type: 'child_chip_event';
+      phase: 'close';
+      child_conv_id: string;
+      delegation_id: string;
+      target_folder: string;
+      target_name: string;
+      final_status: string;
+      duration_ms?: number;
+    };
+
 export type ServerMessage =
   | { type: 'session'; chatId: string; agentId: string }
   | { type: 'thinking' }
@@ -14,7 +65,8 @@ export type ServerMessage =
   | { type: 'done' }
   | { type: 'error'; message: string }
   | { type: 'status'; status: AgentStatus; tool?: string; input?: string }
-  | { type: 'safety_blocked'; reason: string; stage: string; rule_id?: string };
+  | { type: 'safety_blocked'; reason: string; stage: string; rule_id?: string }
+  | ChildChipEvent;
 
 export type MessageHandler = (msg: ServerMessage) => void;
 

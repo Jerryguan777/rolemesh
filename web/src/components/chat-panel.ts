@@ -1,11 +1,32 @@
 import { LitElement, html } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { AgentClient, type AgentStatus, type ConversationSummary, type ServerMessage } from '../services/agent-client.js';
+import { beautifyToolName } from '../utils/tool-name.js';
+import './child-agent-chip.js';
 
 interface AgentStatusState {
   status: AgentStatus;
   tool?: string;
   input?: string;
+  // Frontdesk v1.5: epoch ms when this status first appeared.
+  // Used to render the "Thinking… (Ns)" duration tail so the user
+  // gets visible feedback that the agent is still alive during long
+  // running turns. Cleared with the rest of agentStatus on text/done/error.
+  startedAt: number;
+}
+
+/**
+ * Frontdesk v1.5 sub-chip state: one entry per active delegation.
+ * Keyed by ``child_conv_id`` from the orchestrator. Cleared as a whole
+ * whenever the parent agent's status bar transitions to idle (defensive:
+ * a missed ``close`` would otherwise strand the chip).
+ */
+interface ChildChipState {
+  delegationId: string;
+  targetName: string;
+  targetFolder: string;
+  contextMode: string;
+  currentLine: string;
 }
 
 export interface ChatMessage {
@@ -68,6 +89,11 @@ export class ChatPanel extends LitElement {
   // it, so without this fallback the UI stays stuck on 'thinking' forever.
   private runningWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
   private static readonly RUNNING_WATCHDOG_MS = 120_000;
+  // Frontdesk v1.5: ticks once per second while agentStatus is set, so
+  // the chip text can show an updating elapsed-time tail. Cleared with
+  // agentStatus on text/done/error.
+  private durationTickTimer: ReturnType<typeof setInterval> | null = null;
+  @state() private activeChildChips: Map<string, ChildChipState> = new Map();
 
   constructor() {
     super();
@@ -121,6 +147,8 @@ export class ChatPanel extends LitElement {
     super.disconnectedCallback();
     this.clearStoppingTimer();
     this.clearRunningWatchdog();
+    this.clearDurationTick();
+    this.activeChildChips = new Map();
     this.unsubscribe?.();
     if (this.tokenRefreshHandler) {
       window.removeEventListener('rm-token-refreshed', this.tokenRefreshHandler);
@@ -179,23 +207,37 @@ export class ChatPanel extends LitElement {
           // array — any partial text remains visible in the last bubble.
           this.clearStoppingTimer();
           this.clearRunningWatchdog();
+          this.clearDurationTick();
           this.agentStatus = null;
+          this.activeChildChips = new Map();
           this.agentState = 'idle';
           this.isStreaming = false;
           break;
         }
         // Progress indicator — overwrites prior status; cleared on text/done/error.
         // Don't reset 'stopping' back to 'running' if a late progress event
-        // arrives after the user clicked Stop.
-        this.agentStatus = { status: msg.status, tool: msg.tool, input: msg.input };
+        // arrives after the user clicked Stop. Preserve the original
+        // ``startedAt`` across status transitions so the elapsed duration
+        // ticks continuously instead of resetting on every tool_use frame.
+        this.agentStatus = {
+          status: msg.status,
+          tool: msg.tool,
+          input: msg.input,
+          startedAt: this.agentStatus?.startedAt ?? Date.now(),
+        };
+        this.ensureDurationTick();
         if (this.agentState === 'idle') {
           this.agentState = 'running';
           this.resetRunningWatchdog();
         }
         break;
+      case 'child_chip_event':
+        this.handleChildChipEvent(msg);
+        break;
       case 'text': {
         // First text chunk means real output has begun — retire the status bar.
         this.agentStatus = null;
+        this.clearDurationTick();
         const last = this.messages[this.messages.length - 1];
         const via = extractViaPrefix(msg.content);
         // A `[via X]` marker is the orchestrator delivering an approval
@@ -226,7 +268,15 @@ export class ChatPanel extends LitElement {
       case 'done': {
         this.clearStoppingTimer();
         this.clearRunningWatchdog();
+        this.clearDurationTick();
         this.agentStatus = null;
+        // Parent turn terminated — any lingering child chips must go.
+        // Belt-and-suspenders: the orchestrator emits close on every
+        // terminal path, but a dropped NATS message would otherwise
+        // strand the chip indefinitely.
+        if (this.activeChildChips.size > 0) {
+          this.activeChildChips = new Map();
+        }
         const last = this.messages[this.messages.length - 1];
         if (last?.role === 'assistant') {
           this.messages = [...this.messages.slice(0, -1), { ...last, streaming: false }];
@@ -239,7 +289,11 @@ export class ChatPanel extends LitElement {
       case 'error': {
         this.clearStoppingTimer();
         this.clearRunningWatchdog();
+        this.clearDurationTick();
         this.agentStatus = null;
+        if (this.activeChildChips.size > 0) {
+          this.activeChildChips = new Map();
+        }
         const last = this.messages[this.messages.length - 1];
         if (last?.role === 'assistant' && last.streaming && !last.content) {
           this.messages = [
@@ -272,6 +326,10 @@ export class ChatPanel extends LitElement {
           this.messages = [...this.messages, safetyMsg];
         }
         this.agentStatus = null;
+        this.clearDurationTick();
+        if (this.activeChildChips.size > 0) {
+          this.activeChildChips = new Map();
+        }
         break;
       }
     }
@@ -288,6 +346,8 @@ export class ChatPanel extends LitElement {
       if (this.agentState === 'running') {
         this.agentState = 'idle';
         this.agentStatus = null;
+        this.clearDurationTick();
+        this.activeChildChips = new Map();
         this.isStreaming = false;
         const last = this.messages[this.messages.length - 1];
         if (last?.role === 'assistant' && last.streaming) {
@@ -305,6 +365,93 @@ export class ChatPanel extends LitElement {
     }
   }
 
+  private ensureDurationTick() {
+    if (this.durationTickTimer !== null) return;
+    this.durationTickTimer = setInterval(() => {
+      // Only re-render while the bar is still visible. We don't update
+      // any state here — the renderer reads ``startedAt`` and Date.now()
+      // directly. requestUpdate triggers a re-render so the seconds
+      // counter advances.
+      if (this.agentStatus) {
+        this.requestUpdate();
+      } else {
+        this.clearDurationTick();
+      }
+    }, 1000);
+  }
+
+  private clearDurationTick() {
+    if (this.durationTickTimer !== null) {
+      clearInterval(this.durationTickTimer);
+      this.durationTickTimer = null;
+    }
+  }
+
+  private handleChildChipEvent(msg: ServerMessage & { type: 'child_chip_event' }) {
+    switch (msg.phase) {
+      case 'open': {
+        const next = new Map(this.activeChildChips);
+        next.set(msg.child_conv_id, {
+          delegationId: msg.delegation_id,
+          targetName: msg.target_name,
+          targetFolder: msg.target_folder,
+          contextMode: msg.context_mode ?? '',
+          currentLine: this.renderChildChipStatus(msg.initial_status ?? 'queued'),
+        });
+        this.activeChildChips = next;
+        break;
+      }
+      case 'status': {
+        const existing = this.activeChildChips.get(msg.child_conv_id);
+        if (!existing) break;
+        const next = new Map(this.activeChildChips);
+        next.set(msg.child_conv_id, {
+          ...existing,
+          currentLine: this.renderChildChipStatus(msg.status),
+        });
+        this.activeChildChips = next;
+        break;
+      }
+      case 'tool_use': {
+        const existing = this.activeChildChips.get(msg.child_conv_id);
+        if (!existing) break;
+        const pretty = beautifyToolName(msg.tool_name);
+        const tail = msg.tool_input ? ` · ${msg.tool_input}` : '';
+        const next = new Map(this.activeChildChips);
+        next.set(msg.child_conv_id, {
+          ...existing,
+          currentLine: pretty + tail,
+        });
+        this.activeChildChips = next;
+        break;
+      }
+      case 'close': {
+        if (!this.activeChildChips.has(msg.child_conv_id)) break;
+        const next = new Map(this.activeChildChips);
+        next.delete(msg.child_conv_id);
+        this.activeChildChips = next;
+        break;
+      }
+    }
+  }
+
+  private renderChildChipStatus(status: string): string {
+    switch (status) {
+      case 'queued':
+        return 'Queued…';
+      case 'container_starting':
+        return 'Starting…';
+      case 'running':
+        return 'Thinking…';
+      case 'tool_use':
+        // Should normally arrive via phase=tool_use with details, not
+        // via a generic status. Defensive fallback.
+        return 'Using tool…';
+      default:
+        return status;
+    }
+  }
+
   private handleStop() {
     if (this.agentState !== 'running') return;
     this.agentState = 'stopping';
@@ -316,6 +463,8 @@ export class ChatPanel extends LitElement {
       if (this.agentState === 'stopping') {
         this.agentState = 'idle';
         this.agentStatus = null;
+        this.clearDurationTick();
+        this.activeChildChips = new Map();
         this.isStreaming = false;
       }
       this.stoppingTimer = null;
@@ -330,22 +479,30 @@ export class ChatPanel extends LitElement {
   }
 
   private renderStatusLine(s: AgentStatusState): string {
-    switch (s.status) {
-      case 'queued':
-        return 'Queued…';
-      case 'container_starting':
-        return 'Starting…';
-      case 'running':
-        return 'Thinking…';
-      case 'tool_use': {
-        const tool = s.tool || 'Tool';
-        return s.input ? `${tool} · ${s.input}` : tool;
+    const base = (() => {
+      switch (s.status) {
+        case 'queued':
+          return 'Queued…';
+        case 'container_starting':
+          return 'Starting…';
+        case 'running':
+          return 'Thinking…';
+        case 'tool_use': {
+          const tool = beautifyToolName(s.tool) || 'Tool';
+          return s.input ? `${tool} · ${s.input}` : tool;
+        }
+        case 'stopped':
+          // handleMessage clears agentStatus on 'stopped', so this branch
+          // is defensive — the bar shouldn't render in this state.
+          return 'Stopped';
       }
-      case 'stopped':
-        // handleMessage clears agentStatus on 'stopped', so this branch
-        // is defensive — the bar shouldn't render in this state.
-        return 'Stopped';
-    }
+    })();
+    // Suppress the seconds tail for the first 2s so a fast turn doesn't
+    // flash a "(0s)" before the response arrives. After that, show
+    // every second so the user has a clear "still alive" signal during
+    // long LLM calls or queued delegations.
+    const elapsedSec = Math.floor((Date.now() - s.startedAt) / 1000);
+    return elapsedSec >= 2 ? `${base} (${elapsedSec}s)` : base;
   }
 
   private handleSend(e: CustomEvent<{ content: string }>) {
@@ -394,8 +551,10 @@ export class ChatPanel extends LitElement {
     this.messages = [];
     this.isStreaming = false;
     this.agentStatus = null;
+    this.activeChildChips = new Map();
     this.agentState = 'idle';
     this.clearStoppingTimer();
+    this.clearDurationTick();
     this.updateUrl();
     this.client.reconnect(chatId);
     this.loadHistory(chatId);
@@ -407,8 +566,10 @@ export class ChatPanel extends LitElement {
     this.messages = [];
     this.isStreaming = false;
     this.agentStatus = null;
+    this.activeChildChips = new Map();
     this.agentState = 'idle';
     this.clearStoppingTimer();
+    this.clearDurationTick();
     this.updateUrl();
   }
 
@@ -492,6 +653,27 @@ export class ChatPanel extends LitElement {
               <div class="max-w-[720px] mx-auto w-full flex items-center gap-2 py-1.5 text-[12px] text-ink-3 dark:text-d-ink-3">
                 <span class="w-1.5 h-1.5 rounded-full bg-brand animate-pulse"></span>
                 <span class="truncate">${this.renderStatusLine(this.agentStatus)}</span>
+              </div>
+            </div>
+          ` : ''}
+
+          <!-- Frontdesk v1.5 delegation sub-chips. One per active delegation,
+               nested under the parent agent's status bar. Ephemeral —
+               unmount on close phase. Renders nothing when no delegations
+               are active. -->
+          ${this.activeChildChips.size > 0 ? html`
+            <div class="shrink-0 px-4">
+              <div class="max-w-[720px] mx-auto w-full">
+                ${Array.from(this.activeChildChips.entries()).map(([id, chip]) => html`
+                  <rm-child-agent-chip
+                    .childConversationId=${id}
+                    .delegationId=${chip.delegationId}
+                    .targetName=${chip.targetName}
+                    .targetFolder=${chip.targetFolder}
+                    .contextMode=${chip.contextMode}
+                    .currentLine=${chip.currentLine}
+                  ></rm-child-agent-chip>
+                `)}
               </div>
             </div>
           ` : ''}

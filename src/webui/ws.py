@@ -153,7 +153,18 @@ async def handle_ws(ws: WebSocket, agent_id: str, token: str, chat_id: str = "")
                     # forward as a typed status frame to the browser. Spread
                     # payload first so a literal "type": "status" always wins.
                     payload = json.loads(data.get("content", "{}"))
-                    out = {**payload, "type": "status"}
+                    # Frontdesk v1.5: payloads tagged kind=child_chip are
+                    # delegation sub-chip events targeting a dedicated UI
+                    # surface. They piggyback on web.stream.* because the
+                    # WebSocket only subscribes to that subject; reroute
+                    # them to a distinct WS frame type so the frontend
+                    # can route them to the child-agent-chip component
+                    # without conflating with the parent agent's status bar.
+                    sub_kind = payload.get("kind")
+                    if sub_kind == "child_chip":
+                        out = {**payload, "type": "child_chip_event"}
+                    else:
+                        out = {**payload, "type": "status"}
                     await _broadcast(binding_id, chat_id, out)
                 elif kind == "safety_blocked":
                     # Safety-block forwarded as its own frame so the client

@@ -497,6 +497,63 @@ async def _emit_status_for_conversation(conversation_id: str, payload: dict[str,
             logger.debug("send_status failed", conversation_id=conversation_id, exc_info=True)
 
 
+async def _emit_child_chip_event_safe(
+    *,
+    parent_conv_id: str,
+    child_conv_id: str,
+    delegation_id: str,
+    target_folder: str,
+    target_name: str,
+    phase: str,
+    payload: dict[str, object],
+) -> None:
+    """Route a delegation child-chip progress event to the parent conv's web binding.
+
+    Frontdesk v1.5: surfaces the target container's progress as a
+    sub-chip rendered beneath the parent agent's status chip. Routed
+    by the PARENT conversation's web binding (not the child's
+    internal binding) because the WebUI only subscribes to web
+    bindings — the internal binding has no WS listener.
+
+    Silently no-op when:
+      - the parent conv is unknown (not in state),
+      - the parent conv's channel is not web (telegram/slack/internal),
+      - the publish fails (NATS hiccup; chip events are best-effort).
+
+    The audit path (delegations table, messages table) is the
+    authoritative record; chip events are a UX layer on top.
+    """
+    found = _state.get_conversation(parent_conv_id)
+    if not found:
+        return
+    cw_state, conv_state = found
+    conv = conv_state.conversation
+    channel_type = _get_channel_type_for_conv(cw_state, conv)
+    binding = cw_state.channel_bindings.get(channel_type)
+    gw = _gateways.get(channel_type) if binding else None
+    if not (binding and isinstance(gw, WebNatsGateway)):
+        return
+    body: dict[str, object] = {
+        "kind": "child_chip",
+        "phase": phase,
+        "child_conv_id": child_conv_id,
+        "delegation_id": delegation_id,
+        "target_folder": target_folder,
+        "target_name": target_name,
+        **payload,
+    }
+    try:
+        await gw.send_status(binding.id, conv.channel_chat_id, body)
+    except (OSError, RuntimeError):
+        logger.debug(
+            "child_chip emit failed",
+            parent_conv_id=parent_conv_id,
+            child_conv_id=child_conv_id,
+            phase=phase,
+            exc_info=True,
+        )
+
+
 async def _emit_queued_status(conversation_id: str) -> None:
     await _emit_status_for_conversation(conversation_id, {"status": "queued"})
 
@@ -1652,6 +1709,7 @@ async def main() -> None:
         await handle_delegate_request(
             msg, state=_state, queue=_queue,
             get_executor=_get_executor_for_backend,
+            emit_chip_event=_emit_child_chip_event_safe,
         )
 
     delegate_sub = await _transport.nc.subscribe(

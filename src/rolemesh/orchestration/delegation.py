@@ -81,7 +81,7 @@ import json
 import time
 from typing import TYPE_CHECKING, Any
 
-from rolemesh.agent.executor import AgentInput, AgentOutput
+from rolemesh.agent.executor import PROGRESS_STATUSES, AgentInput, AgentOutput
 from rolemesh.core.logger import get_logger
 from rolemesh.db.chat import get_session, set_session
 from rolemesh.db.delegation import (
@@ -91,10 +91,11 @@ from rolemesh.db.delegation import (
     insert_delegation,
     update_delegation_terminal,
 )
+from rolemesh.orchestration._chip_throttle import ChipThrottleBucket
 from rolemesh.orchestration.catalog import render_agent_catalog
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
     from rolemesh.container.scheduler import GroupQueue
     from rolemesh.core.orchestrator_state import OrchestratorState
@@ -138,6 +139,7 @@ async def handle_delegate_request(
     state: OrchestratorState,
     queue: GroupQueue,
     get_executor: Callable[[str], Any],
+    emit_chip_event: Callable[..., Awaitable[None]] | None = None,
 ) -> None:
     """Core NATS responder for ``agent.*.delegate.request``.
 
@@ -145,9 +147,15 @@ async def handle_delegate_request(
     routed through ``_process_one``, which writes an audit row before
     returning the wire payload so ops have a single source of truth
     even when the response payload is dropped in transit.
+
+    ``emit_chip_event`` is the frontdesk v1.5 hook for surfacing
+    target progress to the parent web UI as a sub-chip. When None,
+    chip events are silently skipped (audit path untouched).
     """
     try:
-        response = await _process_one(msg, state, queue, get_executor)
+        response = await _process_one(
+            msg, state, queue, get_executor, emit_chip_event,
+        )
     except Exception as exc:
         # Top-of-handler safety net: a raise here would silently break
         # the delegation responder for every subsequent request until
@@ -173,6 +181,7 @@ async def _process_one(
     state: OrchestratorState,
     queue: GroupQueue,
     get_executor: Callable[[str], Any],
+    emit_chip_event: Callable[..., Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     data = json.loads(msg.data.decode())  # type: ignore[attr-defined]
 
@@ -311,6 +320,65 @@ async def _process_one(
         delegation_id=delegation_id,
     )
 
+    # ---- 8b. Frontdesk v1.5 child-chip emitter ----------------------
+    # See plan §3 (Target Agent Event Stream Visualization). The chip
+    # emitter is fire-and-forget: failures must NEVER block the audit
+    # path or alter the merge precedence. Throttle bucket coalesces
+    # bursty tool_use/running events at the source so the WebSocket
+    # doesn't get hammered.
+    chip_throttle = ChipThrottleBucket()
+
+    async def _emit_chip(phase: str, payload: dict[str, Any]) -> None:
+        if emit_chip_event is None:
+            return
+        try:
+            await emit_chip_event(
+                parent_conv_id=parent_conv_id,
+                child_conv_id=child_conv.id,
+                delegation_id=delegation_id,
+                target_folder=target_co.folder,
+                target_name=target_co.name,
+                phase=phase,
+                payload=payload,
+            )
+        except Exception:  # noqa: BLE001 — chip emit is best-effort
+            logger.debug("chip emit raised; suppressed", phase=phase, exc_info=True)
+
+    # Strong reference set for fire-and-forget chip emit tasks. Without
+    # holding a ref the GC can collect the task mid-flight and the emit
+    # silently drops; with it, we let the task complete and discard the
+    # ref on done.
+    chip_emit_tasks: set[asyncio.Task[None]] = set()
+
+    def _schedule_chip(phase: str, payload: dict[str, Any]) -> None:
+        # Fire-and-forget. The audit path must not block on chip emits.
+        try:
+            task = asyncio.create_task(_emit_chip(phase, payload))
+        except RuntimeError:
+            return
+        chip_emit_tasks.add(task)
+        task.add_done_callback(chip_emit_tasks.discard)
+
+    async def _flush_and_close(final_status: str, duration_ms: int) -> None:
+        # Flush any deferred throttled events first so their order is
+        # preserved relative to close (UI would otherwise see a stale
+        # "running" line linger after close).
+        for phase, payload in chip_throttle.flush_all():
+            await _emit_chip(phase, payload)
+        await _emit_chip("close", {
+            "final_status": final_status,
+            "duration_ms": duration_ms,
+        })
+
+    # Open the chip immediately. Done before enqueue so the user sees
+    # the sub-chip appear even while the target's container is still
+    # cold-starting; the dev-only ``context_mode`` tag distinguishes
+    # sticky vs isolated for debugging.
+    _schedule_chip("open", {
+        "initial_status": "queued",
+        "context_mode": ctx_mode,
+    })
+
     # ---- 9. Run + collect events ------------------------------------
     # Pi backend split: text-bearing event (is_final=False) + marker
     # (is_final=True, result=None). Claude backend emits a single event
@@ -332,6 +400,16 @@ async def _process_one(
     async def _on_output(out: AgentOutput) -> None:
         nonlocal text_event, final_marker, terminal_event
         try:
+            # v1.5: translate progress events into child-chip emits.
+            # Done BEFORE the success/terminal branches so an out-of-spec
+            # backend that mis-encodes a progress event (e.g. as
+            # success+is_final=False with result=None and status="tool_use")
+            # is still picked up here; the existing branches won't
+            # double-count because PROGRESS_STATUSES is disjoint from
+            # the terminal/success Literal set.
+            if out.status in PROGRESS_STATUSES:
+                _translate_progress_to_chip(out, chip_throttle, _schedule_chip)
+                return
             # Pi text event (no marker yet, no terminal yet)
             if out.status == "success" and not out.is_final:
                 if out.result:
@@ -422,6 +500,7 @@ async def _process_one(
             duration_ms=duration_ms,
             error_message="Delegation task never started (queue stalled).",
         )
+        await _flush_and_close("error", duration_ms)
         return _err("Delegation task failed to start.")
 
     # ---- 11. Closure has started; wait for terminal -----------------
@@ -440,6 +519,7 @@ async def _process_one(
             duration_ms=duration_ms,
             error_message=msg_text,
         )
+        await _flush_and_close("timeout", duration_ms)
         return _timeout_response(
             target_co, delegation_id, child_conv.id, duration_ms,
         )
@@ -452,6 +532,7 @@ async def _process_one(
             duration_ms=duration_ms,
             error_message=str(e),
         )
+        await _flush_and_close("error", duration_ms)
         return _error_response(
             target_co, delegation_id, child_conv.id, duration_ms, str(e),
         )
@@ -504,12 +585,58 @@ async def _process_one(
             response.get("text") if audit_status != "success" else None
         ),
     )
+    await _flush_and_close(audit_status, duration_ms)
     return response
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _translate_progress_to_chip(
+    out: AgentOutput,
+    bucket: ChipThrottleBucket,
+    schedule: Callable[[str, dict[str, Any]], None],
+) -> None:
+    """Translate a target ``AgentOutput`` progress event into a chip emit.
+
+    Frontdesk v1.5 §4 (UI behaviour): the parent web UI renders a
+    single-line ephemeral sub-chip per active delegation. Tool-use
+    events and ``running`` heartbeats are throttled to one emit per
+    500ms per ``phase`` so the WS doesn't get hammered; the bucket's
+    ``flush_all`` (called from ``_flush_and_close``) emits any
+    last-window payload before close so a burst right before
+    termination isn't lost.
+
+    Phases:
+      - "tool_use": payload {tool_name, tool_input}; UI may beautify
+        ``mcp__server__tool`` into ``server > tool``.
+      - "status":   payload {status: <PROGRESS_STATUSES value>}; UI
+        renders a human-readable label (Queued / Starting / Thinking).
+    """
+    if out.status == "tool_use":
+        meta = out.metadata or {}
+        payload: dict[str, Any] = {
+            "phase_kind": "tool_use",
+            "tool_name": meta.get("tool"),
+            "tool_input": meta.get("input"),
+        }
+        emit_now, prior = bucket.should_emit("tool_use", payload)
+        if emit_now:
+            if prior is not None:
+                schedule("tool_use", prior)
+            schedule("tool_use", payload)
+        return
+    # Generic progress (running / queued / container_starting). All
+    # share a single "status" phase slot — last write wins, since the
+    # UI only renders a single line.
+    payload = {"phase_kind": "status", "status": out.status}
+    emit_now, prior = bucket.should_emit("status", payload)
+    if emit_now:
+        if prior is not None:
+            schedule("status", prior)
+        schedule("status", payload)
 
 
 def _resolve_target(
