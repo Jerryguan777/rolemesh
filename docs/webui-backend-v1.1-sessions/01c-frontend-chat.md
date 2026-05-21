@@ -191,11 +191,40 @@
 - 409 `ALREADY_TERMINAL` 单独分支。
 - reauth event 路由到 banner 订阅者。
 
-需要真后端 / 真 Anthropic key 才能跑的（**留给用户验**）：
+### 设计 §10 Phase 1 Live smoke（已跑通）
 
-- 设计 §10 Phase 1 端到端清单（真 Anthropic key + 真 bootstrap user + DB 写入 `runs.status/completed_at/usage`）。
-- 浏览器实操：发消息 → token streaming → run.completed → 切 conversation → 中断重连。
-- Stop / Cancel 在真容器上的差异（Stop：容器存活，下一条立即响应；Cancel：容器死，下一条 1-3s 冷启）。
-- `BOOTSTRAP_USERS` 切不同 token 后 `GET /api/v1/me` 显示不同身份。
+执行日期：2026-05-21。真 Anthropic key (Haiku 4.5) + Docker 容器 + NATS + Postgres，feat/ui 全栈：
 
-本 session 单测 + 类型 + lint 覆盖了协议层契约，但端到端语义需要 backend smoke 才能 100% 闭环。建议下一步用户跑一遍设计 §10 清单后再开始 Phase 2。
+**通过的 checks：**
+
+- `GET /api/v1/backends`（public matrix）→ claude + pi
+- `GET /api/v1/me` 双 token：alice (`bbdf82ec-…`, owner) vs bob (`d7d63eda-…`, member) → 不同 UUID，多用户身份切换工作
+- `POST /api/v1/coworkers`（claude backend + Haiku model_id）→ 201；验证链通过 (model + credential + BackendCompat)；`created_by_user_id` = alice 真 UUID
+- `POST /api/v1/coworkers/{id}/conversations` → 201；DB 里自动建 `channel_bindings` web 行
+- `POST /api/v1/auth/ws-ticket` → 60s JWT
+- WS `/api/v1/conversations/{id}/stream?ticket=…` → accept；`event.run.started` 立即下发
+- 真 Anthropic 调用 → `event.run.token` 流出 `hello from smoke 01c` (20 chars) → `event.run.completed` (5.5s)
+- `runs.status='completed'`, `completed_at IS NOT NULL`（INV-6 路径 1 现在写得回 DB）
+- `GET /api/v1/runs/{id}` 返回 `status='completed'`，跟 DB 一致
+- 多用户 list 共享：alice / bob 看到同一 coworker 的同一对话列表（设计 §8 "Phase 1 全租户共享"）
+
+**smoke 跑出的 3 个 backend 集成 gap（**已在 commit `bd76e98` 修掉**，跟 01c PR 1-3 一起累在 feat/ui）：**
+
+1. **INV-6 happy-path UPDATE 不写 DB** ——`terminate_run_via_ws_completed` 在 01b 定义了但生产代码从未调用过。修：`webui/v1/ws_stream.py` 在 `_forward_stream` 收到 `done` / `safety_blocked` 时直接调 terminator，且在 send_event **之前**（`asyncio.shield` 保护），避免 client 收到 terminal frame 后秒关 WS 把 `_forward_stream` cancel 在 DB UPDATE 之前。
+2. **orchestrator `_state.coworkers` 不感知新 coworker** —— `POST /api/v1/coworkers` 没有发 `web.coworker.restart`（只有 PATCH 有）。修：CREATE 也发同一 event；orchestrator 端的 `reload_coworker_into_state` 已经有"first time"分支。
+3. **`WebNatsGateway._bindings` 不感知新 binding** —— 旧 binding 缓存只在启动时从 coworker state 加载，新 v1 conversation 触发的新 binding 行被 `web.inbound.*` 消费时 warn "Unknown web binding_id" 然后丢掉。修：listener 在 unknown 时调 `_refresh_binding`，admin pool 拉 binding 行回填本地缓存 + 同时回填 `cw.channel_bindings` 给 `_auto_create_web_conversation` 用。
+
+新增的 backend 测试（10/10 绿）：
+
+- `tests/webui/test_ws_terminators_inv6.py` × 6 — terminator round-trip against real DB（status flip / 有 usage / 无 usage / 非 dict usage / redelivery 幂等 / safety-block 元数据 / missing run_id 静默）。
+- `tests/test_web_gateway_hot_reload.py` × 4 — `_refresh_binding`（DB 有则注册 / DB 无返 False / non-web 拒绝 / DB hiccup 不杀 listener）。
+
+**还没覆盖的（**留给后续 session**）：**
+
+- WS disconnect-mid-turn 时 `runs.status` 仍停在 `running`。WS handler 是 terminator 的唯一调用者，client 在 `done` chunk 到达之前关 socket → fwd_task 被 cancel → terminator 不跑。proper fix 需要 orchestrator-side terminator（durable NATS consumer）。tracking ticket：未开。
+- 容器崩溃后 stale `sessions(conversation_id, session_id)` 不清理 → agent_runner 找不到 JSONL 文件 → exit 1 → infinite retry。本 session smoke 中曾被 Bug B 触发；Bug B 修好后基本不复现，但根因仍在（container_crash terminator 应该清 sessions 行）。
+- Phase 1 端到端"切 BOOTSTRAP_USERS 不同 token → user 身份变了" —— 已通过 alice/bob 两套 token 同时跑 `/api/v1/me` 验证；完整的"重启进程切 BOOTSTRAP_USERS 配置"路径未跑（rolemesh-3 sibling worktree 在跑另一个分支，避免环境震荡）。
+
+### 多 worktree 环境注意
+
+跑 smoke 时把 sibling worktree `/home/jerry/ai/rolemesh-3` (feat/frontdesk) 的 orchestrator + webui 都停了，从 feat/ui 用 `uv run rolemesh` + `uv run rolemesh-webui` 起新的。NATS + Postgres 是 docker container 共享基础设施，不动。Smoke 结束后 DB 里 smoke-haiku 系列 coworker / conv / runs 已经全部清掉，`tenant_model_credentials` 的临时 anthropic 行也删了。rolemesh-3 的服务需要用户重启。
