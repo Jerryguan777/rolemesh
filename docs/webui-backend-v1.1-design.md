@@ -352,6 +352,29 @@ server -> client:
 
 `tests/test_run_state_machine.py` 枚举每条路径。
 
+### 4.1 Stop vs Cancel —— 两个独立 control surface
+
+用户中止 agent 工作有**两个语义不同的控制**，UI 必须明确区分，不能合并到同一个按钮：
+
+| 控制 | endpoint / wire | 中止粒度 | 容器命运 | 适用场景 |
+|---|---|---|---|---|
+| **Stop**（soft） | 旧 `/ws/chat {type:"stop"}` → NATS `agent.{job_id}.interrupt` → SDK `interrupt_current_turn` | **本轮 turn 生成中止**；同 conversation 下一轮可立即继续 | **保留**（agent process / MCP connections / 凭证 inject 都不变） | 用户对当前回复不满意，想打断后继续追问 |
+| **Cancel**（hard） | `POST /api/v1/runs/{id}/cancel` 或 WS `request.cancel` → NATS `web.run.cancel.{run_id}` → `runtime.stop` + `terminate_run_via_user_cancel` | **整个 run 终止**；agent 不再为本 run 触发任何 turn | **硬杀**（释放资源、清凭证；下次新消息冷启动容器） | 用户想终结整个任务，资源立刻释放 |
+
+**为什么不合并**：
+
+- Stop 走 SDK 的 turn-cancellation 原语，**毫秒级生效**且无副作用；用户点 Stop 后立刻点 "再试一次" 体验顺滑
+- Cancel 必须 `runtime.stop` 容器才能真正"停"——下次 chat 1-3 秒冷启动；如果把 Stop 按钮映射到 Cancel endpoint，每次软中断都付重启税
+- 两者落入 `runs.status` 的状态也不同：Stop 不改 runs 状态（run 仍可能 completed），Cancel 写 `status='cancelled'`
+
+**前端实现约束**：
+
+- chat UI **两个按钮并存**（典型：聊天框旁边的 ⏸ Stop 与对话顶部的 ✕ Cancel）
+- 文案区分清楚（避免用户误以为 Stop 会"完全停下来"）
+- 已 terminal 的 run 上两个按钮都禁用
+
+`tests/orchestration/test_run_cancel_subscriber.py` 钉死 Cancel 路径的语义（容器停 + status 写）；旧 Stop 路径走的 NATS subject 与 INV-6 状态机解耦，由 channel 层独立保证。
+
 ---
 
 ## 5. 认证与 User-mode MCP
