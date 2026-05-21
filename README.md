@@ -61,10 +61,14 @@ RoleMesh is built for that gap:
 - DB-backed and tenant-scoped: skills live in Postgres with RLS, projected per-spawn into a read-only bind mount, never shared across tenants.
 - Backend-aware frontmatter: write a skill once, project it to either Claude SDK (`/home/agent/.claude/skills`) or Pi (`/home/agent/.pi/skills`); fields scoped to the other backend are dropped at projection time.
 
-### 7. Evaluation framework
+### 7. Frontdesk
+
+- Single user-facing entry point per tenant that delegates synchronously to specialist agents (accounting / portfolio / trading / ...). Depth strictly 1; no chained delegations. See `docs/frontdesk-architecture.md`.
+
+### 8. Evaluation framework
 
 - `rolemesh-eval` CLI — Inspect AI based, manual / nightly tool for measuring how coworker behavior changes across `system_prompt` / `tools` / `skills` / `agent_backend` / `model` configurations.
-- Three orthogonal scorers: `final_answer` (exact / regex / LLM-judge), `tool_trace` (required / forbidden / expected order), `cost` (per-sample latency + token spend).
+- Four orthogonal scorers: `final_answer` (exact / regex / LLM-judge), `tool_trace` (required / forbidden / expected order), `routing_accuracy` (frontdesk delegate-target check), `cost` (per-sample latency + token spend).
 - Reuses the production `ContainerAgentExecutor` so eval runs the same code path that handles real traffic.
 - Coworker config snapshot inlined into each run with a sha256 over the canonical form, so `rolemesh-eval list` clusters runs that share a configuration.
 
