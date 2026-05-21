@@ -29,6 +29,13 @@ export type Conversation = components['schemas']['Conversation'];
 export type Message = components['schemas']['Message'];
 export type Run = components['schemas']['Run'];
 export type Me = components['schemas']['Me'];
+export type Model = components['schemas']['Model'];
+export type ModelProvider = components['schemas']['ModelProvider'];
+export type CredentialResponse = components['schemas']['CredentialResponse'];
+export type CredentialUpsert = components['schemas']['CredentialUpsert'];
+export type MCPServer = components['schemas']['MCPServer'];
+export type MCPServerCreate = components['schemas']['MCPServerCreate'];
+export type MCPServerUpdate = components['schemas']['MCPServerUpdate'];
 export type ErrorResponseBody =
   paths['/api/v1/runs/{id}/cancel']['post']['responses']['409']['content']['application/json'];
 
@@ -147,6 +154,110 @@ export class ApiClient {
     if (resp.status === 404) return null;
     if (!resp.ok) throw await this.parseError(resp);
     return (await resp.json()) as Run;
+  }
+
+  // ------------------------------------------------------------------
+  // Models (read-only)
+  // ------------------------------------------------------------------
+
+  async listModels(filters?: {
+    provider?: ModelProvider | null;
+    family?: components['schemas']['ModelFamily'] | null;
+  }): Promise<Model[]> {
+    const qs = new URLSearchParams();
+    if (filters?.provider) qs.set('provider', filters.provider);
+    if (filters?.family) qs.set('family', filters.family);
+    const url = `${this.baseUrl}/api/v1/models${qs.size ? `?${qs}` : ''}`;
+    const resp = await fetch(url, { method: 'GET', headers: this.headers() });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Model[];
+  }
+
+  // ------------------------------------------------------------------
+  // Tenant credentials (write-only secret; read is metadata)
+  // ------------------------------------------------------------------
+
+  async listCredentials(): Promise<CredentialResponse[]> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/tenant/credentials`, {
+      method: 'GET',
+      headers: this.headers(),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as CredentialResponse[];
+  }
+
+  /** Upsert a tenant credential for ``provider``. The plaintext key
+   *  flows server-side into the CredentialVault — never persisted in
+   *  the SPA, never logged. The response carries metadata only. */
+  async putCredential(
+    provider: ModelProvider,
+    body: CredentialUpsert,
+  ): Promise<CredentialResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/tenant/credentials/${encodeURIComponent(provider)}`,
+      {
+        method: 'PUT',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(body),
+      },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as CredentialResponse;
+  }
+
+  async deleteCredential(provider: ModelProvider): Promise<void> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/tenant/credentials/${encodeURIComponent(provider)}`,
+      { method: 'DELETE', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+  }
+
+  // ------------------------------------------------------------------
+  // MCP servers
+  // ------------------------------------------------------------------
+
+  async listMCPServers(): Promise<MCPServer[]> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/mcp-servers`, {
+      method: 'GET',
+      headers: this.headers(),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as MCPServer[];
+  }
+
+  async createMCPServer(body: MCPServerCreate): Promise<MCPServer> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/mcp-servers`, {
+      method: 'POST',
+      headers: this.headers({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as MCPServer;
+  }
+
+  async updateMCPServer(
+    id: string,
+    body: MCPServerUpdate,
+  ): Promise<MCPServer> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/mcp-servers/${encodeURIComponent(id)}`,
+      {
+        method: 'PATCH',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(body),
+      },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as MCPServer;
+  }
+
+  async deleteMCPServer(id: string): Promise<void> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/mcp-servers/${encodeURIComponent(id)}`,
+      { method: 'DELETE', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
   }
 
   /** Returns `{ ok: true }` on 202, `{ ok: false, alreadyTerminal: true }`

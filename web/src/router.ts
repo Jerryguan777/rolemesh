@@ -80,7 +80,7 @@ export const ROUTES: readonly RouteDef[] = [
     prefixes: ['#/mcp-servers'],
     phase: 2,
     inSidebar: true,
-    render: () => html`<rm-coming-soon label="MCP servers" phase=${2}></rm-coming-soon>`,
+    render: () => html`<rm-mcp-servers-page></rm-mcp-servers-page>`,
   },
   {
     id: 'models',
@@ -89,7 +89,7 @@ export const ROUTES: readonly RouteDef[] = [
     prefixes: ['#/models'],
     phase: 2,
     inSidebar: true,
-    render: () => html`<rm-coming-soon label="Models" phase=${2}></rm-coming-soon>`,
+    render: () => html`<rm-models-page></rm-models-page>`,
   },
   {
     id: 'skills',
@@ -107,7 +107,7 @@ export const ROUTES: readonly RouteDef[] = [
     prefixes: ['#/credentials'],
     phase: 2,
     inSidebar: true,
-    render: () => html`<rm-coming-soon label="Credentials" phase=${2}></rm-coming-soon>`,
+    render: () => html`<rm-credentials-page></rm-credentials-page>`,
   },
   {
     id: 'bindings',

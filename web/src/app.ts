@@ -11,6 +11,9 @@ import './components/safety-rules-page.js';
 import './components/safety-decisions-page.js';
 import './components/coming-soon.js';
 import './components/coworkers-page.js';
+import './components/credentials-page.js';
+import './components/mcp-servers-page.js';
+import './components/models-page.js';
 import './components/app-shell.js';
 import {
   fetchAuthConfig,
