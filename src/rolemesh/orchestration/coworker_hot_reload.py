@@ -1,0 +1,169 @@
+"""Hot-reload pipeline for coworker config changes from the WebUI.
+
+Design §7 lists ``web.coworker.restart`` as the JetStream event that
+fires when a v1 PATCH changes the ``model_id`` (or any field that
+forces the running agent container to be re-spawned). The webui
+process is the publisher (see :mod:`webui.v1.coworker_events`); this
+module is the subscriber inside the orchestrator process.
+
+The minimum responsibility for v1.1 Phase 1 is:
+
+* Re-read the coworker row from DB.
+* Replace the cached ``CoworkerState.config`` in
+  :class:`rolemesh.core.orchestrator_state.OrchestratorState`.
+
+Stopping any currently-active container is *not* required to make a
+``model_id`` swap take effect — the next request that wakes the
+coworker uses the refreshed config. Container kill-on-reload is a
+nice-to-have that would shorten the gap between "PATCH returns 200"
+and "the new model is actually answering", but doing it cleanly
+requires draining in-flight requests; pushed to a separate session
+because nothing in 01a needs the latency floor.
+
+Failure handling: a hot-reload that can't find the coworker row in
+DB (deleted between publish and consume) is logged at WARN and the
+message is ack'd anyway — re-delivery would loop forever. Anything
+else (NATS hiccup, asyncpg blip) raises and the JetStream consumer's
+redelivery retries the operation.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import json
+from typing import TYPE_CHECKING, Awaitable, Callable
+
+from rolemesh.core.logger import get_logger
+from rolemesh.core.orchestrator_state import CoworkerState, OrchestratorState
+
+if TYPE_CHECKING:
+    from nats.aio.msg import Msg as NatsMsg
+    from nats.js.client import JetStreamContext
+    from nats.js.subscription import Subscription
+
+    from rolemesh.core.types import Coworker
+
+logger = get_logger()
+
+
+WEB_COWORKER_RESTART_SUBJECT = "web.coworker.restart"
+_DURABLE = "orch-web-coworker-restart"
+
+
+async def reload_coworker_into_state(
+    *,
+    coworker_id: str,
+    tenant_id: str,
+    state: OrchestratorState,
+    fetch_coworker: Callable[[str, str], Awaitable["Coworker | None"]],
+) -> bool:
+    """Re-fetch the coworker row and replace the in-memory config.
+
+    Returns ``True`` on success, ``False`` when the row is gone (the
+    event refers to a coworker that has since been DELETEd). The
+    boolean is consumed by the JetStream callback to decide whether to
+    log at INFO or WARN; both paths still ack the message.
+
+    The replacement preserves runtime-only state — conversations and
+    channel_bindings — by mutating ``.config`` rather than swapping
+    the ``CoworkerState`` instance whole. Swapping would orphan every
+    in-flight conversation reference held by ``_message_loop``.
+    """
+    cw = await fetch_coworker(coworker_id, tenant_id)
+    if cw is None:
+        return False
+
+    cached = state.coworkers.get(coworker_id)
+    if cached is None:
+        # First time we hear about this coworker — fresh
+        # ``CoworkerState`` is the only thing we can do. Conversations
+        # / bindings will repopulate on first message via the existing
+        # auto-create paths.
+        state.coworkers[coworker_id] = CoworkerState.from_coworker(cw)
+        return True
+
+    cached.config = cw
+    # ``trigger_pattern`` is derived from the coworker's name; if a
+    # PATCH changed the name we'd need to recompute. The v1 schema
+    # forbids renaming via the same event path today, but rebuilding
+    # is cheap — keeps the cache honest if the WebUI grows broader
+    # hot-reload triggers.
+    from rolemesh.core.orchestrator_state import build_trigger_pattern
+
+    cached.trigger_pattern = build_trigger_pattern(cw.name)
+    return True
+
+
+async def subscribe_coworker_restart(
+    js: "JetStreamContext",
+    *,
+    state: OrchestratorState,
+    fetch_coworker: Callable[[str, str], Awaitable["Coworker | None"]],
+) -> "Subscription":
+    """Subscribe to ``web.coworker.restart`` on JetStream.
+
+    The caller owns the returned ``Subscription`` and is responsible
+    for unsubscribing during shutdown. Manual ack ensures redelivery
+    on transient failure; the callback ack's only after the in-memory
+    reload completes (or is conclusively skipped).
+    """
+
+    async def _on_message(msg: "NatsMsg") -> None:
+        try:
+            payload = json.loads(msg.data.decode("utf-8") or "{}")
+        except json.JSONDecodeError:
+            logger.warning(
+                "web.coworker.restart payload not JSON; dropping",
+                data=msg.data[:128],
+            )
+            with contextlib.suppress(Exception):
+                await msg.ack()
+            return
+
+        coworker_id = payload.get("coworker_id")
+        tenant_id = payload.get("tenant_id")
+        if not (isinstance(coworker_id, str) and isinstance(tenant_id, str)):
+            logger.warning(
+                "web.coworker.restart missing coworker_id/tenant_id; dropping",
+                payload=payload,
+            )
+            with contextlib.suppress(Exception):
+                await msg.ack()
+            return
+
+        try:
+            ok = await reload_coworker_into_state(
+                coworker_id=coworker_id,
+                tenant_id=tenant_id,
+                state=state,
+                fetch_coworker=fetch_coworker,
+            )
+        except Exception:
+            logger.exception(
+                "web.coworker.restart handler failed; leaving for redelivery",
+                coworker_id=coworker_id,
+                tenant_id=tenant_id,
+            )
+            return
+
+        if ok:
+            logger.info(
+                "Coworker config hot-reloaded from DB",
+                coworker_id=coworker_id,
+                tenant_id=tenant_id,
+            )
+        else:
+            logger.warning(
+                "web.coworker.restart for unknown coworker; skipping",
+                coworker_id=coworker_id,
+                tenant_id=tenant_id,
+            )
+        with contextlib.suppress(Exception):
+            await msg.ack()
+
+    return await js.subscribe(
+        WEB_COWORKER_RESTART_SUBJECT,
+        durable=_DURABLE,
+        cb=_on_message,
+        manual_ack=True,
+    )

@@ -23,18 +23,22 @@ attached the chain above runs in full.
 from __future__ import annotations
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from rolemesh.auth.provider import AuthenticatedUser
 from rolemesh.core.backend_capabilities import BackendCompatError, validate_combo
 from rolemesh.db import (
     create_coworker,
+    delete_coworker,
+    get_coworker,
     get_coworkers_for_tenant,
     get_model_by_id,
     tenant_has_credential_for_provider,
+    update_coworker,
 )
 from webui.dependencies import get_current_user
-from webui.schemas_v1 import Coworker, CoworkerCreate
+from webui.schemas_v1 import Coworker, CoworkerCreate, CoworkerUpdate
+from webui.v1 import coworker_events
 from webui.v1.errors import ErrorResponseException, raise_error_response
 
 router = APIRouter(prefix="/coworkers", tags=["Coworkers"])
@@ -182,3 +186,122 @@ def _looks_like_uuid(value: str) -> bool:
     return len(parts) == 5 and all(
         all(c in "0123456789abcdefABCDEF" for c in p) for p in parts
     )
+
+
+async def _get_coworker_or_404(coworker_id: str, tenant_id: str) -> object:
+    """Fetch one coworker; raise the v1 envelope on miss / wrong tenant.
+
+    Catches ``DataError`` (raised when ``coworker_id`` is not a valid
+    UUID) so callers don't have to special-case it; both the bad
+    UUID case and the legitimate "not found" case present as the
+    same 404 to the client. Surfacing them differently leaks the
+    DB's parsing rules.
+    """
+    try:
+        cw = await get_coworker(coworker_id, tenant_id=tenant_id)
+    except asyncpg.DataError:
+        cw = None
+    if cw is None:
+        raise_error_response(
+            "NOT_FOUND",
+            "Coworker not found.",
+            status_code=404,
+            details={"coworker_id": coworker_id},
+        )
+    return cw
+
+
+@router.get("/{coworker_id}", response_model=Coworker)
+async def get_coworker_endpoint(
+    coworker_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> Coworker:
+    cw = await _get_coworker_or_404(coworker_id, user.tenant_id)
+    return _coworker_to_response(cw)
+
+
+@router.patch("/{coworker_id}", response_model=Coworker)
+async def patch_coworker_endpoint(
+    coworker_id: str,
+    body: CoworkerUpdate,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> Coworker:
+    """Update selected fields on a coworker.
+
+    A ``model_id`` change re-runs the same validation chain as POST
+    and, on success, publishes ``web.coworker.restart`` on JetStream
+    so the orchestrator hot-reloads the cached config (design §7).
+    The publish is best-effort (logged but not failed) because the
+    DB write has already committed by the time we hit that line —
+    the orchestrator picks up the change on its next full restart
+    even if the broadcast misses.
+    """
+    cw = await _get_coworker_or_404(coworker_id, user.tenant_id)
+    model_changed = body.model_id is not None and body.model_id != cw.model_id
+
+    if body.model_id is not None:
+        # Validate against the *target* backend — either the new one
+        # if the caller passed it (the v1 surface doesn't support
+        # this today; the path is here so the same helper works for
+        # both POST and PATCH) or the existing backend.
+        backend_name = cw.agent_backend
+        await _validate_model_and_credential(
+            tenant_id=user.tenant_id,
+            model_id=body.model_id,
+            backend_name=backend_name,
+        )
+
+    kwargs: dict[str, object] = {}
+    if body.name is not None:
+        kwargs["name"] = body.name
+    if body.system_prompt is not None:
+        kwargs["system_prompt"] = body.system_prompt
+    if body.status is not None:
+        kwargs["status"] = body.status
+    if body.max_concurrent is not None:
+        kwargs["max_concurrent"] = body.max_concurrent
+    if body.model_id is not None:
+        kwargs["model_id"] = body.model_id
+
+    try:
+        updated = await update_coworker(
+            coworker_id, tenant_id=user.tenant_id, **kwargs,  # type: ignore[arg-type]
+        )
+    except asyncpg.UniqueViolationError as exc:
+        raise ErrorResponseException(
+            status_code=409,
+            code="RESOURCE_IN_USE",
+            message="A coworker with this name/folder already exists in the tenant.",
+            details={"constraint": getattr(exc, "constraint_name", "") or ""},
+        ) from exc
+    if updated is None:
+        # The row vanished between the 404 check and the UPDATE —
+        # treat as a normal 404 rather than 500 so a concurrent
+        # DELETE doesn't surface as a server bug.
+        raise_error_response(
+            "NOT_FOUND",
+            "Coworker not found.",
+            status_code=404,
+            details={"coworker_id": coworker_id},
+        )
+    if model_changed:
+        await coworker_events.publish_coworker_restart(
+            coworker_id=coworker_id, tenant_id=user.tenant_id,
+        )
+    return _coworker_to_response(updated)
+
+
+@router.delete("/{coworker_id}", status_code=204)
+async def delete_coworker_endpoint(
+    coworker_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> Response:
+    """Delete a coworker. DB FK ON DELETE CASCADE handles dependents.
+
+    Per design §3 "DELETE 语义" table, a coworker DELETE cascades to
+    conversations / runs / messages. No 409 path on this endpoint —
+    the design treats coworkers as roots of their own subtree.
+    """
+    await _get_coworker_or_404(coworker_id, user.tenant_id)
+    await delete_coworker(coworker_id, tenant_id=user.tenant_id)
+    return Response(status_code=204)

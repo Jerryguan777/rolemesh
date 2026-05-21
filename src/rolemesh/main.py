@@ -1586,6 +1586,37 @@ async def main() -> None:
         token_sub = await start_token_responder(_transport.nc, vault=_vault)
         egress_responder_subs.append(token_sub)
 
+    # v1.1 §7: hot-reload pipeline for coworker config changes from
+    # the WebUI. The /api/v1 PATCH publishes ``web.coworker.restart``
+    # on the JS ``web-ipc`` stream; this subscriber re-reads the row
+    # so the next request uses the new config without an orchestrator
+    # restart. The stream is created by the WebUI lifespan; we ensure
+    # it here too in case the orchestrator boots before the WebUI.
+    from nats.js.api import StreamConfig as _WebStreamConfig
+
+    from rolemesh.db import get_coworker as _db_get_coworker
+    from rolemesh.orchestration.coworker_hot_reload import (
+        subscribe_coworker_restart,
+    )
+
+    try:
+        await _transport.js.add_stream(
+            _WebStreamConfig(name="web-ipc", subjects=["web.>"], max_age=3600.0)
+        )
+    except Exception:
+        with contextlib.suppress(Exception):
+            await _transport.js.update_stream(
+                _WebStreamConfig(name="web-ipc", subjects=["web.>"], max_age=3600.0)
+            )
+
+    async def _fetch_cw(coworker_id: str, tenant_id: str) -> Coworker | None:
+        return await _db_get_coworker(coworker_id, tenant_id=tenant_id)
+
+    coworker_restart_sub = await subscribe_coworker_restart(
+        _transport.js, state=_state, fetch_coworker=_fetch_cw,
+    )
+    egress_responder_subs.append(coworker_restart_sub)
+
     # Launch the egress gateway now that the snapshot responders are
     # registered. Moved here from _ensure_container_system_running()
     # because otherwise the gateway NATS-requests the snapshot before

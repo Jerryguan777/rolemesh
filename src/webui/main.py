@@ -148,9 +148,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # snapshot fetch on boot handles missed deltas as a backstop.
     _admin.set_mcp_publisher(_nc)
 
+    # v1.1 §7: wire the coworker hot-reload publisher. PATCH on
+    # /api/v1/coworkers/{id} (model_id change) emits
+    # ``web.coworker.restart`` via JetStream so the orchestrator
+    # re-reads the row without a full restart.
+    from webui.v1 import coworker_events
+
+    coworker_events.set_jetstream(js)
+
     yield
 
     # Shutdown
+    coworker_events.set_jetstream(None)
     _admin.set_mcp_publisher(None)
     await auth.close_auth()
     await _close_db()
