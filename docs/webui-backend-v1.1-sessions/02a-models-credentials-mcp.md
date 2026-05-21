@@ -1,4 +1,4 @@
-# Session 02a — Models + Credentials + MCP CRUD  `[DRAFT]`
+# Session 02a — Models + Credentials + MCP CRUD
 
 | field | value |
 |---|---|
@@ -6,7 +6,7 @@
 | Prerequisites | Phase 1 全 done（含 e2e smoke 通过） |
 | Estimated PRs | 4-5 |
 | Estimated LOC | ~1300（含 vault primitive，rotation 推迟） |
-| Status | not started — DRAFT |
+| Status | done — 2026-05-21 |
 
 > **DRAFT**：本 prompt 在 Phase 1 完工前可能需要刷新。**执行前必读**：
 > - 末尾"刷新清单"
@@ -124,4 +124,73 @@
 
 ## Findings (after execution)
 
-_(empty)_
+执行日期：2026-05-21。5 个 PR 各一个 commit，均以 `git commit -s` 累在 `feat/ui`。后端 112 个 pytest 全绿（约 14.5 分钟）；前端 15 个 vitest 全绿。
+
+### OIDC vault 当前 env var + 共享 helper 路径
+
+- 现有 OIDC vault env var = `ROLEMESH_TOKEN_SECRET`（`src/rolemesh/core/config.py:195` 是 grep 入口，实际消费在 `src/rolemesh/auth/token_vault.py:create_vault_from_env`）
+- 共享 derive 逻辑放在 **`src/rolemesh/auth/encryption.py`**，两个函数：
+  - `derive_fernet_key(secret: str) -> bytes`（SHA-256 → urlsafe-base64）
+  - `load_vault_key_from_env(env_var: str) -> bytes`（unset/empty 直接 `RuntimeError`，fail-loud）
+- `TokenVault.derive_key(secret)` 变成 thin alias，**完全不破坏行为**——`tests/auth/test_token_vault.py` 11/11 全绿
+- 新 vault env var = `CREDENTIAL_VAULT_KEY`，由 `rolemesh.auth.credential_vault.CREDENTIAL_VAULT_ENV` 常量导出，避免拼写漂移
+
+### CredentialVault 与 audit log
+
+- **没有**在 PUT/DELETE 时落 audit log。理由：v1.1 范围内 `audit_log` 表是 approval-专用的（schema §approval），credential 写入没有现成的 audit 表可用；为 02a 单独立一张 audit 表是 scope creep
+- PUT credential 走 `logger.info("PUT credential", ..., body=sanitize_for_log(...))`——`api_key` 字段被替换成 `<redacted>`，作为日志层的最小留痕
+- 真正想审计 credential 变更时，独立 chore：复用现有 `approval_audit_log` 表结构 + 新 actor_action 枚举值（`tenant_credential_put` / `tenant_credential_delete`），不在本 session
+
+### `mcp_servers.auth_mode` 默认值最终选择
+
+- DB 列：`VARCHAR(50) NOT NULL DEFAULT 'service'`（idempotent `ALTER` 兼容老 dev DB）
+- API 层：**必填**——`MCPServerCreate.auth_mode` 是 `Literal["user","service","both"]`，缺字段 → 422
+- 双层防御理由：API 必填让操作者必须显式声明（避免"我以为是 service 但其实落了 user"），DB 默认 'service' 让非 API 路径（migration / smoke 脚本）落在最安全的服务端凭证模式
+
+### PUT credential 触发 coworker 重启的端到端验证
+
+- 单元验证：`test_put_credential_publishes_restart_per_affected_coworker` 直接 monkeypatch publisher，验三个 fixture coworkers（2 个 anthropic + 1 个 openai）中只有 anthropic 的 2 个收到 event
+- 边缘验证：`test_put_credential_does_not_publish_for_unused_provider` 防 false-positive（无 coworker 使用该 provider 时不发空 event）
+- **JetStream live test 未做**——01a 已经在 `test_patch_model_id_round_trips_through_real_nats` 把"webui → JS → orchestrator subscriber → state.config 更新"链路钉死，credential PUT 用同一个 `WEB_COWORKER_RESTART_SUBJECT` 和同一个 publisher 函数，复用既有保护。如果 02c 实跑发现重启没生效，再补一个 NATS round-trip 测试
+
+### 对 02b（tools 双写）与 02c（credential_proxy user-mode）的影响
+
+**对 02b**：
+- `mcp_servers.auth_mode` 列已落地 + 默认值就位，02b 双写时直接用 DB 列；不需要再改 schema
+- `coworker_mcp_servers` 关系层（PR 4）已经覆盖 NULL/[]/whitelist 三态，02b reader 切换时只需要从 `coworkers.tools` JSONB 改读关系表
+- 新 NATS subject `web.coworker.mcp_changed` 常量在 `rolemesh.orchestration.coworker_hot_reload` 定义，02b 在 orchestrator 侧加 subscriber 用这个常量即可，**不要**自己定义新字符串
+- 提示：PATCH /mcp-servers/{id} 已经发 `egress.mcp.changed`，注意 02b 双写期不要重复发——orchestrator 侧的 in-process registry 由这个 event 维护，从 `coworker.tools` 走的旧路径要在 reader 切换时一起停掉
+
+**对 02c**：
+- CredentialVault 单例已在 webui lifespan 装好（`rolemesh.auth.credential_vault.set_credential_vault`）；orchestrator 进程需要同样 import + install 一次才能 decrypt
+- `credential_data` 列是 BYTEA，credential_proxy 读取时调 `CredentialVault.decrypt_json(blob)` 拿到 `{"api_key": "sk-..."}`，**不要**自己用 Fernet 解
+- `auth_mode=user` 路径 02c 仍走 TokenVault（OIDC），与 CredentialVault 是两套独立机制——不要混用 derive key
+- Frontend MCP 页面已经把 `auth_mode != service` 标 amber "requires user session"，02c 不用再改 UI 文案
+
+### 偏离原 prompt 的地方
+
+- **未实现 OpenAPI codegen freshness 检查里的 npm 步骤**——`tests/test_openapi_codegen_freshness.py` 自带在 `web/node_modules` 缺失时 self-skip，所以 freshness 在 CI/本地都没 red。每个 PR 我都手动跑了 `npm run openapi:gen` 并提交 `types.ts`
+- **PR 4 PATCH 行为细化**：原 prompt 说"PATCH 改 enabled_tools"，没说"空 body 是 no-op 还是清空"。最终决定空 body → 返回当前状态（no-op），显式 `{"enabled_tools": null}` 才是"全启用"。理由：tri-state 语义要求 null 是有意义的值，不能让"忘传字段"和"想清空"撞车。`test_patch_can_transition_through_each_tri_state` 钉死这条规则
+- **PR 5 没做 Coworker 详情页的 MCP 子面板**——原 prompt 没列入 §6.3 D/E/F 范围，coworker_mcp 关系层只通过 REST 暴露；Coworkers 列表页的"详情子 tab"留给 03b 一起做（与 skills 子面板节奏一致）
+- **DB schema 在 mcp_servers 上加了 idempotent `ALTER ... SET DEFAULT 'service'`**——原 prompt 没明定，但老 dev DB 的 CREATE 没有 DEFAULT，少这一行老 DB 上 API 必填的双层防御等于只有 API 一层
+
+### Acceptance criteria verification
+
+- [x] 全 endpoint 单测 + RLS 隔离测试（112 个 pytest 全绿 / 15 个 vitest 全绿）
+- [x] Vault INV-VAULT-1/2/3 pinned test 全绿（tests/auth/test_credential_vault.py + tests/webui/test_v1_credentials.py 里 sentinel-grep）
+- [x] OIDC `TokenVault` 现有测试不退化（11/11 全绿，只 import 共享 `derive_fernet_key`）
+- [ ] Phase 2 smoke 部分（service-mode MCP 路径）—— **未跑**，留给 02b/02c 实跑。本 session 范围只到 CRUD + 单元/集成测试
+- [x] DELETE 被引用 → 409 + 结构化 error（credentials 用 coworker_ids；mcp_servers 用 coworker_ids）
+- [x] Credentials 响应永不包含真 key（sentinel test + Pydantic 结构性 forbid）
+- [x] PUT credential 后 NATS event 真发出（fan-out 单测覆盖；live NATS round-trip 借 01a 既有保护）
+- [x] 更新 plan 状态
+
+### 后续 cleanup（不在本 session 范围）
+
+- 02b：`coworker.tools` 双写 + orchestrator 侧 `web.coworker.mcp_changed` subscriber
+- 02c：credential_proxy 调 `CredentialVault.decrypt_json` 取真 key + user-mode 路径
+- Channel binding tokens（`channel_bindings.credentials` JSONB 明文）→ 独立 chore，不在 v1.1 范围
+- Audit log for credential PUT/DELETE → 独立 chore
+- Coworker 详情页的 MCP/Skills 子面板 → 03b 与 skills 一起做
+- Live NATS smoke for credential-restart fan-out → 02c 跑真链路时补
+
