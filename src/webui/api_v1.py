@@ -16,6 +16,8 @@ from fastapi import APIRouter, Response
 
 from rolemesh.core.backend_capabilities import backends_as_json
 from webui.schemas_v1 import Backend
+from webui.v1.approval_policies import router as approval_policies_router
+from webui.v1.approvals import router as approvals_router
 from webui.v1.auth import me_router as auth_me_router
 from webui.v1.auth import router as auth_router
 from webui.v1.conversations import (
@@ -64,3 +66,5 @@ router.include_router(credentials_router)
 router.include_router(mcp_servers_router)
 router.include_router(models_router)
 router.include_router(runs_router)
+router.include_router(approval_policies_router)
+router.include_router(approvals_router)

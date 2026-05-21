@@ -73,7 +73,11 @@ class ApprovalRequest:
     tenant_id: str
     coworker_id: str
     conversation_id: str | None
-    policy_id: str
+    # ``policy_id`` may be NULL: the auto_execute default-mode path
+    # creates a request with no policy attached, and policy DELETE
+    # SET NULL-cascades into pending requests so the link can
+    # disappear after creation (design §3 DELETE 语义).
+    policy_id: str | None
     user_id: str
     job_id: str
     mcp_server_name: str

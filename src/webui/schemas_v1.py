@@ -448,3 +448,155 @@ class Run(BaseModel):
     error: dict[str, object] | None = None
     started_at: str | None = None
     completed_at: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Approvals (design §3 Phase 3 / §11 INV-4 + INV-7)
+# ---------------------------------------------------------------------------
+
+
+ApprovalPostExecMode = Literal["report"]
+ApprovalRequestStatus = Literal[
+    "pending",
+    "approved",
+    "rejected",
+    "expired",
+    "cancelled",
+    "skipped",
+    "executing",
+    "executed",
+    "execution_failed",
+    "execution_stale",
+]
+ApprovalRequestSource = Literal[
+    "proposal", "auto_intercept", "safety_require_approval"
+]
+ApprovalListScope = Literal["mine", "all"]
+ApprovalDecideAction = Literal["approve", "reject"]
+
+
+class ApprovalPolicy(BaseModel):
+    """Wire projection of an ``approval_policies`` row."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    tenant_id: str
+    coworker_id: str | None = None
+    mcp_server_name: str
+    tool_name: str
+    condition_expr: dict[str, object]
+    approver_user_ids: list[str] = Field(default_factory=list)
+    notify_conversation_id: str | None = None
+    auto_expire_minutes: int = Field(ge=1, le=10080)
+    post_exec_mode: ApprovalPostExecMode
+    enabled: bool
+    priority: int = Field(ge=-1000, le=1000)
+    created_at: str
+    updated_at: str
+
+
+class ApprovalPolicyCreate(BaseModel):
+    """``POST /api/v1/approval-policies`` body."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mcp_server_name: str = Field(min_length=1)
+    tool_name: str = Field(min_length=1)
+    condition_expr: dict[str, object]
+    coworker_id: str | None = None
+    approver_user_ids: list[str] = Field(default_factory=list)
+    notify_conversation_id: str | None = None
+    auto_expire_minutes: int = Field(default=60, ge=1, le=10080)
+    post_exec_mode: ApprovalPostExecMode = "report"
+    enabled: bool = True
+    priority: int = Field(default=0, ge=-1000, le=1000)
+
+
+class ApprovalPolicyUpdate(BaseModel):
+    """``PATCH /api/v1/approval-policies/{id}`` body.
+
+    Every field is optional; ``model_fields_set`` discriminates
+    "leave alone" from "explicit clear". The DB helper accepts the
+    same shape and treats explicit ``None`` for nullable columns as
+    "clear".
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mcp_server_name: str | None = Field(default=None, min_length=1)
+    tool_name: str | None = Field(default=None, min_length=1)
+    condition_expr: dict[str, object] | None = None
+    approver_user_ids: list[str] | None = None
+    notify_conversation_id: str | None = None
+    auto_expire_minutes: int | None = Field(default=None, ge=1, le=10080)
+    post_exec_mode: ApprovalPostExecMode | None = None
+    enabled: bool | None = None
+    priority: int | None = Field(default=None, ge=-1000, le=1000)
+
+
+class ApprovalRequest(BaseModel):
+    """Wire projection of an ``approval_requests`` row.
+
+    ``policy_id`` is nullable because (a) the proposal default-mode
+    path stores no policy, and (b) deleting a policy
+    ``SET NULL``-cascades into pending requests so they survive
+    a policy retraction (design §3 DELETE 语义).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    tenant_id: str
+    coworker_id: str
+    conversation_id: str | None = None
+    policy_id: str | None = None
+    user_id: str
+    job_id: str
+    mcp_server_name: str
+    actions: list[dict[str, object]] = Field(default_factory=list)
+    action_hashes: list[str] = Field(default_factory=list)
+    rationale: str | None = None
+    source: ApprovalRequestSource
+    status: ApprovalRequestStatus
+    post_exec_mode: ApprovalPostExecMode
+    resolved_approvers: list[str] = Field(default_factory=list)
+    requested_at: str
+    expires_at: str
+    created_at: str
+    updated_at: str
+
+
+class ApprovalAuditEntry(BaseModel):
+    """Wire projection of an ``approval_audit_log`` row."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    request_id: str
+    action: str
+    actor_user_id: str | None = None
+    note: str | None = None
+    metadata: dict[str, object] = Field(default_factory=dict)
+    created_at: str
+
+
+class ApprovalRequestDetail(ApprovalRequest):
+    """``GET /api/v1/approvals/{id}`` body — request + inline audit_log."""
+
+    audit_log: list[ApprovalAuditEntry] = Field(default_factory=list)
+
+
+class ApprovalDecide(BaseModel):
+    """``POST /api/v1/approvals/{id}/decide`` body.
+
+    ``action`` is the HTTP wire enum (``approve``/``reject``).
+    The handler translates it via INV-7's
+    :func:`rolemesh.approval.enum_translate.http_action_to_outcome`;
+    engine code never sees the wire string.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: ApprovalDecideAction
+    note: str | None = Field(default=None, max_length=1000)

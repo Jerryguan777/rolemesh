@@ -21,6 +21,8 @@ servers:
 
 tags:
   - name: Auth
+  - name: Approvals
+  - name: ApprovalPolicies
   - name: Backends
   - name: Coworkers
   - name: Conversations
@@ -729,6 +731,238 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
 
+  /api/v1/approval-policies:
+    get:
+      tags: [ApprovalPolicies]
+      operationId: listApprovalPolicies
+      summary: List the tenant's approval policies
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: coworker_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: enabled
+          in: query
+          required: false
+          schema: { type: boolean }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ApprovalPolicy' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [ApprovalPolicies]
+      operationId: createApprovalPolicy
+      summary: Create an approval policy
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApprovalPolicyCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalPolicy' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
+  /api/v1/approval-policies/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [ApprovalPolicies]
+      operationId: getApprovalPolicy
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalPolicy' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [ApprovalPolicies]
+      operationId: updateApprovalPolicy
+      summary: Partially update an approval policy
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApprovalPolicyUpdate' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalPolicy' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [ApprovalPolicies]
+      operationId: deleteApprovalPolicy
+      summary: Delete an approval policy
+      description: |
+        `approval_requests.policy_id` is `ON DELETE SET NULL`, so
+        already-issued pending requests survive policy removal —
+        the audit trail loses the link but the decision flow
+        continues (design §3 DELETE 语义表).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '204':
+          description: No content
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/approvals:
+    get:
+      tags: [Approvals]
+      operationId: listApprovals
+      summary: List approval requests
+      description: |
+        Default filter is "I am an approver on a pending request"
+        (`scope=mine`, `status=pending`). Admins may pass
+        `scope=all` to see the whole tenant; non-admin callers
+        asking for `scope=all` get 403.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { type: string }
+        - name: scope
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [mine, all]
+            default: mine
+        - name: coworker_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ApprovalRequest' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/approvals/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [Approvals]
+      operationId: getApproval
+      summary: Approval request detail (includes audit_log)
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalRequestDetail' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/approvals/{id}/audit-log:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [Approvals]
+      operationId: getApprovalAuditLog
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ApprovalAuditEntry' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/approvals/{id}/decide:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    post:
+      tags: [Approvals]
+      operationId: decideApproval
+      summary: Approve or reject a pending approval request
+      description: |
+        Wire enum (`approve`/`reject`) is translated to the engine
+        enum at the handler boundary via INV-7's
+        `http_action_to_outcome`. The audit-log row's
+        `actor_user_id` flows through `resolve_actor_user_id`
+        (INV-4) so bootstrap fast-path callers land on the
+        tenant's owner UUID, not the literal `"bootstrap"`.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApprovalDecide' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalRequest' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Caller is not in `resolved_approvers`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Request is no longer pending.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '503':
+          description: |
+            Approval engine is not wired into this process
+            (`code="APPROVAL_ENGINE_UNAVAILABLE"`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1274,4 +1508,260 @@ components:
         completed_at:
           type: string
           format: date-time
+          nullable: true
+
+    # -----------------------------------------------------------------
+    # Approvals (design §3 Phase 3 / §11 INV-4 + INV-7)
+    # -----------------------------------------------------------------
+
+    ApprovalPostExecMode:
+      type: string
+      enum: [report]
+      description: |
+        How approved actions feed back into the conversation. The
+        only mode shipped today is `report` (executor posts a
+        rendered summary); the closed enum is preserved so future
+        modes land as a typed contract change.
+
+    ApprovalRequestStatus:
+      type: string
+      description: |
+        Lifecycle status of an `approval_requests` row. Closed set
+        enforced by the DB CHECK constraint; surfacing it as an
+        enum lets the SPA branch on the value without string
+        comparisons against bare text.
+      enum:
+        - pending
+        - approved
+        - rejected
+        - expired
+        - cancelled
+        - skipped
+        - executing
+        - executed
+        - execution_failed
+        - execution_stale
+
+    ApprovalRequestSource:
+      type: string
+      enum: [proposal, auto_intercept, safety_require_approval]
+
+    ApprovalPolicy:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - mcp_server_name
+        - tool_name
+        - condition_expr
+        - auto_expire_minutes
+        - post_exec_mode
+        - enabled
+        - priority
+        - created_at
+        - updated_at
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        coworker_id:
+          type: string
+          format: uuid
+          nullable: true
+        mcp_server_name: { type: string }
+        tool_name: { type: string }
+        condition_expr:
+          type: object
+          additionalProperties: true
+        approver_user_ids:
+          type: array
+          items: { type: string, format: uuid }
+        notify_conversation_id:
+          type: string
+          format: uuid
+          nullable: true
+        auto_expire_minutes:
+          type: integer
+          minimum: 1
+          maximum: 10080
+        post_exec_mode: { $ref: '#/components/schemas/ApprovalPostExecMode' }
+        enabled: { type: boolean }
+        priority:
+          type: integer
+          minimum: -1000
+          maximum: 1000
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    ApprovalPolicyCreate:
+      type: object
+      required: [mcp_server_name, tool_name, condition_expr]
+      properties:
+        mcp_server_name:
+          type: string
+          minLength: 1
+        tool_name:
+          type: string
+          minLength: 1
+        condition_expr:
+          type: object
+          additionalProperties: true
+        coworker_id:
+          type: string
+          format: uuid
+          nullable: true
+        approver_user_ids:
+          type: array
+          items: { type: string, format: uuid }
+        notify_conversation_id:
+          type: string
+          format: uuid
+          nullable: true
+        auto_expire_minutes:
+          type: integer
+          minimum: 1
+          maximum: 10080
+          default: 60
+        post_exec_mode:
+          $ref: '#/components/schemas/ApprovalPostExecMode'
+        enabled:
+          type: boolean
+          default: true
+        priority:
+          type: integer
+          minimum: -1000
+          maximum: 1000
+          default: 0
+
+    ApprovalPolicyUpdate:
+      type: object
+      properties:
+        mcp_server_name:
+          type: string
+          minLength: 1
+        tool_name:
+          type: string
+          minLength: 1
+        condition_expr:
+          type: object
+          additionalProperties: true
+        approver_user_ids:
+          type: array
+          items: { type: string, format: uuid }
+        notify_conversation_id:
+          type: string
+          format: uuid
+          nullable: true
+        auto_expire_minutes:
+          type: integer
+          minimum: 1
+          maximum: 10080
+        post_exec_mode:
+          $ref: '#/components/schemas/ApprovalPostExecMode'
+        enabled: { type: boolean }
+        priority:
+          type: integer
+          minimum: -1000
+          maximum: 1000
+
+    ApprovalRequest:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - coworker_id
+        - user_id
+        - job_id
+        - mcp_server_name
+        - source
+        - status
+        - post_exec_mode
+        - requested_at
+        - expires_at
+        - created_at
+        - updated_at
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        coworker_id: { type: string, format: uuid }
+        conversation_id:
+          type: string
+          format: uuid
+          nullable: true
+        policy_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            NULL when (a) the request originated from a path with
+            no matching policy (proposal default-mode flow), or
+            (b) the policy was deleted after the request was
+            issued (`ON DELETE SET NULL`).
+        user_id: { type: string, format: uuid }
+        job_id: { type: string }
+        mcp_server_name: { type: string }
+        actions:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        action_hashes:
+          type: array
+          items: { type: string }
+        rationale:
+          type: string
+          nullable: true
+        source: { $ref: '#/components/schemas/ApprovalRequestSource' }
+        status: { $ref: '#/components/schemas/ApprovalRequestStatus' }
+        post_exec_mode: { $ref: '#/components/schemas/ApprovalPostExecMode' }
+        resolved_approvers:
+          type: array
+          items: { type: string, format: uuid }
+        requested_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    ApprovalAuditEntry:
+      type: object
+      required: [id, request_id, action, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        request_id: { type: string, format: uuid }
+        action: { type: string }
+        actor_user_id:
+          type: string
+          format: uuid
+          nullable: true
+        note:
+          type: string
+          nullable: true
+        metadata:
+          type: object
+          additionalProperties: true
+        created_at: { type: string, format: date-time }
+
+    ApprovalRequestDetail:
+      allOf:
+        - $ref: '#/components/schemas/ApprovalRequest'
+        - type: object
+          required: [audit_log]
+          properties:
+            audit_log:
+              type: array
+              items: { $ref: '#/components/schemas/ApprovalAuditEntry' }
+
+    ApprovalDecide:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [approve, reject]
+          description: |
+            HTTP wire enum. Translated by
+            `http_action_to_outcome` (INV-7) at the handler
+            boundary into the engine's `ApprovalOutcome`.
+        note:
+          type: string
+          maxLength: 1000
           nullable: true

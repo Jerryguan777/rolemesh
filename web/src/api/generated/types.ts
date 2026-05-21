@@ -465,6 +465,137 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/approval-policies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List the tenant's approval policies */
+        get: operations["listApprovalPolicies"];
+        put?: never;
+        /** Create an approval policy */
+        post: operations["createApprovalPolicy"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/approval-policies/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        get: operations["getApprovalPolicy"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete an approval policy
+         * @description `approval_requests.policy_id` is `ON DELETE SET NULL`, so
+         *     already-issued pending requests survive policy removal —
+         *     the audit trail loses the link but the decision flow
+         *     continues (design §3 DELETE 语义表).
+         */
+        delete: operations["deleteApprovalPolicy"];
+        options?: never;
+        head?: never;
+        /** Partially update an approval policy */
+        patch: operations["updateApprovalPolicy"];
+        trace?: never;
+    };
+    "/api/v1/approvals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List approval requests
+         * @description Default filter is "I am an approver on a pending request"
+         *     (`scope=mine`, `status=pending`). Admins may pass
+         *     `scope=all` to see the whole tenant; non-admin callers
+         *     asking for `scope=all` get 403.
+         */
+        get: operations["listApprovals"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/approvals/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        /** Approval request detail (includes audit_log) */
+        get: operations["getApproval"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/approvals/{id}/audit-log": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        get: operations["getApprovalAuditLog"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/approvals/{id}/decide": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Approve or reject a pending approval request
+         * @description Wire enum (`approve`/`reject`) is translated to the engine
+         *     enum at the handler boundary via INV-7's
+         *     `http_action_to_outcome`. The audit-log row's
+         *     `actor_user_id` flows through `resolve_actor_user_id`
+         *     (INV-4) so bootstrap fast-path callers land on the
+         *     tenant's owner UUID, not the literal `"bootstrap"`.
+         */
+        post: operations["decideApproval"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -781,6 +912,148 @@ export interface components {
             started_at?: string | null;
             /** Format: date-time */
             completed_at?: string | null;
+        };
+        /**
+         * @description How approved actions feed back into the conversation. The
+         *     only mode shipped today is `report` (executor posts a
+         *     rendered summary); the closed enum is preserved so future
+         *     modes land as a typed contract change.
+         * @enum {string}
+         */
+        ApprovalPostExecMode: "report";
+        /**
+         * @description Lifecycle status of an `approval_requests` row. Closed set
+         *     enforced by the DB CHECK constraint; surfacing it as an
+         *     enum lets the SPA branch on the value without string
+         *     comparisons against bare text.
+         * @enum {string}
+         */
+        ApprovalRequestStatus: "pending" | "approved" | "rejected" | "expired" | "cancelled" | "skipped" | "executing" | "executed" | "execution_failed" | "execution_stale";
+        /** @enum {string} */
+        ApprovalRequestSource: "proposal" | "auto_intercept" | "safety_require_approval";
+        ApprovalPolicy: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            tenant_id: string;
+            /** Format: uuid */
+            coworker_id?: string | null;
+            mcp_server_name: string;
+            tool_name: string;
+            condition_expr: {
+                [key: string]: unknown;
+            };
+            approver_user_ids?: string[];
+            /** Format: uuid */
+            notify_conversation_id?: string | null;
+            auto_expire_minutes: number;
+            post_exec_mode: components["schemas"]["ApprovalPostExecMode"];
+            enabled: boolean;
+            priority: number;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        ApprovalPolicyCreate: {
+            mcp_server_name: string;
+            tool_name: string;
+            condition_expr: {
+                [key: string]: unknown;
+            };
+            /** Format: uuid */
+            coworker_id?: string | null;
+            approver_user_ids?: string[];
+            /** Format: uuid */
+            notify_conversation_id?: string | null;
+            /** @default 60 */
+            auto_expire_minutes: number;
+            post_exec_mode?: components["schemas"]["ApprovalPostExecMode"];
+            /** @default true */
+            enabled: boolean;
+            /** @default 0 */
+            priority: number;
+        };
+        ApprovalPolicyUpdate: {
+            mcp_server_name?: string;
+            tool_name?: string;
+            condition_expr?: {
+                [key: string]: unknown;
+            };
+            approver_user_ids?: string[];
+            /** Format: uuid */
+            notify_conversation_id?: string | null;
+            auto_expire_minutes?: number;
+            post_exec_mode?: components["schemas"]["ApprovalPostExecMode"];
+            enabled?: boolean;
+            priority?: number;
+        };
+        ApprovalRequest: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            tenant_id: string;
+            /** Format: uuid */
+            coworker_id: string;
+            /** Format: uuid */
+            conversation_id?: string | null;
+            /**
+             * Format: uuid
+             * @description NULL when (a) the request originated from a path with
+             *     no matching policy (proposal default-mode flow), or
+             *     (b) the policy was deleted after the request was
+             *     issued (`ON DELETE SET NULL`).
+             */
+            policy_id?: string | null;
+            /** Format: uuid */
+            user_id: string;
+            job_id: string;
+            mcp_server_name: string;
+            actions?: {
+                [key: string]: unknown;
+            }[];
+            action_hashes?: string[];
+            rationale?: string | null;
+            source: components["schemas"]["ApprovalRequestSource"];
+            status: components["schemas"]["ApprovalRequestStatus"];
+            post_exec_mode: components["schemas"]["ApprovalPostExecMode"];
+            resolved_approvers?: string[];
+            /** Format: date-time */
+            requested_at: string;
+            /** Format: date-time */
+            expires_at: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        ApprovalAuditEntry: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            request_id: string;
+            action: string;
+            /** Format: uuid */
+            actor_user_id?: string | null;
+            note?: string | null;
+            metadata?: {
+                [key: string]: unknown;
+            };
+            /** Format: date-time */
+            created_at: string;
+        };
+        ApprovalRequestDetail: components["schemas"]["ApprovalRequest"] & {
+            audit_log: components["schemas"]["ApprovalAuditEntry"][];
+        };
+        ApprovalDecide: {
+            /**
+             * @description HTTP wire enum. Translated by
+             *     `http_action_to_outcome` (INV-7) at the handler
+             *     boundary into the engine's `ApprovalOutcome`.
+             * @enum {string}
+             */
+            action: "approve" | "reject";
+            note?: string | null;
         };
     };
     responses: {
@@ -1624,6 +1897,264 @@ export interface operations {
             404: components["responses"]["NotFound"];
             /** @description Run is already in a terminal state (`code="ALREADY_TERMINAL"`). */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    listApprovalPolicies: {
+        parameters: {
+            query?: {
+                coworker_id?: string;
+                enabled?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalPolicy"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    createApprovalPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ApprovalPolicyCreate"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalPolicy"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["Unprocessable"];
+        };
+    };
+    getApprovalPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalPolicy"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteApprovalPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateApprovalPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ApprovalPolicyUpdate"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalPolicy"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listApprovals: {
+        parameters: {
+            query?: {
+                status?: string;
+                scope?: "mine" | "all";
+                coworker_id?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalRequest"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    getApproval: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalRequestDetail"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    getApprovalAuditLog: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalAuditEntry"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    decideApproval: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ApprovalDecide"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalRequest"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description Caller is not in `resolved_approvers`. */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+            /** @description Request is no longer pending. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            422: components["responses"]["Unprocessable"];
+            /**
+             * @description Approval engine is not wired into this process
+             *     (`code="APPROVAL_ENGINE_UNAVAILABLE"`).
+             */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };

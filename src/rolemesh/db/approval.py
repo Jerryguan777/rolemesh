@@ -300,7 +300,7 @@ def _record_to_approval_request(row: asyncpg.Record) -> ApprovalRequest:
         tenant_id=str(row["tenant_id"]),
         coworker_id=str(row["coworker_id"]),
         conversation_id=str(row["conversation_id"]) if row["conversation_id"] else None,
-        policy_id=str(row["policy_id"]),
+        policy_id=str(row["policy_id"]) if row["policy_id"] else None,
         user_id=str(row["user_id"]),
         job_id=row["job_id"],
         mcp_server_name=row["mcp_server_name"],

@@ -81,23 +81,29 @@ AdminUser = Annotated[AuthenticatedUser, Depends(require_manage_agents)]
 UserManager = Annotated[AuthenticatedUser, Depends(require_manage_users)]
 AuthedUser = Annotated[AuthenticatedUser, Depends(get_current_user)]
 
-# Module-level ApprovalEngine handle — set from the WebUI bootstrap when
-# approvals are wired up. None means the approval feature is not active
-# in this process; decision endpoints will 503 rather than silently
-# no-op, and list/get continue to work because they only touch the DB.
-_approval_engine: ApprovalEngine | None = None
+# The process-wide ApprovalEngine handle lives in
+# :mod:`webui.v1.approval_engine_registry` so the v1 decide endpoint
+# can resolve the same instance without dragging admin schemas into
+# the v1 import graph. ``set_approval_engine`` here is preserved as
+# a thin re-export so the existing bootstrap call sites in
+# :mod:`webui.main` keep working.
+from webui.v1.approval_engine_registry import (
+    get_approval_engine as _get_engine,
+)
+from webui.v1.approval_engine_registry import (
+    set_approval_engine,
+)
 
-
-def set_approval_engine(engine: ApprovalEngine | None) -> None:
-    """Attach or detach the process-wide ApprovalEngine."""
-    global _approval_engine
-    _approval_engine = engine
+# Re-export so :mod:`webui.main` and existing tests keep finding it
+# at :func:`webui.admin.set_approval_engine`.
+__all__ = ["router", "set_approval_engine", "set_mcp_publisher"]
 
 
 def _require_engine() -> ApprovalEngine:
-    if _approval_engine is None:
+    engine = _get_engine()
+    if engine is None:
         raise HTTPException(status_code=503, detail="Approval engine not configured")
-    return _approval_engine
+    return engine
 
 
 # Module-level NATS client used to publish ``egress.mcp.changed``
