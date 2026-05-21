@@ -464,13 +464,28 @@ async def authenticate_ws(token: str) -> AuthenticatedUser | None:
 - spec 修改后需重启 webui（不 hot-reload）
 - spec 引用的 `tenant_slug` 必须在 DB 中真实存在；找不到对应 tenant 时 `authenticate_ws` 返回 `None`（请求被拒为未鉴权），不伪造 `tenant_id`。这是有意的 fail-closed 行为，确保 audit FK 不会指向幽灵 tenant。
 
-#### 5.2.2 OIDC / user-mode MCP 链路验收推迟
+#### 5.2.2 OIDC / user-mode MCP 链路实现推迟（整条）
 
-rolemesh 的 OIDC client 代码（`src/rolemesh/auth/oidc/*`）+ token_vault + `auth_mode=user` MCP 注入路径**全部按本文档设计实现并保留单元测试**，但 **e2e live smoke 推迟到 Keycloak + mock-tropos-mcp 分支合入后**。在那之前：
-- `AUTH_MODE=oidc` 启动应该能 work（连任何合规 IdP），但 dev 默认不跑
+原计划（02c session）是"e2e 推迟，但单测+wiring 实现先合入"。v1.1 实施过程中应用反 over-engineering 原则后**进一步推迟**：`auth_mode=user` MCP 注入路径（IPC header + credential_proxy 反查 + reauth wire）**整条链路实现都不在 v1.1 范围**，留给 Keycloak / OIDC 分支单独 session 一次性做完。理由：0 当前 caller、0 攻击向量（无 token 注入路径 = header 伪造无意义）、~1050 LOC 投入服务的是"想象中的未来用户"。
+
+在 OIDC 分支合入前的实际状态：
+
+- `AUTH_MODE=oidc` 启动可以 work（OIDC client 代码 + TokenVault 在 v1.1 内已就位，OIDC 登录流程能跑——00a + 02a 同步落地的部分）
+- **`auth_mode=user` MCP server** 配了也不会真注入 user token（credential_proxy 当前只处理 `service`）—— 见下 §5.4.1
 - WS ticket 颁发链路单测覆盖
 - `token_vault` 行为单测覆盖（mock IdP）
-- `auth_mode=user` MCP 路径单测覆盖（mock vault + mock MCP）
+- ~~`auth_mode=user` MCP 路径单测覆盖（mock vault + mock MCP）~~ **不做**——单测无 caller 也是 over-engineering
+
+未来 OIDC session 启动时，强烈建议先 `git log --follow docs/webui-backend-v1.1-sessions/02c-credential-proxy-user-mode.md` 拿回 retired 时记录的设计要点（特别是 conversation_id header 信任验证机制，那是 02c refresh 期间发现的安全要求）。
+
+##### 5.4.1 `auth_mode=user` 当前的"配置但不工作"状态
+
+02a 给 `mcp_servers.auth_mode` 落了 `user / service / both` 三值的 API + DB schema，但 02c retire 后 credential_proxy 没有 `user` 路径处理。两种处置选项（待选）：
+
+- **A**（推荐）：API 层把 `auth_mode` 临时限制为只接受 `service`，UI dropdown 把 `user` / `both` 标灰提示 "Coming with OIDC integration"。配置时即拒绝，避免 silent failure。改动小（~30 LOC，Pydantic Literal 收窄 + frontend dropdown）
+- B：DB / API 保持三值，runtime 命中 `user` / `both` 时 silently 跳过——差体验，不推荐
+
+留作 follow-up，不在 02c retirement 范围内。
 
 ### 5.3 User-mode MCP 链路（架构保留）
 

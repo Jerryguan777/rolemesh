@@ -58,7 +58,7 @@ Phase 4   04  (safety UI to v1)
 | 01c | 前端 chat 接入新 WS | done | 2026-05-20 | 3 commits; v1_client + chat-panel rewrite + Coworkers list; 13 vitest cases; lint:no-admin-chat enforces v1 cutover |
 | 02a | Models + Credentials + MCP CRUD | done | 2026-05-21 | 5 commits on feat/ui; CredentialVault primitive + BYTEA schema + endpoints + UI; INV-VAULT-1/2/3 pinned |
 | 02b | `coworker.tools` 一次性下线（greenfield） | done | 2026-05-21 | 1 commit on feat/ui; drop column + 9 reader sites switched + `list_coworker_mcp_configs` helper + `web.coworker.mcp_changed` subscriber wired |
-| 02c | credential_proxy user-mode + fake-vault e2e | not started | — | OIDC wiring 兜底 |
+| 02c | (retired) credential_proxy user-mode + fake-vault e2e | retired | 2026-05-21 | 反 over-engineering 第三次：0 caller，整条链路推迟到 OIDC 分支单独 session |
 | 03a | Approvals 迁 v1 + 多 user smoke | not started | — | 方案 A 多 bootstrap user 实跑 |
 | 03b | Skills per-tenant 迁移 + UI | not started | — | greenfield 下 drop `skills.coworker_id` 同 commit 完成 |
 | 03+ | (retired) drop `coworkers.tools` 列 | retired | 2026-05-21 | greenfield 吸收：tools → 02b；skills.coworker_id → 03b |
