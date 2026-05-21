@@ -71,7 +71,7 @@ export const ROUTES: readonly RouteDef[] = [
     prefixes: ['#/coworkers'],
     phase: 1,
     inSidebar: true,
-    render: () => html`<rm-coming-soon label="Coworkers" phase=${1}></rm-coming-soon>`,
+    render: () => html`<rm-coworkers-page></rm-coworkers-page>`,
   },
   {
     id: 'mcp',

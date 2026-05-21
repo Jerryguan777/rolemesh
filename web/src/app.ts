@@ -10,6 +10,7 @@ import './components/login-page.js';
 import './components/safety-rules-page.js';
 import './components/safety-decisions-page.js';
 import './components/coming-soon.js';
+import './components/coworkers-page.js';
 import './components/app-shell.js';
 import {
   fetchAuthConfig,
