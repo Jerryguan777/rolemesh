@@ -1,89 +1,39 @@
-# Session 03+ — Drop `coworkers.tools` 列 + drop `skills.coworker_id` 列  `[DRAFT]`
+# Session 03+ — Absorbed, no longer needed  `[RETIRED]`
 
 | field | value |
 |---|---|
-| Phase | n/a（独立 session，跨 phase） |
-| Prerequisites | 02b（tools 双写）+ 03b（skills 双写）都跑通过且**实跑稳定一段时间** |
-| Estimated PRs | 2 |
-| Estimated LOC | ~200（纯 migration + 清理） |
-| Status | not started — DRAFT |
+| Phase | n/a |
+| Prerequisites | — |
+| Estimated PRs | 0 |
+| Estimated LOC | 0 |
+| Status | retired — 2026-05-21 |
 
-> **DRAFT + STRONG**：本 session 是数据形变 stage 3。**不要在 02b/03b 刚完工就开**——必须等 Phase 3 全部 e2e smoke 通过、生产/dev 实跑至少一周（如果项目有 staging，跑通 staging），确认双写 reader 切完真无回退后再开。
->
-> 如果 grep 输出仍有任何残留 reader，**本 session 立刻中止**，回到 02b/03b 补 reader 切。
+## 为什么 retire
 
-## Goal
+原 03+ 的两个任务都被上游 session 吸收：
 
-Drop `coworkers.tools` JSONB 列与 `skills.coworker_id` 列。完成设计 §9.3 三阶段下线 stage 3。
+| 原任务 | 新归属 | 理由 |
+|---|---|---|
+| Drop `coworkers.tools` JSONB 列 | **02b 同 commit 完成** | greenfield 姿态下 02b 简化为"一次性 drop + 全 reader 切"单 PR；不再需要"stage 2 跑稳后 stage 3 drop"的 timing 约束 |
+| Drop `skills.coworker_id` 列 | **03b 同 commit 完成** | 03b 做 skills per-tenant 迁移本来就要碰这块；greenfield 下 drop 与 reader 切可同 commit |
 
-## Required reading
+原计划的"三阶段下线 stage 3"是**production multi-tenant** 系统的保守 migration 模式（stage 1 双写 → stage 2 reader 切 → stage 3 drop 列要等长时间观察期）。在 greenfield 姿态下（dev DB 只有测试数据，可清可重建），三阶段安全网不 earn its keep——切换瞬间任何漏改的 reader 会立即在 dev smoke 暴露，不需要 prod-style "stage 2 跑一周才 drop"的兜底窗口。
 
-1. [`docs/webui-backend-v1.1-design.md`](../webui-backend-v1.1-design.md) §9.3 stage 3
-2. 02b Findings + 03b Findings —— 必须先确认两个 Findings 段都说"reader 切完，长时间无回退"
-3. STEPS.md 中 02b / 03b 完成后的所有提交—— grep 一遍确认没引入新 reader
+## 历史档案
 
-## Scope — PR sketch
+如果未来项目进入 production 阶段，需要真正的渐进式 schema 迁移（保留生产数据 + 不中断在线服务 + 多机滚动发布），可以回滚本文件的 git 历史：
 
-### PR 1 — Pre-flight check
+```
+git log --follow -- docs/webui-backend-v1.1-sessions/03plus-drop-tools-column.md
+```
 
-- 跑全仓 grep：
-  ```bash
-  grep -rn "coworker.*\.tools\b\|cw\.tools\b" src/ tests/ scripts/ container/ | grep -v __pycache__ | grep -v "coworkers\.tools[^=]" | grep -v "test_run_state_machine"
-  ```
-  必须为空，**除了 schema.py 写 column 定义、db/coworker.py 写入路径**
-- 同样 grep `skills.coworker_id`：
-  ```bash
-  grep -rn "skills.*coworker_id\|skill\.coworker_id" src/ tests/ | grep -v __pycache__
-  ```
-  应只剩 schema.py 与 db/skill.py 写入路径
-- 把两个 grep 输出贴到本 PR description，作为"确认无回退"证据
-- pre-flight 不过就在 PR description 列残留 reader 让 reviewer 决定推迟
+之前版本包含完整的 pre-flight grep / 双写一致性验证 / 长观察期 / DROP COLUMN 不可逆告警等 production-grade 检查清单。**那些内容仍然有效**——只是不在 v1.1 greenfield 范围内使用。
 
-### PR 2 — Migration drop columns + 清写入路径
+## 关联 commit
 
-- `ALTER TABLE coworkers DROP COLUMN tools;`（CASCADE 必要时）
-- `ALTER TABLE skills DROP COLUMN coworker_id;`
-- 删除 db/coworker.py 中 tools JSONB 的写入逻辑
-- 删除 db/skill.py 中 coworker_id 的写入逻辑
-- schema.py 同步移除 tools / coworker_id 列定义
-- 删除 backfill script（已完成历史使命）
-- 跑全套测试 + Phase 1/2/3 smoke 重跑
-- 跑 02b/03b 的双写一致性测试**改成"新写入只走关系表"测试**
+- `6c7f013 docs(v1.1): collapse 02b to single-PR drop under greenfield stance` —— 把 tools 列 drop 吸收进 02b 的决定
+- `ba1c78f docs(v1.1): pivot 00b prompt to greenfield-schema stance` —— greenfield 姿态确立的源头（00b 的 pivot）
 
-## Acceptance criteria
+## 对 plan.md 的影响
 
-- [ ] Pre-flight grep 全空（除 schema 和写入路径）
-- [ ] DB migration 跑通
-- [ ] 全套测试通过
-- [ ] Phase 1/2/3 smoke 全过
-- [ ] 更新 plan 状态
-
-## Out of scope
-
-- ❌ 任何业务变更
-- ❌ 任何 API 变更
-
-## Open questions
-
-无（这是 mechanical 操作）
-
-## Pitfalls
-
-- DROP COLUMN 在 PG 是即时的且不可逆——必须先 pg_dump 备份再跑
-- 如果 grep 漏了某个隐性 reader（典型：动态构造 SQL 字符串），生产会立刻爆。这是为什么 pre-flight + 长时间观察期必要
-- 删完 column 后**禁止回滚到 stage 2**——回滚必须 restore from backup
-- backfill script 删了，万一发现没切干净的 reader 就只能 hotfix
-
-## 执行前刷新清单（强烈版）
-
-- [ ] 02b 完成至少一周？
-- [ ] 03b 完成至少一周？
-- [ ] Phase 3 完整 smoke 至少跑过 2 次都过？
-- [ ] 02b/03b Findings 段都说"reader 切完无问题"？
-- [ ] Pre-flight grep 真的空？
-
-任何一条 ❌ 就推迟。
-
-## Findings (after execution)
-
-_(empty)_
+`docs/webui-backend-v1.1-plan.md` 状态表里 03+ 行应该改为 `retired` 而不是 `not started`。02b / 03b 完成时应在各自 Findings 段确认"已含 drop 列"。

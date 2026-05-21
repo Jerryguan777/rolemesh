@@ -57,11 +57,11 @@ Phase 4   04  (safety UI to v1)
 | 01b | WS 新协议 + run state machine | done | 2026-05-20 | 4 个 commit；REST conv/messages/runs + WS v1 stream + 7-path INV-6 + INV-7 enum 翻译；70 个新测试全绿 |
 | 01c | 前端 chat 接入新 WS | done | 2026-05-20 | 3 commits; v1_client + chat-panel rewrite + Coworkers list; 13 vitest cases; lint:no-admin-chat enforces v1 cutover |
 | 02a | Models + Credentials + MCP CRUD | done | 2026-05-21 | 5 commits on feat/ui; CredentialVault primitive + BYTEA schema + endpoints + UI; INV-VAULT-1/2/3 pinned |
-| 02b | `coworker.tools` 双写 + reader 切换 | not started | — | **不 drop 列**（推到 03+）|
+| 02b | `coworker.tools` 一次性下线（greenfield） | not started | — | 单 PR：drop 列 + reader 切 + 写入只写新表 |
 | 02c | credential_proxy user-mode + fake-vault e2e | not started | — | OIDC wiring 兜底 |
 | 03a | Approvals 迁 v1 + 多 user smoke | not started | — | 方案 A 多 bootstrap user 实跑 |
-| 03b | Skills per-tenant 迁移 + UI | not started | — | 双写期保留 `coworker_id` |
-| 03+ | drop `coworkers.tools` 列 | not started | — | 必须等 02b 实跑足够时间 |
+| 03b | Skills per-tenant 迁移 + UI | not started | — | greenfield 下 drop `skills.coworker_id` 同 commit 完成 |
+| 03+ | (retired) drop `coworkers.tools` 列 | retired | 2026-05-21 | greenfield 吸收：tools → 02b；skills.coworker_id → 03b |
 | 04 | Safety UI 迁 v1 | not started | — | 基本搬迁 |
 
 更新方法：手动维护此表。每个 session 完成后填 ✅ + 日期。
