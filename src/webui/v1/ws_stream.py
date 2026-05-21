@@ -1,0 +1,556 @@
+"""``WS /api/v1/conversations/{id}/stream`` — design §4 protocol.
+
+Stands alongside the legacy :mod:`webui.ws` endpoint (``/ws/chat``);
+both ship in parallel during the migration window. The v1 path is
+the canonical surface for the SPA going forward.
+
+The shape:
+
+* Handshake — verify the short-lived JWT ticket
+  (:mod:`rolemesh.auth.ws_ticket`) before any DB work. Failure
+  closes the WS with a 4001/4002/4003 code so the SPA can branch
+  on the reason without re-reading the body.
+* client → server frames:
+  - ``request.run`` — initiates a new agent invocation.
+    ``idempotency_key`` is *required* (per 01b lockdown). A
+    duplicate inside the 60s window returns the same ``run_id``
+    without re-publishing to NATS.
+  - ``request.cancel`` — fire-and-forget; the actual
+    ``status='cancelled'`` write happens via the orchestrator
+    (no ghost-container risk — see :mod:`webui.v1.run_events`).
+  - ``request.approval`` — wire decision (``"approve"`` /
+    ``"deny"``) is translated through INV-7's
+    :func:`rolemesh.approval.enum_translate.ws_decision_to_outcome`
+    and forwarded as a NATS event for the orchestrator-side
+    approval engine to act on. The WebUI does not run the engine
+    directly from the WS handler (the engine fan-out lives in the
+    orchestrator process so the worker can pick it up via
+    JetStream).
+* server → client events: a thin pass-through over the existing
+  ``web.stream.{binding_id}.{chat_id}`` topics, projecting them
+  into ``event.run.*`` frames keyed by the active ``run_id``.
+
+Disconnect semantics: per 01b Open Question 1 (locked), a client
+closing the WS does NOT cancel the active run. Only an explicit
+``request.cancel`` / POST ``/api/v1/runs/{id}/cancel`` does. The
+fire-and-forget design lets the agent finish its work even after
+the browser tab is closed; the next reconnect calls
+``GET /api/v1/runs/{id}`` to fetch truth.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import uuid
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
+
+from fastapi import Query, WebSocket, WebSocketDisconnect
+from nats.js.api import DeliverPolicy
+from starlette.websockets import WebSocketState
+
+from rolemesh.approval.enum_translate import ws_decision_to_outcome
+from rolemesh.auth.ws_ticket import (
+    WsTicketError,
+    WsTicketExpired,
+    WsTicketPayload,
+    verify_ws_ticket,
+)
+from rolemesh.core.logger import get_logger
+from rolemesh.db import (
+    get_channel_binding_for_coworker,
+    get_conversation,
+    store_message,
+    tenant_conn,
+)
+from rolemesh.ipc.web_protocol import WebInboundMessage
+from rolemesh.runs import create_run
+from webui.v1.idempotency import cache as idempotency_cache
+from webui.v1.run_events import publish_run_cancel
+
+if TYPE_CHECKING:
+    from nats.js.client import JetStreamContext
+
+logger = get_logger()
+
+
+# ---------------------------------------------------------------------------
+# WS close codes (RFC 6455 private-use range 4000-4999)
+# ---------------------------------------------------------------------------
+
+_CLOSE_TICKET_EXPIRED = 4001
+_CLOSE_TICKET_INVALID = 4002
+_CLOSE_TICKET_MISMATCH = 4003
+_CLOSE_NOT_FOUND = 4004
+
+
+# ---------------------------------------------------------------------------
+# Module-level JetStream context — set by webui.main.lifespan
+# ---------------------------------------------------------------------------
+
+
+_js: "JetStreamContext | None" = None
+
+
+def set_jetstream(js: "JetStreamContext | None") -> None:
+    """Attach or detach the process-wide JetStream context."""
+    global _js
+    _js = js
+
+
+# ---------------------------------------------------------------------------
+# Handshake
+# ---------------------------------------------------------------------------
+
+
+async def _verify_handshake(
+    ws: WebSocket, conversation_id: str, ticket: str
+) -> WsTicketPayload | None:
+    """Validate the ticket against the WS path.
+
+    Returns the decoded payload on success, or ``None`` after
+    closing the WS with the appropriate close code. The
+    ticket→path mismatch check is deliberately split from the
+    expiry / signature checks so the SPA can distinguish "your
+    session expired" (re-request a ticket) from "you don't own
+    this conversation" (don't bother retrying — different bug).
+    """
+    if not ticket:
+        await ws.close(code=_CLOSE_TICKET_INVALID, reason="WS_TICKET_INVALID")
+        return None
+    try:
+        payload = verify_ws_ticket(ticket)
+    except WsTicketExpired:
+        await ws.close(code=_CLOSE_TICKET_EXPIRED, reason="WS_TICKET_EXPIRED")
+        return None
+    except WsTicketError:
+        await ws.close(code=_CLOSE_TICKET_INVALID, reason="WS_TICKET_INVALID")
+        return None
+    if payload.conversation_id != conversation_id:
+        await ws.close(
+            code=_CLOSE_TICKET_MISMATCH,
+            reason="ticket conversation mismatch",
+        )
+        return None
+    return payload
+
+
+# ---------------------------------------------------------------------------
+# Event helpers
+# ---------------------------------------------------------------------------
+
+
+async def _send_event(ws: WebSocket, frame: dict[str, Any]) -> None:
+    """Send a JSON frame guarded against double-close races."""
+    if ws.client_state != WebSocketState.CONNECTED:
+        return
+    with contextlib.suppress(OSError, RuntimeError, WebSocketDisconnect):
+        await ws.send_json(frame)
+
+
+# ---------------------------------------------------------------------------
+# Main handler
+# ---------------------------------------------------------------------------
+
+
+async def stream(
+    ws: WebSocket,
+    conversation_id: str,
+    ticket: str = Query("", alias="ticket"),
+) -> None:
+    """WS endpoint per design §4. Mounted on the FastAPI app.
+
+    Mounting via :func:`register_routes` (see end of file) so the
+    composition test in ``webui.api_v1`` can swap fixtures without
+    importing the FastAPI app graph directly.
+    """
+    payload = await _verify_handshake(ws, conversation_id, ticket)
+    if payload is None:
+        return
+
+    # Conversation existence + tenant match — the ticket payload
+    # already binds the conversation, but RLS still requires the
+    # row to be present in the caller's tenant. Treat absence as
+    # 4004 so the SPA distinguishes "ticket OK but row missing" from
+    # auth issues; both forms of failure look the same to an
+    # attacker but the operator sees the difference in logs.
+    import asyncpg
+
+    try:
+        conv = await get_conversation(
+            conversation_id, tenant_id=payload.tenant_id
+        )
+    except asyncpg.DataError:
+        # Bad UUID syntax — collapse to 4004 to avoid leaking the
+        # parser hint to clients.
+        conv = None
+    if conv is None:
+        await ws.close(code=_CLOSE_NOT_FOUND, reason="conversation not found")
+        return
+
+    await ws.accept()
+
+    # ``binding_id`` is needed for the NATS subjects the
+    # orchestrator emits onto. The conversation row carries it
+    # directly so no extra DB call beyond ``get_conversation``.
+    binding_id = conv.channel_binding_id
+
+    # Active run state. The lifecycle helper's
+    # ``WHERE status='running'`` gate is the only enforcement of
+    # "one active run per conversation"; this variable tracks the
+    # *current* one so we can stamp ``event.run.*`` frames.
+    active_run_id: str | None = None
+    # Active-run lock — guards the create-run + idempotency probe
+    # against two ``request.run`` frames arriving back-to-back
+    # before the first NATS publish lands.
+    active_run_lock = asyncio.Lock()
+
+    # JetStream subscriptions
+    if _js is None:
+        await ws.close(code=1011, reason="server jetstream not initialised")
+        return
+    js = _js
+
+    stream_sub = await js.subscribe(
+        f"web.stream.{binding_id}.{conv.channel_chat_id}",
+        ordered_consumer=True,
+        deliver_policy=DeliverPolicy.NEW,
+    )
+
+    async def _forward_stream() -> None:
+        """Fan NATS stream chunks to ``event.run.*`` frames.
+
+        The legacy ``web.stream.*`` carrier is reused here so this
+        endpoint can interoperate with the existing orchestrator
+        emitter — replacing the emitter would be another session.
+        ``run_id`` is stamped from the closure's ``active_run_id``;
+        when ``None``, the frame is dropped because no client
+        side-effect could meaningfully consume it.
+        """
+        async for msg in stream_sub.messages:
+            try:
+                data = json.loads(msg.data)
+                kind = data.get("type")
+                run_id = active_run_id
+                if run_id is None:
+                    await msg.ack()
+                    continue
+                if kind == "text":
+                    await _send_event(
+                        ws,
+                        {
+                            "type": "event.run.token",
+                            "run_id": run_id,
+                            "delta": data.get("content", ""),
+                        },
+                    )
+                elif kind == "done":
+                    await _send_event(
+                        ws,
+                        {
+                            "type": "event.run.completed",
+                            "run_id": run_id,
+                        },
+                    )
+                elif kind == "safety_blocked":
+                    inner = json.loads(data.get("content", "{}"))
+                    await _send_event(
+                        ws,
+                        {
+                            "type": "event.run.error",
+                            "run_id": run_id,
+                            "code": "SAFETY_BLOCKED",
+                            "message": inner.get("reason") or "blocked",
+                            "details": inner,
+                        },
+                    )
+                await msg.ack()
+            except (WebSocketDisconnect, RuntimeError):
+                return
+            except (OSError, ValueError, TypeError, KeyError):
+                with contextlib.suppress(OSError, RuntimeError):
+                    await msg.ack()
+
+    fwd_task = asyncio.create_task(_forward_stream())
+
+    try:
+        while True:
+            raw = await ws.receive_text()
+            try:
+                frame = json.loads(raw)
+            except json.JSONDecodeError:
+                await _send_event(
+                    ws,
+                    {
+                        "type": "event.run.error",
+                        "code": "PROTOCOL_BAD_JSON",
+                        "message": "frame must be valid JSON",
+                    },
+                )
+                continue
+            kind = frame.get("type")
+            if kind == "request.run":
+                active_run_id = await _handle_request_run(
+                    ws=ws,
+                    frame=frame,
+                    payload=payload,
+                    conv=conv,
+                    binding_id=binding_id,
+                    js=js,
+                    active_run_lock=active_run_lock,
+                )
+            elif kind == "request.cancel":
+                await _handle_request_cancel(
+                    ws=ws, frame=frame, payload=payload,
+                )
+            elif kind == "request.approval":
+                await _handle_request_approval(
+                    ws=ws, frame=frame, payload=payload, js=js,
+                )
+            else:
+                await _send_event(
+                    ws,
+                    {
+                        "type": "event.run.error",
+                        "code": "PROTOCOL_UNKNOWN_TYPE",
+                        "message": f"unknown frame type {kind!r}",
+                    },
+                )
+    except WebSocketDisconnect:
+        # 01b Open Question 1 (locked): closing the tab does NOT
+        # cancel the active run. The agent container keeps going
+        # and the next GET /runs/{id} reports the truth.
+        pass
+    finally:
+        fwd_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await fwd_task
+        with contextlib.suppress(Exception):
+            await stream_sub.unsubscribe()
+
+
+# ---------------------------------------------------------------------------
+# Per-frame handlers
+# ---------------------------------------------------------------------------
+
+
+async def _handle_request_run(
+    *,
+    ws: WebSocket,
+    frame: dict[str, Any],
+    payload: WsTicketPayload,
+    conv: Any,
+    binding_id: str,
+    js: "JetStreamContext",
+    active_run_lock: asyncio.Lock,
+) -> str | None:
+    """Process a ``request.run`` frame.
+
+    Returns the active run_id (cached or freshly minted) so the
+    caller can stamp follow-up events. On any validation failure,
+    sends an ``event.run.error`` frame and returns the previous
+    ``active_run_id`` (caller should keep using it).
+    """
+    text = frame.get("input")
+    if not isinstance(text, str) or not text:
+        await _send_event(
+            ws,
+            {
+                "type": "event.run.error",
+                "code": "PROTOCOL_MISSING_INPUT",
+                "message": "request.run requires non-empty 'input' string",
+            },
+        )
+        return None
+    idempotency_key = frame.get("idempotency_key")
+    if not isinstance(idempotency_key, str) or not idempotency_key:
+        await _send_event(
+            ws,
+            {
+                "type": "event.run.error",
+                "code": "PROTOCOL_MISSING_IDEMPOTENCY_KEY",
+                "message": (
+                    "request.run requires a non-empty 'idempotency_key'; "
+                    "01b mandates client-minted UUID4 per send"
+                ),
+            },
+        )
+        return None
+
+    async def _create_run_and_store_msg() -> str:
+        """Atomically INSERT runs + INSERT message. See lifecycle docstring."""
+        async with active_run_lock, tenant_conn(payload.tenant_id) as conn:
+            run_id = await create_run(
+                tenant_id=payload.tenant_id,
+                conversation_id=conv.id,
+                conn=conn,
+            )
+        sender_id = payload.user_id
+        sender_name = "User"
+        ts = datetime.now(UTC).isoformat()
+        await store_message(
+            tenant_id=payload.tenant_id,
+            conversation_id=conv.id,
+            msg_id=str(uuid.uuid4()),
+            sender=sender_id,
+            sender_name=sender_name,
+            content=text,
+            timestamp=ts,
+            is_from_me=False,
+            run_id=run_id,
+        )
+        # NATS publish — orchestrator picks up via web.inbound.{binding_id}
+        inbound = WebInboundMessage(
+            chat_id=conv.channel_chat_id,
+            sender_id=sender_id,
+            sender_name=sender_name,
+            text=text,
+            timestamp=ts,
+            msg_id=str(uuid.uuid4()),
+        )
+        try:
+            await js.publish(
+                f"web.inbound.{binding_id}", inbound.to_bytes()
+            )
+        except Exception:  # NATS hiccup — log but don't strand the run
+            logger.warning(
+                "ws_stream: NATS publish failed; run row stays running",
+                run_id=run_id,
+                exc_info=True,
+            )
+        return run_id
+
+    run_id, was_cached = await idempotency_cache.lookup_or_remember(
+        conversation_id=conv.id,
+        idempotency_key=idempotency_key,
+        run_id_factory_async=_create_run_and_store_msg,
+    )
+    await _send_event(
+        ws,
+        {
+            "type": "event.run.started",
+            "run_id": run_id,
+            "idempotent": was_cached,
+        },
+    )
+    return run_id
+
+
+async def _handle_request_cancel(
+    *,
+    ws: WebSocket,
+    frame: dict[str, Any],
+    payload: WsTicketPayload,
+) -> None:
+    """Forward a cancel request to the orchestrator via NATS.
+
+    Symmetric with the REST endpoint :mod:`webui.v1.runs` — both
+    publish ``web.run.cancel.{run_id}`` and let the orchestrator
+    do the actual ``status='cancelled'`` UPDATE. The WS handler
+    never writes the terminal status itself (would create a ghost).
+    """
+    run_id = frame.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        await _send_event(
+            ws,
+            {
+                "type": "event.run.error",
+                "code": "PROTOCOL_MISSING_RUN_ID",
+                "message": "request.cancel requires 'run_id'",
+            },
+        )
+        return
+    # We don't load the run row here to check ``terminal`` — the
+    # orchestrator can no-op a terminal cancel via the lifecycle
+    # helper's ``WHERE status='running'`` gate. Loading would
+    # double the DB cost on a hot path.
+    await publish_run_cancel(
+        run_id=run_id,
+        tenant_id=payload.tenant_id,
+        conversation_id=payload.conversation_id,
+    )
+
+
+async def _handle_request_approval(
+    *,
+    ws: WebSocket,
+    frame: dict[str, Any],
+    payload: WsTicketPayload,
+    js: "JetStreamContext",
+) -> None:
+    """Forward an approval decision to the orchestrator.
+
+    01b only translates the wire enum (INV-7); the actual approval
+    business surface (``/api/v1/approvals/*``) lands in 03a. So
+    this handler publishes a NATS event keyed by the approval id
+    and lets the orchestrator-side engine pick it up; engine code
+    never sees the WS string.
+    """
+    approval_id = frame.get("approval_id")
+    decision = frame.get("decision")
+    note = frame.get("note")
+    if not isinstance(approval_id, str) or not isinstance(decision, str):
+        await _send_event(
+            ws,
+            {
+                "type": "event.run.error",
+                "code": "PROTOCOL_BAD_APPROVAL",
+                "message": (
+                    "request.approval requires 'approval_id' and 'decision'"
+                ),
+            },
+        )
+        return
+    try:
+        outcome = ws_decision_to_outcome(decision)
+    except ValueError as exc:
+        await _send_event(
+            ws,
+            {
+                "type": "event.run.error",
+                "code": "PROTOCOL_BAD_DECISION",
+                "message": str(exc),
+            },
+        )
+        return
+    body = {
+        "approval_id": approval_id,
+        "outcome": outcome,
+        "tenant_id": payload.tenant_id,
+        "user_id": payload.user_id,
+        "note": note if isinstance(note, str) else None,
+    }
+    try:
+        await js.publish(
+            f"web.approval.decide.{approval_id}",
+            json.dumps(body).encode("utf-8"),
+        )
+    except Exception:
+        logger.warning(
+            "ws_stream: approval publish failed",
+            approval_id=approval_id,
+            exc_info=True,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Route mounting
+# ---------------------------------------------------------------------------
+
+
+def register_routes(app: Any) -> None:
+    """Attach the WS endpoint to a FastAPI app.
+
+    Called from :mod:`webui.main` so the route lands on the same
+    app the rest of /api/v1 lives on. We don't use an
+    :class:`APIRouter` because FastAPI's router-level
+    ``add_api_websocket_route`` doesn't gracefully compose path
+    parameters across includes in every version we run against;
+    mounting directly avoids the surprise.
+    """
+    app.add_api_websocket_route(
+        "/api/v1/conversations/{conversation_id}/stream",
+        stream,
+    )

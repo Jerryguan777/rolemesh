@@ -152,14 +152,28 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # /api/v1/coworkers/{id} (model_id change) emits
     # ``web.coworker.restart`` via JetStream so the orchestrator
     # re-reads the row without a full restart.
-    from webui.v1 import coworker_events
+    from webui.v1 import coworker_events, run_events, ws_stream
 
     coworker_events.set_jetstream(js)
+    # v1.1 §4 (INV-6): wire the run-cancel publisher. POST
+    # /api/v1/runs/{id}/cancel emits ``web.run.cancel.{run_id}`` so
+    # the orchestrator stops the container and the lifecycle helper
+    # writes the terminal UPDATE — the webui never writes
+    # ``status='cancelled'`` directly (avoids ghost containers).
+    run_events.set_jetstream(js)
+    # v1.1 §4: wire the WS /api/v1/conversations/{id}/stream
+    # endpoint's JetStream context. The route itself is mounted
+    # at app-build time (below), but the JS handle is what each
+    # connection uses to publish ``web.inbound.*`` / subscribe
+    # to ``web.stream.*``.
+    ws_stream.set_jetstream(js)
 
     yield
 
     # Shutdown
     coworker_events.set_jetstream(None)
+    run_events.set_jetstream(None)
+    ws_stream.set_jetstream(None)
     _admin.set_mcp_publisher(None)
     await auth.close_auth()
     await _close_db()
@@ -332,6 +346,13 @@ from webui.v1.errors import install_error_handler  # noqa: E402
 # TS client can't decode it.
 install_error_handler(app)
 app.include_router(api_v1_router)
+
+# Mount the v1 WebSocket stream alongside the REST surface. The
+# legacy ``/ws/chat`` handler remains so existing SPA builds keep
+# working during the 01c migration window.
+from webui.v1.ws_stream import register_routes as _register_v1_ws  # noqa: E402
+
+_register_v1_ws(app)
 
 # OIDC PKCE router (only when AUTH_MODE=oidc)
 if os.environ.get("AUTH_MODE", "external") == "oidc":
