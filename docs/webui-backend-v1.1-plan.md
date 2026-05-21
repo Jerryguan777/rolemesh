@@ -54,7 +54,7 @@ Phase 4   04  (safety UI to v1)
 | 00b | Migrations + RLS | done | 2026-05-20 | 6 张新表 + 4 处 ALTER；2 个 commit；greenfield rename of skills.created_by |
 | 00c | OpenAPI 脚手架 + shell 抽离 | done | 2026-05-20 | 3 个 commit；codegen + freshness + contract pytest；shell 不重构 chat-panel |
 | 01a | Coworkers CRUD + runs 写入责任人 | done | 2026-05-20 | 4 个 commit；coworkers CRUD + runs lifecycle helper + auth/ws-ticket；39 个新测试全绿 |
-| 01b | WS 新协议 + run state machine | not started | — | INV-6 pinned test 同 session 内完成 |
+| 01b | WS 新协议 + run state machine | done | 2026-05-20 | 4 个 commit；REST conv/messages/runs + WS v1 stream + 7-path INV-6 + INV-7 enum 翻译；70 个新测试全绿 |
 | 01c | 前端 chat 接入新 WS | not started | — | 待 01a/01b smoke 通过 |
 | 02a | Models + Credentials + MCP CRUD | not started | — | 不含 `auth_mode=user` 路径 |
 | 02b | `coworker.tools` 双写 + reader 切换 | not started | — | **不 drop 列**（推到 03+）|

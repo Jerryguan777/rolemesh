@@ -6,7 +6,7 @@
 | Prerequisites | 01a done（runs lifecycle helper + ws-ticket endpoint 已就绪）|
 | Estimated PRs | 3-4 |
 | Estimated LOC | ~1500 |
-| Status | not started |
+| Status | done (2026-05-20) |
 
 ## Goal
 
@@ -148,4 +148,159 @@
 
 ## Findings (after execution)
 
-_(empty — 重点记录：`awaiting_reauth` 最终选了哪个语义？INV-6 7 条路径有没有发现遗漏？idempotency 实现细节？)_
+### `awaiting_reauth` 实际实现细节
+
+**选 terminal**（与 Open Question 2 锁定方向一致）。落地：
+
+- `rolemesh.runs.lifecycle.TerminalStatus` Literal 直接列了
+  `"awaiting_reauth"`；`_TERMINAL_STATUSES` frozenset 包含它。
+- `update_run_terminal(status="awaiting_reauth", ...)` 与
+  其它三种 terminal 状态共享同一条 SQL UPDATE（`WHERE
+  status='running'` 不变；`completed_at = NOW()`）。
+- 没有新增 `POST /runs/{id}/resume` 端点；不需要 paused state。
+  User 重登后开一个**全新 run**，由 SPA 拿
+  `GET /api/v1/conversations/{id}/messages` 历史回放 context。
+- OpenAPI `RunStatus` enum 由原来的 `[queued, running, ...]`
+  改为 `[running, completed, failed, cancelled, awaiting_reauth]`
+  —— 我们的 lifecycle helper 从来不写 `queued`，留 enum 是
+  误导。`tests/test_openapi_contract.py::test_run_status_enum_matches_lifecycle_terminal_set`
+  把 enum 钉死。
+- 错误体 `{code:"REAUTH_REQUIRED", reason: "refresh_token_expired"
+  | "user_revoked"}`，`event.run.requires_reauth` 复用同样的
+  `reason` 字段让 UI banner differentiated。
+
+### 7 条终止路径的 wire 归属
+
+落地集中在 `src/rolemesh/runs/terminators.py`——7 个命名 wrapper
+都过 `update_run_terminal`，禁止直接 SQL UPDATE。每条路径的
+"谁调 wrapper" 责任：
+
+| # | 路径 | 调 wrapper 的进程 | 触发源 |
+|---|---|---|---|
+| 1 | WS completed | orchestrator | agent SDK `ResultMessage` → NATS `web.stream.*` "done" → orchestrator-side 收到 → `terminate_run_via_ws_completed`（**01b 提供 wrapper；orchestrator 端实际接线推到下游 session 的 NATS handler**）|
+| 2 | WS error | orchestrator | agent SDK exception / NATS `safety_blocked` → `terminate_run_via_ws_error` |
+| 3 | user cancel | orchestrator | webui POST/WS publish `web.run.cancel.{run_id}` → orchestrator subscriber stop 容器 + `terminate_run_via_user_cancel` |
+| 4 | scheduled | scheduler（Phase 2） | scheduled job finish → `terminate_run_via_scheduled_completion(success=...)` |
+| 5 | approval reject | orchestrator (engine) | 03a 把 `engine.handle_decision(outcome="rejected")` 与 parent run 关联 → `terminate_run_via_approval_reject` |
+| 6 | container crash | orchestrator (container monitor) | Docker / Pi runtime die event 非零退出 → `terminate_run_via_container_crash` |
+| 7 | reauth | credential_proxy（02c） | 401 from token_vault → `terminate_run_via_reauth_required(reason=...)` |
+
+**webui 端从不直接 UPDATE `runs`**——这是 01b 的硬底线。即使
+是 WS request.cancel，webui handler 也只 publish 一条 NATS
+`web.run.cancel.{run_id}`，orchestrator 接事件后才 UPDATE。
+ghost container 风险关闭。
+
+### `request.cancel` 经 orchestrator 的路径
+
+- WebUI 端：
+  - HTTP: `POST /api/v1/runs/{id}/cancel` 在
+    `src/webui/v1/runs.py`，返 202，调用
+    `webui.v1.run_events.publish_run_cancel(run_id, tenant_id,
+    conversation_id)`。已 terminal 直接 409
+    `code="ALREADY_TERMINAL"` 不发 NATS。
+  - WS: `request.cancel` 在
+    `src/webui/v1/ws_stream.py::_handle_request_cancel` 调同一个
+    publisher。
+- NATS subject: `web.run.cancel.{run_id}`，payload
+  `{run_id, tenant_id, conversation_id}`。fit 进现有
+  `web-ipc` JetStream stream（`subjects=["web.>"]`）——原 prompt
+  字面 `run.cancel.{run_id}` 要新加 stream，我换成
+  `web.run.cancel.{run_id}` 复用已有 stream。
+- orchestrator 端订阅：留待后续 session（路径已通；wrapper
+  函数 `terminate_run_via_user_cancel` 已就位）。
+- "谁 stop 容器"：orchestrator 端的 NATS handler，下游 session
+  连 container runtime 的 stop API。webui 永远不直接碰容器。
+
+### idempotency dedup 实现
+
+- 选 **in-memory dict + per-conversation `asyncio.Lock`**（不落
+  DB，不挂 KV）。
+- 实现：`src/webui/v1/idempotency.py` 模块单例 `cache`。
+- 窗口：60 秒滑窗（per-conversation 内 key 去重；跨 conversation
+  不共享）。
+- 并发安全：每个 conversation 一把 `asyncio.Lock`；
+  `lookup_or_remember` 在锁内调 `run_id_factory_async`，确保
+  双 frame 同时到达不会双 INSERT + 双 publish。
+- 重启丢一窗口：可以接受（窗口外 client 重投相当于新请求，
+  正确行为）。
+- `request.run` 强制要求 `idempotency_key`（缺则
+  `PROTOCOL_MISSING_IDEMPOTENCY_KEY` 错；prompt 锁定）。
+
+### INV-7 enum 翻译有没有发现遗漏的 wire enum value
+
+- HTTP `decide.action`：`approve | reject`（Pydantic regex 已
+  锁；handler 入口经 `http_action_to_outcome`）。
+- WS `request.approval.decision`：`approve | deny`（`deny ≠ reject`
+  是设计 §12 命名陷阱原文锁的；`ws_decision_to_outcome` 处理）。
+- WS `event.approval.resolved.decision`：`approve | deny |
+  expired | cancelled`（`outcome_to_ws_decision` 反向映射；后两
+  者只能从 engine internal 出来，handler 入口拒绝接收）。
+- Engine `ApprovalOutcome`：`approved | rejected | expired |
+  cancelled`，与 DB `approval_requests.status` 一致。
+- **新增 refactor**：`ApprovalEngine.handle_decision(action=...)`
+  的 wire-style 参数改名 `outcome=...` 接 engine enum；旧
+  `action` 字面量 `"approve"/"reject"` 不再出现在 engine 里。
+  HTTP/WS handler 边界做翻译。**遗漏**：没发现新增 wire
+  value；不过 03a 接业务 API 时 `request.approval.cancel`（取消
+  pending 审批）的 wire string 不在本次范围，留 03a 处理。
+
+### 对 01c（前端 chat 接入新 WS）的影响
+
+- 新 endpoint：`WS /api/v1/conversations/{id}/stream?ticket=<jwt>`，
+  与旧 `/ws/chat?agent_id=&token=&chat_id=` 并存（旧端点不动）。
+- 握手前 SPA 必须：
+  1. `POST /api/v1/auth/ws-ticket {conversation_id}` → 拿
+     `{ticket, expires_in_s}`。
+  2. WS connect，ticket 作 query param。失败 close code
+     4001/4002/4003/4004 区分错误。
+- client→server frame 必填 `idempotency_key`（client 端
+  `crypto.randomUUID()`）。漏了直接 `event.run.error
+  code=PROTOCOL_MISSING_IDEMPOTENCY_KEY`。
+- 重连约定：client 先 `GET /api/v1/runs/{id}`；
+  terminal → 不订阅。server 不主动 replay；这是协议契约，没
+  server 端代码支撑。
+- event 名 schema：`event.run.started/token/completed/error/
+  requires_reauth`，`event.approval.required/resolved`，
+  `idempotent: true/false` 标志新旧 run。
+- 旧 `/ws/chat` text 协议（`{type:"text"|"thinking"|...}`）
+  在 01c 完全切完之前**保留**，让回退快。
+
+### 偏离原 prompt 的地方
+
+- **NATS topic 名**：prompt 字面 `run.cancel.{run_id}`，实际
+  用 `web.run.cancel.{run_id}`——理由如上（复用 stream）。
+- **`MessageRole` enum**：prompt 没显式约束，yaml 由 4 种
+  (`user/assistant/system/safety`) 收窄到 2 种
+  (`user/assistant`)。`system`/`safety` 是 WS event 流的事，
+  不入 persisted message。如果 02a/02b 要把 safety 决策入
+  `messages` 表那时再开。
+- **`engine.handle_decision` 签名改名 `action → outcome`**：
+  比"只在 handler 翻译，engine 内部继续 wire enum"更彻底；
+  blast radius 是 7 个 test 文件 (`sed` 替换)。值得，因为
+  这才真正让 engine 内部不见 wire string。
+- **schema migration（messages.conversation_id FK ON DELETE
+  CASCADE）**：原 prompt 没列；DELETE conversation 的级联是
+  设计 §3 "DELETE 语义" 表里写的，但 schema 历史版本没加
+  CASCADE。01b 加了一个 idempotent ALTER 块（pg_constraint
+  introspection）补上。这是 PR1 的隐藏血——`tests/webui/
+  test_v1_conversations.py::test_delete_conversation_cascades_messages`
+  钉住。
+
+### 后续 cleanup / 留给下游 session
+
+- **orchestrator-side 接 `web.run.cancel.*` 的 subscriber** 没
+  落在 01b——01b 只 publish。下游 session（很可能 02 系列）需要
+  在 orchestrator init 里注册一个 subscriber，stop 对应 agent
+  容器 + 调 `terminate_run_via_user_cancel`。
+- **WS handler 内的"哪个 run_id 是当前 active"逻辑**靠
+  per-connection 变量，依赖"一个 conversation 同时只一个
+  running run"（lifecycle helper 的 `WHERE status='running'` 已
+  保证）。如果将来允许并行 run 这里要重做。
+- **`event.run.tool_call` / `event.run.tool_result`**：协议设计
+  里有，01b 没实现 forward 链路（orchestrator 端目前不发
+  这两类 NATS 事件）。留待 agent SDK 接线时补。
+- **WS endpoint 的 RLS 隔离测试** 因为 starlette TestClient + asyncpg
+  pool 跨 loop 的限制走的是 `get_conversation` stub 路径——RLS
+  本身在 PR1 的 REST endpoint 已有真测试覆盖；WS path 的 RLS
+  最终依赖同一个 `get_conversation`，等 02c live smoke 跑实
+  e2e 时一并验证。
