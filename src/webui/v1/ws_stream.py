@@ -66,7 +66,11 @@ from rolemesh.db import (
     tenant_conn,
 )
 from rolemesh.ipc.web_protocol import WebInboundMessage
-from rolemesh.runs import create_run
+from rolemesh.runs import (
+    create_run,
+    terminate_run_via_ws_completed,
+    terminate_run_via_ws_error,
+)
 from webui.v1.idempotency import cache as idempotency_cache
 from webui.v1.run_events import publish_run_cancel
 
@@ -150,6 +154,53 @@ async def _send_event(ws: WebSocket, frame: dict[str, Any]) -> None:
         await ws.send_json(frame)
 
 
+async def _terminate_run_completed(
+    *, run_id: str, tenant_id: str, usage: Any | None
+) -> None:
+    """Fire INV-6 path 1 (ws_completed) inside a tenant-scoped txn.
+
+    Wrapped in :class:`contextlib.suppress` so a transient DB
+    hiccup never crashes the forwarding loop — the run row stays
+    ``running`` and a future GET ``/api/v1/runs/{id}`` will report
+    the (now-incorrect) state until the operator notices. The
+    lifecycle helper's ``WHERE status='running'`` guard makes the
+    UPDATE idempotent in case the NATS chunk redelivers and we run
+    here twice.
+    """
+    usage_dict: dict[str, Any] | None = (
+        usage if isinstance(usage, dict) else None
+    )
+    try:
+        async with tenant_conn(tenant_id) as conn:
+            await terminate_run_via_ws_completed(
+                run_id=run_id, usage=usage_dict, conn=conn
+            )
+    except Exception:
+        logger.warning(
+            "ws_stream: terminator UPDATE failed (run stays 'running'); "
+            "investigate orchestrator side",
+            run_id=run_id,
+            exc_info=True,
+        )
+
+
+async def _terminate_run_errored(
+    *, run_id: str, tenant_id: str, error: dict[str, Any]
+) -> None:
+    """Symmetric helper for INV-6 path 2 (ws_error)."""
+    try:
+        async with tenant_conn(tenant_id) as conn:
+            await terminate_run_via_ws_error(
+                run_id=run_id, error=error, conn=conn
+            )
+    except Exception:
+        logger.warning(
+            "ws_stream: error terminator UPDATE failed",
+            run_id=run_id,
+            exc_info=True,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Main handler
 # ---------------------------------------------------------------------------
@@ -228,6 +279,14 @@ async def stream(
         ``run_id`` is stamped from the closure's ``active_run_id``;
         when ``None``, the frame is dropped because no client
         side-effect could meaningfully consume it.
+
+        INV-6 happy-path UPDATE: on ``done`` / ``safety_blocked`` the
+        terminator fires here so ``runs.{status, completed_at}`` lands
+        in the DB. Disconnect-mid-turn still leaves the row at
+        ``running`` (the ``finally`` in :func:`stream` cancels this
+        task — the WS handler does not survive a closed socket). A
+        durable orchestrator-side terminator for that case is on the
+        backlog (see 01c smoke Findings — design §11 INV-6 path 1).
         """
         async for msg in stream_sub.messages:
             try:
@@ -247,6 +306,24 @@ async def stream(
                         },
                     )
                 elif kind == "done":
+                    # INV-6 path 1: write the terminal status FIRST so
+                    # the UPDATE survives even if the client closes
+                    # the WS the moment it sees ``event.run.completed``
+                    # (the disconnect cancels ``_forward_stream`` —
+                    # without ordering this before ``_send_event``, a
+                    # fast-close races the cancellation against the
+                    # DB write and the row stays at ``running``). We
+                    # also wrap in ``asyncio.shield`` so cancellation
+                    # mid-UPDATE doesn't strand the row. Lifecycle
+                    # helper is idempotent on the ``WHERE
+                    # status='running'`` guard, so re-delivery is safe.
+                    await asyncio.shield(
+                        _terminate_run_completed(
+                            run_id=run_id,
+                            tenant_id=payload.tenant_id,
+                            usage=data.get("usage"),
+                        )
+                    )
                     await _send_event(
                         ws,
                         {
@@ -256,6 +333,19 @@ async def stream(
                     )
                 elif kind == "safety_blocked":
                     inner = json.loads(data.get("content", "{}"))
+                    # Same ordering rationale as ``done`` above.
+                    await asyncio.shield(
+                        _terminate_run_errored(
+                            run_id=run_id,
+                            tenant_id=payload.tenant_id,
+                            error={
+                                "code": "SAFETY_BLOCKED",
+                                "message": inner.get("reason") or "blocked",
+                                "stage": inner.get("stage"),
+                                "rule_id": inner.get("rule_id"),
+                            },
+                        )
+                    )
                     await _send_event(
                         ws,
                         {

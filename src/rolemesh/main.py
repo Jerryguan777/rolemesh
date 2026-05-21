@@ -448,36 +448,70 @@ async def _auto_create_web_conversation(
     binding_id: str, chat_id: str
 ) -> tuple[CoworkerState, ConversationState] | None:
     """Auto-create a conversation for web channel (each browser tab gets a new chat_id)."""
-    # Find the coworker that owns this binding
+    # First: check coworkers whose ``channel_bindings`` cache already
+    # contains the binding (the startup-loaded path).
     for cw in _state.coworkers.values():
         for b in cw.channel_bindings.values():
             if b.id == binding_id and b.channel_type == "web":
-                # ws.py may have already created the conversation before the
-                # NATS message reaches the orchestrator. Check DB first to
-                # avoid a UniqueViolationError on (binding_id, chat_id).
-                conv = await get_conversation_by_binding_and_chat(
-                    binding_id, chat_id, tenant_id=cw.config.tenant_id
-                )
-                if conv is None:
-                    conv = await create_conversation(
-                        tenant_id=cw.config.tenant_id,
-                        coworker_id=cw.config.id,
-                        channel_binding_id=binding_id,
-                        channel_chat_id=chat_id,
-                        name=f"Web Chat {chat_id[:8]}",
-                        requires_trigger=False,
-                        user_id=None,
-                    )
-                conv_state = ConversationState(conversation=conv)
-                cw.conversations[conv.id] = conv_state
-                logger.info(
-                    "Auto-created web conversation",
-                    coworker=cw.config.name,
-                    chat_id=chat_id,
-                    conversation_id=conv.id,
-                )
-                return cw, conv_state
-    return None
+                return await _land_web_conversation(cw, binding_id, chat_id)
+
+    # Fallback: the binding row exists in DB but isn't in the in-memory
+    # CoworkerState cache yet. Happens when the v1 webui creates the
+    # binding via ``POST /api/v1/coworkers/{id}/conversations`` after
+    # the orchestrator has booted. We hot-load from DB so the inbound
+    # message doesn't get dropped — smoke caught this. The gateway
+    # already hot-loads its own ``_bindings`` dict (see
+    # ``WebNatsGateway._refresh_binding``); the missing piece is the
+    # coworker-side cache, which this fallback fills.
+    from rolemesh.db import get_channel_binding_by_id_admin
+
+    binding = await get_channel_binding_by_id_admin(binding_id)
+    if binding is None or binding.channel_type != "web":
+        return None
+    cw = _state.coworkers.get(binding.coworker_id)
+    if cw is None:
+        # Coworker not in state — would have been hot-loaded by the
+        # ``web.coworker.restart`` subscriber on CREATE, but if that
+        # event was missed we re-read here. Best-effort.
+        logger.warning(
+            "binding's coworker not in state; cannot route inbound",
+            binding_id=binding_id,
+            coworker_id=binding.coworker_id,
+        )
+        return None
+    cw.channel_bindings[binding.channel_type] = binding
+    return await _land_web_conversation(cw, binding_id, chat_id)
+
+
+async def _land_web_conversation(
+    cw: CoworkerState, binding_id: str, chat_id: str
+) -> tuple[CoworkerState, ConversationState]:
+    """Get-or-create + cache the conversation row for a web binding."""
+    # ws.py may have already created the conversation before the
+    # NATS message reaches the orchestrator. Check DB first to
+    # avoid a UniqueViolationError on (binding_id, chat_id).
+    conv = await get_conversation_by_binding_and_chat(
+        binding_id, chat_id, tenant_id=cw.config.tenant_id
+    )
+    if conv is None:
+        conv = await create_conversation(
+            tenant_id=cw.config.tenant_id,
+            coworker_id=cw.config.id,
+            channel_binding_id=binding_id,
+            channel_chat_id=chat_id,
+            name=f"Web Chat {chat_id[:8]}",
+            requires_trigger=False,
+            user_id=None,
+        )
+    conv_state = ConversationState(conversation=conv)
+    cw.conversations[conv.id] = conv_state
+    logger.info(
+        "Auto-created web conversation",
+        coworker=cw.config.name,
+        chat_id=chat_id,
+        conversation_id=conv.id,
+    )
+    return cw, conv_state
 
 
 async def _emit_status_for_conversation(conversation_id: str, payload: dict[str, object]) -> None:

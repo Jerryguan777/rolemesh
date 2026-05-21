@@ -28,6 +28,7 @@ __all__ = [
     "get_all_conversations",
     "get_all_sessions",
     "get_channel_binding",
+    "get_channel_binding_by_id_admin",
     "get_channel_binding_for_coworker",
     "get_channel_bindings_for_coworker",
     "get_conversation",
@@ -99,6 +100,27 @@ async def get_channel_binding(binding_id: str, *, tenant_id: str) -> ChannelBind
             "SELECT * FROM channel_bindings WHERE id = $1::uuid AND tenant_id = $2::uuid",
             binding_id,
             tenant_id,
+        )
+    if row is None:
+        return None
+    return _record_to_channel_binding(row)
+
+
+async def get_channel_binding_by_id_admin(binding_id: str) -> ChannelBinding | None:
+    """Fetch a binding by id without a tenant filter.
+
+    Used by orchestrator-side hot-reload paths that discover a binding
+    via NATS subject (e.g. ``web.inbound.{binding_id}``) and need to
+    resolve its tenant before any tenant-scoped query can run. The
+    caller is the orchestrator process — never a user-facing handler,
+    which is why it goes through ``admin_conn`` and skips RLS. The
+    returned binding's ``tenant_id`` is what callers should plumb into
+    subsequent tenant-scoped reads.
+    """
+    async with admin_conn() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM channel_bindings WHERE id = $1::uuid",
+            binding_id,
         )
     if row is None:
         return None

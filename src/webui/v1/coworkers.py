@@ -167,6 +167,23 @@ async def create_coworker_endpoint(
         ) from exc
     except HTTPException:
         raise
+    # CREATE-side hot-reload: published the same way PATCH does so the
+    # running orchestrator picks the new coworker up without a process
+    # restart. ``reload_coworker_into_state`` already handles the
+    # "first time we hear about this coworker" branch — see the docstring
+    # in :mod:`rolemesh.orchestration.coworker_hot_reload`. Smoke-discovered
+    # gap: without this publish, the orchestrator's in-memory state
+    # missed CREATEd coworkers and ``_handle_incoming`` silently dropped
+    # every inbound message routed at them.
+    try:
+        await coworker_events.publish_coworker_restart(
+            coworker_id=cw.id,
+            tenant_id=user.tenant_id,
+        )
+    except Exception:
+        # Same best-effort posture as PATCH — DB row is the source of
+        # truth, the next process boot picks it up.
+        pass
     return _coworker_to_response(cw)
 
 
