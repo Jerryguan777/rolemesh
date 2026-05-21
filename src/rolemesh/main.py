@@ -1497,20 +1497,24 @@ async def main() -> None:
         widened in this PR. Until then: callers must not pass an
         unvalidated conversation_id (e.g. from user input) to this
         sender.
+
+        The body delegates to the module-level
+        ``send_to_conversation_with_fanout`` helper so the
+        frontdesk-v1.2 fan-out logic can be unit-tested without
+        booting the orchestrator. See that function for the fan-out
+        contract.
         """
 
         async def send_to_conversation(
             self, conversation_id: str, text: str
         ) -> None:
-            conv = await _pg_get_conv(conversation_id)
-            if conv is None:
-                logger.warning(
-                    "approval notification: conversation not found",
-                    conversation_id=conversation_id,
-                )
-                return
-            cw = _state.coworkers.get(conv.coworker_id)
-            await _send_via_coworker(cw, conv.channel_chat_id, text)
+            await send_to_conversation_with_fanout(
+                conversation_id,
+                text,
+                get_conv=_pg_get_conv,
+                send_via_coworker=_send_via_coworker,
+                coworker_lookup=_state.coworkers.get,
+            )
 
     resolver = NotificationTargetResolver(
         get_conversations_for_user_and_coworker=_convs_for_user_and_cw,
@@ -1858,6 +1862,86 @@ class _IpcDepsImpl:
             t = asyncio.ensure_future(_update(cw.config.folder, cw_perms, cw.config.tenant_id, task_rows))
             _bg_tasks.add(t)
             t.add_done_callback(_bg_tasks.discard)
+
+
+async def send_to_conversation_with_fanout(
+    conversation_id: str,
+    text: str,
+    *,
+    get_conv: Callable[[str], Awaitable[Conversation | None]],
+    send_via_coworker: Callable[
+        [CoworkerState | None, str, str], Awaitable[None],
+    ],
+    coworker_lookup: Callable[[str], CoworkerState | None],
+) -> None:
+    """Deliver an approval notification to a conversation, fanning the
+    same text out to the parent conversation when the destination is a
+    delegation child.
+
+    Frontdesk v1.2 — when ``conv.parent_conversation_id IS NOT NULL``,
+    the destination is a delegation child conv that sits on a
+    ``channel_type='internal'`` binding the WebUI gateway does not
+    subscribe to. Without the fan-out, approval outcomes (executed /
+    rejected / skipped / expired / cancelled) submitted by a delegate
+    would never reach the user, who only sees the parent chat.
+
+    The parent dispatch prefixes the text with ``[via <target_name>] ``
+    so the user can attribute the message to the specialist they don't
+    normally see. The web frontend regex-parses that prefix into a
+    chip; telegram/slack users see the prefix as plain text. We
+    deliberately do NOT widen ``ChannelGateway.send_message`` to carry
+    structured ``{source, via_target_name}`` metadata — the text-prefix
+    encoding keeps the change to a single channel-adapter site rather
+    than touching all 3 gateway implementations + ``WebOutboundMessage``.
+
+    Non-regression: when the destination is a top-level user
+    conversation (``parent_conversation_id IS NULL``), the fan-out
+    branch is skipped and behaviour is identical to the pre-v1.2
+    adapter.
+
+    Pulled out of ``_OrchestratorChannelSender`` so the fan-out
+    branching can be unit-tested without booting a real orchestrator;
+    dependencies are injected so tests can pass fakes. The production
+    caller passes ``get_conversation_for_notification``,
+    ``_send_via_coworker``, and ``_state.coworkers.get``.
+    """
+    conv = await get_conv(conversation_id)
+    if conv is None:
+        logger.warning(
+            "approval notification: conversation not found",
+            conversation_id=conversation_id,
+        )
+        return
+    cw = coworker_lookup(conv.coworker_id)
+    await send_via_coworker(cw, conv.channel_chat_id, text)
+
+    if conv.parent_conversation_id is None:
+        return
+    parent_conv = await get_conv(conv.parent_conversation_id)
+    if parent_conv is None:
+        # Child row exists but the parent has been deleted. Logging is
+        # enough — we already delivered to the child, audit is intact.
+        logger.warning(
+            "approval fan-out: parent conversation not found",
+            child_conversation_id=conversation_id,
+            parent_conversation_id=conv.parent_conversation_id,
+        )
+        return
+    # The target coworker is the one running in the child conv.
+    # Falling back to "specialist" when the row was hard-deleted between
+    # delegation start and the approval outcome — rare, but the chip is
+    # cosmetic and shouldn't crash the notification path.
+    target_cw_state = coworker_lookup(conv.coworker_id)
+    target_name = (
+        target_cw_state.config.name
+        if target_cw_state is not None
+        else "specialist"
+    )
+    parent_cw = coworker_lookup(parent_conv.coworker_id)
+    fanout_text = f"[via {target_name}] {text}"
+    await send_via_coworker(
+        parent_cw, parent_conv.channel_chat_id, fanout_text,
+    )
 
 
 async def _send_via_coworker(cw_state: CoworkerState | None, chat_id: str, text: str) -> None:

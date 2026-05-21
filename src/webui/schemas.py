@@ -80,6 +80,8 @@ class AgentResponse(BaseModel):
     status: str
     agent_role: str
     permissions: dict[str, object] = Field(default_factory=dict)
+    is_frontdesk: bool = False
+    routing_description: str | None = None
     created_at: str
 
 
@@ -119,6 +121,12 @@ class AgentCreate(BaseModel):
     max_concurrent: int = Field(2, ge=1, le=20)
     agent_role: str = Field("agent", pattern=r"^(super_agent|agent)$")
     permissions: dict[str, object] | None = None
+    is_frontdesk: bool = False
+    # Frontdesk v1.2: domain agents author a short capability card the
+    # frontdesk LLM reads when routing. Length-capped to keep the
+    # injected catalog block tractable; long capability docs belong in
+    # the specialist's system prompt instead.
+    routing_description: str | None = Field(None, max_length=500)
 
 
 class AgentUpdate(BaseModel):
@@ -129,6 +137,8 @@ class AgentUpdate(BaseModel):
     status: str | None = Field(None, pattern=r"^(active|paused|disabled)$")
     agent_role: str | None = Field(None, pattern=r"^(super_agent|agent)$")
     permissions: dict[str, object] | None = None
+    is_frontdesk: bool | None = None
+    routing_description: str | None = Field(None, max_length=500)
 
 
 # ---------------------------------------------------------------------------

@@ -17,6 +17,27 @@ export interface ChatMessage {
   // UUID of the rule when present.
   safetyStage?: string;
   safetyRuleId?: string;
+  // Frontdesk v1.2: when the orchestrator fans an approval outcome
+  // out of a delegation child conv up to the parent, it prepends the
+  // assistant text with `[via <target>] ` so the user knows the message
+  // came from a specialist they don't normally see. extractViaPrefix()
+  // splits it out so the renderer can show it as a chip.
+  viaTargetName?: string;
+}
+
+// Match `[via Trading Desk] body...` — captures the target name and the
+// body separately. The name allows letters, digits, spaces, dashes,
+// underscores, dots, and slashes (typical coworker.name characters);
+// closing bracket terminates. Anchored at start of string so it only
+// applies to the leading marker, not anywhere in body text.
+const VIA_PREFIX_RE = /^\[via ([^\]]{1,80})\]\s+/;
+
+export function extractViaPrefix(
+  text: string,
+): { viaTargetName?: string; content: string } {
+  const m = text.match(VIA_PREFIX_RE);
+  if (!m) return { content: text };
+  return { viaTargetName: m[1], content: text.slice(m[0].length) };
 }
 
 @customElement('rm-chat-panel')
@@ -115,7 +136,13 @@ export class ChatPanel extends LitElement {
     const history = await this.client.fetchMessages(chatId);
     this.messages = history
       .filter((m) => m.content.trim())
-      .map((m) => ({ role: m.role, content: m.content }));
+      .map((m) => {
+        if (m.role === 'assistant') {
+          const { viaTargetName, content } = extractViaPrefix(m.content);
+          return { role: m.role, content, viaTargetName };
+        }
+        return { role: m.role, content: m.content };
+      });
   }
 
   private handleMessage(msg: ServerMessage) {
@@ -170,13 +197,29 @@ export class ChatPanel extends LitElement {
         // First text chunk means real output has begun — retire the status bar.
         this.agentStatus = null;
         const last = this.messages[this.messages.length - 1];
-        if (last?.role === 'assistant' && last.streaming) {
+        const via = extractViaPrefix(msg.content);
+        // A `[via X]` marker is the orchestrator delivering an approval
+        // outcome that fired inside a delegation. It's a discrete
+        // (non-streamed) message and should NEVER be appended to a
+        // streaming bubble belonging to a different conversation turn,
+        // even if one happens to be in flight when the fan-out arrives.
+        if (last?.role === 'assistant' && last.streaming && !via.viaTargetName) {
           this.messages = [
             ...this.messages.slice(0, -1),
             { ...last, content: last.content + msg.content },
           ];
         } else {
-          this.messages = [...this.messages, { role: 'assistant', content: msg.content, streaming: true }];
+          this.messages = [
+            ...this.messages,
+            {
+              role: 'assistant',
+              content: via.content,
+              viaTargetName: via.viaTargetName,
+              // Fan-out messages are complete on arrival; only spawn a
+              // streaming bubble for a regular assistant turn.
+              streaming: via.viaTargetName ? false : true,
+            },
+          ];
         }
         break;
       }

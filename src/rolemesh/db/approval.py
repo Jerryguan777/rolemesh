@@ -460,8 +460,20 @@ async def list_approval_requests(
     *,
     status: str | None = None,
     coworker_id: str | None = None,
+    conversation_id: str | None = None,
     limit: int = 100,
 ) -> list[ApprovalRequest]:
+    """List approval requests for a tenant.
+
+    ``conversation_id`` filter implements the frontdesk v1.2
+    parent-walk: matches approval rows attributed either to the given
+    conversation OR to any child (``parent_conversation_id = $cid``)
+    delegation conv. This lets a user viewing their parent
+    conversation see approvals submitted by the delegate while it ran
+    in a child conversation — without the parent-walk, those approvals
+    would be invisible because they're attributed to a child conv the
+    user never sees in their conversation list.
+    """
     clauses = ["tenant_id = $1::uuid"]
     params: list[Any] = [tenant_id]
     if status is not None:
@@ -470,6 +482,14 @@ async def list_approval_requests(
     if coworker_id is not None:
         params.append(coworker_id)
         clauses.append(f"coworker_id = ${len(params)}::uuid")
+    if conversation_id is not None:
+        params.append(conversation_id)
+        idx = len(params)
+        clauses.append(
+            f"(conversation_id = ${idx}::uuid OR conversation_id IN "
+            f"(SELECT id FROM conversations "
+            f"WHERE parent_conversation_id = ${idx}::uuid))"
+        )
     params.append(limit)
     sql = (
         "SELECT * FROM approval_requests WHERE "

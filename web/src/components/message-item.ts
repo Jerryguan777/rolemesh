@@ -59,6 +59,7 @@ export class MessageItem extends LitElement {
 
   private renderAssistant() {
     const hasContent = this.message.content.trim().length > 0;
+    const via = this.message.viaTargetName;
 
     return html`
       <div class="mb-5 anim-enter">
@@ -70,7 +71,10 @@ export class MessageItem extends LitElement {
           </div>
 
           <div class="min-w-0 flex-1 pt-0.5">
-            <div class="text-[11.5px] font-semibold text-brand uppercase tracking-wide mb-1">Assistant</div>
+            <div class="text-[11.5px] font-semibold text-brand uppercase tracking-wide mb-1 flex items-center gap-2">
+              <span>Assistant</span>
+              ${via ? html`<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-surface-2 dark:bg-d-surface-3 text-[10px] font-medium normal-case tracking-normal text-ink-2 dark:text-d-ink-2 border border-border-1 dark:border-d-border-1" title="Delivered from a delegated specialist">via ${via}</span>` : ''}
+            </div>
 
             ${hasContent ? html`
               <div class="md text-[13.5px] text-ink-1 dark:text-d-ink-1">

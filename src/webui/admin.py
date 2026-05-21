@@ -228,8 +228,63 @@ def _coworker_to_response(cw: Coworker) -> AgentResponse:
         status=cw.status,
         agent_role=cw.agent_role,
         permissions=cw.permissions.to_dict() if cw.permissions else {},
+        is_frontdesk=cw.is_frontdesk,
+        routing_description=cw.routing_description,
         created_at=cw.created_at,
     )
+
+
+# Frontdesk v1.2 capacity advisory — see handbook §4 decision #21.
+# A single frontdesk turn may fan out up to ``MAX_PARALLEL_DELEGATIONS_PER_TURN``
+# concurrent delegation child containers in addition to the frontdesk's
+# own container. Required concurrency budget is therefore:
+#   peak_users * (1 + parallel) + buffer
+# Operators provide ``peak_concurrent_user_turns`` (an estimate of how
+# many users will be mid-turn at peak) and we compare against the
+# tenant's ``max_concurrent_containers`` cap. Advisory only — never
+# blocks a save; an under-provisioned tenant still operates correctly,
+# just with queue backpressure instead of parallelism.
+_FRONTDESK_PARALLEL_DELEGATIONS_PER_TURN = 3
+_FRONTDESK_CAPACITY_BUFFER = 2
+
+
+def check_frontdesk_capacity(
+    *, max_concurrent_containers: int, peak_concurrent_user_turns: int,
+) -> str | None:
+    required = (
+        peak_concurrent_user_turns
+        * (1 + _FRONTDESK_PARALLEL_DELEGATIONS_PER_TURN)
+        + _FRONTDESK_CAPACITY_BUFFER
+    )
+    if max_concurrent_containers < required:
+        return (
+            f"Recommended tenant container concurrency >= {required} "
+            f"(peak_concurrent_user_turns={peak_concurrent_user_turns} "
+            f"x (1 frontdesk + "
+            f"{_FRONTDESK_PARALLEL_DELEGATIONS_PER_TURN} parallel "
+            f"delegations) + {_FRONTDESK_CAPACITY_BUFFER} buffer). "
+            f"Currently {max_concurrent_containers}."
+        )
+    return None
+
+
+def _validate_frontdesk_role(
+    *, is_frontdesk: bool | None, agent_role: str | None,
+) -> None:
+    """Reject ``is_frontdesk=True`` unless the coworker is a super_agent.
+
+    Called from create + update. Update passes the EFFECTIVE
+    post-update values (caller resolves None → current); we only fire
+    when ``is_frontdesk`` is being set to True. Clearing the flag
+    (``is_frontdesk=False``) is always allowed.
+    """
+    if is_frontdesk is True and agent_role != "super_agent":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "is_frontdesk=True requires agent_role='super_agent'"
+            ),
+        )
 
 
 def _coworker_to_summary(cw: Coworker) -> AgentSummary:
@@ -450,6 +505,9 @@ async def create_agent(
 ) -> AgentResponse:
     if not is_valid_group_folder(body.folder):
         raise HTTPException(status_code=400, detail=f"Invalid folder name: {body.folder!r}")
+    _validate_frontdesk_role(
+        is_frontdesk=body.is_frontdesk, agent_role=body.agent_role,
+    )
     tools = _parse_tools(body.tools) if body.tools else None
     permissions = _parse_permissions(body.permissions)
     try:
@@ -463,6 +521,8 @@ async def create_agent(
             max_concurrent=body.max_concurrent,
             agent_role=body.agent_role,
             permissions=permissions,
+            is_frontdesk=body.is_frontdesk,
+            routing_description=body.routing_description,
         )
     except asyncpg.UniqueViolationError as exc:
         raise HTTPException(status_code=409, detail="Agent with this folder already exists in tenant") from exc
@@ -495,7 +555,24 @@ async def update_agent(
     body: AgentUpdate,
     user: AdminUser,
 ) -> AgentResponse:
-    await _get_agent_or_404(agent_id, user.tenant_id)
+    existing = await _get_agent_or_404(agent_id, user.tenant_id)
+    # Frontdesk role validation must run against the EFFECTIVE
+    # post-update values. A PATCH that only flips ``is_frontdesk=True``
+    # on a coworker that is already ``agent_role='super_agent'`` should
+    # be accepted; a PATCH that flips ``is_frontdesk=True`` on a domain
+    # agent without simultaneously promoting it to super_agent should
+    # 400. We resolve None → current to compute the effective values.
+    effective_is_frontdesk = (
+        existing.is_frontdesk if body.is_frontdesk is None
+        else body.is_frontdesk
+    )
+    effective_agent_role = (
+        existing.agent_role if body.agent_role is None else body.agent_role
+    )
+    _validate_frontdesk_role(
+        is_frontdesk=effective_is_frontdesk,
+        agent_role=effective_agent_role,
+    )
     tools = _parse_tools(body.tools) if body.tools is not None else None
     permissions = _parse_permissions(body.permissions)
     updated = await db.update_coworker(
@@ -508,6 +585,8 @@ async def update_agent(
         status=body.status,
         agent_role=body.agent_role,
         permissions=permissions,
+        is_frontdesk=body.is_frontdesk,
+        routing_description=body.routing_description,
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -892,9 +971,21 @@ async def list_approvals_ep(
     user: AuthedUser,
     status: str | None = None,
     coworker_id: str | None = None,
+    conversation_id: str | None = None,
 ) -> list[ApprovalRequestResponse]:
+    """List approval requests in this tenant.
+
+    ``conversation_id`` triggers the frontdesk v1.2 parent-walk: rows
+    attributed to the given conv OR to any of its delegation children
+    are returned. So an admin (or, in a future UI, the user) viewing
+    a parent conversation sees approvals the specialist submitted
+    while running in a child conv.
+    """
     rows = await db.list_approval_requests(
-        user.tenant_id, status=status, coworker_id=coworker_id
+        user.tenant_id,
+        status=status,
+        coworker_id=coworker_id,
+        conversation_id=conversation_id,
     )
     return [_request_to_response(r) for r in rows]
 
