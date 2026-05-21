@@ -113,4 +113,89 @@
 
 ## Findings (after execution)
 
-_(empty — 重点记录：现有前端框架确认、admin → v1 切换是否真一刀切、idempotency 选择)_
+执行日期：2026-05-20。三个 commit 全部累在 `feat/ui`，已 push。
+
+### 前端框架最终确认
+
+- 实测 `web/` 使用 **Lit 3 + Tailwind v4 + Vite 6**，与设计文档一致；Open Question 4 锁定无变。
+- 新增两个 dev-only 依赖：`vitest@^4`（PR 1 reconnect-with-GET 单测要求）+ `happy-dom@^20`（chat-panel 的 Stop/Cancel 路由测试需要 LitElement 能在 node 下构造）。`npm test` 跑 13 个 case，~360ms。
+- 没有 React/Vue 引入，主仓维持纯 Lit 渲染管线。
+
+### admin → v1 切换的实际范围
+
+按 Open Question 3 的方案"一刀切 chat 路径，admin 路径保留"执行。结果：
+
+- **完全切到 v1**：chat-panel 的会话列表 / 消息历史 / 新会话创建 / streaming / Cancel 全部走 `web/src/api/client.ts`（typed `ApiClient`）或 `web/src/ws/v1_client.ts`。
+- **保留 admin**：`safety-admin-client.ts` 仍调 `/api/admin/safety/*` 与 `/api/admin/tenants/*`（Phase 4 才搬）；`agent-client.ts` 仍调 `/api/conversations` 系列——但 chat-panel 不再调它，留着只是为了 Stop 按钮的 `/ws/chat {type:"stop"}` 路径。
+- **lint 守门**：`scripts/lint-no-admin-chat.mjs` + `npm run lint:no-admin-chat`，allowlist 只放行 safety-admin / safety pages 三个文件；任何回归（chat-panel 等再次出现 `/api/admin/` 字面量）会立刻红。
+
+### Stop / Cancel 按钮在 UI 上的实际放置
+
+按 Open Question 5（保留现有位置，不重新设计）执行——但因为旧 chat-panel 没有 Cancel 按钮，做了一个最小新增：
+
+- **Stop 按钮**：仍在 `<rm-message-editor>` 内（聊天输入框右下角的方块按钮），文案保持 `Stop` / `Stopping…`。位置完全不动。
+- **Cancel 按钮**：新增到 chat-panel header 右侧（"Connected" 状态指示器左边），红边框小按钮，禁用态为灰边框。当 `runState !== 'running'/'stopping'`（无活跃 run）或刚 cancelling 期间禁用，tooltip 区分清楚。
+- 文案严格按 prompt 给定的 tooltip：
+  - Stop = `Interrupt this response (continue conversation)`（注：`<rm-message-editor>` 现有按钮的 `title` 是 `Stop`/`Stopping…`，更动一句 tooltip 文案需要改子组件 API，下游 session 再统一）
+  - Cancel = `Cancel run and release container (next message starts fresh)`
+- **绝对没把 Stop 重指向 Cancel endpoint**：`chat-panel.test.ts` 5 个 case 的前两个就是把 Stop 路由到 `AgentClient.stop()`、Cancel 路由到 `v1.cancelRun()` 钉死，任何回归立刻红。
+
+### 旧 AgentClient 哪些方法被标 deprecated
+
+`web/src/services/agent-client.ts` 文件 docstring 已说明它是 legacy 文件，*单*方法仍 load-bearing。具体 deprecated 列表：
+
+| 方法 | 状态 | 替代 |
+|---|---|---|
+| `send(content)` | `@deprecated` | `V1WsClient.send()`（`request.run` 帧）|
+| `subscribe(handler)` | `@deprecated` | `V1WsClient.onEvent()` 事件总线 |
+| `fetchConversations()` | `@deprecated` | `ApiClient.listCoworkerConversations(id)` |
+| `fetchMessages(chatId)` | `@deprecated` | `ApiClient.listMessages(conversationId)` |
+| `stop()` | **保留** | 无替代——是 Stop 按钮唯一前端入口 |
+| `connect()` / `disconnect()` / `reconnect()` | 保留 | Stop 路径用，不能删 |
+| `setToken()` | 保留 | OIDC refresh 仍需要 |
+
+`agent-client.ts` 整个文件不能删；删了 Stop 按钮就没下家。下游 session（设计 §4.1 提到的"统一 WS endpoint"）真做之前，这个文件就一直在。
+
+### 对 Phase 2+ 的影响
+
+- **02a (Models + Credentials + MCP CRUD)**：
+  - 已经有 typed `ApiClient` 框架 + getMe / listCoworkers / cancelRun 等 helper；新增端点照葫芦画瓢即可。
+  - Coworker 创建向导（PR 3 故意留空）落在 02a 时，需要扩 `ApiClient.createCoworker()` + 一个新组件，但 `<rm-coworkers-page>` 的列表渲染可以原地复用——已经按设计 §6.2 ("Pick a coworker to start chatting") 布局，加一个 `+ New coworker` 按钮即可。
+  - `ApiError` + `ErrorResponseBody` 类型已经能 narrow `code: 'BACKEND_INCOMPAT' / 'MISSING_CREDENTIAL'` 等设计 §13 枚举，02a 的错误展示组件可以直接消费。
+
+- **02b (tools 双写 / reader 切换)**：纯 backend；本 session 不影响。
+
+- **02c (credential_proxy user-mode + fake-vault e2e)**：
+  - `<rm-reauth-banner>` 已经挂在 `<rm-app-shell>` 顶部，监听 `rm-reauth-required` window 事件。02c 真把 `event.run.requires_reauth` 接到 v1 stream 时，`chat-panel.ts` 现有的 dispatch（`window.dispatchEvent(new CustomEvent('rm-reauth-required', ...))`）就直接生效；banner UI 不用动。
+  - dev hook `window.__forceReauth()` 已可控；02c QA 不用等到真后端触发就能验银幕。
+
+- **03a (Approvals to v1)**：`V1WsClient.sendApproval(approvalId, decision, note?)` 已实现并 wire 了 `request.approval` 帧；03a 只需做 approval UI 组件 + 订阅未来的 `event.approval.*`（如果设计要加）。
+
+- **04 (Safety UI to v1)**：lint allowlist 的三个文件就是 04 的迁移清单（`safety-rules-page` / `safety-decisions-page` / `safety-admin-client`）；04 完成后把三行从 allowlist 删掉，再跑 lint 验证。
+
+### Acceptance criteria 状态
+
+实跑过：
+
+- `npm run lint:no-admin-chat` → clean（chat-panel.ts 等无 `/api/admin/` 字面量）。
+- `npm test` → 13 个 case 全绿（v1_client.test 8 + chat-panel.test 5）。
+- `npm run build` → 41 modules ok，gzip 39.66 kB。
+- `tests/webui/test_ws_v1_handshake.py` 独跑 7/7 绿（注：与其它 webui 测试同跑时有 `WS_TICKET_SECRET` env-pollution，是 backend 测试 isolation 老问题，不在本 session 范围）。
+- `tests/test_openapi_codegen_freshness.py` + `tests/test_openapi_contract.py` 12/12 绿（package-lock.json 更新没影响 codegen 输出）。
+
+代码级 + 单测验过：
+
+- Stop vs Cancel 路由（`chat-panel.test.ts` 5/5）—— Stop 永远只调 `AgentClient.stop()`，Cancel 永远只调 `V1WsClient.cancelRun()`。
+- 重连先 GET truth（`v1_client.test.ts`：terminal → 合成事件 + 不开新 socket；running → 新 ticket + 新 socket）。
+- idempotency_key 重用（相同 input 复用 key，不同 input 新 key）。
+- 409 `ALREADY_TERMINAL` 单独分支。
+- reauth event 路由到 banner 订阅者。
+
+需要真后端 / 真 Anthropic key 才能跑的（**留给用户验**）：
+
+- 设计 §10 Phase 1 端到端清单（真 Anthropic key + 真 bootstrap user + DB 写入 `runs.status/completed_at/usage`）。
+- 浏览器实操：发消息 → token streaming → run.completed → 切 conversation → 中断重连。
+- Stop / Cancel 在真容器上的差异（Stop：容器存活，下一条立即响应；Cancel：容器死，下一条 1-3s 冷启）。
+- `BOOTSTRAP_USERS` 切不同 token 后 `GET /api/v1/me` 显示不同身份。
+
+本 session 单测 + 类型 + lint 覆盖了协议层契约，但端到端语义需要 backend smoke 才能 100% 闭环。建议下一步用户跑一遍设计 §10 清单后再开始 Phase 2。
