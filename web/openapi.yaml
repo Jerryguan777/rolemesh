@@ -24,6 +24,8 @@ tags:
   - name: Backends
   - name: Coworkers
   - name: Conversations
+  - name: Credentials
+  - name: Models
   - name: Runs
 
 paths:
@@ -322,6 +324,138 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+
+  /api/v1/models:
+    get:
+      tags: [Models]
+      operationId: listModels
+      summary: List platform models
+      description: |
+        Public, tenant-agnostic catalog. Optional `provider` /
+        `family` query filters narrow the picker for the coworker
+        wizard. `is_active=false` rows are filtered out by default
+        — admin surfaces are out of scope for v1.1 (design §14).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: provider
+          required: false
+          schema: { $ref: '#/components/schemas/ModelProvider' }
+        - in: query
+          name: family
+          required: false
+          schema: { $ref: '#/components/schemas/ModelFamily' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Model' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/models/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [Models]
+      operationId: getModel
+      summary: Fetch one platform model
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Model' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/tenant/credentials:
+    get:
+      tags: [Credentials]
+      operationId: listTenantCredentials
+      summary: List the tenant's configured credentials (no secrets)
+      description: |
+        Returns only metadata (`provider`, timestamps). The encrypted
+        payload never appears on this surface — design §8.1 envelope
+        encryption. Use `PUT` to set a new value.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CredentialResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/tenant/credentials/{provider}:
+    parameters:
+      - in: path
+        name: provider
+        required: true
+        schema: { $ref: '#/components/schemas/ModelProvider' }
+    put:
+      tags: [Credentials]
+      operationId: putTenantCredential
+      summary: Create or overwrite the credential for one provider
+      description: |
+        Body carries the real API key in `api_key`. The webui process
+        encrypts via `CredentialVault.encrypt_json` before INSERT /
+        UPDATE on `tenant_model_credentials`. A successful write
+        publishes one `web.coworker.restart` event on JetStream per
+        affected coworker so the orchestrator hot-reloads the cached
+        config (design §7 hot-load matrix).
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CredentialUpsert' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CredentialResponse' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+    delete:
+      tags: [Credentials]
+      operationId: deleteTenantCredential
+      summary: Remove a credential
+      description: |
+        Returns `409 RESOURCE_IN_USE` (with `details.coworker_ids`)
+        if at least one coworker still references this provider. The
+        SPA renders the count from `details` so the operator can fix
+        the offenders before retrying.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '204':
+          description: No content
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            Credential is still referenced by at least one coworker.
+            `code="RESOURCE_IN_USE"`, `details.coworker_ids` lists
+            the offenders.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
 
   /api/v1/runs/{id}:
     parameters:
@@ -722,6 +856,53 @@ components:
         details (`reason` for `awaiting_reauth`, `exit_code` for
         container crashes).
       additionalProperties: true
+
+    Model:
+      type: object
+      required: [id, provider, model_id, model_family, display_name, is_active]
+      properties:
+        id: { type: string, format: uuid }
+        provider: { $ref: '#/components/schemas/ModelProvider' }
+        model_id:
+          type: string
+          description: |
+            Provider-side model identifier (e.g. `claude-opus-4-7`).
+        model_family: { $ref: '#/components/schemas/ModelFamily' }
+        display_name: { type: string }
+        is_active: { type: boolean }
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    CredentialResponse:
+      type: object
+      required: [provider, created_at, updated_at]
+      properties:
+        provider: { $ref: '#/components/schemas/ModelProvider' }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    CredentialUpsert:
+      type: object
+      required: [api_key]
+      properties:
+        api_key:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          description: |
+            Plaintext provider API key. Encrypted server-side via
+            envelope encryption before being persisted; never returned
+            on any subsequent GET (design §8.1).
+        extras:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: |
+            Provider-specific extras (e.g. `api_base`, `region`).
+            Schema intentionally open — the credential proxy reads
+            whatever shape the provider needs.
 
     Run:
       type: object

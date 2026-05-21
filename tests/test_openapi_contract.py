@@ -29,8 +29,11 @@ from webui.api_v1 import router
 from webui.schemas_v1 import (
     Backend,
     Conversation,
+    CredentialResponse,
+    CredentialUpsert,
     ErrorResponse,
     Message,
+    Model,
     Run,
 )
 
@@ -64,6 +67,10 @@ def test_phase_1_endpoints_listed_in_design_are_present_in_yaml() -> None:
         "/api/v1/coworkers/{id}/conversations",
         "/api/v1/conversations/{id}",
         "/api/v1/conversations/{id}/messages",
+        "/api/v1/models",
+        "/api/v1/models/{id}",
+        "/api/v1/tenant/credentials",
+        "/api/v1/tenant/credentials/{provider}",
         "/api/v1/runs/{id}",
         "/api/v1/runs/{id}/cancel",
     }
@@ -208,6 +215,65 @@ def test_run_status_enum_matches_lifecycle_terminal_set() -> None:
     expected = set(_TERMINAL_STATUSES) | {"running"}
     assert yaml_enum == expected, (
         f"RunStatus enum drift: yaml={yaml_enum} expected={expected}"
+    )
+
+
+def test_v1_model_required_matches_pydantic_model() -> None:
+    spec = _load_spec()
+    yaml_required = set(_schema(spec, "Model")["required"])  # type: ignore[arg-type]
+    py_required = {
+        name for name, f in Model.model_fields.items() if f.is_required()
+    }
+    assert yaml_required == py_required, (
+        f"Model.required drift: yaml={yaml_required} python={py_required}"
+    )
+
+
+def test_v1_credential_response_required_matches_pydantic_model() -> None:
+    """CredentialResponse may never grow a credential-payload field.
+
+    Beyond the required-set match we also assert the absolute absence
+    of any field name that could possibly carry the plaintext — a
+    structural guard against accidentally re-introducing the leak
+    surface design §8.1 explicitly forbids.
+    """
+    spec = _load_spec()
+    yaml_required = set(_schema(spec, "CredentialResponse")["required"])  # type: ignore[arg-type]
+    py_required = {
+        name
+        for name, f in CredentialResponse.model_fields.items()
+        if f.is_required()
+    }
+    assert yaml_required == py_required, (
+        f"CredentialResponse.required drift: yaml={yaml_required} "
+        f"python={py_required}"
+    )
+    py_fields = set(CredentialResponse.model_fields.keys())
+    for forbidden in ("credential_data", "api_key", "secret", "credential_ref"):
+        assert forbidden not in py_fields, (
+            f"CredentialResponse must NOT declare a {forbidden!r} field "
+            "(design §8.1 — list/get response never exposes plaintext)"
+        )
+    yaml_props = set(
+        _schema(spec, "CredentialResponse")["properties"].keys()  # type: ignore[index]
+    )
+    for forbidden in ("credential_data", "api_key", "secret", "credential_ref"):
+        assert forbidden not in yaml_props, (
+            f"CredentialResponse yaml must NOT declare a {forbidden!r} field"
+        )
+
+
+def test_v1_credential_upsert_required_matches_pydantic_model() -> None:
+    spec = _load_spec()
+    yaml_required = set(_schema(spec, "CredentialUpsert")["required"])  # type: ignore[arg-type]
+    py_required = {
+        name
+        for name, f in CredentialUpsert.model_fields.items()
+        if f.is_required()
+    }
+    assert yaml_required == py_required, (
+        f"CredentialUpsert.required drift: yaml={yaml_required} "
+        f"python={py_required}"
     )
 
 

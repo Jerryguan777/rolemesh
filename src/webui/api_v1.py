@@ -23,6 +23,8 @@ from webui.v1.conversations import (
     coworker_conversations_router,
 )
 from webui.v1.coworkers import router as coworkers_router
+from webui.v1.credentials import router as credentials_router
+from webui.v1.models import router as models_router
 from webui.v1.runs import router as runs_router
 
 router = APIRouter(prefix="/api/v1")
@@ -55,4 +57,6 @@ router.include_router(auth_me_router)
 router.include_router(coworkers_router)
 router.include_router(coworker_conversations_router)
 router.include_router(conversations_router)
+router.include_router(credentials_router)
+router.include_router(models_router)
 router.include_router(runs_router)

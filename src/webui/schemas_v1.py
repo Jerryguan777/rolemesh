@@ -253,6 +253,66 @@ class Message(BaseModel):
     run_id: str | None = None
 
 
+# ---------------------------------------------------------------------------
+# Models / Credentials (v1.1 §2.1, §8.1)
+# ---------------------------------------------------------------------------
+
+
+class Model(BaseModel):
+    """Wire projection of a ``models`` row (platform catalog).
+
+    Read-only — admin write surface is deferred to v2 per design §14.
+    The SPA renders these in the read-only ``#/models`` page and
+    filters by ``provider`` × ``model_family`` when constructing the
+    coworker model picker.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    provider: ModelProvider
+    model_id: str
+    model_family: ModelFamily
+    display_name: str
+    is_active: bool
+    created_at: str | None = None
+
+
+class CredentialResponse(BaseModel):
+    """Tenant credential metadata WITHOUT the secret.
+
+    The plaintext API key never appears on this surface. No
+    ``credential_data`` field is declared — even setting Pydantic's
+    ``model_dump(exclude=...)`` would still leave the path open for
+    a future refactor to start serialising it. The defence here is
+    structural: a curious developer cannot ask the wire type for the
+    field because it does not exist.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: ModelProvider
+    created_at: str
+    updated_at: str
+
+
+class CredentialUpsert(BaseModel):
+    """``PUT /api/v1/tenant/credentials/{provider}`` body.
+
+    Today only ``api_key`` is recognised. Provider-specific extras
+    (``api_base``, ``region``, ...) ride on top via ``extras`` so
+    the schema does not have to grow a field per provider in lockstep
+    with the credential proxy. ``extras`` is intentionally
+    ``additionalProperties: true`` — the credential proxy reads
+    whatever shape the provider needs.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    api_key: str = Field(min_length=1, max_length=4096)
+    extras: dict[str, object] | None = None
+
+
 class Run(BaseModel):
     """Wire projection of a ``runs`` row.
 

@@ -205,6 +205,104 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/models": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List platform models
+         * @description Public, tenant-agnostic catalog. Optional `provider` /
+         *     `family` query filters narrow the picker for the coworker
+         *     wizard. `is_active=false` rows are filtered out by default
+         *     — admin surfaces are out of scope for v1.1 (design §14).
+         */
+        get: operations["listModels"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        /** Fetch one platform model */
+        get: operations["getModel"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tenant/credentials": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the tenant's configured credentials (no secrets)
+         * @description Returns only metadata (`provider`, timestamps). The encrypted
+         *     payload never appears on this surface — design §8.1 envelope
+         *     encryption. Use `PUT` to set a new value.
+         */
+        get: operations["listTenantCredentials"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/tenant/credentials/{provider}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                provider: components["schemas"]["ModelProvider"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Create or overwrite the credential for one provider
+         * @description Body carries the real API key in `api_key`. The webui process
+         *     encrypts via `CredentialVault.encrypt_json` before INSERT /
+         *     UPDATE on `tenant_model_credentials`. A successful write
+         *     publishes one `web.coworker.restart` event on JetStream per
+         *     affected coworker so the orchestrator hot-reloads the cached
+         *     config (design §7 hot-load matrix).
+         */
+        put: operations["putTenantCredential"];
+        post?: never;
+        /**
+         * Remove a credential
+         * @description Returns `409 RESOURCE_IN_USE` (with `details.coworker_ids`)
+         *     if at least one coworker still references this provider. The
+         *     SPA renders the count from `details` so the operator can fix
+         *     the offenders before retrying.
+         */
+        delete: operations["deleteTenantCredential"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/runs/{id}": {
         parameters: {
             query?: never;
@@ -442,6 +540,41 @@ export interface components {
          */
         RunError: {
             [key: string]: unknown;
+        };
+        Model: {
+            /** Format: uuid */
+            id: string;
+            provider: components["schemas"]["ModelProvider"];
+            /** @description Provider-side model identifier (e.g. `claude-opus-4-7`). */
+            model_id: string;
+            model_family: components["schemas"]["ModelFamily"];
+            display_name: string;
+            is_active: boolean;
+            /** Format: date-time */
+            created_at?: string | null;
+        };
+        CredentialResponse: {
+            provider: components["schemas"]["ModelProvider"];
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        CredentialUpsert: {
+            /**
+             * @description Plaintext provider API key. Encrypted server-side via
+             *     envelope encryption before being persisted; never returned
+             *     on any subsequent GET (design §8.1).
+             */
+            api_key: string;
+            /**
+             * @description Provider-specific extras (e.g. `api_base`, `region`).
+             *     Schema intentionally open — the credential proxy reads
+             *     whatever shape the provider needs.
+             */
+            extras?: {
+                [key: string]: unknown;
+            } | null;
         };
         Run: {
             /** Format: uuid */
@@ -868,6 +1001,139 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    listModels: {
+        parameters: {
+            query?: {
+                provider?: components["schemas"]["ModelProvider"];
+                family?: components["schemas"]["ModelFamily"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Model"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    getModel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Model"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listTenantCredentials: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialResponse"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    putTenantCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                provider: components["schemas"]["ModelProvider"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CredentialUpsert"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            422: components["responses"]["Unprocessable"];
+        };
+    };
+    deleteTenantCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                provider: components["schemas"]["ModelProvider"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            /**
+             * @description Credential is still referenced by at least one coworker.
+             *     `code="RESOURCE_IN_USE"`, `details.coworker_ids` lists
+             *     the offenders.
+             */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
         };
     };
     getRun: {
