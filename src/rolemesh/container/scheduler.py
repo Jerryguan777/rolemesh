@@ -242,6 +242,23 @@ class GroupQueue:
         if job_id:
             state.job_id = job_id
 
+    def get_active_container_name(self, group_jid: str) -> str | None:
+        """Return the active container name for ``group_jid`` or ``None``.
+
+        ``None`` is returned when the group has never had a container
+        registered, OR when the container has exited and
+        ``register_process`` left ``container_name`` cleared. Callers
+        like the orchestrator-side ``web.run.cancel.*`` subscriber
+        use this for the "stop the container if it is still alive"
+        side of a cancel — the parallel ``terminate_run_via_user_cancel``
+        UPDATE proceeds regardless of the return value, so a None
+        here is not an error.
+        """
+        state = self._groups.get(group_jid)
+        if state is None:
+            return None
+        return state.container_name
+
     def notify_idle(self, group_jid: str) -> None:
         """Mark container as idle-waiting. Preempt if tasks pending."""
         state = self._get_group(group_jid)

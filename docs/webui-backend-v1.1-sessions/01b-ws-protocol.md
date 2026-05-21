@@ -304,3 +304,51 @@ ghost container 风险关闭。
   本身在 PR1 的 REST endpoint 已有真测试覆盖；WS path 的 RLS
   最终依赖同一个 `get_conversation`，等 02c live smoke 跑实
   e2e 时一并验证。
+
+### chore A: orchestrator-side cancel subscriber
+
+01b 只 publish `web.run.cancel.{run_id}`，没人订阅，导致
+POST `/api/v1/runs/{id}/cancel` 是"假成功"。chore A 补上订阅端：
+
+- **Container 反查路径**：在
+  `src/rolemesh/container/scheduler.py::GroupQueue` 加公开方法
+  `get_active_container_name(group_jid) -> str | None`（~10 行）。
+  `group_jid` 在 web 流里就是 `conversation_id`（验证于
+  `src/rolemesh/main.py:920` 的 `register_process(conv.id, ...)`
+  调用）。Subscriber 通过 `main.py` 闭包把 `_queue.get_active_container_name`
+  注入，私有字段不外漏。
+- **Subscriber 模块**：`src/rolemesh/orchestration/run_cancel_subscriber.py`
+  - subject filter `web.run.cancel.>`，durable `orch-web-run-cancel`
+  - `manual_ack=True`，`ConsumerConfig(ack_wait=30s, max_deliver=3)`
+    —— 容器 stop 可能慢，ack_wait 默认几秒不够；max_deliver=3 防
+    重试风暴
+  - 失败 ack 用 `msg.nak()` 让 NATS 重投，不要 silent drop
+  - Malformed payload（非 JSON / 字段缺失）当场 ack 不重投
+- **顺序：先 stop 容器后 UPDATE runs**。理由：
+  - stop 失败时（docker daemon 错 / 容器已不在）log warn + 继续 UPDATE，
+    不让 SPA 卡在 "cancelling…" 状态
+  - 已 terminal 时 lifecycle helper 的 `WHERE status='running'` 守卫
+    让 UPDATE 自动 no-op
+  - 注意：**已 terminal 的 run 仍然会调 runtime.stop**（防 ghost
+    container；pinned test 钉住）
+- **runtime.stop 失败的实际表现**：subscriber 不抛、不重投、
+  状态机仍推进到 cancelled。这条由
+  `test_runtime_stop_failure_still_advances_state_machine` 钉住。
+- **Cancel vs Stop 按钮**（locked decision A）：
+  - 现有 web Stop 按钮调 `interrupt_current_turn`——只中止本轮生成，
+    容器保留（NATS `agent.{job_id}.interrupt`）
+  - 新 `POST /api/v1/runs/{id}/cancel`（含 WS `request.cancel`）走
+    `runtime.stop`——硬杀容器
+  - 两套不同语义并存。**01c 前端必须**区分两个按钮：
+    旧 Stop 按钮接旧 `/ws/chat` 的 `{type:"stop"}`，新 Cancel 按钮
+    接 `POST /api/v1/runs/{id}/cancel`。**不要**把旧 Stop 按钮直接
+    搬到新 endpoint——会让用户每次 Stop 都重建容器，体验回退。
+- **JetStream stream 复用**：`web-ipc`（subjects `["web.>"]`）已在
+  orchestrator boot 路径幂等注册（`main.py:1603` add → fallback
+  update_stream），chore A 不另起 stream。
+- **对 01c 的影响**：
+  - 客户端 cancel 行为现在能真验收——`POST /cancel` 返 202 后
+    几秒内 `GET /api/v1/runs/{id}` 可看到 `status='cancelled'` +
+    `completed_at` 非 NULL
+  - WS `request.cancel` 同样走通（publish 是同一个 publisher）
+  - 上面的"Cancel vs Stop"区分对 SPA UX 是新约束

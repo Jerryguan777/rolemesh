@@ -1617,6 +1617,28 @@ async def main() -> None:
     )
     egress_responder_subs.append(coworker_restart_sub)
 
+    # chore A — orchestrator-side ``web.run.cancel.*`` subscriber.
+    # WebUI publishes the event from POST /api/v1/runs/{id}/cancel
+    # (and from the WS request.cancel frame). The subscriber stops
+    # the container (if any) and writes ``runs.status='cancelled'``
+    # via the lifecycle helper. Re-uses the existing ``web-ipc``
+    # JetStream stream registered above.
+    from rolemesh.orchestration.run_cancel_subscriber import (
+        subscribe_run_cancel,
+    )
+
+    assert _runtime is not None, (
+        "ContainerRuntime must be initialised before "
+        "subscribe_run_cancel — _runtime is wired in "
+        "_init_container_runtime earlier in startup."
+    )
+    run_cancel_sub = await subscribe_run_cancel(
+        _transport.js,
+        runtime=_runtime,
+        fetch_active_container=_queue.get_active_container_name,
+    )
+    egress_responder_subs.append(run_cancel_sub)
+
     # Launch the egress gateway now that the snapshot responders are
     # registered. Moved here from _ensure_container_system_running()
     # because otherwise the gateway NATS-requests the snapshot before
