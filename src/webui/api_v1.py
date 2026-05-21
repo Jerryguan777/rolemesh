@@ -22,6 +22,7 @@ from webui.v1.conversations import (
     conversations_router,
     coworker_conversations_router,
 )
+from webui.v1.coworker_mcp import router as coworker_mcp_router
 from webui.v1.coworkers import router as coworkers_router
 from webui.v1.credentials import router as credentials_router
 from webui.v1.mcp_servers import router as mcp_servers_router
@@ -56,6 +57,7 @@ async def get_backends(response: Response) -> list[dict[str, object]]:
 router.include_router(auth_router)
 router.include_router(auth_me_router)
 router.include_router(coworkers_router)
+router.include_router(coworker_mcp_router)
 router.include_router(coworker_conversations_router)
 router.include_router(conversations_router)
 router.include_router(credentials_router)

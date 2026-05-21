@@ -381,6 +381,55 @@ class MCPServerUpdate(BaseModel):
     description: str | None = None
 
 
+# ---------------------------------------------------------------------------
+# Coworker <-> MCP server bindings (design §2.1)
+# ---------------------------------------------------------------------------
+
+
+class CoworkerMCPBindingResponse(BaseModel):
+    """One ``coworker_mcp_servers`` row, wire-side.
+
+    Tri-state ``enabled_tools``: ``None`` means all tools enabled
+    (the common case), ``[]`` means all disabled, and a non-empty
+    list is a whitelist. The SPA distinguishes these states; the
+    schema must preserve them.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    coworker_id: str
+    mcp_server_id: str
+    enabled_tools: list[str] | None = None
+
+
+class CoworkerMCPBindingCreate(BaseModel):
+    """``POST /api/v1/coworkers/{id}/mcp-servers`` body.
+
+    ``enabled_tools`` is optional; omitting it means "all tools
+    enabled". A caller that wants the all-disabled state passes
+    an explicit ``[]``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mcp_server_id: str = Field(min_length=1)
+    enabled_tools: list[str] | None = None
+
+
+class CoworkerMCPBindingUpdate(BaseModel):
+    """``PATCH /api/v1/coworkers/{id}/mcp-servers/{mcp_id}`` body.
+
+    The only mutable field is ``enabled_tools``. ``None`` is a real
+    value (= all enabled), so the handler distinguishes
+    "field absent" from "field=None" via
+    :pyattr:`pydantic.BaseModel.model_fields_set`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled_tools: list[str] | None = None
+
+
 class Run(BaseModel):
     """Wire projection of a ``runs`` row.
 

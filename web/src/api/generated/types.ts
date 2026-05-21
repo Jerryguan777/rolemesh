@@ -303,6 +303,61 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/coworkers/{id}/mcp-servers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        /** List a coworker's MCP server bindings */
+        get: operations["listCoworkerMCPBindings"];
+        put?: never;
+        /**
+         * Bind one MCP server to this coworker
+         * @description `enabled_tools` is tri-state — `null` (or omitted) means all
+         *     tools enabled, `[]` means all disabled, a non-empty list is a
+         *     whitelist. Publishes `web.coworker.mcp_changed` on success.
+         */
+        post: operations["bindCoworkerMCPServer"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/coworkers/{id}/mcp-servers/{mcp_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+                mcp_id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Unbind an MCP server from this coworker
+         * @description Idempotent: a 404 is returned when the binding does not exist.
+         *     Publishes `web.coworker.mcp_changed` on success.
+         */
+        delete: operations["unbindCoworkerMCPServer"];
+        options?: never;
+        head?: never;
+        /**
+         * Update enabled_tools on a binding
+         * @description The only mutable field is `enabled_tools`. `null` means all
+         *     enabled, `[]` means all disabled, a non-empty list is a
+         *     whitelist. Publishes `web.coworker.mcp_changed` on success.
+         */
+        patch: operations["updateCoworkerMCPBinding"];
+        trace?: never;
+    };
     "/api/v1/mcp-servers": {
         parameters: {
             query?: never;
@@ -628,6 +683,25 @@ export interface components {
             extras?: {
                 [key: string]: unknown;
             } | null;
+        };
+        CoworkerMCPBindingResponse: {
+            /** Format: uuid */
+            coworker_id: string;
+            /** Format: uuid */
+            mcp_server_id: string;
+            /**
+             * @description Tri-state: `null` (or absent) means all tools enabled,
+             *     `[]` means all disabled, a non-empty list is a whitelist.
+             */
+            enabled_tools?: string[] | null;
+        };
+        CoworkerMCPBindingCreate: {
+            /** Format: uuid */
+            mcp_server_id: string;
+            enabled_tools?: string[] | null;
+        };
+        CoworkerMCPBindingUpdate: {
+            enabled_tools?: string[] | null;
         };
         /** @enum {string} */
         MCPType: "sse" | "http";
@@ -1253,6 +1327,113 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+        };
+    };
+    listCoworkerMCPBindings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CoworkerMCPBindingResponse"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    bindCoworkerMCPServer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CoworkerMCPBindingCreate"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CoworkerMCPBindingResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    unbindCoworkerMCPServer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+                mcp_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateCoworkerMCPBinding: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+                mcp_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CoworkerMCPBindingUpdate"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CoworkerMCPBindingResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
         };
     };
     listMCPServers: {

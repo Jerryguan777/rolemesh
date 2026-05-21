@@ -458,6 +458,104 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
 
+  /api/v1/coworkers/{id}/mcp-servers:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [Coworkers]
+      operationId: listCoworkerMCPBindings
+      summary: List a coworker's MCP server bindings
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CoworkerMCPBindingResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [Coworkers]
+      operationId: bindCoworkerMCPServer
+      summary: Bind one MCP server to this coworker
+      description: |
+        `enabled_tools` is tri-state — `null` (or omitted) means all
+        tools enabled, `[]` means all disabled, a non-empty list is a
+        whitelist. Publishes `web.coworker.mcp_changed` on success.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CoworkerMCPBindingCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CoworkerMCPBindingResponse' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/coworkers/{id}/mcp-servers/{mcp_id}:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+      - in: path
+        name: mcp_id
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      tags: [Coworkers]
+      operationId: updateCoworkerMCPBinding
+      summary: Update enabled_tools on a binding
+      description: |
+        The only mutable field is `enabled_tools`. `null` means all
+        enabled, `[]` means all disabled, a non-empty list is a
+        whitelist. Publishes `web.coworker.mcp_changed` on success.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CoworkerMCPBindingUpdate' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CoworkerMCPBindingResponse' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Coworkers]
+      operationId: unbindCoworkerMCPServer
+      summary: Unbind an MCP server from this coworker
+      description: |
+        Idempotent: a 404 is returned when the binding does not exist.
+        Publishes `web.coworker.mcp_changed` on success.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '204':
+          description: No content
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /api/v1/mcp-servers:
     get:
       tags: [MCPServers]
@@ -1017,6 +1115,38 @@ components:
             Provider-specific extras (e.g. `api_base`, `region`).
             Schema intentionally open — the credential proxy reads
             whatever shape the provider needs.
+
+    CoworkerMCPBindingResponse:
+      type: object
+      required: [coworker_id, mcp_server_id]
+      properties:
+        coworker_id: { type: string, format: uuid }
+        mcp_server_id: { type: string, format: uuid }
+        enabled_tools:
+          type: array
+          nullable: true
+          description: |
+            Tri-state: `null` (or absent) means all tools enabled,
+            `[]` means all disabled, a non-empty list is a whitelist.
+          items: { type: string }
+
+    CoworkerMCPBindingCreate:
+      type: object
+      required: [mcp_server_id]
+      properties:
+        mcp_server_id: { type: string, format: uuid }
+        enabled_tools:
+          type: array
+          nullable: true
+          items: { type: string }
+
+    CoworkerMCPBindingUpdate:
+      type: object
+      properties:
+        enabled_tools:
+          type: array
+          nullable: true
+          items: { type: string }
 
     MCPType:
       type: string

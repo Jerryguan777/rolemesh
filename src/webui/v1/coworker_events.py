@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING
 
 from rolemesh.core.logger import get_logger
 from rolemesh.orchestration.coworker_hot_reload import (
+    WEB_COWORKER_MCP_CHANGED_SUBJECT,
     WEB_COWORKER_RESTART_SUBJECT,
 )
 
@@ -67,6 +68,38 @@ async def publish_coworker_restart(
     except Exception:
         logger.warning(
             "Failed to publish web.coworker.restart; relying on next restart",
+            coworker_id=coworker_id,
+            tenant_id=tenant_id,
+            exc_info=True,
+        )
+
+
+async def publish_coworker_mcp_changed(
+    *, coworker_id: str, tenant_id: str,
+) -> None:
+    """Publish ``web.coworker.mcp_changed`` for ``(coworker_id, tenant_id)``.
+
+    Fires from the relation layer (bind / unbind / patch enabled_tools).
+    Same best-effort posture as :func:`publish_coworker_restart`. The
+    orchestrator-side subscriber lands in 02b alongside the
+    ``coworker.tools`` reader switch; today the next message that
+    wakes the coworker re-reads bindings from DB on its own.
+    """
+    if _js is None:
+        logger.debug(
+            "coworker.mcp_changed publisher unset; skipping broadcast",
+            coworker_id=coworker_id,
+            tenant_id=tenant_id,
+        )
+        return
+    payload = json.dumps({"coworker_id": coworker_id, "tenant_id": tenant_id})
+    try:
+        await _js.publish(
+            WEB_COWORKER_MCP_CHANGED_SUBJECT, payload.encode("utf-8"),
+        )
+    except Exception:
+        logger.warning(
+            "Failed to publish web.coworker.mcp_changed",
             coworker_id=coworker_id,
             tenant_id=tenant_id,
             exc_info=True,

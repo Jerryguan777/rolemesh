@@ -22,12 +22,17 @@ if TYPE_CHECKING:
 
 
 __all__ = [
+    "CoworkerMCPBinding",
     "MCPServerRow",
+    "bind_coworker_mcp_server",
     "create_mcp_server",
     "delete_mcp_server",
     "get_mcp_server",
     "get_mcp_server_references",
+    "list_coworker_mcp_bindings",
     "list_mcp_servers",
+    "set_coworker_mcp_enabled_tools",
+    "unbind_coworker_mcp_server",
     "update_mcp_server",
 ]
 
@@ -216,6 +221,141 @@ async def delete_mcp_server(mcp_id: str, *, tenant_id: str) -> bool:
             mcp_id, tenant_id,
         )
     return status.endswith(" 1")
+
+
+@dataclass(frozen=True, slots=True)
+class CoworkerMCPBinding:
+    """One row from ``coworker_mcp_servers``.
+
+    ``enabled_tools`` is the tri-state column documented on the
+    table: ``None`` means all tools enabled (the common case),
+    ``[]`` means all disabled, and a non-empty list is a whitelist.
+    Routes and tests rely on this distinction surviving the DB
+    roundtrip — do not collapse ``None`` and ``[]`` here.
+    """
+
+    coworker_id: str
+    mcp_server_id: str
+    enabled_tools: list[str] | None
+
+
+async def list_coworker_mcp_bindings(
+    coworker_id: str, *, tenant_id: str,
+) -> list[CoworkerMCPBinding]:
+    """Return every MCP binding for ``coworker_id``.
+
+    The join carries tenant_id explicitly so a malformed
+    ``coworker_id`` cannot reach a foreign tenant's row even if
+    the junction RLS policy were ever weakened.
+    """
+    async with tenant_conn(tenant_id) as conn:
+        rows = await conn.fetch(
+            "SELECT cms.coworker_id, cms.mcp_server_id, cms.enabled_tools "
+            "FROM coworker_mcp_servers cms "
+            "JOIN coworkers c ON c.id = cms.coworker_id "
+            "WHERE cms.coworker_id = $1::uuid "
+            "  AND c.tenant_id = $2::uuid",
+            coworker_id, tenant_id,
+        )
+    out: list[CoworkerMCPBinding] = []
+    for r in rows:
+        et = r["enabled_tools"]
+        # asyncpg returns TEXT[] as list[str] | None — keep the
+        # tri-state semantics intact (do not coerce None to []).
+        if et is not None and not isinstance(et, list):
+            et = list(et)
+        out.append(
+            CoworkerMCPBinding(
+                coworker_id=str(r["coworker_id"]),
+                mcp_server_id=str(r["mcp_server_id"]),
+                enabled_tools=et,
+            )
+        )
+    return out
+
+
+async def bind_coworker_mcp_server(
+    *,
+    coworker_id: str,
+    mcp_server_id: str,
+    enabled_tools: list[str] | None,
+    tenant_id: str,
+) -> CoworkerMCPBinding:
+    """Create the (coworker, mcp_server) row with the given tri-state value.
+
+    Caller is responsible for verifying both parent rows belong to
+    ``tenant_id`` before calling; the junction's RLS policy
+    transitively enforces it via the parent coworker but the
+    route layer wants an explicit 404 path on missing parents.
+    """
+    async with tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO coworker_mcp_servers "
+            "    (coworker_id, mcp_server_id, enabled_tools) "
+            "VALUES ($1::uuid, $2::uuid, $3) "
+            "RETURNING coworker_id, mcp_server_id, enabled_tools",
+            coworker_id, mcp_server_id, enabled_tools,
+        )
+    assert row is not None
+    return CoworkerMCPBinding(
+        coworker_id=str(row["coworker_id"]),
+        mcp_server_id=str(row["mcp_server_id"]),
+        enabled_tools=row["enabled_tools"],
+    )
+
+
+async def unbind_coworker_mcp_server(
+    *,
+    coworker_id: str,
+    mcp_server_id: str,
+    tenant_id: str,
+) -> bool:
+    """Delete one binding. Returns ``True`` iff a row was removed."""
+    async with tenant_conn(tenant_id) as conn:
+        status = await conn.execute(
+            "DELETE FROM coworker_mcp_servers cms "
+            "USING coworkers c "
+            "WHERE cms.coworker_id = $1::uuid "
+            "  AND cms.mcp_server_id = $2::uuid "
+            "  AND c.id = cms.coworker_id "
+            "  AND c.tenant_id = $3::uuid",
+            coworker_id, mcp_server_id, tenant_id,
+        )
+    return status.endswith(" 1")
+
+
+async def set_coworker_mcp_enabled_tools(
+    *,
+    coworker_id: str,
+    mcp_server_id: str,
+    enabled_tools: list[str] | None,
+    tenant_id: str,
+) -> CoworkerMCPBinding | None:
+    """Update the tri-state column on an existing binding.
+
+    Returns ``None`` if the binding does not exist (route layer
+    surfaces as 404). Distinguishes ``[]`` from ``None`` so the
+    "ban all tools" intent reaches the DB intact.
+    """
+    async with tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow(
+            "UPDATE coworker_mcp_servers cms "
+            "SET enabled_tools = $3 "
+            "FROM coworkers c "
+            "WHERE cms.coworker_id = $1::uuid "
+            "  AND cms.mcp_server_id = $2::uuid "
+            "  AND c.id = cms.coworker_id "
+            "  AND c.tenant_id = $4::uuid "
+            "RETURNING cms.coworker_id, cms.mcp_server_id, cms.enabled_tools",
+            coworker_id, mcp_server_id, enabled_tools, tenant_id,
+        )
+    if row is None:
+        return None
+    return CoworkerMCPBinding(
+        coworker_id=str(row["coworker_id"]),
+        mcp_server_id=str(row["mcp_server_id"]),
+        enabled_tools=row["enabled_tools"],
+    )
 
 
 async def get_mcp_server_references(

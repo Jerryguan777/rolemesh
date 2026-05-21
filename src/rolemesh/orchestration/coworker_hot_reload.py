@@ -47,6 +47,11 @@ logger = get_logger()
 
 
 WEB_COWORKER_RESTART_SUBJECT = "web.coworker.restart"
+# Coworker <-> MCP binding mutations. The orchestrator-side
+# subscriber lands in 02b alongside the ``coworker.tools`` reader
+# switch; the subject is defined here so the v1 publisher and the
+# (future) subscriber share one source of truth.
+WEB_COWORKER_MCP_CHANGED_SUBJECT = "web.coworker.mcp_changed"
 _DURABLE = "orch-web-coworker-restart"
 
 
