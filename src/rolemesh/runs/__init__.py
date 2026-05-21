@@ -18,5 +18,25 @@ from rolemesh.runs.lifecycle import (
     get_run,
     update_run_terminal,
 )
+from rolemesh.runs.terminators import (
+    terminate_run_via_approval_reject,
+    terminate_run_via_container_crash,
+    terminate_run_via_reauth_required,
+    terminate_run_via_scheduled_completion,
+    terminate_run_via_user_cancel,
+    terminate_run_via_ws_completed,
+    terminate_run_via_ws_error,
+)
 
-__all__ = ["create_run", "get_run", "update_run_terminal"]
+__all__ = [
+    "create_run",
+    "get_run",
+    "terminate_run_via_approval_reject",
+    "terminate_run_via_container_crash",
+    "terminate_run_via_reauth_required",
+    "terminate_run_via_scheduled_completion",
+    "terminate_run_via_user_cancel",
+    "terminate_run_via_ws_completed",
+    "terminate_run_via_ws_error",
+    "update_run_terminal",
+]
