@@ -7,11 +7,11 @@ registry that ``reverse_proxy.handle_mcp_proxy`` reads.
 Why this exists
 ---------------
 Before this module, ``register_mcp_server`` was called only on the
-orchestrator process (``rolemesh.main`` walking ``coworker.tools`` at
-startup). The gateway is a separate container with its own copy of
-``reverse_proxy._mcp_registry`` — no IPC fed it, so every
-``/mcp-proxy/<name>/<path>`` request returned ``404 MCP server not
-found``.
+orchestrator process (``rolemesh.main`` walking each coworker's
+projected MCP bindings at startup). The gateway is a separate
+container with its own copy of ``reverse_proxy._mcp_registry`` — no
+IPC fed it, so every ``/mcp-proxy/<name>/<path>`` request returned
+``404 MCP server not found``.
 
 This module fills that gap with the same NATS pattern safety rules
 use:

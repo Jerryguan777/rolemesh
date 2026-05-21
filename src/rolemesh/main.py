@@ -91,6 +91,7 @@ from rolemesh.db import (
     get_new_messages_for_conversations,
     get_tenant_by_slug,
     init_database,
+    list_coworker_mcp_configs,
     set_session,
     update_conversation_last_invocation,
     update_tenant_message_cursor,
@@ -206,9 +207,20 @@ def _coworker_from_state(cw_state: CoworkerState) -> Coworker:
         folder=c.folder,
         agent_backend=c.agent_backend,
         system_prompt=c.system_prompt,
-        tools=c.tools,
         max_concurrent=c.max_concurrent,
     )
+
+
+def _mcp_configs_from_state(coworker_id: str) -> list:
+    """Look up MCP configs cached on ``_state`` for the executor.
+
+    The executor uses this as its ``get_mcp_configs`` callable.
+    Returns an empty list when the coworker isn't in state (the
+    executor's ``_get_coworker`` branch already short-circuits in
+    that case, so we never actually feed it to the spec builder).
+    """
+    cw = _state.coworkers.get(coworker_id)
+    return list(cw.mcp_configs) if cw else []
 
 
 _transport: NatsTransport | None = None
@@ -407,7 +419,15 @@ async def _load_state() -> None:
         convs_by_coworker.setdefault(c.coworker_id, []).append(c)
 
     for cw in all_coworkers:
-        cw_state = CoworkerState.from_coworker(cw)
+        # Read the coworker's MCP bindings from the relation layer
+        # (``coworker_mcp_servers`` JOIN ``mcp_servers``). 02b dropped
+        # the inline JSONB column; ``list_coworker_mcp_configs`` is
+        # now the single source of truth for "what does this coworker
+        # have wired up".
+        mcp_configs = await list_coworker_mcp_configs(
+            cw.id, tenant_id=cw.tenant_id,
+        )
+        cw_state = CoworkerState.from_coworker(cw, mcp_configs=mcp_configs)
 
         # Load channel bindings
         for b in bindings_by_coworker.get(cw.id, []):
@@ -425,9 +445,9 @@ async def _load_state() -> None:
 
         _state.coworkers[cw.id] = cw_state
 
-    # Register MCP servers with the credential proxy
-    for cw in all_coworkers:
-        for tool_cfg in cw.tools:
+    # Register MCP servers with the credential proxy.
+    for cw_state in _state.coworkers.values():
+        for tool_cfg in cw_state.mcp_configs:
             parsed = urlparse(tool_cfg.url)
             origin = f"{parsed.scheme}://{parsed.netloc}"
             register_mcp_server(tool_cfg.name, origin, tool_cfg.headers, tool_cfg.auth_mode)
@@ -1374,7 +1394,10 @@ async def main() -> None:
 
     # Build one executor per backend.
     for cfg in (CLAUDE_CODE_BACKEND, PI_BACKEND):
-        _executors[cfg.name] = ContainerAgentExecutor(cfg, _runtime, _transport, _get_coworker)
+        _executors[cfg.name] = ContainerAgentExecutor(
+            cfg, _runtime, _transport, _get_coworker,
+            get_mcp_configs=_mcp_configs_from_state,
+        )
 
     if AGENT_BACKEND_DEFAULT not in _executors:
         logger.warning("Unknown ROLEMESH_AGENT_BACKEND=%r, falling back to 'claude'", AGENT_BACKEND_DEFAULT)
@@ -1598,12 +1621,12 @@ async def main() -> None:
 
     # Mirror MCP registry deltas into THIS process. The webui process
     # is the one that publishes ``egress.mcp.changed`` (admin REST
-    # edits coworker.tools), but our in-process ``_mcp_registry`` is
-    # also the source the snapshot responder serves to the gateway.
-    # Without this subscription, an admin tools edit would land on the
-    # gateway via the broadcast yet leave the orchestrator's view
-    # stale; the next gateway restart would then re-fetch a snapshot
-    # that's missing the edit.
+    # edits a coworker's MCP bindings), but our in-process
+    # ``_mcp_registry`` is also the source the snapshot responder
+    # serves to the gateway. Without this subscription, an admin tools
+    # edit would land on the gateway via the broadcast yet leave the
+    # orchestrator's view stale; the next gateway restart would then
+    # re-fetch a snapshot that's missing the edit.
     mcp_sub = await subscribe_mcp_changes(_transport.nc)
     egress_responder_subs.append(mcp_sub)
 
@@ -1630,6 +1653,7 @@ async def main() -> None:
 
     from rolemesh.db import get_coworker as _db_get_coworker
     from rolemesh.orchestration.coworker_hot_reload import (
+        subscribe_coworker_mcp_changed,
         subscribe_coworker_restart,
     )
 
@@ -1646,10 +1670,29 @@ async def main() -> None:
     async def _fetch_cw(coworker_id: str, tenant_id: str) -> Coworker | None:
         return await _db_get_coworker(coworker_id, tenant_id=tenant_id)
 
+    async def _fetch_mcp_configs(coworker_id: str, tenant_id: str):
+        return await list_coworker_mcp_configs(
+            coworker_id, tenant_id=tenant_id,
+        )
+
     coworker_restart_sub = await subscribe_coworker_restart(
-        _transport.js, state=_state, fetch_coworker=_fetch_cw,
+        _transport.js,
+        state=_state,
+        fetch_coworker=_fetch_cw,
+        fetch_mcp_configs=_fetch_mcp_configs,
     )
     egress_responder_subs.append(coworker_restart_sub)
+
+    # web.coworker.mcp_changed — sibling subscriber that handles the
+    # narrower "junction row touched" event (bind / unbind / patch
+    # enabled_tools). Keeps ``CoworkerState.mcp_configs`` honest
+    # without a full coworker row refetch.
+    coworker_mcp_sub = await subscribe_coworker_mcp_changed(
+        _transport.js,
+        state=_state,
+        fetch_mcp_configs=_fetch_mcp_configs,
+    )
+    egress_responder_subs.append(coworker_mcp_sub)
 
     # chore A — orchestrator-side ``web.run.cancel.*`` subscriber.
     # WebUI publishes the event from POST /api/v1/runs/{id}/cancel

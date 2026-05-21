@@ -4,8 +4,9 @@ The tool reversibility signal threads through five distinct layers:
 
   1. ``McpServerConfig.tool_reversibility`` on the coworker config
      (admin creates via REST / DB seeder)
-  2. PostgreSQL ``coworkers.tools`` JSONB column (serialize on
-     create/update, deserialize on read)
+  2. PostgreSQL ``mcp_servers.tool_reversibility`` JSONB column
+     bound via ``coworker_mcp_servers`` (serialize on create/update,
+     deserialize on read through ``list_coworker_mcp_configs``)
   3. ``container_executor`` copies into ``McpServerSpec.tool_reversibility``
      when building ``AgentInitData``
   4. NATS KV / agent-init transport via ``AgentInitData.serialize``
@@ -39,8 +40,8 @@ from rolemesh.db import (
     create_coworker,
     create_tenant,
     create_user,
-    get_coworker,
-    update_coworker,
+    list_coworker_mcp_configs,
+    replace_coworker_mcp_configs,
 )
 from rolemesh.ipc.protocol import AgentInitData, McpServerSpec
 from rolemesh.safety.registry import (
@@ -111,16 +112,19 @@ class TestPersistenceRoundTrip:
             tenant_id=tenant.id,
             name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
-            tools=[mcp],
+        )
+        await replace_coworker_mcp_configs(
+            cw.id, tenant_id=tenant.id, mcp_configs=[mcp],
         )
 
-        # Layer 2 → 3 → 4: read coworker back, build spec, serialize.
-        fetched = await get_coworker(cw.id, tenant_id=tenant.id)
-        assert fetched is not None
-        assert len(fetched.tools) == 1
-        persisted_mcp = fetched.tools[0]
+        # Layer 2 → 3 → 4: read MCP projection back, build spec, serialize.
+        persisted = await list_coworker_mcp_configs(
+            cw.id, tenant_id=tenant.id,
+        )
+        assert len(persisted) == 1
+        persisted_mcp = persisted[0]
         # Persisted map must match what we inserted (no silent drop
-        # on the JSONB round-trip).
+        # on the JSONB round-trip through mcp_servers).
         assert persisted_mcp.tool_reversibility == {
             "list_pulls": True,
             "create_pr": False,
@@ -187,10 +191,10 @@ class TestPersistenceRoundTrip:
     async def test_update_coworker_preserves_tool_reversibility(
         self,
     ) -> None:
-        """PATCH path: updating a coworker's ``tools`` list must
+        """PATCH path: rewriting a coworker's MCP bindings must
         round-trip the reversibility map too. A regression that
-        forgot to include the key in the UPDATE serialiser would
-        silently drop overrides on any edit.
+        forgot to include the key in the upsert would silently drop
+        overrides on any edit.
         """
         tenant = await create_tenant(
             name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
@@ -199,7 +203,11 @@ class TestPersistenceRoundTrip:
             tenant_id=tenant.id,
             name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
-            tools=[
+        )
+        await replace_coworker_mcp_configs(
+            cw.id,
+            tenant_id=tenant.id,
+            mcp_configs=[
                 McpServerConfig(
                     name="api",
                     type="http",
@@ -209,10 +217,10 @@ class TestPersistenceRoundTrip:
             ],
         )
         # Update with a modified reversibility map.
-        await update_coworker(
+        await replace_coworker_mcp_configs(
             cw.id,
             tenant_id=tenant.id,
-            tools=[
+            mcp_configs=[
                 McpServerConfig(
                     name="api",
                     type="http",
@@ -225,9 +233,10 @@ class TestPersistenceRoundTrip:
                 )
             ],
         )
-        fetched = await get_coworker(cw.id, tenant_id=tenant.id)
-        assert fetched is not None
-        assert fetched.tools[0].tool_reversibility == {
+        persisted = await list_coworker_mcp_configs(
+            cw.id, tenant_id=tenant.id,
+        )
+        assert persisted[0].tool_reversibility == {
             "read": True,
             "write": False,
             "delete": False,
@@ -309,10 +318,10 @@ class TestRestGuardWithPersistedReversibility:
         persisted config → admin POSTs a slow-check rule scoped to
         that coworker at PRE_TOOL_CALL → REST guard refuses with
         400. The guard has to (a) read the coworker from DB, (b)
-        walk the tools JSONB, (c) resolve reversibility via the
-        shared helper. Persisting the reversibility map wrong in
-        step 2→3 of the chain would make this test fail with 201
-        (rule accepted incorrectly).
+        walk the projected MCP bindings, (c) resolve reversibility
+        via the shared helper. Persisting the reversibility map
+        wrong in step 2→3 of the chain would make this test fail
+        with 201 (rule accepted incorrectly).
         """
         tenant = await create_tenant(
             name="T", slug=f"t-{uuid.uuid4().hex[:8]}"
@@ -322,7 +331,11 @@ class TestRestGuardWithPersistedReversibility:
             tenant_id=tenant.id,
             name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
-            tools=[
+        )
+        await replace_coworker_mcp_configs(
+            cw.id,
+            tenant_id=tenant.id,
+            mcp_configs=[
                 McpServerConfig(
                     name="github",
                     type="http",
@@ -363,7 +376,11 @@ class TestRestGuardWithPersistedReversibility:
             tenant_id=tenant.id,
             name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
-            tools=[
+        )
+        await replace_coworker_mcp_configs(
+            cw.id,
+            tenant_id=tenant.id,
+            mcp_configs=[
                 McpServerConfig(
                     name="github",
                     type="http",

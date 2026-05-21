@@ -42,6 +42,7 @@ from rolemesh.db import (
     get_coworker_by_folder,
     get_user,
     init_database,
+    list_coworker_mcp_configs,
 )
 from rolemesh.evaluation.dataset import load_dataset
 from rolemesh.evaluation.freeze import freeze_coworker_config
@@ -91,17 +92,19 @@ async def _resolve_coworker(coworker_arg: str, tenant_id: str) -> Any:
     return await get_coworker_by_folder(tenant_id, coworker_arg)
 
 
-def _user_mode_mcp_servers(coworker: Any) -> list[str]:
-    """Names of MCP servers on this coworker that need a user identity.
+def _user_mode_mcp_servers(mcp_configs: Any) -> list[str]:
+    """Names of MCP servers in ``mcp_configs`` that need a user identity.
 
     ``user`` and ``both`` modes both call out to the credential proxy
     expecting an ``X-RoleMesh-User-Id`` header so an OIDC bearer can
     be looked up; ``service`` mode uses static per-server headers and
-    is safe under ``user_id=""``.
+    is safe under ``user_id=""``. ``None`` is tolerated (some
+    fixtures hand a stub coworker whose binding lookup raised) so the
+    --user pre-flight check never crashes on a malformed input.
     """
     return [
-        t.name for t in (coworker.tools or [])
-        if t.auth_mode in ("user", "both")
+        t.name for t in (mcp_configs or [])
+        if getattr(t, "auth_mode", None) in ("user", "both")
     ]
 
 
@@ -284,6 +287,9 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     # currently hangs forever (Bug 9). Fail-loud upfront beats every
     # sample silently timing out.
     user_id = (args.user or "").strip()
+    coworker_mcp_configs = await list_coworker_mcp_configs(
+        coworker.id, tenant_id=tenant_id,
+    )
     if user_id:
         user = await get_user(user_id, tenant_id=tenant_id)
         if user is None:
@@ -294,7 +300,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
             )
             return 1
     else:
-        offending = _user_mode_mcp_servers(coworker)
+        offending = _user_mode_mcp_servers(coworker_mcp_configs)
         if offending:
             print(
                 f"ERROR: coworker {coworker.folder!r} has user-mode MCP "
@@ -346,9 +352,16 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     # have to re-query the DB on every sample (the executor accepts a
     # callable; we close over the dict-cache here for O(1) lookup).
     coworker_cache: dict[str, Any] = {coworker.id: coworker}
+    # MCP configs live in the relation table now (02b dropped the
+    # inline JSONB column); cache them alongside the coworker so the
+    # executor's ``get_mcp_configs`` callable stays O(1) too.
+    mcp_cache: dict[str, list[Any]] = {coworker.id: list(coworker_mcp_configs)}
 
     def _get_coworker(coworker_id: str) -> Any:
         return coworker_cache.get(coworker_id)
+
+    def _get_mcp_configs(coworker_id: str) -> list[Any]:
+        return mcp_cache.get(coworker_id, [])
 
     log_dir = Path(args.log_dir).resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -369,6 +382,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
             runtime=runtime,
             transport=transport,
             get_coworker=_get_coworker,
+            get_mcp_configs=_get_mcp_configs,
             run_id=run_row.id,
             timeout_s=float(args.timeout_s),
             user_id=user_id,

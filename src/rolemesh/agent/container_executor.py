@@ -109,11 +109,22 @@ class ContainerAgentExecutor:
         runtime: ContainerRuntime,
         transport: NatsTransport,
         get_coworker: Callable[[str], Coworker | None],
+        *,
+        get_mcp_configs: Callable[[str], list[McpServerConfig]] | None = None,
     ) -> None:
         self._config = config
         self._runtime = runtime
         self._transport = transport
         self._get_coworker = get_coworker
+        # 02b: MCP configs no longer live on ``Coworker``. The executor
+        # asks the orchestrator (or eval CLI) for the per-coworker
+        # binding list via this callable. Default returns an empty
+        # list so call sites that build an executor without wiring it
+        # up gracefully degrade to "no MCP servers" rather than
+        # raising AttributeError on the missing field.
+        self._get_mcp_configs: Callable[[str], list[McpServerConfig]] = (
+            get_mcp_configs or (lambda _cid: [])
+        )
 
     @property
     def name(self) -> str:
@@ -241,7 +252,7 @@ class ContainerAgentExecutor:
         logs_dir = coworker_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
 
-        # Build MCP server specs from coworker tools config.
+        # Build MCP server specs from the coworker's projected bindings.
         # proxy_host branches on EC: egress-gateway service name when
         # EC is active, host.docker.internal for the pre-EC rollback
         # path — matches build_container_spec's env routing so a
@@ -253,7 +264,8 @@ class ContainerAgentExecutor:
             else CONTAINER_HOST_GATEWAY
         )
         mcp_specs: list[McpServerSpec] | None = None
-        if coworker.tools:
+        coworker_mcp_configs = self._get_mcp_configs(coworker.id)
+        if coworker_mcp_configs:
             mcp_specs = [
                 rewrite_mcp_url_for_container(
                     tool_cfg,
@@ -261,7 +273,7 @@ class ContainerAgentExecutor:
                     proxy_port=CREDENTIAL_PROXY_PORT,
                     proxy_prefix=MCP_PROXY_PREFIX,
                 )
-                for tool_cfg in coworker.tools
+                for tool_cfg in coworker_mcp_configs
             ]
 
         # Load per-coworker approval policies. Passed to the container

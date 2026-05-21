@@ -6,11 +6,10 @@ with the (coworker, mcp_server) binding plus the ``enabled_tools``
 tri-state.
 
 Every mutating handler publishes one ``web.coworker.mcp_changed``
-event so the orchestrator can refresh the coworker's tool list
+event so the orchestrator can refresh the coworker's MCP projection
 without a full restart (design §7 hot-load matrix). The
-orchestrator-side subscriber lands in 02b alongside the
-``coworker.tools`` reader switch — until then the next message that
-wakes the coworker re-reads from DB.
+orchestrator-side subscriber lives in
+``rolemesh.orchestration.coworker_hot_reload.subscribe_coworker_mcp_changed``.
 """
 
 from __future__ import annotations

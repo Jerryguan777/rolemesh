@@ -121,13 +121,15 @@ def set_mcp_publisher(nc: Any) -> None:
     _mcp_publisher = nc
 
 
-async def _publish_mcp_for_coworker(action: str, cw: Coworker) -> None:
-    """Broadcast one ``egress.mcp.changed`` event per tool on the
-    coworker. Best-effort — a NATS hiccup must not break the admin
-    REST response, so the publisher itself swallows errors.
+async def _publish_mcp_for_coworker(
+    action: str, cw: Coworker, mcp_configs: list[McpServerConfig],
+) -> None:
+    """Broadcast one ``egress.mcp.changed`` event per MCP binding on
+    the coworker. Best-effort — a NATS hiccup must not break the
+    admin REST response, so the publisher itself swallows errors.
 
-    Used after create / update of a coworker's tools list. We send
-    one event per tool (not a single batched event) so the
+    Used after create / update of a coworker's MCP bindings. We send
+    one event per server (not a single batched event) so the
     gateway-side ``apply_change_event`` stays trivial — the same
     handler shape works for boot snapshot + live deltas.
 
@@ -141,10 +143,10 @@ async def _publish_mcp_for_coworker(action: str, cw: Coworker) -> None:
     on every admin edit. The proper fix is to re-key the registry on
     ``(tenant_id, name)`` (operator scope) or ``(coworker_id, name)``
     (per-agent scope) — tracked as a follow-up. Until then, document
-    in the operator playbook that tool names should be unique within
-    a tenant.
+    in the operator playbook that MCP server names should be unique
+    within a tenant.
     """
-    if _mcp_publisher is None:
+    if _mcp_publisher is None or not mcp_configs:
         return
     from urllib.parse import urlparse
 
@@ -152,7 +154,7 @@ async def _publish_mcp_for_coworker(action: str, cw: Coworker) -> None:
     from rolemesh.egress.mcp_cache import McpEntry
     from rolemesh.egress.orch_glue import publish_mcp_registry_changed
 
-    for tool in cw.tools:
+    for tool in mcp_configs:
         # Same origin computation the orchestrator's bootstrap
         # register_mcp_server walk uses (rolemesh/main.py); keep the
         # two paths aligned so the gateway never sees a tool URL the
@@ -209,7 +211,9 @@ def _user_to_response(u: User) -> UserResponse:
     )
 
 
-def _coworker_to_response(cw: Coworker) -> AgentResponse:
+def _coworker_to_response(
+    cw: Coworker, mcp_configs: list[McpServerConfig],
+) -> AgentResponse:
     return AgentResponse(
         id=cw.id,
         tenant_id=cw.tenant_id,
@@ -225,13 +229,27 @@ def _coworker_to_response(cw: Coworker) -> AgentResponse:
                 "headers": t.headers,
                 "auth_mode": t.auth_mode,
             }
-            for t in cw.tools
+            for t in mcp_configs
         ],
         max_concurrent=cw.max_concurrent,
         status=cw.status,
         agent_role=cw.agent_role,
         permissions=cw.permissions.to_dict() if cw.permissions else {},
         created_at=cw.created_at,
+    )
+
+
+async def _load_mcp_configs(
+    coworker_id: str, tenant_id: str,
+) -> list[McpServerConfig]:
+    """Project the relation layer into a ``McpServerConfig`` list.
+
+    Centralised so every admin reader of "what MCP servers does this
+    coworker have" goes through the same JOIN — keeps the response
+    body, the safety-rule guard, and the MCP publisher in lockstep.
+    """
+    return await db.list_coworker_mcp_configs(
+        coworker_id, tenant_id=tenant_id,
     )
 
 
@@ -443,7 +461,11 @@ async def delete_user(
 @router.get("/agents", response_model=list[AgentResponse])
 async def list_agents(user: AdminUser) -> list[AgentResponse]:
     agents = await db.get_coworkers_for_tenant(user.tenant_id)
-    return [_coworker_to_response(a) for a in agents]
+    out: list[AgentResponse] = []
+    for a in agents:
+        mcp_configs = await _load_mcp_configs(a.id, user.tenant_id)
+        out.append(_coworker_to_response(a, mcp_configs))
+    return out
 
 
 @router.post("/agents", response_model=AgentResponse, status_code=201)
@@ -462,19 +484,28 @@ async def create_agent(
             folder=body.folder,
             agent_backend=body.agent_backend,
             system_prompt=body.system_prompt,
-            tools=tools,
             max_concurrent=body.max_concurrent,
             agent_role=body.agent_role,
             permissions=permissions,
         )
     except asyncpg.UniqueViolationError as exc:
         raise HTTPException(status_code=409, detail="Agent with this folder already exists in tenant") from exc
+    # MCP bindings: the legacy admin wire keeps the ``tools`` field
+    # (the v1 ``/api/v1/coworkers/{id}/mcp-servers`` relation API is
+    # the explicit-binding path). We translate the inline list into
+    # one transactional ``replace_coworker_mcp_configs`` call so the
+    # coworker row + its junctions land together.
+    if tools:
+        await db.replace_coworker_mcp_configs(
+            cw.id, tenant_id=user.tenant_id, mcp_configs=tools,
+        )
+    mcp_configs = await _load_mcp_configs(cw.id, user.tenant_id)
     # Notify the egress gateway of the freshly-registered MCP tools
     # so it doesn't have to wait for an orchestrator restart to route
     # them. Best-effort; the snapshot path on gateway boot still
     # recovers full state if the broadcast misses.
-    await _publish_mcp_for_coworker("created", cw)
-    return _coworker_to_response(cw)
+    await _publish_mcp_for_coworker("created", cw, mcp_configs)
+    return _coworker_to_response(cw, mcp_configs)
 
 
 @router.get("/agents/{agent_id}", response_model=AgentDetailResponse)
@@ -485,8 +516,9 @@ async def get_agent_detail(
     cw = await _get_agent_or_404(agent_id, user.tenant_id)
     bindings = await db.get_channel_bindings_for_coworker(agent_id, tenant_id=user.tenant_id)
     conversations = await db.get_conversations_for_coworker(agent_id, tenant_id=user.tenant_id)
+    mcp_configs = await _load_mcp_configs(agent_id, user.tenant_id)
     return AgentDetailResponse(
-        **_coworker_to_response(cw).model_dump(),
+        **_coworker_to_response(cw, mcp_configs).model_dump(),
         bindings=[_binding_to_response(b) for b in bindings],
         conversations=[_conversation_to_response(c) for c in conversations],
     )
@@ -506,7 +538,6 @@ async def update_agent(
         tenant_id=user.tenant_id,
         name=body.name,
         system_prompt=body.system_prompt,
-        tools=tools,
         max_concurrent=body.max_concurrent,
         status=body.status,
         agent_role=body.agent_role,
@@ -514,7 +545,7 @@ async def update_agent(
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="Agent not found")
-    # Hot-reload MCP routes only when tools were actually included
+    # Hot-reload MCP routes only when ``tools`` was actually included
     # in the PATCH (``body.tools is not None``). A PATCH that only
     # touches name/permissions/etc. shouldn't generate spurious
     # mcp.changed traffic.
@@ -525,8 +556,13 @@ async def update_agent(
     # keyed. See ``_publish_mcp_for_coworker`` docstring for the
     # follow-up plan.
     if body.tools is not None:
-        await _publish_mcp_for_coworker("updated", updated)
-    return _coworker_to_response(updated)
+        await db.replace_coworker_mcp_configs(
+            agent_id, tenant_id=user.tenant_id, mcp_configs=tools or [],
+        )
+    mcp_configs = await _load_mcp_configs(agent_id, user.tenant_id)
+    if body.tools is not None:
+        await _publish_mcp_for_coworker("updated", updated, mcp_configs)
+    return _coworker_to_response(updated, mcp_configs)
 
 
 @router.delete("/agents/{agent_id}", status_code=204)
@@ -1110,36 +1146,39 @@ async def _validate_safety_rule_body(
     # check is slow AND the stage is PRE_TOOL_CALL — other combinations
     # have no budget conflict. Scope expansion:
     #   coworker_id is None → tenant-wide rule → union of every
-    #     coworker's tools
-    #   coworker_id is set  → single coworker's tools
+    #     coworker's MCP bindings
+    #   coworker_id is set  → single coworker's MCP bindings
     if (
         getattr(check, "cost_class", "cheap") == "slow"
         and stage_enum == Stage.PRE_TOOL_CALL
     ):
-        coworkers: list[object] = []
+        scope_coworkers: list[Coworker] = []
         if coworker_id is not None:
             cw = await db.get_coworker(coworker_id, tenant_id=tenant_id)
             if cw is not None:
-                coworkers.append(cw)
+                scope_coworkers.append(cw)
         else:
-            coworkers.extend(await db.get_coworkers_for_tenant(tenant_id))
-        for cw_any in coworkers:
-            tools = getattr(cw_any, "tools", None) or []
+            scope_coworkers.extend(
+                await db.get_coworkers_for_tenant(tenant_id)
+            )
+        for cw_any in scope_coworkers:
+            tools = await db.list_coworker_mcp_configs(
+                cw_any.id, tenant_id=tenant_id,
+            )
             for mcp in tools:
-                overrides = getattr(mcp, "tool_reversibility", {}) or {}
+                overrides = dict(mcp.tool_reversibility or {})
                 # Builtins win — operator can't flip a stock tool's
                 # reversibility via MCP override. The helper does that
                 # layering for us; we just scan the declared bare
                 # names per MCP server.
                 for bare_name in overrides:
                     if get_tool_reversibility(bare_name, overrides):
-                        name = getattr(cw_any, "name", "?")
                         raise HTTPException(
                             status_code=400,
                             detail=(
                                 f"Rule with slow check {check_id!r} at "
                                 f"PRE_TOOL_CALL is blocked: coworker "
-                                f"{name!r} configures reversible tool "
+                                f"{cw_any.name!r} configures reversible tool "
                                 f"{bare_name!r} which exceeds the "
                                 "100 ms budget. Narrow the rule scope "
                                 "or use a different stage."

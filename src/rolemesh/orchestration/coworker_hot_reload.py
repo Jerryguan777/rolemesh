@@ -41,18 +41,19 @@ if TYPE_CHECKING:
     from nats.js.client import JetStreamContext
     from nats.js.subscription import Subscription
 
-    from rolemesh.core.types import Coworker
+    from rolemesh.core.types import Coworker, McpServerConfig
 
 logger = get_logger()
 
 
 WEB_COWORKER_RESTART_SUBJECT = "web.coworker.restart"
-# Coworker <-> MCP binding mutations. The orchestrator-side
-# subscriber lands in 02b alongside the ``coworker.tools`` reader
-# switch; the subject is defined here so the v1 publisher and the
-# (future) subscriber share one source of truth.
+# Coworker <-> MCP binding mutations. Published by the v1 relation
+# endpoint (bind / unbind / patch enabled_tools); subscribed here so
+# the in-memory ``CoworkerState.mcp_configs`` projection follows
+# DB writes without waiting for the next process restart.
 WEB_COWORKER_MCP_CHANGED_SUBJECT = "web.coworker.mcp_changed"
 _DURABLE = "orch-web-coworker-restart"
+_MCP_DURABLE = "orch-web-coworker-mcp-changed"
 
 
 async def reload_coworker_into_state(
@@ -61,6 +62,9 @@ async def reload_coworker_into_state(
     tenant_id: str,
     state: OrchestratorState,
     fetch_coworker: Callable[[str, str], Awaitable["Coworker | None"]],
+    fetch_mcp_configs: (
+        Callable[[str, str], Awaitable[list["McpServerConfig"]]] | None
+    ) = None,
 ) -> bool:
     """Re-fetch the coworker row and replace the in-memory config.
 
@@ -73,10 +77,19 @@ async def reload_coworker_into_state(
     channel_bindings — by mutating ``.config`` rather than swapping
     the ``CoworkerState`` instance whole. Swapping would orphan every
     in-flight conversation reference held by ``_message_loop``.
+
+    When ``fetch_mcp_configs`` is provided the cached
+    ``CoworkerState.mcp_configs`` projection is refreshed too; the
+    callable is kept optional so callers that only swap the coworker
+    row (model_id change) don't have to pay a second query.
     """
     cw = await fetch_coworker(coworker_id, tenant_id)
     if cw is None:
         return False
+
+    mcp_configs: list["McpServerConfig"] | None = None
+    if fetch_mcp_configs is not None:
+        mcp_configs = await fetch_mcp_configs(coworker_id, tenant_id)
 
     cached = state.coworkers.get(coworker_id)
     if cached is None:
@@ -84,10 +97,14 @@ async def reload_coworker_into_state(
         # ``CoworkerState`` is the only thing we can do. Conversations
         # / bindings will repopulate on first message via the existing
         # auto-create paths.
-        state.coworkers[coworker_id] = CoworkerState.from_coworker(cw)
+        state.coworkers[coworker_id] = CoworkerState.from_coworker(
+            cw, mcp_configs=mcp_configs,
+        )
         return True
 
     cached.config = cw
+    if mcp_configs is not None:
+        cached.mcp_configs = list(mcp_configs)
     # ``trigger_pattern`` is derived from the coworker's name; if a
     # PATCH changed the name we'd need to recompute. The v1 schema
     # forbids renaming via the same event path today, but rebuilding
@@ -99,11 +116,41 @@ async def reload_coworker_into_state(
     return True
 
 
+async def reload_coworker_mcp_into_state(
+    *,
+    coworker_id: str,
+    tenant_id: str,
+    state: OrchestratorState,
+    fetch_mcp_configs: Callable[
+        [str, str], Awaitable[list["McpServerConfig"]]
+    ],
+) -> bool:
+    """Refresh only ``CoworkerState.mcp_configs`` for ``coworker_id``.
+
+    Sibling of :func:`reload_coworker_into_state` for the narrower
+    ``web.coworker.mcp_changed`` event — the coworker row itself
+    didn't change, just its junction-table bindings. Skips the row
+    fetch entirely. Returns ``False`` if the coworker isn't in state
+    yet (the event would have been preceded by a ``restart`` if it
+    were a brand-new coworker); the caller logs and acks regardless.
+    """
+    cached = state.coworkers.get(coworker_id)
+    if cached is None:
+        return False
+    cached.mcp_configs = list(
+        await fetch_mcp_configs(coworker_id, tenant_id)
+    )
+    return True
+
+
 async def subscribe_coworker_restart(
     js: "JetStreamContext",
     *,
     state: OrchestratorState,
     fetch_coworker: Callable[[str, str], Awaitable["Coworker | None"]],
+    fetch_mcp_configs: (
+        Callable[[str, str], Awaitable[list["McpServerConfig"]]] | None
+    ) = None,
 ) -> "Subscription":
     """Subscribe to ``web.coworker.restart`` on JetStream.
 
@@ -111,6 +158,11 @@ async def subscribe_coworker_restart(
     for unsubscribing during shutdown. Manual ack ensures redelivery
     on transient failure; the callback ack's only after the in-memory
     reload completes (or is conclusively skipped).
+
+    When ``fetch_mcp_configs`` is provided, the restart event also
+    refreshes the cached MCP projection so a PATCH that swaps
+    ``model_id`` plus tweaks the relation table in the same admin
+    flow doesn't leave the cache half-stale.
     """
 
     async def _on_message(msg: "NatsMsg") -> None:
@@ -142,6 +194,7 @@ async def subscribe_coworker_restart(
                 tenant_id=tenant_id,
                 state=state,
                 fetch_coworker=fetch_coworker,
+                fetch_mcp_configs=fetch_mcp_configs,
             )
         except Exception:
             logger.exception(
@@ -169,6 +222,86 @@ async def subscribe_coworker_restart(
     return await js.subscribe(
         WEB_COWORKER_RESTART_SUBJECT,
         durable=_DURABLE,
+        cb=_on_message,
+        manual_ack=True,
+    )
+
+
+async def subscribe_coworker_mcp_changed(
+    js: "JetStreamContext",
+    *,
+    state: OrchestratorState,
+    fetch_mcp_configs: Callable[
+        [str, str], Awaitable[list["McpServerConfig"]]
+    ],
+) -> "Subscription":
+    """Subscribe to ``web.coworker.mcp_changed``.
+
+    Mirrors :func:`subscribe_coworker_restart` but only refreshes the
+    junction projection — the coworker row itself didn't change. A
+    redelivery on transient failure leaves the cache at whatever
+    state the previous handler observed; the next message that wakes
+    the coworker re-reads anyway, so a missed broadcast degrades to
+    "small staleness window" rather than "permanent divergence".
+    """
+
+    async def _on_message(msg: "NatsMsg") -> None:
+        try:
+            payload = json.loads(msg.data.decode("utf-8") or "{}")
+        except json.JSONDecodeError:
+            logger.warning(
+                "web.coworker.mcp_changed payload not JSON; dropping",
+                data=msg.data[:128],
+            )
+            with contextlib.suppress(Exception):
+                await msg.ack()
+            return
+
+        coworker_id = payload.get("coworker_id")
+        tenant_id = payload.get("tenant_id")
+        if not (isinstance(coworker_id, str) and isinstance(tenant_id, str)):
+            logger.warning(
+                "web.coworker.mcp_changed missing ids; dropping",
+                payload=payload,
+            )
+            with contextlib.suppress(Exception):
+                await msg.ack()
+            return
+
+        try:
+            ok = await reload_coworker_mcp_into_state(
+                coworker_id=coworker_id,
+                tenant_id=tenant_id,
+                state=state,
+                fetch_mcp_configs=fetch_mcp_configs,
+            )
+        except Exception:
+            logger.exception(
+                "web.coworker.mcp_changed handler failed; "
+                "leaving for redelivery",
+                coworker_id=coworker_id,
+                tenant_id=tenant_id,
+            )
+            return
+
+        if ok:
+            logger.info(
+                "Coworker MCP projection hot-reloaded",
+                coworker_id=coworker_id,
+                tenant_id=tenant_id,
+            )
+        else:
+            logger.warning(
+                "web.coworker.mcp_changed for unknown coworker; skipping",
+                coworker_id=coworker_id,
+                tenant_id=tenant_id,
+            )
+        with contextlib.suppress(Exception):
+            await msg.ack()
+
+    return await js.subscribe(
+        WEB_COWORKER_MCP_CHANGED_SUBJECT,
+        durable=_MCP_DURABLE,
         cb=_on_message,
         manual_ack=True,
     )

@@ -11,7 +11,13 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from rolemesh.core.types import ChannelBinding, Conversation, Coworker, Tenant
+    from rolemesh.core.types import (
+        ChannelBinding,
+        Conversation,
+        Coworker,
+        McpServerConfig,
+        Tenant,
+    )
 
 
 def build_trigger_pattern(name: str) -> re.Pattern[str]:
@@ -36,19 +42,32 @@ class CoworkerState:
     truth for all coworker fields. Derived/computed values such as the
     @-mention ``trigger_pattern`` live as sibling fields here, not on
     ``config`` — keeping the DB shape and the runtime cache cleanly separated.
+
+    ``mcp_configs`` is the projected list of MCP server bindings (the
+    junction-joined view returned by
+    :func:`rolemesh.db.list_coworker_mcp_configs`). It is kept on the
+    state object so request-path consumers (container_executor,
+    mcp_publisher) read the cache instead of hitting Postgres on every
+    spawn. The orchestrator boot loop populates it once; the
+    ``web.coworker.restart`` / ``web.coworker.mcp_changed`` subscribers
+    re-fetch and overwrite it.
     """
 
     config: Coworker
     trigger_pattern: re.Pattern[str]
     conversations: dict[str, ConversationState] = field(default_factory=dict)
     channel_bindings: dict[str, ChannelBinding] = field(default_factory=dict)
+    mcp_configs: list[McpServerConfig] = field(default_factory=list)
 
     @staticmethod
-    def from_coworker(cw: Coworker) -> CoworkerState:
+    def from_coworker(
+        cw: Coworker, mcp_configs: list[McpServerConfig] | None = None,
+    ) -> CoworkerState:
         """Build a fresh ``CoworkerState`` from a ``Coworker`` DB row."""
         return CoworkerState(
             config=cw,
             trigger_pattern=build_trigger_pattern(cw.name),
+            mcp_configs=list(mcp_configs) if mcp_configs else [],
         )
 
 

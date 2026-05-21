@@ -81,9 +81,11 @@ async def publish_coworker_mcp_changed(
 
     Fires from the relation layer (bind / unbind / patch enabled_tools).
     Same best-effort posture as :func:`publish_coworker_restart`. The
-    orchestrator-side subscriber lands in 02b alongside the
-    ``coworker.tools`` reader switch; today the next message that
-    wakes the coworker re-reads bindings from DB on its own.
+    orchestrator-side subscriber lives in
+    :func:`rolemesh.orchestration.coworker_hot_reload.subscribe_coworker_mcp_changed`
+    and refreshes ``CoworkerState.mcp_configs`` from the relation
+    layer so the next message routed at the coworker sees the new
+    bindings without a process restart.
     """
     if _js is None:
         logger.debug(

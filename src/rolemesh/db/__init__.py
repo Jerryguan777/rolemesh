@@ -14,6 +14,7 @@ from rolemesh.db._pool import *  # noqa: F403
 from rolemesh.db.approval import *  # noqa: F403
 from rolemesh.db.chat import *  # noqa: F403
 from rolemesh.db.coworker import *  # noqa: F403
+from rolemesh.db.coworker_mcp import *  # noqa: F403
 from rolemesh.db.legacy import *  # noqa: F403
 from rolemesh.db.mcp_server import *  # noqa: F403
 from rolemesh.db.model import *  # noqa: F403

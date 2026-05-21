@@ -177,7 +177,6 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             folder TEXT NOT NULL,
             agent_backend TEXT DEFAULT 'claude',
             system_prompt TEXT,
-            tools JSONB DEFAULT '[]',
             container_config JSONB,
             max_concurrent INT DEFAULT 2,
             status TEXT DEFAULT 'active',
@@ -186,7 +185,13 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         )
     """)
 
-    # Migrate from roles table if it exists (Step 5 -> merged schema)
+    # Migrate from roles table if it exists (Step 5 -> merged schema).
+    # v1.1 §2.1 retired the inline ``tools`` JSONB column on coworkers;
+    # MCP configs now live in the ``coworker_mcp_servers`` junction +
+    # ``mcp_servers`` table. The roles migration below no longer
+    # backfills ``tools`` because the destination column no longer
+    # exists — legacy ``roles.tools`` rows are silently dropped (dev DB
+    # only; production schemas never carried this column).
     has_roles = await conn.fetchval("SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='roles')")
     if has_roles:
         has_role_id = await conn.fetchval(
@@ -197,17 +202,15 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             for col, default in [
                 ("agent_backend", "'claude'"),
                 ("system_prompt", "NULL"),
-                ("tools", "'[]'::jsonb"),
             ]:
                 await conn.execute(
                     f"ALTER TABLE coworkers ADD COLUMN IF NOT EXISTS {col} "
-                    f"{'JSONB' if col == 'tools' else 'TEXT'} DEFAULT {default}"
+                    f"TEXT DEFAULT {default}"
                 )
             await conn.execute("""
                 UPDATE coworkers SET
                     agent_backend = r.agent_backend,
-                    system_prompt = r.system_prompt,
-                    tools = r.tools
+                    system_prompt = r.system_prompt
                 FROM roles r WHERE coworkers.role_id = r.id
             """)
             await conn.execute("ALTER TABLE coworkers DROP COLUMN role_id")
@@ -216,6 +219,12 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     # The skill system is moving to dedicated `skills` / `skill_files` tables;
     # the old per-coworker JSONB list was never consumed by the runner.
     await conn.execute("ALTER TABLE coworkers DROP COLUMN IF EXISTS skills")
+    # v1.1 02b greenfield: drop the legacy ``tools`` JSONB column on
+    # any pre-existing dev DB. MCP configs live in the
+    # ``coworker_mcp_servers`` junction + ``mcp_servers`` table now;
+    # callers must seed mcp_servers and bind via the relation layer.
+    # Idempotent — a fresh testcontainer never had the column.
+    await conn.execute("ALTER TABLE coworkers DROP COLUMN IF EXISTS tools")
     # Rename legacy backend value: ``claude-code`` was the original name
     # before the Pi integration (commit c032db0) renamed it to ``claude``.
     # The alias was kept for back-compat; this idempotent UPDATE retires

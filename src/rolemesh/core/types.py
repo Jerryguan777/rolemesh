@@ -67,9 +67,11 @@ class ContainerConfig:
 class McpServerConfig:
     """Per-coworker external MCP server configuration.
 
-    Stored in the coworker's `tools` JSONB field in the database.
-    The `url` is the actual MCP server URL on the host machine.
-    The `headers` are injected by the credential proxy when forwarding requests.
+    Persisted as one row in ``mcp_servers`` (tenant-scoped) plus a
+    ``coworker_mcp_servers`` junction row that binds it to a specific
+    coworker. The ``url`` is the actual MCP server URL on the host
+    machine. The ``headers`` are injected by the credential proxy when
+    forwarding requests.
 
     auth_mode controls how the MCP server is authenticated:
       * "user"    — forward the user's IdP access_token as Authorization
@@ -131,7 +133,13 @@ class User:
 
 @dataclass
 class Coworker:
-    """An AI coworker with own workspace, identity, and agent config."""
+    """An AI coworker with own workspace, identity, and agent config.
+
+    MCP server bindings are not stored here: see ``mcp_servers`` +
+    ``coworker_mcp_servers`` (read via ``list_coworker_mcp_configs``).
+    The orchestrator projects them onto :class:`CoworkerState` at
+    state-load time so downstream consumers don't have to re-query.
+    """
 
     id: str  # UUID
     tenant_id: str
@@ -139,7 +147,6 @@ class Coworker:
     folder: str
     agent_backend: str = "claude"
     system_prompt: str | None = None
-    tools: list[McpServerConfig] = field(default_factory=list)
     container_config: ContainerConfig | None = None
     max_concurrent: int = 2
     status: str = "active"

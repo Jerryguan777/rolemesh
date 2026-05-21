@@ -6,7 +6,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from rolemesh.auth.permissions import AgentPermissions
-from rolemesh.core.types import ContainerConfig, Coworker, McpServerConfig, User
+from rolemesh.core.types import ContainerConfig, Coworker, User
 from rolemesh.db._pool import admin_conn, tenant_conn
 from rolemesh.db.user import _record_to_user
 
@@ -62,7 +62,6 @@ async def create_coworker(
     folder: str,
     agent_backend: str = "claude",
     system_prompt: str | None = None,
-    tools: list[McpServerConfig] | None = None,
     container_config: ContainerConfig | None = None,
     max_concurrent: int = 2,
     agent_role: str = "agent",
@@ -70,7 +69,13 @@ async def create_coworker(
     model_id: str | None = None,
     created_by_user_id: str | None = None,
 ) -> Coworker:
-    """Create a new coworker.
+    """Create a new coworker row.
+
+    MCP servers are no longer stored inline on the coworker (v1.1 §2.1
+    moved them to the ``mcp_servers`` table + ``coworker_mcp_servers``
+    junction). Callers that need to seed bindings at create time should
+    follow up with :func:`rolemesh.db.replace_coworker_mcp_configs`
+    (admin convenience) or the v1 relation layer.
 
     ``model_id`` and ``created_by_user_id`` are v1.1 additions (design
     §2.2). Both are NULLABLE on the DB so the existing admin call
@@ -92,10 +97,10 @@ async def create_coworker(
         row = await conn.fetchrow(
             """
             INSERT INTO coworkers (tenant_id, name, folder, agent_backend, system_prompt,
-                tools, container_config, max_concurrent, agent_role, permissions,
+                container_config, max_concurrent, agent_role, permissions,
                 model_id, created_by_user_id)
-            VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10::jsonb,
-                $11::uuid, $12::uuid)
+            VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7, $8, $9::jsonb,
+                $10::uuid, $11::uuid)
             RETURNING *
             """,
             tenant_id,
@@ -103,21 +108,6 @@ async def create_coworker(
             folder,
             agent_backend,
             system_prompt,
-            json.dumps(
-                [
-                    {
-                        "name": t.name,
-                        "type": t.type,
-                        "url": t.url,
-                        "headers": t.headers,
-                        "auth_mode": t.auth_mode,
-                        "tool_reversibility": dict(t.tool_reversibility),
-                    }
-                    for t in tools
-                ]
-                if tools
-                else []
-            ),
             cc_json,
             max_concurrent,
             agent_role,
@@ -130,33 +120,6 @@ async def create_coworker(
 
 
 def _record_to_coworker(row: asyncpg.Record) -> Coworker:
-    tools_raw = row.get("tools")
-    if isinstance(tools_raw, str):
-        tools_raw = json.loads(tools_raw) if tools_raw else []
-    elif not isinstance(tools_raw, list):
-        tools_raw = []
-    tools: list[McpServerConfig] = []
-    for item in tools_raw:
-        if isinstance(item, dict) and "name" in item:
-            raw_headers = item.get("headers")
-            auth_mode = item.get("auth_mode") or "user"
-            if auth_mode not in ("user", "service", "both"):
-                auth_mode = "user"
-            raw_rev = item.get("tool_reversibility")
-            tools.append(
-                McpServerConfig(
-                    name=item["name"],
-                    type=item.get("type", "sse"),
-                    url=item.get("url", ""),
-                    headers=raw_headers if isinstance(raw_headers, dict) else {},
-                    auth_mode=auth_mode,
-                    tool_reversibility=(
-                        dict(raw_rev) if isinstance(raw_rev, dict) else {}
-                    ),
-                )
-            )
-        # Skip legacy string entries silently
-
     # Parse agent_role and permissions (new auth fields)
     agent_role = row.get("agent_role") or "agent"
     perms_raw = row.get("permissions")
@@ -177,7 +140,6 @@ def _record_to_coworker(row: asyncpg.Record) -> Coworker:
         folder=row["folder"],
         agent_backend=row.get("agent_backend") or "claude",
         system_prompt=row.get("system_prompt"),
-        tools=tools,
         container_config=_parse_container_config(row["container_config"]),
         max_concurrent=row["max_concurrent"],
         status=row["status"] or "active",
@@ -244,7 +206,6 @@ async def update_coworker(
     tenant_id: str,
     name: str | None = None,
     system_prompt: str | None = None,
-    tools: list[McpServerConfig] | None = None,
     max_concurrent: int | None = None,
     status: str | None = None,
     agent_role: str | None = None,
@@ -252,6 +213,11 @@ async def update_coworker(
     model_id: str | None | Any = _MODEL_ID_UNSET,
 ) -> Coworker | None:
     """Update selected fields on a coworker, scoped to ``tenant_id``.
+
+    MCP server bindings have their own write path
+    (:func:`rolemesh.db.replace_coworker_mcp_configs` /
+    :func:`rolemesh.db.bind_coworker_mcp_server`); they are no longer
+    accepted here.
 
     ``model_id`` uses a sentinel rather than ``None`` for "unchanged"
     because ``None`` is a legitimate clearing value — the v1 API
@@ -270,24 +236,6 @@ async def update_coworker(
     if system_prompt is not None:
         fields.append(f"system_prompt = ${param_idx}")
         values.append(system_prompt)
-        param_idx += 1
-    if tools is not None:
-        fields.append(f"tools = ${param_idx}::jsonb")
-        values.append(
-            json.dumps(
-                [
-                    {
-                        "name": t.name,
-                        "type": t.type,
-                        "url": t.url,
-                        "headers": t.headers,
-                        "auth_mode": t.auth_mode,
-                        "tool_reversibility": dict(t.tool_reversibility),
-                    }
-                    for t in tools
-                ]
-            )
-        )
         param_idx += 1
     if max_concurrent is not None:
         fields.append(f"max_concurrent = ${param_idx}")

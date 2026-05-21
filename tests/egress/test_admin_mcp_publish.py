@@ -40,15 +40,16 @@ class _FakeNats:
         self.published.append(_Captured(subject, data))
 
 
-def _coworker_with_tools(tools: list[McpServerConfig]) -> Coworker:
-    return Coworker(
+def _coworker_with_tools(
+    tools: list[McpServerConfig],
+) -> tuple[Coworker, list[McpServerConfig]]:
+    cw = Coworker(
         id="cw-id",
         tenant_id="tenant-id",
         name="bot",
         folder="bot-folder",
         agent_backend="claude",
         system_prompt=None,
-        tools=tools,
         container_config=None,
         max_concurrent=2,
         status="active",
@@ -56,6 +57,7 @@ def _coworker_with_tools(tools: list[McpServerConfig]) -> Coworker:
         agent_role="agent",
         permissions=None,
     )
+    return cw, tools
 
 
 @pytest.fixture(autouse=True)
@@ -74,14 +76,14 @@ async def test_publish_is_noop_without_publisher() -> None:
     # return without raising / without trying to call into a missing
     # NATS handle. Lets dev/test stand the WebUI up without NATS for
     # admin smoke tests.
-    cw = _coworker_with_tools(
+    cw, mcp_configs = _coworker_with_tools(
         [
             McpServerConfig(
                 name="github", type="http", url="https://api.github.com"
             )
         ]
     )
-    await admin_mod._publish_mcp_for_coworker("created", cw)
+    await admin_mod._publish_mcp_for_coworker("created", cw, mcp_configs)
     # No exception. Nothing else to assert — no nats handle to inspect.
 
 
@@ -95,7 +97,7 @@ async def test_publish_emits_one_event_per_tool() -> None:
     nc = _FakeNats()
     admin_mod.set_mcp_publisher(nc)
 
-    cw = _coworker_with_tools(
+    cw, mcp_configs = _coworker_with_tools(
         [
             McpServerConfig(
                 name="github",
@@ -112,7 +114,7 @@ async def test_publish_emits_one_event_per_tool() -> None:
             ),
         ]
     )
-    await admin_mod._publish_mcp_for_coworker("updated", cw)
+    await admin_mod._publish_mcp_for_coworker("updated", cw, mcp_configs)
 
     assert len(nc.published) == 2
     subjects = {p.subject for p in nc.published}
@@ -128,7 +130,7 @@ async def test_publish_strips_path_to_origin() -> None:
     nc = _FakeNats()
     admin_mod.set_mcp_publisher(nc)
 
-    cw = _coworker_with_tools(
+    cw, mcp_configs = _coworker_with_tools(
         [
             McpServerConfig(
                 name="x",
@@ -137,7 +139,7 @@ async def test_publish_strips_path_to_origin() -> None:
             )
         ]
     )
-    await admin_mod._publish_mcp_for_coworker("updated", cw)
+    await admin_mod._publish_mcp_for_coworker("updated", cw, mcp_configs)
 
     payload = json.loads(nc.published[0].body)
     assert payload["url"] == "https://api.example.com"
@@ -150,11 +152,11 @@ async def test_publish_action_propagates() -> None:
     nc = _FakeNats()
     admin_mod.set_mcp_publisher(nc)
 
-    cw = _coworker_with_tools(
+    cw, mcp_configs = _coworker_with_tools(
         [McpServerConfig(name="x", type="http", url="https://x.example")]
     )
-    await admin_mod._publish_mcp_for_coworker("created", cw)
-    await admin_mod._publish_mcp_for_coworker("updated", cw)
+    await admin_mod._publish_mcp_for_coworker("created", cw, mcp_configs)
+    await admin_mod._publish_mcp_for_coworker("updated", cw, mcp_configs)
 
     actions = [json.loads(p.body)["action"] for p in nc.published]
     assert actions == ["created", "updated"]
@@ -165,7 +167,7 @@ async def test_publish_serialises_headers_and_auth_mode() -> None:
     nc = _FakeNats()
     admin_mod.set_mcp_publisher(nc)
 
-    cw = _coworker_with_tools(
+    cw, mcp_configs = _coworker_with_tools(
         [
             McpServerConfig(
                 name="x",
@@ -176,7 +178,7 @@ async def test_publish_serialises_headers_and_auth_mode() -> None:
             )
         ]
     )
-    await admin_mod._publish_mcp_for_coworker("created", cw)
+    await admin_mod._publish_mcp_for_coworker("created", cw, mcp_configs)
 
     payload = json.loads(nc.published[0].body)
     assert payload["headers"] == {"X-A": "1", "X-B": "2"}
@@ -187,8 +189,8 @@ async def test_publish_serialises_headers_and_auth_mode() -> None:
 async def test_publish_with_zero_tools_emits_nothing() -> None:
     nc = _FakeNats()
     admin_mod.set_mcp_publisher(nc)
-    cw = _coworker_with_tools([])
-    await admin_mod._publish_mcp_for_coworker("updated", cw)
+    cw, mcp_configs = _coworker_with_tools([])
+    await admin_mod._publish_mcp_for_coworker("updated", cw, mcp_configs)
     assert nc.published == []
 
 
@@ -201,11 +203,11 @@ async def test_publish_swallows_nats_errors() -> None:
             raise RuntimeError("nats down")
 
     admin_mod.set_mcp_publisher(_Boom())
-    cw = _coworker_with_tools(
+    cw, mcp_configs = _coworker_with_tools(
         [McpServerConfig(name="x", type="http", url="https://x.example")]
     )
     # Must not raise.
-    await admin_mod._publish_mcp_for_coworker("updated", cw)
+    await admin_mod._publish_mcp_for_coworker("updated", cw, mcp_configs)
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +223,7 @@ class TestLoopbackRewriteAtPublishBoundary:
         nc = _FakeNats()
         admin_mod.set_mcp_publisher(nc)
 
-        cw = _coworker_with_tools(
+        cw, mcp_configs = _coworker_with_tools(
             [
                 McpServerConfig(
                     name="tropos-mcp",
@@ -230,7 +232,7 @@ class TestLoopbackRewriteAtPublishBoundary:
                 )
             ]
         )
-        await admin_mod._publish_mcp_for_coworker("updated", cw)
+        await admin_mod._publish_mcp_for_coworker("updated", cw, mcp_configs)
 
         payload = json.loads(nc.published[0].body)
         # The exact regression that caused Bug 5: gateway-bound event
@@ -242,7 +244,7 @@ class TestLoopbackRewriteAtPublishBoundary:
         nc = _FakeNats()
         admin_mod.set_mcp_publisher(nc)
 
-        cw = _coworker_with_tools(
+        cw, mcp_configs = _coworker_with_tools(
             [
                 McpServerConfig(
                     name="local-mcp",
@@ -251,7 +253,7 @@ class TestLoopbackRewriteAtPublishBoundary:
                 )
             ]
         )
-        await admin_mod._publish_mcp_for_coworker("updated", cw)
+        await admin_mod._publish_mcp_for_coworker("updated", cw, mcp_configs)
         payload = json.loads(nc.published[0].body)
         assert payload["url"] == "http://host.docker.internal:9100"
 
@@ -262,7 +264,7 @@ class TestLoopbackRewriteAtPublishBoundary:
         nc = _FakeNats()
         admin_mod.set_mcp_publisher(nc)
 
-        cw = _coworker_with_tools(
+        cw, mcp_configs = _coworker_with_tools(
             [
                 McpServerConfig(
                     name="github",
@@ -271,6 +273,6 @@ class TestLoopbackRewriteAtPublishBoundary:
                 )
             ]
         )
-        await admin_mod._publish_mcp_for_coworker("updated", cw)
+        await admin_mod._publish_mcp_for_coworker("updated", cw, mcp_configs)
         payload = json.loads(nc.published[0].body)
         assert payload["url"] == "https://api.github.com"

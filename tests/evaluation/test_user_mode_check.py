@@ -11,19 +11,8 @@ silently timing out.
 
 from __future__ import annotations
 
-from typing import Any
-
 from rolemesh.core.types import McpServerConfig
 from rolemesh.evaluation.cli import _user_mode_mcp_servers
-
-
-class _FakeCoworker:
-    """Just enough surface for ``_user_mode_mcp_servers`` — avoids
-    standing up a full Coworker dataclass with all its required fields.
-    """
-
-    def __init__(self, tools: list[McpServerConfig]) -> None:
-        self.tools = tools
 
 
 def _mcp(name: str, auth_mode: str) -> McpServerConfig:
@@ -34,13 +23,13 @@ def _mcp(name: str, auth_mode: str) -> McpServerConfig:
 
 def test_lists_user_mode_servers() -> None:
     """``user`` and ``both`` both flag — ``service`` is safe."""
-    cw = _FakeCoworker(tools=[
+    configs = [
         _mcp("svc-a", "service"),
         _mcp("usr-a", "user"),
         _mcp("usr-b", "user"),
         _mcp("both-a", "both"),
-    ])
-    offending = _user_mode_mcp_servers(cw)
+    ]
+    offending = _user_mode_mcp_servers(configs)
     assert sorted(offending) == ["both-a", "usr-a", "usr-b"]
 
 
@@ -48,24 +37,21 @@ def test_no_user_mode_servers_returns_empty() -> None:
     """Coworker with only service-mode MCP — eval must run without
     --user. Mutation guard against returning all servers regardless
     of mode."""
-    cw = _FakeCoworker(tools=[
+    configs = [
         _mcp("svc-a", "service"),
         _mcp("svc-b", "service"),
-    ])
-    assert _user_mode_mcp_servers(cw) == []
+    ]
+    assert _user_mode_mcp_servers(configs) == []
 
 
 def test_no_tools_returns_empty() -> None:
-    """A coworker with no MCP tools at all — empty list, no fail."""
-    cw = _FakeCoworker(tools=[])
-    assert _user_mode_mcp_servers(cw) == []
+    """A coworker with no MCP bindings at all — empty list, no fail."""
+    assert _user_mode_mcp_servers([]) == []
 
 
-def test_tools_none_returns_empty() -> None:
-    """``coworker.tools`` may be ``None`` on some load paths
-    (defensive). Off-by-one guard: ``None or []`` mustn't crash."""
-
-    class _NoToolsCoworker:
-        tools: Any = None
-
-    assert _user_mode_mcp_servers(_NoToolsCoworker()) == []
+def test_none_argument_returns_empty() -> None:
+    """``None`` is tolerated for fixtures that hand a stub coworker
+    whose binding lookup raised. The pre-flight check must never
+    crash on a malformed input — that would replace a clear error
+    with a confusing traceback."""
+    assert _user_mode_mcp_servers(None) == []

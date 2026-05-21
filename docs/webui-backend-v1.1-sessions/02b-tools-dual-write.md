@@ -132,6 +132,74 @@
 - [ ] admin endpoint wire 字段名决策（保留 `tools` vs 改 `mcp_configs`）
 - [ ] 03+ session prompt 现在变成只剩 `skills.coworker_id` drop——是否合并进 03b？（推荐合并：03b 做 skills per-tenant 迁移本来就要碰这块）
 
-## Findings (after execution)
+## Findings (after execution, 2026-05-21)
 
-_(empty — 重点记录：reader 实际数量、有没有遗漏、admin endpoint wire 字段名最终选择、对 03+ session 的影响（如果 03+ 现在变成只剩 skills.coworker_id drop，是否建议合并进 03b）)_
+**Reader baseline (entry grep)** —— 17 hits, 9 of them real readers / writers (the rest were comments or pi `.tools` context). Real sites switched:
+
+- `src/rolemesh/main.py:430` —— orchestrator startup MCP register loop. Now iterates `cw_state.mcp_configs` (loaded from the relation projection at state-load time).
+- `src/rolemesh/agent/container_executor.py:256,264` —— spec builder. New `get_mcp_configs(coworker_id)` callable on the executor constructor; orchestrator + eval CLI both feed it.
+- `src/rolemesh/evaluation/cli.py:103` —— `_user_mode_mcp_servers` re-signatured to take a `Sequence[McpServerConfig]`. Caller fetches via `list_coworker_mcp_configs` and reuses the cache for the executor.
+- `src/rolemesh/evaluation/freeze.py:83` —— `_coworker_to_dict` now takes `mcp_configs` and projects them into the eval-run snapshot.
+- `src/webui/admin.py:155,228,465,509,1127` —— `_publish_mcp_for_coworker(action, cw, mcp_configs)`, `_coworker_to_response(cw, mcp_configs)`, `list_agents` / `get_agent_detail` / `create_agent` / `update_agent` all read via the new helper; safety-rule reversibility guard also re-fetches.
+- `src/rolemesh/db/coworker.py` —— `create_coworker` / `update_coworker` no longer accept `tools=`; `_record_to_coworker` no longer parses a `tools` column.
+
+**Helper signatures** (new in `src/rolemesh/db/coworker_mcp.py`):
+
+```python
+async def list_coworker_mcp_configs(
+    coworker_id: str, *, tenant_id: str,
+) -> list[McpServerConfig]
+```
+
+JOINs `coworker_mcp_servers` to `mcp_servers`, ordered by server `name`. Three-state `enabled_tools` is **not** applied at this layer (returns every bound server; per-tool filtering belongs to the SDK's tool-allowlist).
+
+```python
+async def replace_coworker_mcp_configs(
+    coworker_id: str, *, tenant_id: str,
+    mcp_configs: Sequence[McpServerConfig],
+) -> None
+```
+
+Transactional convenience for the legacy admin POST/PATCH wire and test fixtures: DELETE existing junctions, upsert `mcp_servers` rows by `(tenant_id, name)`, INSERT junctions with `enabled_tools=NULL`. The v1 relation API (`POST /api/v1/coworkers/{id}/mcp-servers`) still requires explicit `mcp_server_id`; no auto-upsert there.
+
+**Callers of `list_coworker_mcp_configs`**:
+
+- `src/rolemesh/main.py` —— orchestrator state load + hot-reload subscriber.
+- `src/rolemesh/orchestration/coworker_hot_reload.py` —— `reload_coworker_into_state` (when caller passes `fetch_mcp_configs`) and new `reload_coworker_mcp_into_state`.
+- `src/rolemesh/evaluation/freeze.py` —— eval snapshot.
+- `src/rolemesh/evaluation/cli.py` —— pre-flight `--user` check + executor cache.
+- `src/webui/admin.py` —— `_load_mcp_configs` wrapper used by every reader.
+
+**Schema migration** —— `src/rolemesh/db/schema.py`:
+
+1. Removed the inline `tools JSONB DEFAULT '[]'` column from the `coworkers` CREATE TABLE.
+2. Removed `tools` from the legacy roles-migration backfill loop.
+3. Added idempotent `ALTER TABLE coworkers DROP COLUMN IF EXISTS tools` after the existing skill-drop guard so pre-greenfield dev DBs converge on a fresh testcontainer's schema without a manual migration.
+
+No back-compat shim: the dataclass field is gone, the column is gone, the create/update API no longer accepts the parameter.
+
+**Open question decisions** (session-internal):
+
+- Admin endpoint wire field = retained literal `tools`. The v1.1 design's admin frontend doesn't currently send it (02a built Models / Credentials / MCP pages instead), so the wire surface is only exercised by historical tests; keeping the name avoids a follow-up if the admin UI grows a tool-editing surface.
+- `enabled_tools` default on writes = `NULL` (three-state "all enabled") in `replace_coworker_mcp_configs`. Matches 02a's locked semantics.
+
+**Hot-reload subscriber** —— added `subscribe_coworker_mcp_changed` (durable `orch-web-coworker-mcp-changed`) alongside the existing `subscribe_coworker_restart`. The v1 relation endpoint already publishes `web.coworker.mcp_changed`; until this commit the orchestrator's `CoworkerState.mcp_configs` projection only refreshed on the next process restart.
+
+**Test surgery**:
+
+- `tests/db/test_pg.py`, `tests/safety/test_rest_validation.py`, `tests/safety/e2e/test_reversibility_roundtrip.py` —— swapped `create_coworker(tools=...)` for `create_coworker(...)` + `replace_coworker_mcp_configs(...)`; read-side asserts go through `list_coworker_mcp_configs`.
+- `tests/core/test_types.py:89` —— removed the `cw.tools == []` default assertion.
+- `tests/evaluation/test_user_mode_check.py` —— retargeted at the new `_user_mode_mcp_servers(mcp_configs)` signature; dropped the `_FakeCoworker` mock.
+- `tests/egress/test_admin_mcp_publish.py` —— `_coworker_with_tools` returns `(Coworker, list[McpServerConfig])`; every `_publish_mcp_for_coworker` call now passes both.
+
+**Grep verification** —— end-of-session run of the baseline grep is empty modulo:
+
+- `src/rolemesh/main.py:424` (comment that documents the historic `coworkers.tools` column).
+- `src/rolemesh/db/schema.py:193` (comment in the legacy roles-migration block about `roles.tools` rows being silently dropped).
+
+Both are documentation references in the migration code itself.
+
+**Impact on 02c / 03b**:
+
+- 02c (user-mode credential injection) is independent — the relation projection layer already carries `auth_mode` per server, which is what the credential proxy keys on.
+- 03b inherits a cleaner starting point: `Coworker` no longer carries any inline collection that 03b's per-tenant `skills` move would have to keep in lockstep. The `skills.coworker_id` drop stays the only schema change remaining for 03b.

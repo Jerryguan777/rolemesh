@@ -5,25 +5,33 @@ even after the live Coworker is edited or deleted. The hash over a
 canonical JSON serialization (``coworker_config_sha256``) lets the
 ``rolemesh-eval list`` command cluster runs that share a configuration.
 
-Skills are read via ``rolemesh.db.list_skills_for_coworker`` so
-the freeze stays in lockstep with the production projection: same
-``enabled_only`` filter, same name-ordered scan, same per-file content
-fetch. ``frontmatter_common`` and ``frontmatter_backend`` are kept
-separate (rather than pre-merged into the active backend's view) so
-one snapshot describes a Coworker switched between backends.
+MCP bindings are read via ``list_coworker_mcp_configs`` (the
+``coworker_mcp_servers`` JOIN ``mcp_servers`` projection) so the
+freeze stays in lockstep with the orchestrator's runtime view. Skills
+go through ``rolemesh.db.list_skills_for_coworker`` for the same
+parity reason — same ``enabled_only`` filter, same name-ordered scan,
+same per-file content fetch. ``frontmatter_common`` and
+``frontmatter_backend`` are kept separate (rather than pre-merged into
+the active backend's view) so one snapshot describes a Coworker
+switched between backends.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from rolemesh.db import get_coworker, list_skills_for_coworker
+from rolemesh.db import (
+    get_coworker,
+    list_coworker_mcp_configs,
+    list_skills_for_coworker,
+)
 
 if TYPE_CHECKING:
-    from rolemesh.core.types import Coworker, Skill
+    from rolemesh.core.types import Coworker, McpServerConfig, Skill
 
 
 @dataclass(frozen=True)
@@ -48,16 +56,18 @@ def _hash_config(config: dict[str, Any]) -> str:
     return hashlib.sha256(_canonical_dumps(config).encode("utf-8")).hexdigest()
 
 
-def _coworker_to_dict(c: Coworker) -> dict[str, Any]:
+def _coworker_to_dict(
+    c: Coworker, mcp_configs: Sequence[McpServerConfig],
+) -> dict[str, Any]:
     """Behavior-affecting fields only — name/folder/created_at omitted.
 
-    ``tools`` are MCP server configs that drive what tools the agent can
-    invoke; ``permissions`` and ``agent_role`` gate which tools the
-    container actually permits. ``container_config`` carries timeout
-    and resource limits that change runtime semantics. Anything purely
-    cosmetic (id, name, status, created_at) is left out so two
-    differently-named coworkers with identical behavior produce the same
-    hash.
+    ``tools`` come from the relation-table projection (not the dropped
+    JSONB column); ``permissions`` and ``agent_role`` gate which tools
+    the container actually permits. ``container_config`` carries
+    timeout and resource limits that change runtime semantics. Anything
+    purely cosmetic (id, name, status, created_at) is left out so two
+    differently-named coworkers with identical behavior produce the
+    same hash.
     """
     perms = c.permissions
     perms_dict = perms.to_dict() if perms is not None else {}
@@ -74,13 +84,13 @@ def _coworker_to_dict(c: Coworker) -> dict[str, Any]:
                 # headers + auth_mode + tool_reversibility all change
                 # how the container talks to MCP, so they participate
                 # in the hash. Secrets are NOT in headers (those go via
-                # the credential proxy); leaking the header dict here
-                # is the same surface as ``coworkers.tools`` in DB.
+                # the credential proxy); the per-MCP-server config that
+                # this snapshot mirrors lives in ``mcp_servers``.
                 "headers": dict(t.headers),
                 "auth_mode": t.auth_mode,
                 "tool_reversibility": dict(t.tool_reversibility),
             }
-            for t in c.tools
+            for t in mcp_configs
         ],
         "container_config": (
             {
@@ -128,7 +138,10 @@ async def freeze_coworker_config(
     if coworker is None:
         msg = f"coworker {coworker_id!r} not found in tenant {tenant_id!r}"
         raise LookupError(msg)
-    config = _coworker_to_dict(coworker)
+    mcp_configs = await list_coworker_mcp_configs(
+        coworker_id, tenant_id=tenant_id,
+    )
+    config = _coworker_to_dict(coworker, mcp_configs)
     skills = await list_skills_for_coworker(
         coworker_id, tenant_id=tenant_id, enabled_only=True, with_files=True,
     )

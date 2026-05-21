@@ -285,11 +285,12 @@ async def fetch_all_mcp_servers() -> list[McpEntry]:
     """Production MCP fetcher: snapshot the orchestrator's in-process
     ``_mcp_registry``.
 
-    The orchestrator already populates this dict in ``main`` by walking
-    ``coworker.tools`` at startup. We read the dict directly rather than
-    re-walking the DB because the dict is the authoritative
-    "what has the orchestrator registered" view that future hot-reload
-    publishers will keep in lockstep.
+    The orchestrator already populates this dict in ``main`` by
+    walking each ``CoworkerState.mcp_configs`` projection at startup
+    (the ``coworker_mcp_servers`` JOIN ``mcp_servers`` view). We read
+    the dict directly rather than re-walking the DB because the dict
+    is the authoritative "what has the orchestrator registered" view
+    that the live hot-reload publishers keep in lockstep.
 
     Bug 5 (2026-04-26): rewrite ``localhost`` / ``127.0.0.1`` in each
     URL to ``host.docker.internal`` BEFORE serialising. The
