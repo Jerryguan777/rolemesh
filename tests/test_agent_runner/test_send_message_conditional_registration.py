@@ -162,13 +162,13 @@ def test_claude_scheduled_task_container_includes_send_message(
     )
 
 
-def test_claude_other_tools_unaffected_by_gate(
+def test_claude_other_tools_unaffected_by_send_message_gate(
     claude_recording_sdk: None,
 ) -> None:
-    """The gate only affects send_message. schedule_task, list_tasks,
-    etc. must be present in both interactive and scheduled-task
-    containers — they have their own purposes."""
-    expected_always_present = {
+    """The send_message gate must not bleed into task-management gating.
+    When ``register_task_management=True``, the six task tools must be
+    present regardless of whether send_message is registered."""
+    expected_task_tools = {
         "schedule_task",
         "list_tasks",
         "pause_task",
@@ -177,13 +177,72 @@ def test_claude_other_tools_unaffected_by_gate(
         "update_task",
     }
     interactive = _tool_names_claude(
-        claude_adapter.create_rolemesh_mcp_server(_ctx(), register_send_message=False)
+        claude_adapter.create_rolemesh_mcp_server(
+            _ctx(),
+            register_send_message=False,
+            register_task_management=True,
+        )
     )
     scheduled = _tool_names_claude(
-        claude_adapter.create_rolemesh_mcp_server(_ctx(), register_send_message=True)
+        claude_adapter.create_rolemesh_mcp_server(
+            _ctx(),
+            register_send_message=True,
+            register_task_management=True,
+        )
     )
-    assert expected_always_present <= set(interactive)
-    assert expected_always_present <= set(scheduled)
+    assert expected_task_tools <= set(interactive)
+    assert expected_task_tools <= set(scheduled)
+
+
+def test_claude_default_omits_gated_tools(
+    claude_recording_sdk: None,
+) -> None:
+    """Specialists with no perms (every flag default False) must see
+    NONE of the gated tools. Pins the v1.5 sub-chip contract: a
+    specialist's chip must never surface ``delegate_to_agent`` events
+    because the tool is never offered to it."""
+    server = claude_adapter.create_rolemesh_mcp_server(_ctx())
+    names = set(_tool_names_claude(server))
+    assert "delegate_to_agent" not in names
+    assert "list_agents" not in names
+    assert "send_message" not in names
+    for t in ("schedule_task", "list_tasks", "pause_task",
+              "resume_task", "cancel_task", "update_task"):
+        assert t not in names, f"{t} leaked into a no-perm specialist"
+
+
+def test_claude_register_delegation_adds_pair(
+    claude_recording_sdk: None,
+) -> None:
+    """Frontdesks (agent_delegate=True) must see delegate_to_agent AND
+    list_agents — list_agents alone is useless and the reverse cripples
+    catalog refresh."""
+    server = claude_adapter.create_rolemesh_mcp_server(
+        _ctx(), register_delegation=True,
+    )
+    names = set(_tool_names_claude(server))
+    assert "delegate_to_agent" in names
+    assert "list_agents" in names
+    # No leak into other categories
+    assert "schedule_task" not in names
+    assert "send_message" not in names
+
+
+def test_claude_register_task_management_adds_six(
+    claude_recording_sdk: None,
+) -> None:
+    """All six task lifecycle tools move together — partial
+    registration would let an LLM schedule but not cancel."""
+    server = claude_adapter.create_rolemesh_mcp_server(
+        _ctx(), register_task_management=True,
+    )
+    names = set(_tool_names_claude(server))
+    for required in ("schedule_task", "list_tasks", "pause_task",
+                      "resume_task", "cancel_task", "update_task"):
+        assert required in names, f"missing {required}"
+    # No leak into other categories
+    assert "delegate_to_agent" not in names
+    assert "send_message" not in names
 
 
 def test_claude_default_is_no_send_message(

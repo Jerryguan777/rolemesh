@@ -19,17 +19,39 @@ def create_rolemesh_mcp_server(
     ctx: ToolContext,
     *,
     register_send_message: bool = False,
+    register_delegation: bool = False,
+    register_task_management: bool = False,
 ) -> Any:
     """Create an in-process MCP server with all RoleMesh tools for Claude SDK.
 
-    ``register_send_message``: only register the ``send_message`` tool
-    when True. Per the nanoclaw-derived design intent, send_message is
-    a scheduled-task notification output — it should be unavailable to
-    interactive turns. Conditional registration removes it from
-    Claude's tool choice set entirely on interactive containers, so
-    Claude cannot misuse it to deliver replies (which would cause the
-    reply to be dropped by the orchestrator's _handle_agent_message_ipc).
-    Pass True only when ``init.is_scheduled_task`` is True.
+    Tools are filtered at registration so Claude never sees options it
+    cannot legitimately exercise — saving context, preventing wasted
+    tool-use turns, and keeping the v1.5 sub-chip display honest.
+    Runtime permission checks in ``rolemesh_tools`` remain as
+    defence-in-depth.
+
+    Flag → permission mapping (read by callers from ``init.permissions``):
+
+      - ``register_send_message``: ``init.is_scheduled_task``. Per the
+        nanoclaw-derived design intent, send_message is a
+        scheduled-task notification output — it should be unavailable
+        to interactive turns. Conditional registration removes it from
+        Claude's tool choice set entirely on interactive containers,
+        so Claude cannot misuse it to deliver replies (which would
+        cause the reply to be dropped by the orchestrator's
+        _handle_agent_message_ipc). Pass True only when
+        ``init.is_scheduled_task`` is True.
+      - ``register_delegation``: ``agent_delegate``. Gates
+        ``delegate_to_agent`` and ``list_agents`` — both are
+        frontdesk-only routing tools. The orchestrator-side handler in
+        ``rolemesh.orchestration.delegation`` enforces the same gate as
+        a second layer.
+      - ``register_task_management``: ``task_schedule OR
+        task_manage_others``. Gates the six task lifecycle tools
+        (schedule / list / pause / resume / cancel / update). Either
+        permission alone is enough — ``task_schedule`` covers managing
+        the agent's own tasks, ``task_manage_others`` covers managing
+        someone else's.
     """
 
     @tool(
@@ -131,17 +153,23 @@ def create_rolemesh_mcp_server(
     async def delegate_to_agent(args: dict[str, Any]) -> dict[str, Any]:
         return await rt.delegate_to_agent(args, ctx)
 
-    tool_list: list[Any] = [
-        schedule_task,
-        list_tasks,
-        pause_task,
-        resume_task,
-        cancel_task,
-        update_task,
-        list_agents,
-        delegate_to_agent,
-    ]
+    # Build the tool list by category so the gating is auditable at a
+    # glance. The pi adapter iterates ``TOOL_DEFINITIONS`` and applies
+    # the same three flags + ``send_message`` rule there; both adapters
+    # must stay in sync.
+    tool_list: list[Any] = []
     if register_send_message:
-        tool_list.insert(0, send_message)
+        tool_list.append(send_message)
+    if register_task_management:
+        tool_list.extend([
+            schedule_task,
+            list_tasks,
+            pause_task,
+            resume_task,
+            cancel_task,
+            update_task,
+        ])
+    if register_delegation:
+        tool_list.extend([list_agents, delegate_to_agent])
 
     return create_sdk_mcp_server("rolemesh", tools=tool_list)

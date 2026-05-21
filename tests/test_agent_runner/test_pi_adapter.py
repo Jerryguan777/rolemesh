@@ -88,44 +88,119 @@ class TestRoleMeshAgentTool:
 
 
 class TestCreateRoleMeshTools:
-    def test_creates_all_tools_when_send_message_enabled(self) -> None:
-        # With register_send_message=True the adapter must produce exactly
-        # one AgentTool per TOOL_DEFINITIONS entry. The "seven tools"
-        # count was extended when submit_proposal landed, so we assert
-        # against the live definitions rather than a hardcoded number.
+    def test_creates_all_tools_when_all_flags_enabled(self) -> None:
+        # With every flag True the adapter must produce exactly one
+        # AgentTool per TOOL_DEFINITIONS entry. We assert against the
+        # live definitions rather than a hardcoded number so new tools
+        # added to ``TOOL_DEFINITIONS`` are detected by this test.
         ctx = _make_ctx()
-        tools = create_rolemesh_tools(ctx, register_send_message=True)
+        tools = create_rolemesh_tools(
+            ctx,
+            register_send_message=True,
+            register_delegation=True,
+            register_task_management=True,
+        )
         assert len(tools) == len(TOOL_DEFINITIONS)
 
-    def test_default_omits_send_message(self) -> None:
-        # Commit 2e63ca7 made send_message conditional: by default
-        # (interactive containers) the tool is NOT exposed, because
-        # Claude/Pi was misusing it as the reply channel and dropping
-        # real assistant text. Pin that contract here so a future
-        # refactor doesn't accidentally flip the default back to "always
-        # register".
+    def test_default_omits_gated_tools(self) -> None:
+        # With every flag False (a typical specialist agent without
+        # delegate / task / scheduled-task permissions), the adapter
+        # must drop all four categories: send_message, the delegation
+        # pair (delegate_to_agent / list_agents), and the six task
+        # lifecycle tools. Only ungated tools (currently:
+        # ``submit_proposal``) remain. Pinning this protects the v1.5
+        # sub-chip display contract — a specialist must not surface
+        # ``delegate_to_agent`` events on the parent UI.
         ctx = _make_ctx()
         tools = create_rolemesh_tools(ctx)
         tool_names = {t.name for t in tools}
         assert "send_message" not in tool_names
-        assert len(tools) == len(TOOL_DEFINITIONS) - 1
+        assert "delegate_to_agent" not in tool_names
+        assert "list_agents" not in tool_names
+        assert "schedule_task" not in tool_names
+        assert "list_tasks" not in tool_names
+        assert "pause_task" not in tool_names
+        assert "resume_task" not in tool_names
+        assert "cancel_task" not in tool_names
+        assert "update_task" not in tool_names
+        # 1 ungated tool currently: submit_proposal. If a new ungated
+        # tool lands, this assertion fails and forces a deliberate
+        # decision about gating.
+        assert tool_names == {"submit_proposal"}
+
+    def test_register_delegation_only_adds_delegation_pair(self) -> None:
+        # Frontdesks (agent_delegate=True, task perms also True) must
+        # see both delegate_to_agent AND list_agents; a config that
+        # turned on agent_delegate without registering list_agents
+        # would leave the LLM unable to refresh a stale catalog.
+        ctx = _make_ctx()
+        tools = create_rolemesh_tools(ctx, register_delegation=True)
+        tool_names = {t.name for t in tools}
+        assert "delegate_to_agent" in tool_names
+        assert "list_agents" in tool_names
+        # Should NOT add task tools or send_message
+        assert "schedule_task" not in tool_names
+        assert "send_message" not in tool_names
+
+    def test_register_task_management_adds_six_task_tools(self) -> None:
+        # The six task lifecycle tools must move together — partial
+        # registration would let an LLM call schedule_task but not
+        # cancel it, stranding scheduled work.
+        ctx = _make_ctx()
+        tools = create_rolemesh_tools(ctx, register_task_management=True)
+        tool_names = {t.name for t in tools}
+        for required in ("schedule_task", "list_tasks", "pause_task",
+                          "resume_task", "cancel_task", "update_task"):
+            assert required in tool_names, f"missing {required}"
+        # Should NOT add delegation tools or send_message
+        assert "delegate_to_agent" not in tool_names
+        assert "send_message" not in tool_names
+
+    def test_flags_are_independent(self) -> None:
+        # No flag should leak across categories. Enabling only
+        # task_management must not enable delegation, and vice versa.
+        ctx = _make_ctx()
+        delegation_only = {
+            t.name for t in create_rolemesh_tools(ctx, register_delegation=True)
+        }
+        task_only = {
+            t.name for t in create_rolemesh_tools(ctx, register_task_management=True)
+        }
+        # Their intersection is only the ungated tools
+        ungated = {"submit_proposal"}
+        assert delegation_only & task_only == ungated
 
     def test_tool_names_match_definitions(self) -> None:
         ctx = _make_ctx()
-        tools = create_rolemesh_tools(ctx, register_send_message=True)
+        tools = create_rolemesh_tools(
+            ctx,
+            register_send_message=True,
+            register_delegation=True,
+            register_task_management=True,
+        )
         tool_names = {t.name for t in tools}
         expected = {d["name"] for d in TOOL_DEFINITIONS}
         assert tool_names == expected
 
     def test_tools_have_descriptions(self) -> None:
         ctx = _make_ctx()
-        tools = create_rolemesh_tools(ctx)
+        tools = create_rolemesh_tools(
+            ctx,
+            register_send_message=True,
+            register_delegation=True,
+            register_task_management=True,
+        )
         for tool in tools:
             assert tool.description, f"Tool '{tool.name}' has no description"
 
     def test_tools_have_json_schema_parameters(self) -> None:
         ctx = _make_ctx()
-        tools = create_rolemesh_tools(ctx)
+        tools = create_rolemesh_tools(
+            ctx,
+            register_send_message=True,
+            register_delegation=True,
+            register_task_management=True,
+        )
         for tool in tools:
             assert tool.parameters.get("type") == "object", (
                 f"Tool '{tool.name}' parameters should be a JSON Schema object"
@@ -137,7 +212,11 @@ class TestScheduleTaskViaPiAdapter:
     the full path from AgentTool.execute → rolemesh_tools.schedule_task → result."""
 
     async def test_permission_denied_propagated_as_error(self) -> None:
-        """Agent without task_schedule permission gets isError response."""
+        """Defence-in-depth: even when the tool is registered
+        (e.g. a misconfig forces ``register_task_management=True``
+        without ``task_schedule``), the tool function itself still
+        rejects the call with a permission error. Registration-time
+        filtering is the first line of defence; this is the second."""
         from agent_runner.tools.context import ToolContext
 
         ctx = ToolContext(
@@ -151,7 +230,9 @@ class TestScheduleTaskViaPiAdapter:
             coworker_id="cw",
             conversation_id="cv",
         )
-        tools = create_rolemesh_tools(ctx)
+        # Force registration to bypass the first defence layer; we're
+        # exercising the runtime check.
+        tools = create_rolemesh_tools(ctx, register_task_management=True)
         schedule_tool = next(t for t in tools if t.name == "schedule_task")
 
         result = await schedule_tool.execute(

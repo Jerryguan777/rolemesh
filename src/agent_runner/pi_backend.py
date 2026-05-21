@@ -510,11 +510,17 @@ class PiBackend:
         await resource_loader.reload()
 
         # Build custom tools (RoleMesh IPC tools + external MCP tools).
-        # send_message is restricted to scheduled-task containers — see
-        # claude_adapter.create_rolemesh_mcp_server for rationale.
+        # Tools are filtered by permission so Pi never sees options
+        # it cannot legitimately exercise. See
+        # create_rolemesh_tools docstring for the flag→permission map.
+        perms = init.permissions
         custom_tools = create_rolemesh_tools(
             tool_ctx,
             register_send_message=init.is_scheduled_task,
+            register_delegation=bool(perms.get("agent_delegate")),
+            register_task_management=bool(
+                perms.get("task_schedule") or perms.get("task_manage_others")
+            ),
         )
 
         if mcp_servers:

@@ -16,10 +16,6 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from rolemesh.db import (
-    insert_safety_decision,
-)
-
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -64,9 +60,17 @@ class AuditSink(Protocol):
 
 
 class DbAuditSink:
-    """Persists AuditEvent to the ``safety_decisions`` table."""
+    """Persists AuditEvent to the ``safety_decisions`` table.
+
+    ``rolemesh.db`` is an orchestrator-only dependency (not shipped in
+    the agent container image). The import lives inside ``write`` so
+    importing this module from an agent container never triggers it —
+    agents only call the helpers ``compute_context_digest`` /
+    ``summarize_context`` below, never ``DbAuditSink.write``.
+    """
 
     async def write(self, event: AuditEvent) -> None:
+        from rolemesh.db import insert_safety_decision
 
         await insert_safety_decision(
             tenant_id=event.tenant_id,
