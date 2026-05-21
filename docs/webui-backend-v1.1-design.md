@@ -746,41 +746,24 @@ read 路径：BYTEA 密文  ─Fernet.decrypt(master_key)→  plain JSON
 
 **关键点**：application code **完全不区分 dev/prod**——都是从 `os.environ["CREDENTIAL_VAULT_KEY"]` 读。基础设施层负责注入。
 
-#### 8.1.1 Rotation 策略（multi-key window）
+#### 8.1.1 Rotation —— 推迟，不在 v1.1 范围
 
-Master key 必须能旋转——泄漏响应 / 合规要求 / 周期 hygiene 都需要。
+Master key rotation（如合规要求年度 rotate / 怀疑泄漏 / 离职处理）当前**不实现**。理由：
 
-**双 key 窗口**用 `cryptography.MultiFernet`：
+- LLM API key 是长期 static 凭证（Anthropic / OpenAI / Google 等用户在 console 手动管理）——**与 OIDC token 自动 refresh 不同**，不需要应用层的周期 rotation
+- 项目当前 dev 阶段，无生产部署 / 无合规要求 / 无已知泄漏——0 当前需求
+- Single Fernet → MultiFernet 是**非破坏性升级**：Fernet 密文格式与 MultiFernet 完全兼容（`MultiFernet([new, old]).decrypt(fernet_token)` 能解开历史 Fernet 写入的 token）。未来真要 rotation 时，vault 包装类几行代码改造即可，DB 数据不动
 
-```python
-# env 同时提供
-CREDENTIAL_VAULT_KEY=<new>          # primary，用于加密
-CREDENTIAL_VAULT_KEY_PREV=<old>     # secondary，仅用于解密 fallback
+**用户能做的"换 key"**：直接 `PUT /api/v1/tenant/credentials/{provider}` 带新值——DB 行覆盖，不需要 application 层 rotation 机制。
 
-# 代码
-mf = MultiFernet([Fernet(new_key), Fernet(old_key)])
-mf.encrypt(plaintext)   # 总是用 new_key 加密
-mf.decrypt(ciphertext)  # 先 new_key 解，失败 fallback old_key
-```
-
-**旋转流程**：
-
-1. 生成 new key，注入 `CREDENTIAL_VAULT_KEY` (new) + 把原 key 移到 `CREDENTIAL_VAULT_KEY_PREV`
-2. 部署应用，新写入立即用 new key
-3. 后台 task（或 cron）批量 re-encrypt 所有 row：`UPDATE ... SET credential_data = mf.rotate(credential_data)`
-4. re-encrypt 完成后下线 `CREDENTIAL_VAULT_KEY_PREV`
-
-`MultiFernet.rotate(token)` 是 cryptography 库 built-in 函数：以当前 primary key 重新加密。
-
-**适用范围**：`TokenVault` 与 `CredentialVault` 都走 MultiFernet（不只是 02a 新 vault；现有 OIDC vault 也升级到 MultiFernet，统一 rotation 能力）。
+如果未来真需要 master key rotation（合规 / incident response），单独 chore 加上即可。
 
 #### 8.1.2 失败模式
 
 | 场景 | 行为 |
 |---|---|
 | `CREDENTIAL_VAULT_KEY` 未设置 | app 启动 fail-loud（不 silent fallback 到明文） |
-| 密文用 new + old 都解不开 | raise + audit log；endpoint 返 503（不返 500，503 表 "we know this is broken, retry doesn't help"） |
-| Rotation 中途崩溃 | 已 re-encrypt 的行用 new key，未 re-encrypt 的行用 old key 解都 OK；继续跑 rotation task 即可 |
+| 密文解不开（key 错 / 数据损坏） | raise + audit log；endpoint 返 503（不返 500，503 表 "we know this is broken, retry doesn't help"） |
 | 想从加密迁明文（绝不应该发生） | 没这条路径——`credential_data BYTEA NOT NULL` schema 拒 |
 
 #### 8.1.3 不变量（pinned tests）
@@ -789,8 +772,7 @@ mf.decrypt(ciphertext)  # 先 new_key 解，失败 fallback old_key
 |---|---|
 | `INV-VAULT-1` | 未设 `CREDENTIAL_VAULT_KEY` 时 vault 构造抛 + app 启动 fail-loud |
 | `INV-VAULT-2` | Encrypt 后 DB 行不含明文 substring（用一个 sentinel string 真写真读，grep BYTEA 转 utf8 不命中） |
-| `INV-VAULT-3` | MultiFernet rotation：两条 row 各用 old / new key 加密，迁移后两条都用 new key |
-| `INV-VAULT-4` | API list/get `tenant_model_credentials` 响应**永不**含明文字段（response_model 排除） |
+| `INV-VAULT-3` | API list/get `tenant_model_credentials` 响应**永不**含明文字段（response_model 排除） |
 
 ---
 
