@@ -433,6 +433,7 @@ async def store_message(
     cache_write_tokens: int | None = None,
     cost_usd: float | None = None,
     model_id: str | None = None,
+    run_id: str | None = None,
 ) -> None:
     """Store a message.
 
@@ -444,6 +445,13 @@ async def store_message(
     columns alone — a re-store of the same message id (e.g. a retry on
     the inbound path) must not blank out usage that an earlier write
     already recorded.
+
+    ``run_id`` (v1.1 §2.2) ties the message to the ``runs`` row that
+    produced it. v1.1 Phase 1 wires this through the WS /api/v1 path
+    (01b); legacy / external-channel writes pass ``None`` and the
+    column stays NULL. The ON CONFLICT branch leaves ``run_id`` alone
+    for the same reason it leaves usage alone — a retry must not
+    clobber the row that the first write attributed correctly.
     """
     async with tenant_conn(tenant_id) as conn:
         await conn.execute(
@@ -452,10 +460,10 @@ async def store_message(
                 tenant_id, conversation_id, id, sender, sender_name,
                 content, timestamp, is_from_me, is_bot_message,
                 input_tokens, output_tokens, cache_read_tokens,
-                cache_write_tokens, cost_usd, model_id
+                cache_write_tokens, cost_usd, model_id, run_id
             )
             VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9,
-                    $10, $11, $12, $13, $14, $15)
+                    $10, $11, $12, $13, $14, $15, $16::uuid)
             ON CONFLICT (tenant_id, id, conversation_id) DO UPDATE SET
                 content = EXCLUDED.content,
                 timestamp = EXCLUDED.timestamp
@@ -475,6 +483,7 @@ async def store_message(
             cache_write_tokens,
             cost_usd,
             model_id,
+            run_id,
         )
 
 
