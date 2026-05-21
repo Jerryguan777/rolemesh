@@ -96,9 +96,9 @@ async def _seed_pair() -> dict[str, dict[str, str]]:
                 t.id, f"mcp-{tag}", "http", "https://example.invalid", "service",
             )
             cred_id = await conn.fetchval(
-                "INSERT INTO tenant_model_credentials (tenant_id, provider, credential_ref) "
+                "INSERT INTO tenant_model_credentials (tenant_id, provider, credential_data) "
                 "VALUES ($1::uuid, $2, $3) RETURNING id",
-                t.id, "anthropic", f"vault://creds/{tag}",
+                t.id, "anthropic", f"vault://creds/{tag}".encode(),
             )
             run_id = await conn.fetchval(
                 "INSERT INTO runs (tenant_id, conversation_id, status, completed_at) "

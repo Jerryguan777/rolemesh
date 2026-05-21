@@ -81,18 +81,46 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         )
     """)
 
-    # Tenant-scoped credential pointers — the real key lives in a
-    # secret store, only the ``credential_ref`` is in the DB.
+    # Tenant-scoped LLM credentials. ``credential_data`` BYTEA holds the
+    # Fernet-encrypted JSON payload ({"api_key": "sk-..."}) — see
+    # ``rolemesh.auth.credential_vault`` and design §8.1. The CREATE
+    # below already lands the BYTEA column on a fresh DB; the guarded
+    # DO block below rewrites a pre-greenfield dev DB that still has
+    # the legacy ``credential_ref TEXT`` shape. Both branches are
+    # idempotent.
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS tenant_model_credentials (
             id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             tenant_id        UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
             provider         VARCHAR(50) NOT NULL,
-            credential_ref   TEXT NOT NULL,
+            credential_data  BYTEA NOT NULL,
             created_at       TIMESTAMPTZ DEFAULT NOW(),
             updated_at       TIMESTAMPTZ DEFAULT NOW(),
             UNIQUE (tenant_id, provider)
         )
+    """)
+    # Greenfield migration: drop legacy ``credential_ref`` column and
+    # add ``credential_data`` if the pre-existing dev DB was created
+    # with the old shape. The design (§8.1) is explicit that the
+    # vault is not back-compat with the old plaintext-pointer column —
+    # any row stored under the old shape is unrecoverable, so we drop
+    # all rows along with the column. Tenants must re-PUT credentials.
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'tenant_model_credentials'
+                         AND column_name = 'credential_ref') THEN
+                DELETE FROM tenant_model_credentials;
+                ALTER TABLE tenant_model_credentials DROP COLUMN credential_ref;
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                           WHERE table_name = 'tenant_model_credentials'
+                             AND column_name = 'credential_data') THEN
+                ALTER TABLE tenant_model_credentials
+                    ADD COLUMN credential_data BYTEA NOT NULL;
+            END IF;
+        END $$
     """)
 
     # MCP server registry. ``tool_reversibility`` is a {tool_name: bool}

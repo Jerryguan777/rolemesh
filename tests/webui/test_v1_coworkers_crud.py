@@ -104,12 +104,13 @@ async def _seed_models() -> dict[str, str]:
 
 
 async def _add_credential(tenant_id: str, provider: str) -> None:
+    """Seed a credential row purely so the validation chain finds one."""
     pool = _get_admin_pool()
     async with pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO tenant_model_credentials (tenant_id, provider, credential_ref) "
+            "INSERT INTO tenant_model_credentials (tenant_id, provider, credential_data) "
             "VALUES ($1::uuid, $2, $3) ON CONFLICT (tenant_id, provider) DO NOTHING",
-            tenant_id, provider, "ref://test/secret",
+            tenant_id, provider, b"placeholder-ciphertext",
         )
 
 

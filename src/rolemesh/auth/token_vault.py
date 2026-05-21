@@ -16,8 +16,6 @@ Why not let the credential proxy hit the IdP for every request?
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
 import os
 import time
 import weakref
@@ -26,6 +24,7 @@ from datetime import UTC, datetime, timedelta
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
 
+from rolemesh.auth.encryption import derive_fernet_key
 from rolemesh.core.logger import get_logger
 
 logger = get_logger()
@@ -56,11 +55,13 @@ class TokenVault:
 
     @staticmethod
     def derive_key(secret: str) -> bytes:
-        """Derive a Fernet-compatible key from an arbitrary secret string."""
-        if not secret:
-            raise ValueError("derive_key requires a non-empty secret")
-        digest = hashlib.sha256(secret.encode("utf-8")).digest()
-        return base64.urlsafe_b64encode(digest)
+        """Derive a Fernet-compatible key from an arbitrary secret string.
+
+        Thin alias around :func:`rolemesh.auth.encryption.derive_fernet_key`
+        kept for backwards compatibility with existing call-sites and tests.
+        See module docstring for why both vaults share derivation.
+        """
+        return derive_fernet_key(secret)
 
     def _get_lock(self, user_id: str) -> asyncio.Lock:
         lock = self._refresh_locks.get(user_id)

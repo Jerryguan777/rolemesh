@@ -46,6 +46,17 @@ run_pytest_pinned_file() {
 echo "=== Phase 0 smoke ==="
 echo
 
+# Pre-flight env check (Phase 2, INV-VAULT-1). The webui/orchestrator
+# both fail-loud at boot if ``CREDENTIAL_VAULT_KEY`` is unset; surface
+# that here so the smoke script flags it before running anything that
+# depends on the credential vault — otherwise the failure shows up
+# inside an opaque pytest stacktrace.
+if [[ -z "${CREDENTIAL_VAULT_KEY:-}" ]]; then
+    _fail "CREDENTIAL_VAULT_KEY unset (set to e.g. \`openssl rand -base64 32\`)"
+else
+    _pass "CREDENTIAL_VAULT_KEY present"
+fi
+
 # Pinned tests (each maps to one INV plus PR-7's BOOTSTRAP_USERS).
 echo "Pinned suites:"
 run_pytest_pinned_file "INV-5 SKILL.md constant"           tests/test_skill_manifest_constant.py

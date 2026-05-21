@@ -92,14 +92,20 @@ async def _seed_models() -> dict[str, str]:
 
 
 async def _add_credential(tenant_id: str, provider: str) -> None:
+    """Seed a credential row for the validation chain.
+
+    The actual ciphertext shape doesn't matter to this suite — the
+    chain only checks for row existence — so we insert a fixed BYTEA
+    sentinel rather than reach for the real ``CredentialVault``.
+    """
     pool = _get_admin_pool()
     async with pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO tenant_model_credentials (tenant_id, provider, credential_ref) "
+            "INSERT INTO tenant_model_credentials (tenant_id, provider, credential_data) "
             "VALUES ($1::uuid, $2, $3) ON CONFLICT (tenant_id, provider) DO NOTHING",
             tenant_id,
             provider,
-            "ref://test/secret",
+            b"placeholder-ciphertext",
         )
 
 

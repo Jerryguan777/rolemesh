@@ -105,6 +105,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if _vault is not None:
         oidc_routes.set_token_vault(_vault)
 
+    # v1.1 §8.1: install the LLM CredentialVault singleton. Fails loud
+    # if ``CREDENTIAL_VAULT_KEY`` is unset — INV-VAULT-1. Done here
+    # (not at import time) so test apps that skip the lifespan don't
+    # accidentally depend on the env var.
+    from rolemesh.auth.credential_vault import (
+        create_credential_vault_from_env,
+        set_credential_vault,
+    )
+
+    set_credential_vault(create_credential_vault_from_env())
+
     # Approval engine for the WebUI's decide endpoint. The orchestrator
     # process also owns an engine of its own for IPC events; they do not
     # share in-memory state, only the DB. The decide endpoint returns
@@ -175,6 +186,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     run_events.set_jetstream(None)
     ws_stream.set_jetstream(None)
     _admin.set_mcp_publisher(None)
+    set_credential_vault(None)
     await auth.close_auth()
     await _close_db()
     if _nc is not None:
