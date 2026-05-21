@@ -3,6 +3,7 @@ import { customElement, state } from 'lit/decorators.js';
 
 import { ROUTES, matchRoute, type RouteDef } from '../router.js';
 import './router-outlet.js';
+import './reauth-banner.js';
 
 // Application-level chrome: a thin left nav listing all top-level
 // destinations + the routed page body. Design §6.2.
@@ -59,7 +60,9 @@ export class AppShell extends LitElement {
     const showTopbar = active.id !== 'chat';
 
     return html`
-      <div class="flex h-full bg-surface-0 dark:bg-d-surface-0">
+      <div class="flex flex-col h-full bg-surface-0 dark:bg-d-surface-0">
+        <rm-reauth-banner></rm-reauth-banner>
+        <div class="flex flex-1 min-h-0 overflow-hidden">
         <!-- App-level nav sidebar -->
         <nav
           class="w-52 shrink-0 h-full flex flex-col bg-surface-1 dark:bg-d-surface-1
@@ -134,6 +137,7 @@ export class AppShell extends LitElement {
           <main class="flex-1 min-h-0 flex flex-col overflow-hidden">
             <rm-router-outlet></rm-router-outlet>
           </main>
+        </div>
         </div>
       </div>
     `;

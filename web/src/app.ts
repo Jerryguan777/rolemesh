@@ -5,6 +5,7 @@ import './components/message-list.js';
 import './components/message-item.js';
 import './components/message-editor.js';
 import './components/sidebar.js';
+import './components/reauth-banner.js';
 import './components/login-page.js';
 import './components/safety-rules-page.js';
 import './components/safety-decisions-page.js';

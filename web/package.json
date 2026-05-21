@@ -9,10 +9,12 @@
     "preview": "vite preview",
     "openapi:gen": "openapi-typescript ./openapi.yaml -o ./src/api/generated/types.ts",
     "openapi:check": "openapi-typescript ./openapi.yaml -o /tmp/rm-openapi-types.ts && diff -u ./src/api/generated/types.ts /tmp/rm-openapi-types.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "lint:no-admin-chat": "node scripts/lint-no-admin-chat.mjs"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.1",
+    "happy-dom": "^20.9.0",
     "lit": "^3.3",
     "marked": "^15",
     "openapi-typescript": "^7.13.0",

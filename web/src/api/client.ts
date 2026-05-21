@@ -10,7 +10,7 @@
 // per endpoint we actually need; the input/output shapes flow from
 // `paths` so a yaml change shows up as a type error here.
 
-import type { paths } from './generated/types.js';
+import type { components, paths } from './generated/types.js';
 
 export type ApiPaths = paths;
 
@@ -24,6 +24,11 @@ type GetResponseBody<
   : never;
 
 export type BackendList = GetResponseBody<'/api/v1/backends', 'get'>;
+export type Coworker = components['schemas']['Coworker'];
+export type Conversation = components['schemas']['Conversation'];
+export type Message = components['schemas']['Message'];
+export type Run = components['schemas']['Run'];
+export type Me = components['schemas']['Me'];
 export type ErrorResponseBody =
   paths['/api/v1/runs/{id}/cancel']['post']['responses']['409']['content']['application/json'];
 
@@ -77,4 +82,99 @@ export class ApiClient {
     if (!resp.ok) throw await this.parseError(resp);
     return (await resp.json()) as BackendList;
   }
+
+  async getMe(): Promise<Me> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/me`, {
+      method: 'GET',
+      headers: this.headers(),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Me;
+  }
+
+  async listCoworkers(): Promise<Coworker[]> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/coworkers`, {
+      method: 'GET',
+      headers: this.headers(),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Coworker[];
+  }
+
+  async listCoworkerConversations(coworkerId: string): Promise<Conversation[]> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(coworkerId)}/conversations`,
+      { method: 'GET', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Conversation[];
+  }
+
+  /** Create a fresh web-channel conversation for a coworker. The
+   *  server auto-creates the `web` binding if one is missing and
+   *  invents a `channel_chat_id`, so the SPA does not need to know
+   *  anything about channel internals (design §3). */
+  async createCoworkerConversation(
+    coworkerId: string,
+    name?: string | null,
+  ): Promise<Conversation> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(coworkerId)}/conversations`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ name: name ?? null }),
+      },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Conversation;
+  }
+
+  async listMessages(conversationId: string): Promise<Message[]> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/conversations/${encodeURIComponent(conversationId)}/messages`,
+      { method: 'GET', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Message[];
+  }
+
+  async getRun(runId: string): Promise<Run | null> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/runs/${encodeURIComponent(runId)}`,
+      { method: 'GET', headers: this.headers() },
+    );
+    if (resp.status === 404) return null;
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Run;
+  }
+
+  /** Returns `{ ok: true }` on 202, `{ ok: false, alreadyTerminal: true }`
+   *  on 409 `ALREADY_TERMINAL`. Other failures throw `ApiError`. */
+  async cancelRun(
+    runId: string,
+  ): Promise<{ ok: boolean; alreadyTerminal: boolean }> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/runs/${encodeURIComponent(runId)}/cancel`,
+      { method: 'POST', headers: this.headers() },
+    );
+    if (resp.status === 409) return { ok: false, alreadyTerminal: true };
+    if (!resp.ok) throw await this.parseError(resp);
+    return { ok: true, alreadyTerminal: false };
+  }
+}
+
+/** Shared, lazily-initialised client for components that don't want to
+ *  thread one through. The token comes from `oidc-auth` storage. */
+let _shared: ApiClient | null = null;
+export function getApiClient(): ApiClient {
+  if (!_shared) {
+    _shared = new ApiClient('', sessionStorage.getItem('rm_id_token'));
+    // Keep the shared client in lock-step with the OIDC refresh path.
+    window.addEventListener('rm-token-refreshed', (e: Event) => {
+      const tok = (e as CustomEvent<string>).detail;
+      if (tok) _shared!.setToken(tok);
+    });
+  }
+  return _shared;
 }

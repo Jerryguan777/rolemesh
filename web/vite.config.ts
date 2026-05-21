@@ -26,6 +26,9 @@ export default defineConfig({
     },
   },
   test: {
+    // Default `node`; component tests opt into happy-dom via the
+    // `// @vitest-environment happy-dom` pragma at the top of their
+    // file so we only pay the DOM-init cost where it's actually needed.
     environment: 'node',
     include: ['src/**/*.test.ts'],
   },
