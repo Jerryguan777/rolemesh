@@ -50,16 +50,28 @@ paths:
       description: |
         The browser exchanges its long-lived session token for a
         short-exp JWT (<= 60s) which it then passes as the `ticket`
-        query parameter on the WebSocket handshake. Design §4.
+        query parameter on the WebSocket handshake. The ticket is
+        bound to one `conversation_id`; the handshake compares it
+        against the path so it cannot be reused across conversations
+        (design §4 / 01a Open Question 1).
       security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WsTicketRequest' }
       responses:
         '200':
           description: OK
           content:
             application/json:
               schema: { $ref: '#/components/schemas/WsTicket' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /api/v1/me:
     get:
@@ -118,6 +130,12 @@ paths:
       tags: [Coworkers]
       operationId: createCoworker
       summary: Create a coworker
+      description: |
+        Validates `(agent_backend × model.provider × model.family)`
+        against the static matrix; rejects with `BACKEND_INCOMPAT`
+        if the triple is unsupported and `MISSING_CREDENTIAL` when
+        the tenant has no credential for the model's provider.
+        Design §3 + §13.
       security: [ { bearerAuth: [] } ]
       requestBody:
         required: true
@@ -136,6 +154,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '422':
           $ref: '#/components/responses/Unprocessable'
 
@@ -159,6 +179,14 @@ paths:
     patch:
       tags: [Coworkers]
       operationId: updateCoworker
+      summary: Partially update a coworker
+      description: |
+        A PATCH that changes `model_id` re-runs the
+        backend / provider / family validation; the same
+        `BACKEND_INCOMPAT` and `MISSING_CREDENTIAL` codes apply.
+        Changing `model_id` also publishes `web.coworker.restart`
+        on NATS so the orchestrator hot-reloads the coworker config
+        (design §7).
       security: [ { bearerAuth: [] } ]
       requestBody:
         required: true
@@ -383,6 +411,13 @@ components:
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Conflict:
+      description: |
+        Resource conflict — typically a duplicate name within the
+        tenant, or attempted mutation of a terminal-state run.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
     Unprocessable:
       description: |
         Semantic validation failure (e.g. `BACKEND_INCOMPAT`,
@@ -421,6 +456,18 @@ components:
           type: string
           nullable: true
           description: When set, the SPA redirects here for login.
+
+    WsTicketRequest:
+      type: object
+      required: [conversation_id]
+      properties:
+        conversation_id:
+          type: string
+          format: uuid
+          description: |
+            UUID of the conversation the ticket authorises. The WS
+            handshake compares this against the path `conversation_id`
+            and refuses mismatched tickets without a DB hop.
 
     WsTicket:
       type: object
@@ -498,6 +545,7 @@ components:
         - agent_backend
         - status
         - agent_role
+        - max_concurrent
         - created_at
       properties:
         id: { type: string, format: uuid }

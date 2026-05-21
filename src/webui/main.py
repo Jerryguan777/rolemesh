@@ -314,7 +314,14 @@ app.include_router(admin_router)
 
 # v1 router: new prefixed surface introduced by webui-backend v1.1.
 from webui.api_v1 import router as api_v1_router  # noqa: E402
+from webui.v1.errors import install_error_handler  # noqa: E402
 
+# Flatten ErrorResponseException -> root JSON body for every /api/v1
+# 4xx so the typed client can ``narrow`` on the {code, message,
+# details?} envelope. Without this, FastAPI's default handler nests
+# the envelope inside ``{"detail": ...}`` and the codegen-generated
+# TS client can't decode it.
+install_error_handler(app)
 app.include_router(api_v1_router)
 
 # OIDC PKCE router (only when AUTH_MODE=oidc)

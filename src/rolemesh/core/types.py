@@ -146,6 +146,11 @@ class Coworker:
     created_at: str = ""
     agent_role: str = "agent"  # "super_agent" | "agent"
     permissions: AgentPermissions | None = None  # filled by __post_init__; always non-None after init
+    # Phase 1 (v1.1) — added so the /api/v1 surface can carry them
+    # through. NULLABLE on the DB side; legacy admin code that builds
+    # Coworker instances directly leaves them at None.
+    model_id: str | None = None
+    created_by_user_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.permissions is None:

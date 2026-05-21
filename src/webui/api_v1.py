@@ -1,9 +1,13 @@
 """``/api/v1`` router skeleton.
 
-Phase 0 only ships the public ``GET /api/v1/backends`` endpoint, but
-the prefixed router lives here so Phase 1+ endpoints can be hung off
-it without touching ``webui/main.py`` again. Auth dependencies are
-re-used from ``webui.dependencies`` per the design.
+Each Phase-1 endpoint set lives in its own submodule under
+:mod:`webui.v1`. This module composes them under the
+``/api/v1`` prefix and registers the design §13 error-envelope
+handler.
+
+The router itself stays thin: real handlers go in the submodules
+so the per-endpoint test files import a single FastAPI app fixture
+without dragging in unrelated cross-section.
 """
 
 from __future__ import annotations
@@ -12,6 +16,7 @@ from fastapi import APIRouter, Response
 
 from rolemesh.core.backend_capabilities import backends_as_json
 from webui.schemas_v1 import Backend
+from webui.v1.coworkers import router as coworkers_router
 
 router = APIRouter(prefix="/api/v1")
 
@@ -36,3 +41,6 @@ async def get_backends(response: Response) -> list[dict[str, object]]:
     """
     response.headers["Cache-Control"] = "max-age=3600"
     return backends_as_json()
+
+
+router.include_router(coworkers_router)

@@ -67,8 +67,15 @@ async def create_coworker(
     max_concurrent: int = 2,
     agent_role: str = "agent",
     permissions: AgentPermissions | None = None,
+    model_id: str | None = None,
+    created_by_user_id: str | None = None,
 ) -> Coworker:
-    """Create a new coworker."""
+    """Create a new coworker.
+
+    ``model_id`` and ``created_by_user_id`` are v1.1 additions (design
+    §2.2). Both are NULLABLE on the DB so the existing admin call
+    sites that omit them keep working — the v1 router populates them.
+    """
     cc_json: str | None = None
     if container_config:
         cc_json = json.dumps(
@@ -85,8 +92,10 @@ async def create_coworker(
         row = await conn.fetchrow(
             """
             INSERT INTO coworkers (tenant_id, name, folder, agent_backend, system_prompt,
-                tools, container_config, max_concurrent, agent_role, permissions)
-            VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10::jsonb)
+                tools, container_config, max_concurrent, agent_role, permissions,
+                model_id, created_by_user_id)
+            VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10::jsonb,
+                $11::uuid, $12::uuid)
             RETURNING *
             """,
             tenant_id,
@@ -113,6 +122,8 @@ async def create_coworker(
             max_concurrent,
             agent_role,
             json.dumps(effective_perms.to_dict()),
+            model_id,
+            created_by_user_id,
         )
     assert row is not None
     return _record_to_coworker(row)
@@ -155,6 +166,10 @@ def _record_to_coworker(row: asyncpg.Record) -> Coworker:
         permissions = AgentPermissions.from_dict(json.loads(perms_raw))
     else:
         permissions = AgentPermissions.for_role(agent_role)
+    model_id_val = row.get("model_id") if hasattr(row, "get") else None
+    created_by_val = (
+        row.get("created_by_user_id") if hasattr(row, "get") else None
+    )
     return Coworker(
         id=str(row["id"]),
         tenant_id=str(row["tenant_id"]),
@@ -169,6 +184,8 @@ def _record_to_coworker(row: asyncpg.Record) -> Coworker:
         created_at=row["created_at"].isoformat() if row["created_at"] else "",
         agent_role=agent_role,
         permissions=permissions,
+        model_id=str(model_id_val) if model_id_val else None,
+        created_by_user_id=str(created_by_val) if created_by_val else None,
     )
 
 
@@ -218,6 +235,9 @@ async def get_all_coworkers() -> list[Coworker]:
     return [_record_to_coworker(row) for row in rows]
 
 
+_MODEL_ID_UNSET: Any = object()
+
+
 async def update_coworker(
     coworker_id: str,
     *,
@@ -229,8 +249,16 @@ async def update_coworker(
     status: str | None = None,
     agent_role: str | None = None,
     permissions: AgentPermissions | None = None,
+    model_id: str | None | Any = _MODEL_ID_UNSET,
 ) -> Coworker | None:
-    """Update selected fields on a coworker, scoped to ``tenant_id``."""
+    """Update selected fields on a coworker, scoped to ``tenant_id``.
+
+    ``model_id`` uses a sentinel rather than ``None`` for "unchanged"
+    because ``None`` is a legitimate clearing value — the v1 API
+    rejects clearing today but the helper stays explicit so a future
+    caller doesn't accidentally null the column by passing ``None``
+    to mean "no change".
+    """
     fields: list[str] = []
     values: list[Any] = []
     param_idx = 1
@@ -276,6 +304,10 @@ async def update_coworker(
     if permissions is not None:
         fields.append(f"permissions = ${param_idx}::jsonb")
         values.append(json.dumps(permissions.to_dict()))
+        param_idx += 1
+    if model_id is not _MODEL_ID_UNSET:
+        fields.append(f"model_id = ${param_idx}::uuid")
+        values.append(model_id)
         param_idx += 1
 
     if not fields:

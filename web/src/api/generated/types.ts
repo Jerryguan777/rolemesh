@@ -38,7 +38,10 @@ export interface paths {
          * Issue a short-lived ticket for the WS handshake
          * @description The browser exchanges its long-lived session token for a
          *     short-exp JWT (<= 60s) which it then passes as the `ticket`
-         *     query parameter on the WebSocket handshake. Design §4.
+         *     query parameter on the WebSocket handshake. The ticket is
+         *     bound to one `conversation_id`; the handshake compares it
+         *     against the path so it cannot be reused across conversations
+         *     (design §4 / 01a Open Question 1).
          */
         post: operations["createWsTicket"];
         delete?: never;
@@ -96,7 +99,14 @@ export interface paths {
         /** List coworkers visible to the caller */
         get: operations["listCoworkers"];
         put?: never;
-        /** Create a coworker */
+        /**
+         * Create a coworker
+         * @description Validates `(agent_backend × model.provider × model.family)`
+         *     against the static matrix; rejects with `BACKEND_INCOMPAT`
+         *     if the triple is unsupported and `MISSING_CREDENTIAL` when
+         *     the tenant has no credential for the model's provider.
+         *     Design §3 + §13.
+         */
         post: operations["createCoworker"];
         delete?: never;
         options?: never;
@@ -124,6 +134,15 @@ export interface paths {
         delete: operations["deleteCoworker"];
         options?: never;
         head?: never;
+        /**
+         * Partially update a coworker
+         * @description A PATCH that changes `model_id` re-runs the
+         *     backend / provider / family validation; the same
+         *     `BACKEND_INCOMPAT` and `MISSING_CREDENTIAL` codes apply.
+         *     Changing `model_id` also publishes `web.coworker.restart`
+         *     on NATS so the orchestrator hot-reloads the coworker config
+         *     (design §7).
+         */
         patch: operations["updateCoworker"];
         trace?: never;
     };
@@ -258,6 +277,15 @@ export interface components {
             /** @description When set, the SPA redirects here for login. */
             login_url?: string | null;
         };
+        WsTicketRequest: {
+            /**
+             * Format: uuid
+             * @description UUID of the conversation the ticket authorises. The WS
+             *     handshake compares this against the path `conversation_id`
+             *     and refuses mismatched tickets without a DB hop.
+             */
+            conversation_id: string;
+        };
         WsTicket: {
             /** @description Short-lived JWT (exp <= 60s). */
             ticket: string;
@@ -308,7 +336,7 @@ export interface components {
             system_prompt?: string | null;
             status: components["schemas"]["CoworkerStatus"];
             agent_role: components["schemas"]["AgentRole"];
-            max_concurrent?: number;
+            max_concurrent: number;
             /** Format: uuid */
             created_by_user_id?: string | null;
             /** Format: date-time */
@@ -441,6 +469,18 @@ export interface components {
             };
         };
         /**
+         * @description Resource conflict — typically a duplicate name within the
+         *     tenant, or attempted mutation of a terminal-state run.
+         */
+        Conflict: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /**
          * @description Semantic validation failure (e.g. `BACKEND_INCOMPAT`,
          *     `MISSING_CREDENTIAL` — design §13).
          */
@@ -489,7 +529,11 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WsTicketRequest"];
+            };
+        };
         responses: {
             /** @description OK */
             200: {
@@ -500,7 +544,9 @@ export interface operations {
                     "application/json": components["schemas"]["WsTicket"];
                 };
             };
+            400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
         };
     };
     getMe: {
@@ -592,6 +638,7 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
             422: components["responses"]["Unprocessable"];
         };
     };
