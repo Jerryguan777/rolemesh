@@ -195,5 +195,16 @@ POST  /api/v1/runs/{id}/cancel               (409 = 已终态)
 - App-shell 的 topbar 目前对 chat 页**隐藏**（chat-panel 自有 header），对其它页显示。01c 若要在 chat 上加 topbar，需要先把 chat-panel 里的 brand/header 收掉，避免双 header。建议在 01c 那个 session 一起处理。
 - App-shell 的 nav 没做 collapse（chat-panel 自带的 sub-sidebar 还能 collapse）。如果 Phase 2+ 要让 app-nav 也能 collapse，加一个 `@state collapsed` 即可，没有结构层阻碍。
 
-### Live UI smoke 限制
-本 worktree (`/home/jerry/ai/rolemesh`) 没起 Postgres / NATS / orchestrator，所以没能真跑一遍 chat 全流程（发消息 / token streaming / 中断重连 / 切 conversation）。验证只到 `npm run build` 干净 + custom-element 都在 bundle 里 + 路由 matchRoute 单元测试 10/10。**Merge 前请人工跑一遍 chat 流程**（chat-panel 没改逻辑，应该不退化，但 spec 明确要求手动验）。
+### Live UI smoke 结果（2026-05-20 后补）
+后续在同一台机器上把 Postgres / NATS / orchestrator 真起起来跑了一遍 Playwright 驱动的 smoke，全部通过：
+
+- App-shell 渲染 + sidebar 9 项顺序 + Phase tag 都对（Chat / Coworkers P1 / MCP servers P2 / Models P2 / Skills P3 / Credentials P2 / Bindings P2 / Approvals P3 / Safety）
+- chat 走 `ADMIN_BOOTSTRAP_TOKEN` fast-path 直接 WS 接入：发消息 → 收到 verbatim 回复；orchestrator 端 `Agent output chars=N` 落账
+- sidebar 切到 `#/skills` 渲染 `<rm-coming-soon label="Skills" phase="Phase 3">`；active 项 `bg-brand/10` + `aria-current="page"`；topbar 对 chat 隐藏、对其它页显示——和 §6.2 设计一致
+- conversation 切换：sub-sidebar 点旧 conversation，url `chat_id` 跟着改、历史消息正确加载、WS 不掉
+- WS reconnect：client-side `ws.close(1000)` 触发 `AgentClient.onclose` 重连分支，4 秒内拿到新 WS 对象、readyState=OPEN，post-reconnect 发消息回得来
+- dark mode：4 处 `@media (prefers-color-scheme: dark)` 全部走 `--color-d-*` token，无 hardcode
+
+**01c 要先认的一个预存行为**（feat/ui 没改 chat-panel 逻辑、不是本 session 引入）：`AgentClient` 把 WS close code 4000-4999 当作"intentional close, do not reconnect"（`web/src/services/agent-client.ts:123-125`），逻辑没错；但 `<rm-chat-panel>` 的 "Connected" 文字 badge 不会因为 close 而切到 "Disconnected"——UI 显 stale 直到下一次 mount。01c 做 chat polish 时建议把 connection state 真订阅到 `AgentClient._connected` 上。
+
+Dev smoke 复现路径（给 01c 用）：`docker compose -f docker-compose.dev.yml up -d` → `.venv/bin/rolemesh &` → `.venv/bin/rolemesh-webui &` → 浏览器开 `http://localhost:8080/?agent_id=<coworker-uuid>` 同时在 console `sessionStorage.setItem('rm_id_token', '<ADMIN_BOOTSTRAP_TOKEN>')` 绕过 OIDC——足够跑通 chat smoke。多用户 / 真 OIDC 测试还是要留给 03a。
