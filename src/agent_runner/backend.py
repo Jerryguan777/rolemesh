@@ -251,6 +251,19 @@ def tool_input_preview(tool_name: str, tool_input: dict[str, Any]) -> str:
     if tn in ("task", "taskoutput", "taskstop"):
         val = tool_input.get("description") or tool_input.get("taskId") or ""
         return str(val)[:80]
+    if tn == "delegate_to_agent":
+        # Frontdesk v1.2 — the routing-accuracy eval scorer reads this
+        # preview to decide whether the LLM picked the right specialist
+        # (handbook §6 Step 8.3). Return the target verbatim and untruncated
+        # so the scorer can compare with `expected_target` directly; agent
+        # folder slugs are bounded to 64 chars at the admin layer
+        # (webui/schemas.py AgentCreate.folder), well under the 80-char
+        # display budget the other branches use.
+        target = tool_input.get("target")
+        return str(target) if isinstance(target, str) else ""
+    if tn == "list_agents":
+        # Takes no args; preview is intentionally empty.
+        return ""
     return ""
 
 

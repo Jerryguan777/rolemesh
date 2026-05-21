@@ -12,6 +12,11 @@ build/
 htmlcov/
 groups/
 data/
+# Frontdesk v1.2 — the routing dataset is a release-blocking eval gate
+# input, so it must travel in-tree even though the general `data/` rule
+# above is intended to keep ephemeral run artifacts out of git.
+!tests/data/
+!tests/data/**
 store/
 .env
 .env.bak.*
