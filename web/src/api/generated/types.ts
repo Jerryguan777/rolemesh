@@ -303,6 +303,59 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/mcp-servers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List the tenant's MCP servers */
+        get: operations["listMCPServers"];
+        put?: never;
+        /**
+         * Register a new MCP server
+         * @description Publishes one `egress.mcp.changed` event (`action="created"`)
+         *     on success so the gateway picks up the route without an
+         *     orchestrator restart (design §7).
+         */
+        post: operations["createMCPServer"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/mcp-servers/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        get: operations["getMCPServer"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete an MCP server
+         * @description Returns `409 RESOURCE_IN_USE` (with `details.coworker_ids`)
+         *     when at least one coworker still binds this MCP server.
+         *     Publishes one `egress.mcp.changed` event (`action="deleted"`)
+         *     on success.
+         */
+        delete: operations["deleteMCPServer"];
+        options?: never;
+        head?: never;
+        /**
+         * Partially update an MCP server
+         * @description Publishes one `egress.mcp.changed` event (`action="updated"`)
+         *     on success.
+         */
+        patch: operations["updateMCPServer"];
+        trace?: never;
+    };
     "/api/v1/runs/{id}": {
         parameters: {
             query?: never;
@@ -575,6 +628,72 @@ export interface components {
             extras?: {
                 [key: string]: unknown;
             } | null;
+        };
+        /** @enum {string} */
+        MCPType: "sse" | "http";
+        /**
+         * @description `user` — per-request user OIDC token (architecturally
+         *     present, e2e gated on the OIDC branch).
+         *     `service` — server-managed credential.
+         *     `both` — endpoint accepts either, decided per call.
+         * @enum {string}
+         */
+        MCPAuthMode: "user" | "service" | "both";
+        MCPServer: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            tenant_id: string;
+            name: string;
+            type: components["schemas"]["MCPType"];
+            url: string;
+            auth_mode: components["schemas"]["MCPAuthMode"];
+            credential_ref?: string | null;
+            extra_headers?: {
+                [key: string]: string;
+            };
+            /**
+             * @description Per-tool override map: {tool_name: bool}. `true` means
+             *     the tool is reversible (the safety pipeline may auto-
+             *     approve it). Empty object means "no override, fall back
+             *     to the tenant default" — design §2.1.
+             */
+            tool_reversibility?: {
+                [key: string]: boolean;
+            };
+            description?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        MCPServerCreate: {
+            name: string;
+            type: components["schemas"]["MCPType"];
+            url: string;
+            auth_mode: components["schemas"]["MCPAuthMode"];
+            credential_ref?: string | null;
+            extra_headers?: {
+                [key: string]: string;
+            } | null;
+            tool_reversibility?: {
+                [key: string]: boolean;
+            } | null;
+            description?: string | null;
+        };
+        MCPServerUpdate: {
+            name?: string;
+            type?: components["schemas"]["MCPType"];
+            url?: string;
+            auth_mode?: components["schemas"]["MCPAuthMode"];
+            credential_ref?: string | null;
+            extra_headers?: {
+                [key: string]: string;
+            } | null;
+            tool_reversibility?: {
+                [key: string]: boolean;
+            } | null;
+            description?: string | null;
         };
         Run: {
             /** Format: uuid */
@@ -1134,6 +1253,143 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+        };
+    };
+    listMCPServers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MCPServer"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    createMCPServer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MCPServerCreate"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MCPServer"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    getMCPServer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MCPServer"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteMCPServer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            /**
+             * @description MCP server is still referenced by at least one coworker.
+             *     `code="RESOURCE_IN_USE"`, `details.coworker_ids` lists
+             *     the offenders.
+             */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    updateMCPServer: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MCPServerUpdate"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MCPServer"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
     getRun: {

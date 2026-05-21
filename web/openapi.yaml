@@ -25,6 +25,7 @@ tags:
   - name: Coworkers
   - name: Conversations
   - name: Credentials
+  - name: MCPServers
   - name: Models
   - name: Runs
 
@@ -451,6 +452,119 @@ paths:
         '409':
           description: |
             Credential is still referenced by at least one coworker.
+            `code="RESOURCE_IN_USE"`, `details.coworker_ids` lists
+            the offenders.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/v1/mcp-servers:
+    get:
+      tags: [MCPServers]
+      operationId: listMCPServers
+      summary: List the tenant's MCP servers
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/MCPServer' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [MCPServers]
+      operationId: createMCPServer
+      summary: Register a new MCP server
+      description: |
+        Publishes one `egress.mcp.changed` event (`action="created"`)
+        on success so the gateway picks up the route without an
+        orchestrator restart (design §7).
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MCPServerCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MCPServer' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/mcp-servers/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [MCPServers]
+      operationId: getMCPServer
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MCPServer' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [MCPServers]
+      operationId: updateMCPServer
+      summary: Partially update an MCP server
+      description: |
+        Publishes one `egress.mcp.changed` event (`action="updated"`)
+        on success.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MCPServerUpdate' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MCPServer' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    delete:
+      tags: [MCPServers]
+      operationId: deleteMCPServer
+      summary: Delete an MCP server
+      description: |
+        Returns `409 RESOURCE_IN_USE` (with `details.coworker_ids`)
+        when at least one coworker still binds this MCP server.
+        Publishes one `egress.mcp.changed` event (`action="deleted"`)
+        on success.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '204':
+          description: No content
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            MCP server is still referenced by at least one coworker.
             `code="RESOURCE_IN_USE"`, `details.coworker_ids` lists
             the offenders.
           content:
@@ -903,6 +1017,112 @@ components:
             Provider-specific extras (e.g. `api_base`, `region`).
             Schema intentionally open — the credential proxy reads
             whatever shape the provider needs.
+
+    MCPType:
+      type: string
+      enum: [sse, http]
+
+    MCPAuthMode:
+      type: string
+      enum: [user, service, both]
+      description: |
+        `user` — per-request user OIDC token (architecturally
+        present, e2e gated on the OIDC branch).
+        `service` — server-managed credential.
+        `both` — endpoint accepts either, decided per call.
+
+    MCPServer:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - name
+        - type
+        - url
+        - auth_mode
+        - created_at
+        - updated_at
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        name: { type: string }
+        type: { $ref: '#/components/schemas/MCPType' }
+        url: { type: string }
+        auth_mode: { $ref: '#/components/schemas/MCPAuthMode' }
+        credential_ref:
+          type: string
+          nullable: true
+        extra_headers:
+          type: object
+          additionalProperties: { type: string }
+        tool_reversibility:
+          type: object
+          description: |
+            Per-tool override map: {tool_name: bool}. `true` means
+            the tool is reversible (the safety pipeline may auto-
+            approve it). Empty object means "no override, fall back
+            to the tenant default" — design §2.1.
+          additionalProperties: { type: boolean }
+        description:
+          type: string
+          nullable: true
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    MCPServerCreate:
+      type: object
+      required: [name, type, url, auth_mode]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        type: { $ref: '#/components/schemas/MCPType' }
+        url:
+          type: string
+          minLength: 1
+        auth_mode: { $ref: '#/components/schemas/MCPAuthMode' }
+        credential_ref:
+          type: string
+          nullable: true
+        extra_headers:
+          type: object
+          additionalProperties: { type: string }
+          nullable: true
+        tool_reversibility:
+          type: object
+          additionalProperties: { type: boolean }
+          nullable: true
+        description:
+          type: string
+          nullable: true
+
+    MCPServerUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        type: { $ref: '#/components/schemas/MCPType' }
+        url:
+          type: string
+          minLength: 1
+        auth_mode: { $ref: '#/components/schemas/MCPAuthMode' }
+        credential_ref:
+          type: string
+          nullable: true
+        extra_headers:
+          type: object
+          additionalProperties: { type: string }
+          nullable: true
+        tool_reversibility:
+          type: object
+          additionalProperties: { type: boolean }
+          nullable: true
+        description:
+          type: string
+          nullable: true
 
     Run:
       type: object

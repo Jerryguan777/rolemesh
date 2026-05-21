@@ -32,6 +32,8 @@ from webui.schemas_v1 import (
     CredentialResponse,
     CredentialUpsert,
     ErrorResponse,
+    MCPServer,
+    MCPServerCreate,
     Message,
     Model,
     Run,
@@ -67,6 +69,8 @@ def test_phase_1_endpoints_listed_in_design_are_present_in_yaml() -> None:
         "/api/v1/coworkers/{id}/conversations",
         "/api/v1/conversations/{id}",
         "/api/v1/conversations/{id}/messages",
+        "/api/v1/mcp-servers",
+        "/api/v1/mcp-servers/{id}",
         "/api/v1/models",
         "/api/v1/models/{id}",
         "/api/v1/tenant/credentials",
@@ -273,6 +277,31 @@ def test_v1_credential_upsert_required_matches_pydantic_model() -> None:
     }
     assert yaml_required == py_required, (
         f"CredentialUpsert.required drift: yaml={yaml_required} "
+        f"python={py_required}"
+    )
+
+
+def test_v1_mcp_server_required_matches_pydantic_model() -> None:
+    spec = _load_spec()
+    yaml_required = set(_schema(spec, "MCPServer")["required"])  # type: ignore[arg-type]
+    py_required = {
+        name for name, f in MCPServer.model_fields.items() if f.is_required()
+    }
+    assert yaml_required == py_required, (
+        f"MCPServer.required drift: yaml={yaml_required} python={py_required}"
+    )
+
+
+def test_v1_mcp_server_create_required_matches_pydantic_model() -> None:
+    spec = _load_spec()
+    yaml_required = set(_schema(spec, "MCPServerCreate")["required"])  # type: ignore[arg-type]
+    py_required = {
+        name
+        for name, f in MCPServerCreate.model_fields.items()
+        if f.is_required()
+    }
+    assert yaml_required == py_required, (
+        f"MCPServerCreate.required drift: yaml={yaml_required} "
         f"python={py_required}"
     )
 

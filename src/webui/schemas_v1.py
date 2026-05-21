@@ -313,6 +313,74 @@ class CredentialUpsert(BaseModel):
     extras: dict[str, object] | None = None
 
 
+# ---------------------------------------------------------------------------
+# MCP servers (design §2.1 / §3 Phase 2)
+# ---------------------------------------------------------------------------
+
+
+MCPType = Literal["sse", "http"]
+MCPAuthMode = Literal["user", "service", "both"]
+
+
+class MCPServer(BaseModel):
+    """Wire projection of an ``mcp_servers`` row."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    tenant_id: str
+    name: str
+    type: MCPType
+    url: str
+    auth_mode: MCPAuthMode
+    credential_ref: str | None = None
+    extra_headers: dict[str, str] = Field(default_factory=dict)
+    tool_reversibility: dict[str, bool] = Field(default_factory=dict)
+    description: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class MCPServerCreate(BaseModel):
+    """``POST /api/v1/mcp-servers`` body.
+
+    ``auth_mode`` is required at the API even though the column has
+    a ``'service'`` DB default — making it explicit avoids the
+    "what mode did I create this in" question on the operator side.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+    type: MCPType
+    url: str = Field(min_length=1)
+    auth_mode: MCPAuthMode
+    credential_ref: str | None = None
+    extra_headers: dict[str, str] | None = None
+    tool_reversibility: dict[str, bool] | None = None
+    description: str | None = None
+
+
+class MCPServerUpdate(BaseModel):
+    """``PATCH /api/v1/mcp-servers/{id}`` body.
+
+    Every field is optional; ``None`` is interpreted as "clear" for
+    the nullable columns and "leave alone" for absent fields. The
+    handler routes the difference via Pydantic's ``model_fields_set``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    type: MCPType | None = None
+    url: str | None = Field(default=None, min_length=1)
+    auth_mode: MCPAuthMode | None = None
+    credential_ref: str | None = None
+    extra_headers: dict[str, str] | None = None
+    tool_reversibility: dict[str, bool] | None = None
+    description: str | None = None
+
+
 class Run(BaseModel):
     """Wire projection of a ``runs`` row.
 

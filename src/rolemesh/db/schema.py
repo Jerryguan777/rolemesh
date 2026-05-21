@@ -126,6 +126,15 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     # MCP server registry. ``tool_reversibility`` is a {tool_name: bool}
     # map; an empty object means "no per-tool override, fall back to
     # tenant default".
+    # MCP server registry.
+    # ``auth_mode`` carries the 'user' | 'service' | 'both' triple from
+    # design §2.1; the API surface requires the caller to pass it
+    # explicitly for clarity but the DB default is ``'service'`` so a
+    # bypass-RLS INSERT (migrations, smoke scripts) lands on the safest
+    # mode (server-managed credentials) rather than ``'user'`` which
+    # implies an end-user OIDC token round-trip.
+    # ``tool_reversibility`` is a {tool_name: bool} map; an empty
+    # object means "no per-tool override, fall back to tenant default".
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS mcp_servers (
             id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -133,7 +142,7 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             name                VARCHAR(200) NOT NULL,
             type                VARCHAR(50) NOT NULL,
             url                 TEXT NOT NULL,
-            auth_mode           VARCHAR(50) NOT NULL,
+            auth_mode           VARCHAR(50) NOT NULL DEFAULT 'service',
             credential_ref      TEXT,
             extra_headers       JSONB DEFAULT '{}',
             tool_reversibility  JSONB DEFAULT '{}',
@@ -143,6 +152,11 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             UNIQUE (tenant_id, name)
         )
     """)
+    # Idempotent default for a pre-existing dev DB whose CREATE landed
+    # before the design said ``auth_mode`` should default.
+    await conn.execute(
+        "ALTER TABLE mcp_servers ALTER COLUMN auth_mode SET DEFAULT 'service'"
+    )
 
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
