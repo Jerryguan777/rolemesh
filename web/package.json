@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "openapi:gen": "openapi-typescript ./openapi.yaml -o ./src/api/generated/types.ts",
-    "openapi:check": "openapi-typescript ./openapi.yaml -o /tmp/rm-openapi-types.ts && diff -u ./src/api/generated/types.ts /tmp/rm-openapi-types.ts"
+    "openapi:check": "openapi-typescript ./openapi.yaml -o /tmp/rm-openapi-types.ts && diff -u ./src/api/generated/types.ts /tmp/rm-openapi-types.ts",
+    "test": "vitest run"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.1",
@@ -17,6 +18,7 @@
     "openapi-typescript": "^7.13.0",
     "tailwindcss": "^4",
     "typescript": "^5.7",
-    "vite": "^6"
+    "vite": "^6",
+    "vitest": "^4.1.7"
   }
 }
