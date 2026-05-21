@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 
 from rolemesh import db
 from rolemesh.approval.engine import ApprovalEngine, ConflictError, ForbiddenError
+from rolemesh.approval.enum_translate import http_action_to_outcome
 from rolemesh.auth.bootstrap_actor import resolve_actor_user_id
 from rolemesh.auth.permissions import AgentPermissions
 from rolemesh.auth.provider import AuthenticatedUser
@@ -964,11 +965,22 @@ async def decide_approval_ep(
     if req is None:
         raise HTTPException(status_code=404, detail="Approval not found")
     actor = await resolve_actor_user_id(user.tenant_id, user.user_id)
+    # INV-7: translate the HTTP wire enum into the engine outcome at
+    # this boundary so engine code never sees a wire literal. The
+    # Pydantic regex already constrains ``body.action`` to
+    # ``approve|reject``; ``http_action_to_outcome`` raises
+    # ``ValueError`` on any drift, which propagates as 500 — a
+    # surface we *want* to break loudly rather than silently fall
+    # back to "approved".
+    try:
+        outcome = http_action_to_outcome(body.action)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     try:
         updated = await engine.handle_decision(
             request_id=request_id,
             tenant_id=user.tenant_id,
-            action=body.action,
+            outcome=outcome,
             user_id=actor,
             note=_sanitize_note(body.note),
         )

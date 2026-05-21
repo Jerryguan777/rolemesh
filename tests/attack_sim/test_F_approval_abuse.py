@@ -130,7 +130,7 @@ async def test_F1_non_approver_cannot_decide(fake_publisher, fake_channel) -> No
         await engine.handle_decision(
             request_id=request_id,
             tenant_id=victim.tenant_id,
-            action="approve",
+            outcome="approved",
             user_id=attacker.id,
         )
 
@@ -183,10 +183,10 @@ async def test_F2_concurrent_approve_wins_once(fake_publisher, fake_channel) -> 
 
     results = await asyncio.gather(
         engine.handle_decision(
-            request_id=req.id, tenant_id=victim.tenant_id, action="approve", user_id=victim.owner_user_id
+            request_id=req.id, tenant_id=victim.tenant_id, outcome="approved", user_id=victim.owner_user_id
         ),
         engine.handle_decision(
-            request_id=req.id, tenant_id=victim.tenant_id, action="reject", user_id=other_approver.id
+            request_id=req.id, tenant_id=victim.tenant_id, outcome="rejected", user_id=other_approver.id
         ),
         return_exceptions=True,
     )
@@ -260,7 +260,7 @@ async def test_F3_self_promotion_cannot_reach_prior_pending(
 
     with pytest.raises(ForbiddenError):
         await engine.handle_decision(
-            request_id=req.id, tenant_id=victim.tenant_id, action="approve", user_id=attacker.id
+            request_id=req.id, tenant_id=victim.tenant_id, outcome="approved", user_id=attacker.id
         )
 
 
@@ -282,7 +282,7 @@ async def test_F4_decided_event_replay_does_not_double_execute(
     engine = _engine(fake_publisher, fake_channel)
     request_id, approver_id = await _seed_approver_and_pending(victim, engine)
     await engine.handle_decision(
-        request_id=request_id, tenant_id=victim.tenant_id, action="approve", user_id=approver_id
+        request_id=request_id, tenant_id=victim.tenant_id, outcome="approved", user_id=approver_id
     )
 
     first = await claim_approval_for_execution(request_id, tenant_id=victim.tenant_id)
@@ -451,7 +451,7 @@ async def test_F7_expire_and_approve_race_wins_once(
     async def _approver() -> Exception | None:
         try:
             await engine.handle_decision(
-                request_id=request_id, tenant_id=victim.tenant_id, action="approve", user_id=approver_id
+                request_id=request_id, tenant_id=victim.tenant_id, outcome="approved", user_id=approver_id
             )
             return None
         except Exception as exc:  # noqa: BLE001

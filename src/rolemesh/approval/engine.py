@@ -692,40 +692,55 @@ class ApprovalEngine:
         *,
         request_id: str,
         tenant_id: str,
-        action: str,
+        outcome: str,
         user_id: str,
         note: str | None = None,
     ) -> ApprovalRequest:
         """Process an approve/reject decision.
 
-        Single-query CTE disambiguates 403 (not approver) vs 409 (already
-        resolved) vs 200 (success) without a second round-trip. The audit
-        row is written atomically inside the same transaction by the DB
-        trigger — no "ghost decision" window.
+        ``outcome`` is the engine-internal ``ApprovalOutcome`` enum
+        value (``"approved"`` or ``"rejected"``). Wire-side
+        callers must translate the inbound enum at the handler
+        boundary via :mod:`rolemesh.approval.enum_translate` —
+        engine code never sees the HTTP / WS string (INV-7).
 
-        ``tenant_id`` filters the underlying SELECT/UPDATE so a forged
-        request_id from another tenant returns "missing" rather than
-        leaking decision power.
+        Single-query CTE disambiguates 403 (not approver) vs 409
+        (already resolved) vs 200 (success) without a second
+        round-trip. The audit row is written atomically inside the
+        same transaction by the DB trigger — no "ghost decision"
+        window.
+
+        ``tenant_id`` filters the underlying SELECT/UPDATE so a
+        forged request_id from another tenant returns "missing"
+        rather than leaking decision power.
         """
-        if action not in ("approve", "reject"):
-            raise ValueError(f"Unknown decision action: {action}")
-        new_status = "approved" if action == "approve" else "rejected"
+        if outcome not in ("approved", "rejected"):
+            raise ValueError(
+                f"handle_decision requires an engine ApprovalOutcome "
+                f"of 'approved' or 'rejected'; got {outcome!r}. "
+                f"Use rolemesh.approval.enum_translate at the wire "
+                f"boundary to map HTTP action / WS decision first."
+            )
+        new_status = outcome
 
-        outcome = await decide_approval_request_full(
+        outcome_record = await decide_approval_request_full(
             request_id,
             tenant_id=tenant_id,
             new_status=new_status,
             actor_user_id=user_id,
             note=note,
         )
-        if outcome.kind == "missing":
+        if outcome_record.kind == "missing":
             raise LookupError("approval request not found")
-        if outcome.kind == "forbidden":
+        if outcome_record.kind == "forbidden":
             raise ForbiddenError()
-        if outcome.kind == "conflict":
-            assert outcome.current_status is not None
-            raise ConflictError(outcome.current_status)
-        assert outcome.kind == "updated" and outcome.request is not None
+        if outcome_record.kind == "conflict":
+            assert outcome_record.current_status is not None
+            raise ConflictError(outcome_record.current_status)
+        assert (
+            outcome_record.kind == "updated"
+            and outcome_record.request is not None
+        )
 
         # Fan out to the Worker regardless of outcome. The Worker claims
         # approved rows + executes; for rejected it just delivers the
@@ -734,7 +749,7 @@ class ApprovalEngine:
         await self._publish_decided(
             request_id, tenant_id=tenant_id, status=new_status, note=note
         )
-        return outcome.request
+        return outcome_record.request
 
     async def _publish_decided(
         self,

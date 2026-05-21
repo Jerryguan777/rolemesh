@@ -553,7 +553,7 @@ class TestDecision:
         updated = await engine.handle_decision(
             request_id=req.id,
             tenant_id=req.tenant_id,
-            action="approve",
+            outcome="approved",
             user_id=user_id,
         )
         assert updated.status == "approved"
@@ -592,7 +592,7 @@ class TestDecision:
         await engine.handle_decision(
             request_id=req.id,
             tenant_id=req.tenant_id,
-            action="reject",
+            outcome="rejected",
             user_id=user_id,
             note="not this quarter",
         )
@@ -628,14 +628,14 @@ class TestDecision:
         await engine.handle_decision(
             request_id=req.id,
             tenant_id=req.tenant_id,
-            action="approve",
+            outcome="approved",
             user_id=user_id,
         )
         with pytest.raises(ConflictError):
             await engine.handle_decision(
                 request_id=req.id,
                 tenant_id=req.tenant_id,
-                action="reject",
+                outcome="rejected",
                 user_id=user_id,
             )
 
@@ -667,7 +667,7 @@ class TestDecision:
             await engine.handle_decision(
                 request_id=req.id,
                 tenant_id=req.tenant_id,
-                action="approve",
+                outcome="approved",
                 user_id=outsider.id,
             )
 
@@ -706,7 +706,7 @@ class TestCancelAndMaintenance:
         await engine.handle_decision(
             request_id=first_id,
             tenant_id=reqs[0].tenant_id,
-            action="approve",
+            outcome="approved",
             user_id=user_id,
         )
         # Cancel the job.
