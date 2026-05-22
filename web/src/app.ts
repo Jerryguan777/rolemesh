@@ -15,6 +15,9 @@ import './components/credentials-page.js';
 import './components/mcp-servers-page.js';
 import './components/models-page.js';
 import './components/approvals-page.js';
+import './components/skills-page.js';
+import './components/skill-detail-page.js';
+import './components/coworker-skills-tab.js';
 import './components/inline-approval.js';
 import './components/app-shell.js';
 import {

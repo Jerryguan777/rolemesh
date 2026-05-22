@@ -44,6 +44,14 @@ export type ApprovalAuditEntry =
   components['schemas']['ApprovalAuditEntry'];
 export type ApprovalDecide = components['schemas']['ApprovalDecide'];
 export type ApprovalListScope = 'mine' | 'all';
+export type Skill = components['schemas']['Skill'];
+export type SkillSummary = components['schemas']['SkillSummary'];
+export type SkillCreate = components['schemas']['SkillCreate'];
+export type SkillUpdate = components['schemas']['SkillUpdate'];
+export type SkillFile = components['schemas']['SkillFile'];
+export type SkillFileUpsert = components['schemas']['SkillFileUpsert'];
+export type CoworkerSkillBinding =
+  components['schemas']['CoworkerSkillBinding'];
 
 export type ErrorResponseBody =
   paths['/api/v1/runs/{id}/cancel']['post']['responses']['409']['content']['application/json'];
@@ -318,6 +326,120 @@ export class ApiClient {
 
   /** Returns `{ ok: true }` on 202, `{ ok: false, alreadyTerminal: true }`
    *  on 409 `ALREADY_TERMINAL`. Other failures throw `ApiError`. */
+  // ------------------------------------------------------------------
+  // Skills (design §3 Phase 3)
+  // ------------------------------------------------------------------
+
+  async listSkills(): Promise<SkillSummary[]> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/skills`, {
+      method: 'GET',
+      headers: this.headers(),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as SkillSummary[];
+  }
+
+  async getSkill(id: string): Promise<Skill> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/skills/${encodeURIComponent(id)}`,
+      { method: 'GET', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Skill;
+  }
+
+  async createSkill(body: SkillCreate): Promise<Skill> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/skills`, {
+      method: 'POST',
+      headers: this.headers({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Skill;
+  }
+
+  async updateSkill(id: string, body: SkillUpdate): Promise<Skill> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/skills/${encodeURIComponent(id)}`,
+      {
+        method: 'PATCH',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(body),
+      },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Skill;
+  }
+
+  async deleteSkill(id: string): Promise<void> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/skills/${encodeURIComponent(id)}`,
+      { method: 'DELETE', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+  }
+
+  /** Path segments are NOT URL-encoded — the server's
+   *  ``{path:path}`` matcher accepts slashes, and an encoded ``%2F``
+   *  would render the wrong path. Callers must validate path shape
+   *  upstream (`SKILL_FILE_PATH_RE`) before reaching here. */
+  async putSkillFile(
+    skillId: string,
+    path: string,
+    body: SkillFileUpsert,
+  ): Promise<SkillFile> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/skills/${encodeURIComponent(skillId)}/files/${path}`,
+      {
+        method: 'PUT',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(body),
+      },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as SkillFile;
+  }
+
+  async deleteSkillFile(skillId: string, path: string): Promise<void> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/skills/${encodeURIComponent(skillId)}/files/${path}`,
+      { method: 'DELETE', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+  }
+
+  async listCoworkerSkills(coworkerId: string): Promise<CoworkerSkillBinding[]> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(coworkerId)}/skills`,
+      { method: 'GET', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as CoworkerSkillBinding[];
+  }
+
+  async enableCoworkerSkill(
+    coworkerId: string, skillId: string,
+  ): Promise<CoworkerSkillBinding> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(coworkerId)}` +
+      `/skills/${encodeURIComponent(skillId)}`,
+      { method: 'POST', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as CoworkerSkillBinding;
+  }
+
+  async disableCoworkerSkill(
+    coworkerId: string, skillId: string,
+  ): Promise<void> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(coworkerId)}` +
+      `/skills/${encodeURIComponent(skillId)}`,
+      { method: 'DELETE', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+  }
+
   async cancelRun(
     runId: string,
   ): Promise<{ ok: boolean; alreadyTerminal: boolean }> {

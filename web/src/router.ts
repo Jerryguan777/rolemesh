@@ -96,9 +96,11 @@ export const ROUTES: readonly RouteDef[] = [
     label: 'Skills',
     hash: '#/skills',
     prefixes: ['#/skills'],
-    phase: 3,
+    // Phase 3 landed in 03b PR 4; the placeholder is replaced by the
+    // live catalog page.
+    phase: null,
     inSidebar: true,
-    render: () => html`<rm-coming-soon label="Skills" phase=${3}></rm-coming-soon>`,
+    render: () => html`<rm-skills-page></rm-skills-page>`,
   },
   {
     id: 'credentials',
