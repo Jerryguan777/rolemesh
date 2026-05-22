@@ -123,9 +123,11 @@ export const ROUTES: readonly RouteDef[] = [
     label: 'Approvals',
     hash: '#/approvals',
     prefixes: ['#/approvals'],
-    phase: 3,
+    // Phase 3 landed in 03a; the placeholder is replaced by the
+    // live queue page.
+    phase: null,
     inSidebar: true,
-    render: () => html`<rm-coming-soon label="Approvals" phase=${3}></rm-coming-soon>`,
+    render: () => html`<rm-approvals-page></rm-approvals-page>`,
   },
   {
     id: 'safety-rules',

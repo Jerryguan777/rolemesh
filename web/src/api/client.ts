@@ -36,6 +36,15 @@ export type CredentialUpsert = components['schemas']['CredentialUpsert'];
 export type MCPServer = components['schemas']['MCPServer'];
 export type MCPServerCreate = components['schemas']['MCPServerCreate'];
 export type MCPServerUpdate = components['schemas']['MCPServerUpdate'];
+export type ApprovalPolicy = components['schemas']['ApprovalPolicy'];
+export type ApprovalRequest = components['schemas']['ApprovalRequest'];
+export type ApprovalRequestDetail =
+  components['schemas']['ApprovalRequestDetail'];
+export type ApprovalAuditEntry =
+  components['schemas']['ApprovalAuditEntry'];
+export type ApprovalDecide = components['schemas']['ApprovalDecide'];
+export type ApprovalListScope = 'mine' | 'all';
+
 export type ErrorResponseBody =
   paths['/api/v1/runs/{id}/cancel']['post']['responses']['409']['content']['application/json'];
 
@@ -258,6 +267,53 @@ export class ApiClient {
       { method: 'DELETE', headers: this.headers() },
     );
     if (!resp.ok) throw await this.parseError(resp);
+  }
+
+  // ------------------------------------------------------------------
+  // Approvals (design §3 Phase 3)
+  // ------------------------------------------------------------------
+
+  /** List approval requests. Default scope is "mine" — caller is in
+   *  ``resolved_approvers``. ``scope="all"`` requires admin+ role
+   *  (the server gates this with 403). */
+  async listApprovals(filters?: {
+    scope?: ApprovalListScope;
+    status?: string | null;
+    coworkerId?: string | null;
+  }): Promise<ApprovalRequest[]> {
+    const qs = new URLSearchParams();
+    if (filters?.scope) qs.set('scope', filters.scope);
+    if (filters?.status) qs.set('status', filters.status);
+    if (filters?.coworkerId) qs.set('coworker_id', filters.coworkerId);
+    const url = `${this.baseUrl}/api/v1/approvals${qs.size ? `?${qs}` : ''}`;
+    const resp = await fetch(url, { method: 'GET', headers: this.headers() });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as ApprovalRequest[];
+  }
+
+  async getApproval(id: string): Promise<ApprovalRequestDetail> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/approvals/${encodeURIComponent(id)}`,
+      { method: 'GET', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as ApprovalRequestDetail;
+  }
+
+  async decideApproval(
+    id: string,
+    body: ApprovalDecide,
+  ): Promise<ApprovalRequest> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/approvals/${encodeURIComponent(id)}/decide`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(body),
+      },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as ApprovalRequest;
   }
 
   /** Returns `{ ok: true }` on 202, `{ ok: false, alreadyTerminal: true }`
