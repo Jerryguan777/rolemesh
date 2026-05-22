@@ -5,9 +5,9 @@
 // management, etc.) are still served at `/api/admin/*` during Phase
 // 1; chat MUST be on `/api/v1/*`. To keep that invariant from
 // silently regressing we scan `web/src/` and fail on any literal
-// `/api/admin/` match outside of the safety pages (which still talk
-// to the legacy admin routes — Phase 4 will migrate them) and this
-// scanner itself.
+// `/api/admin/` match outside of the safety pages (which call the
+// admin surface for writes — see ALLOWLIST below) and this scanner
+// itself.
 //
 // Run as: `npm run lint:no-admin-chat`
 // Exits 0 on clean, 1 on violation.
@@ -19,14 +19,28 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..', 'src');
 
-// Files that are *allowed* to mention `/api/admin/` because they
-// own the (yet-to-migrate) safety admin surface. Listed by path
-// suffix relative to `web/src/` so renames within the safety
-// component don't silently re-open the loophole.
+// Files that are *allowed* to mention `/api/admin/` because the
+// design keeps a subset of safety calls on the admin surface
+// permanently. Listed by path suffix relative to `web/src/` so
+// renames within the safety component don't silently re-open the
+// loophole.
+//
+// Safety writes (create/update/delete rules) and the CSV export
+// stay on `/api/admin/*` by design (`docs/webui-backend-v1.1-design.md`
+// §3 Phase 4 — v1 surface is GET-only for safety). The 04 session's
+// frontend migration switched safety READS to the typed v1 ApiClient
+// but writes intentionally remain admin-only, so this allowlist
+// stays permanently rather than being a temporary Phase 4 staging
+// state. The 01c Findings note that hoped to clear this allowlist
+// after 04 was over-optimistic — refreshed by 04.
 const ALLOWLIST = new Set([
-  // Safety pages still call the admin surface (Phase 4 migration).
+  // Safety rule writes (POST/PATCH/DELETE) stay on admin per design
+  // §3 Phase 4 — rule mutation is an admin-privileged operation.
   'components/safety-rules-page.ts',
+  // Decisions CSV export + the cached tenant_id helper used to build
+  // the CSV URL stay on admin (CSV not migrated to v1).
   'components/safety-decisions-page.ts',
+  // The shared admin client for the two pages above.
   'services/safety-admin-client.ts',
 ]);
 

@@ -768,8 +768,9 @@ export interface paths {
         /**
          * List safety rules for the caller's tenant
          * @description Phase 4 (design §3) — GET-only on the v1 surface. Writes
-         *     (create/update/delete) stay on `/api/admin/safety/rules`
-         *     because rule mutation is an admin-only operation.
+         *     (create/update/delete) stay on the admin surface because
+         *     rule mutation is an admin-only operation; see the design
+         *     doc for the locked decision.
          */
         get: operations["listSafetyRules"];
         put?: never;

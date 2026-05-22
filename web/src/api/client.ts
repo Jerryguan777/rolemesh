@@ -52,6 +52,17 @@ export type SkillFile = components['schemas']['SkillFile'];
 export type SkillFileUpsert = components['schemas']['SkillFileUpsert'];
 export type CoworkerSkillBinding =
   components['schemas']['CoworkerSkillBinding'];
+export type SafetyRule = components['schemas']['SafetyRule'];
+export type SafetyCheck = components['schemas']['SafetyCheck'];
+export type SafetyDecision = components['schemas']['SafetyDecision'];
+export type SafetyDecisionPage =
+  components['schemas']['SafetyDecisionPage'];
+export type SafetyRuleAuditEntry =
+  components['schemas']['SafetyRuleAuditEntry'];
+export type SafetyStage = components['schemas']['SafetyStage'];
+export type SafetyVerdictAction =
+  components['schemas']['SafetyVerdictAction'];
+export type SafetyFinding = components['schemas']['SafetyFinding'];
 
 export type ErrorResponseBody =
   paths['/api/v1/runs/{id}/cancel']['post']['responses']['409']['content']['application/json'];
@@ -438,6 +449,94 @@ export class ApiClient {
       { method: 'DELETE', headers: this.headers() },
     );
     if (!resp.ok) throw await this.parseError(resp);
+  }
+
+  // ------------------------------------------------------------------
+  // Safety (design §3 Phase 4 — GET-only on v1)
+  //
+  // Writes (POST/PATCH/DELETE /safety/rules) stay on the admin
+  // surface; see services/safety-admin-client.ts for that path. The
+  // lint guard in scripts/lint-no-admin-chat.mjs allowlists the three
+  // safety-related files so write paths can keep using admin.
+  // ------------------------------------------------------------------
+
+  async listSafetyRules(filters?: {
+    coworkerId?: string | null;
+    stage?: SafetyStage | null;
+    enabled?: boolean | null;
+  }): Promise<SafetyRule[]> {
+    const qs = new URLSearchParams();
+    if (filters?.coworkerId) qs.set('coworker_id', filters.coworkerId);
+    if (filters?.stage) qs.set('stage', filters.stage);
+    if (filters?.enabled !== undefined && filters.enabled !== null) {
+      qs.set('enabled', String(filters.enabled));
+    }
+    const url = `${this.baseUrl}/api/v1/safety/rules${qs.size ? `?${qs}` : ''}`;
+    const resp = await fetch(url, { method: 'GET', headers: this.headers() });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as SafetyRule[];
+  }
+
+  async getSafetyRule(id: string): Promise<SafetyRule> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/safety/rules/${encodeURIComponent(id)}`,
+      { method: 'GET', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as SafetyRule;
+  }
+
+  async listSafetyRuleAudit(
+    ruleId: string,
+    limit = 200,
+  ): Promise<SafetyRuleAuditEntry[]> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/safety/rules/${encodeURIComponent(ruleId)}/audit?limit=${limit}`,
+      { method: 'GET', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as SafetyRuleAuditEntry[];
+  }
+
+  async listSafetyChecks(): Promise<SafetyCheck[]> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/safety/checks`, {
+      method: 'GET',
+      headers: this.headers(),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as SafetyCheck[];
+  }
+
+  async listSafetyDecisions(filters?: {
+    verdictAction?: SafetyVerdictAction | null;
+    coworkerId?: string | null;
+    stage?: SafetyStage | null;
+    fromTs?: string | null;
+    toTs?: string | null;
+    limit?: number;
+    offset?: number;
+  }): Promise<SafetyDecisionPage> {
+    const qs = new URLSearchParams();
+    if (filters?.verdictAction) qs.set('verdict_action', filters.verdictAction);
+    if (filters?.coworkerId) qs.set('coworker_id', filters.coworkerId);
+    if (filters?.stage) qs.set('stage', filters.stage);
+    if (filters?.fromTs) qs.set('from_ts', filters.fromTs);
+    if (filters?.toTs) qs.set('to_ts', filters.toTs);
+    if (filters?.limit !== undefined) qs.set('limit', String(filters.limit));
+    if (filters?.offset !== undefined) qs.set('offset', String(filters.offset));
+    const url = `${this.baseUrl}/api/v1/safety/decisions${qs.size ? `?${qs}` : ''}`;
+    const resp = await fetch(url, { method: 'GET', headers: this.headers() });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as SafetyDecisionPage;
+  }
+
+  async getSafetyDecision(id: string): Promise<SafetyDecision> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/safety/decisions/${encodeURIComponent(id)}`,
+      { method: 'GET', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as SafetyDecision;
   }
 
   async cancelRun(
