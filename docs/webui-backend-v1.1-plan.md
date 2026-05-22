@@ -62,7 +62,7 @@ Phase 4   04  (safety UI to v1)
 | 03a | Approvals 迁 v1 + 多 user smoke | done | 2026-05-21 | 3 commits on feat/ui; /api/v1/approval-policies + /api/v1/approvals + WS event.approval.{required,resolved} + queue page + chat-panel inline bridge; INV-4 + INV-7 + RLS pinned (158 tests) |
 | 03b | Skills per-tenant 迁移 + UI | done | 2026-05-21 | 4 commits on feat/ui; drop `skills.coworker_id` + reader/writer cutover (PR 1) + `Skill.created_by` → `created_by_user_id` (PR 2) + `/api/v1/skills/*` + INV-5 lint + `web.coworker.skills_changed` subscriber (PR 3) + `<rm-skills-page>` + `<rm-skill-detail-page>` + `<rm-coworker-skills-tab>` (PR 4) |
 | 03+ | (retired) drop `coworkers.tools` 列 | retired | 2026-05-21 | greenfield 吸收：tools → 02b；skills.coworker_id → 03b |
-| 04 | Safety UI 迁 v1 | not started | — | 基本搬迁 |
+| 04 | Safety UI 迁 v1 | done | 2026-05-21 | 3 commits on feat/ui; 6 v1 GET endpoints (rules / checks / decisions + audit) + frontend read switch to typed ApiClient (writes + CSV stay admin per design §3 Phase 4) + admin GET Sunset / Deprecation / Link headers (sunset 2026-11-17); 21 integration tests + 7 contract tests + 7 vitest routing tests |
 
 更新方法：手动维护此表。每个 session 完成后填 ✅ + 日期。
 
