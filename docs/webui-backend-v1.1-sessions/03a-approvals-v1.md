@@ -243,4 +243,101 @@ async def decide_approval(request_id: str, body: DecideRequest, user: Authentica
 
 ## Findings (after execution)
 
-_(empty — 重点记录：现有 admin endpoints 搬迁完整度、WS fan-out subject 模式最终选择、chat-panel inline bridge 实现路径、INV-4 端到端 audit 验证结果、对 03b 的影响（如有））_
+### 落地概要
+
+- 3 个独立 commit 累在 `feat/ui`（按 PR 1/2/3 拆）
+- 总测试：158 个相关测试全绿（approval + webui + openapi + audit）
+- 前端 vitest：31 个用例（之前 13 → +18）
+- Pre-existing TS errors in `credentials-page.ts` / `mcp-servers-page.ts` 与本 session 无关；新组件类型检查干净
+
+### 1. Admin endpoints 搬迁完整度
+
+`/api/admin/approval-policies` 与 `/api/admin/approvals` 保留 6 个月兼容期（设计 §3 + open question 锁定），未删除。v1 surface 完整覆盖：
+
+| Admin endpoint | v1 endpoint | 字段差异 |
+|---|---|---|
+| `GET /approval-policies` (`coworker_id?` / `enabled?`) | `GET /api/v1/approval-policies` | 完全一致 |
+| `POST /approval-policies` | `POST /api/v1/approval-policies` | v1 加 cross-tenant `coworker_id` 422 守卫；admin 没有 |
+| `GET / PATCH / DELETE /approval-policies/{id}` | 同 | DELETE 行为相同（SET NULL 由 schema 保证）|
+| `GET /approvals` (`status?` / `coworker_id?`) | `GET /api/v1/approvals` | **新增 `scope=mine\|all`**；默认 `mine`（caller in `resolved_approvers`），`all` 需要 `view_all_conversations` 否则 403 |
+| `GET /approvals/{id}` | 同 | audit_log inline 一致 |
+| `GET /approvals/{id}/audit-log` | 同 | 完全一致 |
+| `POST /approvals/{id}/decide` | 同 | v1 用 `raise_error_response` envelope；admin 用 `HTTPException(detail=str)` |
+
+**Engine 共享**：`webui.v1.approval_engine_registry.{set,get}_approval_engine` 把进程级 engine 句柄从 `webui.admin._approval_engine` 提取出来，admin 模块 re-export `set_approval_engine` 名以保持 `webui.main.lifespan` 不变。v1 模块直接读 registry。两边走同一份 engine 实例，无双实现。
+
+**附带 fix**：admin 的 `ApprovalRequestResponse.policy_id` 从 `str` 收窄为 `str | None`（兼容现有 SET NULL 行为；之前是潜在 `"None"` bug），同步收窄 `rolemesh.approval.types.ApprovalRequest.policy_id`、`rolemesh.db.approval._record_to_approval_request` 解析路径。
+
+### 2. WS fan-out subject 模式
+
+按 prompt 锁定走**双发布**：
+
+- `web.approval.required.{conversation_id}` —— 单发布（一个 pending 行天然属于一个对话）
+- `web.approval.resolved.conv.{conversation_id}` + `web.approval.resolved.req.{approval_id}` —— **每个 decision 同时发两个 subject**
+
+实际遇到的 conversation：alice 与 bob 在**同一个对话**里就够（alice 在 chat panel 发起，bob 通过 channel notification 拿到 inline approval → click 内嵌 approve → engine.handle_decision → 双发布 → conv.{conv_id} 让 alice 的 WS 拿到 resolved）。
+
+**queue page WS 没接**——简化决策：queue page 是 cross-conversation 的，没有"一个 conv 的 WS"能挂；同时 design §6.3 I 也不要求实时。改用 **15s REST 轮询**（`ApprovalsPage.REFRESH_INTERVAL_MS`），加上 decide 后立刻 refresh。`req.{approval_id}` subject 留着，为后续 audit follower / queue page 升级到 SSE 时备用，不变 schema。
+
+### 3. chat-panel inline bridge 实现位置
+
+按 open question 3 锁定走**独立 component** `<rm-inline-approval>` (`web/src/components/inline-approval.ts`)：
+
+- 同时被 chat-panel + approvals-page import；同一份 markup 渲染两处
+- 组件只管自己的 busy/error/status 三态，emit `rm-approval-decided` CustomEvent 让父级决定后续动作（chat-panel 啥也不做、approvals-page 重 fetch）
+- 不订阅 WS——父组件负责把 `event.approval.resolved` 翻译成 `setStatus(...)` 调用，避免多个组件抢同一个事件
+- 单测覆盖：button click → typed `ApiClient.decideApproval` / setStatus → DOM 反映 / can-decide=false 隐藏按钮
+
+chat-panel 维持一个 `Map<approval_id, {…, status}>` state，在 message-list 与 message-editor 之间渲染一组 inline card。switch conversation 时清空。
+
+### 4. INV-4 端到端 audit 验证
+
+测试 `tests/webui/test_v1_approvals.py::TestDecide::test_approve_writes_audit_row_with_real_actor_uuid` + `test_reject_…` + `test_bootstrap_token_decide_falls_back_to_tenant_owner` 直接 `SELECT actor_user_id FROM approval_audit_log` 验证：
+
+- alice 真 UUID 发起 / bob 真 UUID approve → audit row `actor_user_id = bob.id`（pin 过 `uuid.UUID(actor_user_id)` 解析成功）
+- bob 真 UUID reject 同理
+- bootstrap 单 token (`user_id="bootstrap"` 字面量) → helper fallback 到 tenant owner UUID 写入 audit
+- bootstrap 单 token + 无 owner → `503 BOOTSTRAP_NEEDS_TENANT_OWNER` envelope（不写 audit 不破 FK）
+
+WS 路径 `_handle_request_approval` 也过 `resolve_actor_user_id`：BootstrapActorError 转 `event.run.error` frame，code = `BOOTSTRAP_NEEDS_TENANT_OWNER`，端到端 pin 在 `test_v1_ws_approval.py::TestRequestApprovalHandler::test_bootstrap_no_owner_surfaces_503_envelope`。
+
+### 5. INV-7 grep 验证
+
+`tests/webui/test_v1_ws_approval.py::test_inv7_no_wire_strings_in_engine` 在 `src/rolemesh/approval/engine.py` + `executor.py` grep `'approve'|'deny'|'reject'`（带引号），忽略注释行。当前结果：**0 violations**。
+
+手动验证：`engine.py:418` 有 `# "deny"` 注释（被 grep 跳过）。所有 wire string 都集中在 `src/rolemesh/approval/enum_translate.py` 的三个翻译函数。
+
+### 6. WS event 是 additive 通知
+
+`notification.py`（channel-based 发 inline message 给 approver）**未触碰**。WS handler 通过新 NATS subject 增加 additive 通道，断了走 channel 兜底——chat-panel 收 channel inline message 后会通过 channel 端到端展示 approval 状态（这部分是已存在路径，不在 03a 范围）。
+
+### 7. 对 03b 的影响
+
+- `webui.v1.approval_engine_registry` 模块新增，03b 的 skills per-tenant session **不需要**它；隔离干净
+- ApprovalEngine `_publish_web_required` / `_publish_web_resolved` 是 best-effort（NATS 失败只 log）；如果 03b 引入新的 engine 入口（不太可能），同样应该过这两个 publish hook
+- `webui.schemas_v1` 多 8 个 approval 相关类型——schema 文件 ~600 行，仍可读
+- chat-panel 已经 import `<rm-inline-approval>`；03b 若需要 inline skill prompt 之类的，可以参照独立组件 + parent dispatch event 的模式
+- `ApprovalRequest.policy_id` widening (`str → str | None`) 在 `src/rolemesh/approval/types.py` 与 admin `ApprovalRequestResponse` 同步——所有下游消费者只会变更"更宽松"，不破 caller
+
+### 8. Frontend 状态
+
+- `npm test`: 31/31 通过
+- `npm run build`: 通过
+- `npm run lint:no-admin-chat`: clean
+- `npm run openapi:gen` + commit 已同步
+- TS 错误：仅 pre-existing 的 `credentials-page.ts` + `mcp-servers-page.ts`（与本 session 无关）
+
+### 9. Phase 3 smoke 5 步流程
+
+`tests/webui/test_v1_approvals.py::TestDecide` + `tests/webui/test_v1_ws_approval.py` 已经覆盖等价的 11 个端到端断言：
+
+- alice 真 UUID 发起 + bob 真 UUID approve（DB audit row 真 UUID）
+- alice 真 UUID 发起 + bob 真 UUID reject（DB audit row 真 UUID）
+- bootstrap fallback → tenant owner UUID
+- 403 非 approver、409 已 decided、404 跨 tenant、422 无效 action
+- WS request.approval → engine.handle_decision（同一 engine 实例）
+- WS event.approval.resolved 双 subject 发布（`conv.{id}` + `req.{id}`）
+- 引擎 outcome `rejected` 翻译为 WS 线 `deny`
+- safety path 也发 web.approval.required
+
+需要真实 docker + nats 跑 5 步浏览器流程的 live smoke 留给 03b 之后的合并验证：把 BOOTSTRAP_USERS env 设成 `[{alice,owner},{bob,owner}]` → 起 dev backend + frontend → 两个浏览器 tab 走完。本 session 的单元 + 集成测试已经覆盖关键不变量；浏览器流程只验 UI 渲染，不验业务正确性。
