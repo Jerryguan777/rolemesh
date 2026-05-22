@@ -738,3 +738,144 @@ class ApprovalDecide(BaseModel):
 
     action: ApprovalDecideAction
     note: str | None = Field(default=None, max_length=1000)
+
+
+# ---------------------------------------------------------------------------
+# Safety (design §3 Phase 4 — GET-only on v1; admin keeps writes)
+# ---------------------------------------------------------------------------
+
+
+SafetyStage = Literal[
+    "input_prompt",
+    "pre_tool_call",
+    "post_tool_result",
+    "model_output",
+    "pre_compaction",
+    "egress_request",
+]
+SafetyVerdictAction = Literal[
+    "allow",
+    "block",
+    "redact",
+    "warn",
+    "require_approval",
+]
+SafetyCheckCostClass = Literal["cheap", "slow"]
+SafetyFindingSeverity = Literal["info", "low", "medium", "high", "critical"]
+SafetyRuleAuditAction = Literal["created", "updated", "deleted"]
+
+
+class SafetyRule(BaseModel):
+    """Wire projection of a ``safety_rules`` row.
+
+    Read-only on the v1 surface: writes (create/update/delete) stay
+    on ``/api/admin/safety/rules`` per design §3 Phase 4. The schema
+    intentionally mirrors the admin response shape verbatim so a
+    future switch to v1 writes is additive.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    tenant_id: str
+    coworker_id: str | None = None
+    stage: SafetyStage
+    check_id: str
+    config: dict[str, object] = Field(default_factory=dict)
+    priority: int
+    enabled: bool
+    description: str
+    created_at: str
+    updated_at: str
+
+
+class SafetyCheck(BaseModel):
+    """One registered check, surfaced for the rule-editor UI.
+
+    ``config_schema`` is the JSON Schema the check declared (None
+    for legacy checks that accept arbitrary dicts). The UI uses it
+    to render a config form without a second round-trip.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    version: str
+    stages: list[SafetyStage]
+    cost_class: SafetyCheckCostClass
+    supported_codes: list[str] = Field(default_factory=list)
+    config_schema: dict[str, object] | None = None
+
+
+class SafetyFinding(BaseModel):
+    """One finding inside a ``SafetyDecision.findings`` array."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    severity: SafetyFindingSeverity
+    message: str
+    metadata: dict[str, object] | None = None
+
+
+class SafetyDecision(BaseModel):
+    """Wire projection of a ``safety_decisions`` row.
+
+    The list endpoint returns the same shape with ``approval_context``
+    elided (always ``None``) so list payloads stay small. The detail
+    endpoint surfaces ``approval_context`` for require_approval rows
+    within the 24-hour retention window (cleared by the retention
+    sweep — see ``cleanup_old_safety_approval_contexts``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    tenant_id: str
+    coworker_id: str | None = None
+    conversation_id: str | None = None
+    job_id: str | None = None
+    stage: SafetyStage
+    verdict_action: SafetyVerdictAction
+    triggered_rule_ids: list[str] = Field(default_factory=list)
+    findings: list[SafetyFinding] = Field(default_factory=list)
+    context_digest: str
+    context_summary: str
+    approval_context: dict[str, object] | None = None
+    created_at: str
+
+
+class SafetyDecisionPage(BaseModel):
+    """``GET /api/v1/safety/decisions`` response envelope.
+
+    Mirrors the admin shape ``{total, items}`` so the SPA renders
+    pagination without a second count call. The two-field envelope
+    is intentional even when ``total == len(items)`` — keeps the
+    list and count concerns coupled in one round-trip.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    total: int = Field(ge=0)
+    items: list[SafetyDecision] = Field(default_factory=list)
+
+
+class SafetyRuleAuditEntry(BaseModel):
+    """One row of ``safety_rules_audit`` for the rule-change timeline.
+
+    Surfaced raw so operators can answer "when was this rule disabled
+    and by whom". ``before_state`` / ``after_state`` are the full
+    snapshots the trigger captured — small enough (no large blobs
+    live on safety_rules) to ship over the wire.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    rule_id: str
+    tenant_id: str
+    action: SafetyRuleAuditAction
+    actor_user_id: str | None = None
+    before_state: dict[str, object] | None = None
+    after_state: dict[str, object] | None = None
+    created_at: str

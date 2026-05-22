@@ -758,6 +758,144 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/safety/rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List safety rules for the caller's tenant
+         * @description Phase 4 (design §3) — GET-only on the v1 surface. Writes
+         *     (create/update/delete) stay on `/api/admin/safety/rules`
+         *     because rule mutation is an admin-only operation.
+         */
+        get: operations["listSafetyRules"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/safety/rules/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        get: operations["getSafetyRule"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/safety/rules/{id}/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Change-history timeline for one safety rule
+         * @description Newest-first projection of `safety_rules_audit` for one rule.
+         *     Returns 404 if the rule does not exist in the caller's
+         *     tenant — RLS on the audit table prevents cross-tenant
+         *     existence leaks, and the explicit 404 keeps UUID guessing
+         *     from yielding an empty 200 that signals "wrong tenant".
+         */
+        get: operations["listSafetyRuleAudit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/safety/checks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Registered safety checks (rule-editor metadata)
+         * @description Stable-alphabetical ordering. The `config_schema` field is
+         *     the check's declared Pydantic JSON schema, used by the SPA
+         *     to render a config form without a second round-trip.
+         */
+        get: operations["listSafetyChecks"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/safety/decisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Paginated safety decisions for the caller's tenant
+         * @description Returns `{ total, items }` so the SPA renders pagination
+         *     without a second count call. `limit` is capped at 200
+         *     server-side; the admin `decisions.csv` export covers bulk
+         *     retrieval (intentionally NOT migrated to v1 per design
+         *     §3 Phase 4 — the CSV surface stays admin-only).
+         */
+        get: operations["listSafetyDecisions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/safety/decisions/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Single safety decision detail
+         * @description Cross-tenant lookups return 404 (not 403) so UUID existence
+         *     does not leak across tenants — same convention as the admin
+         *     endpoint. `approval_context` is only populated for
+         *     `verdict_action='require_approval'` rows within the 24-hour
+         *     retention window.
+         */
+        get: operations["getSafetyDecision"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1331,6 +1469,107 @@ export interface components {
              */
             action: "approve" | "reject";
             note?: string | null;
+        };
+        /** @enum {string} */
+        SafetyStage: "input_prompt" | "pre_tool_call" | "post_tool_result" | "model_output" | "pre_compaction" | "egress_request";
+        /** @enum {string} */
+        SafetyVerdictAction: "allow" | "block" | "redact" | "warn" | "require_approval";
+        /** @enum {string} */
+        SafetyCheckCostClass: "cheap" | "slow";
+        /** @enum {string} */
+        SafetyFindingSeverity: "info" | "low" | "medium" | "high" | "critical";
+        /** @enum {string} */
+        SafetyRuleAuditAction: "created" | "updated" | "deleted";
+        SafetyRule: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            tenant_id: string;
+            /**
+             * Format: uuid
+             * @description `null` means the rule is tenant-wide (applies to every
+             *     coworker). Non-null binds the rule to a single coworker.
+             */
+            coworker_id?: string | null;
+            stage: components["schemas"]["SafetyStage"];
+            check_id: string;
+            config?: {
+                [key: string]: unknown;
+            };
+            priority: number;
+            enabled: boolean;
+            description: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        SafetyCheck: {
+            id: string;
+            version: string;
+            stages: components["schemas"]["SafetyStage"][];
+            cost_class: components["schemas"]["SafetyCheckCostClass"];
+            supported_codes?: string[];
+            config_schema?: {
+                [key: string]: unknown;
+            } | null;
+        };
+        SafetyFinding: {
+            code: string;
+            severity: components["schemas"]["SafetyFindingSeverity"];
+            message: string;
+            metadata?: {
+                [key: string]: unknown;
+            } | null;
+        };
+        SafetyDecision: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            tenant_id: string;
+            /** Format: uuid */
+            coworker_id?: string | null;
+            conversation_id?: string | null;
+            job_id?: string | null;
+            stage: components["schemas"]["SafetyStage"];
+            verdict_action: components["schemas"]["SafetyVerdictAction"];
+            triggered_rule_ids?: string[];
+            findings?: components["schemas"]["SafetyFinding"][];
+            context_digest: string;
+            context_summary: string;
+            /**
+             * @description Populated only for `verdict_action='require_approval'`
+             *     rows within the 24-hour retention window — cleared by
+             *     the periodic retention sweep.
+             */
+            approval_context?: {
+                [key: string]: unknown;
+            } | null;
+            /** Format: date-time */
+            created_at: string;
+        };
+        SafetyDecisionPage: {
+            total: number;
+            items?: components["schemas"]["SafetyDecision"][];
+        };
+        SafetyRuleAuditEntry: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            rule_id: string;
+            /** Format: uuid */
+            tenant_id: string;
+            action: components["schemas"]["SafetyRuleAuditAction"];
+            /** Format: uuid */
+            actor_user_id?: string | null;
+            before_state?: {
+                [key: string]: unknown;
+            } | null;
+            after_state?: {
+                [key: string]: unknown;
+            } | null;
+            /** Format: date-time */
+            created_at: string;
         };
     };
     responses: {
@@ -2778,6 +3017,155 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+        };
+    };
+    listSafetyRules: {
+        parameters: {
+            query?: {
+                coworker_id?: string;
+                stage?: components["schemas"]["SafetyStage"];
+                enabled?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SafetyRule"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    getSafetyRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SafetyRule"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listSafetyRuleAudit: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SafetyRuleAuditEntry"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listSafetyChecks: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SafetyCheck"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    listSafetyDecisions: {
+        parameters: {
+            query?: {
+                verdict_action?: components["schemas"]["SafetyVerdictAction"];
+                coworker_id?: string;
+                stage?: components["schemas"]["SafetyStage"];
+                from_ts?: string;
+                to_ts?: string;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SafetyDecisionPage"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    getSafetyDecision: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SafetyDecision"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
         };
     };
 }

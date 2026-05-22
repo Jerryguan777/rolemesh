@@ -45,6 +45,11 @@ from webui.schemas_v1 import (
     Message,
     Model,
     Run,
+    SafetyCheck,
+    SafetyDecision,
+    SafetyDecisionPage,
+    SafetyRule,
+    SafetyRuleAuditEntry,
     Skill,
     SkillCreate,
     SkillSummary,
@@ -533,6 +538,108 @@ def test_v1_coworker_skill_binding_required_matches_pydantic_model() -> None:
     assert yaml_required == py_required, (
         f"CoworkerSkillBinding.required drift: yaml={yaml_required} "
         f"python={py_required}"
+    )
+
+
+def test_phase_4_safety_endpoints_are_present_in_yaml() -> None:
+    """04 session lands these v1 read endpoints; admin keeps writes
+    + CSV export for the duration of the compatibility window
+    (NOT listed here — design §3 Phase 4 is GET-only on v1).
+    """
+    spec = _load_spec()
+    paths = set(spec["paths"].keys())  # type: ignore[union-attr]
+    expected = {
+        "/api/v1/safety/rules",
+        "/api/v1/safety/rules/{id}",
+        "/api/v1/safety/rules/{id}/audit",
+        "/api/v1/safety/checks",
+        "/api/v1/safety/decisions",
+        "/api/v1/safety/decisions/{id}",
+    }
+    missing = expected - paths
+    assert not missing, f"yaml missing v1 safety endpoints: {sorted(missing)}"
+
+
+def test_v1_safety_rule_required_matches_pydantic_model() -> None:
+    spec = _load_spec()
+    yaml_required = set(_schema(spec, "SafetyRule")["required"])  # type: ignore[arg-type]
+    py_required = {
+        name for name, f in SafetyRule.model_fields.items() if f.is_required()
+    }
+    assert yaml_required == py_required, (
+        f"SafetyRule.required drift: yaml={yaml_required} python={py_required}"
+    )
+
+
+def test_v1_safety_check_required_matches_pydantic_model() -> None:
+    spec = _load_spec()
+    yaml_required = set(_schema(spec, "SafetyCheck")["required"])  # type: ignore[arg-type]
+    py_required = {
+        name for name, f in SafetyCheck.model_fields.items() if f.is_required()
+    }
+    assert yaml_required == py_required, (
+        f"SafetyCheck.required drift: yaml={yaml_required} python={py_required}"
+    )
+
+
+def test_v1_safety_decision_required_matches_pydantic_model() -> None:
+    spec = _load_spec()
+    yaml_required = set(_schema(spec, "SafetyDecision")["required"])  # type: ignore[arg-type]
+    py_required = {
+        name
+        for name, f in SafetyDecision.model_fields.items()
+        if f.is_required()
+    }
+    assert yaml_required == py_required, (
+        f"SafetyDecision.required drift: yaml={yaml_required} "
+        f"python={py_required}"
+    )
+
+
+def test_v1_safety_decision_page_required_matches_pydantic_model() -> None:
+    spec = _load_spec()
+    yaml_required = set(
+        _schema(spec, "SafetyDecisionPage")["required"]  # type: ignore[arg-type]
+    )
+    py_required = {
+        name
+        for name, f in SafetyDecisionPage.model_fields.items()
+        if f.is_required()
+    }
+    assert yaml_required == py_required, (
+        f"SafetyDecisionPage.required drift: yaml={yaml_required} "
+        f"python={py_required}"
+    )
+
+
+def test_v1_safety_rule_audit_entry_required_matches_pydantic_model() -> None:
+    spec = _load_spec()
+    yaml_required = set(
+        _schema(spec, "SafetyRuleAuditEntry")["required"]  # type: ignore[arg-type]
+    )
+    py_required = {
+        name
+        for name, f in SafetyRuleAuditEntry.model_fields.items()
+        if f.is_required()
+    }
+    assert yaml_required == py_required, (
+        f"SafetyRuleAuditEntry.required drift: yaml={yaml_required} "
+        f"python={py_required}"
+    )
+
+
+def test_v1_safety_stage_enum_matches_safety_types_stage() -> None:
+    """The wire-side SafetyStage Literal anchors against the engine
+    ``Stage`` enum — drift here would let the API accept a stage
+    string the engine has never heard of (silent no-op rule).
+    """
+    from rolemesh.safety.types import Stage
+
+    spec = _load_spec()
+    yaml_enum = set(_schema(spec, "SafetyStage")["enum"])  # type: ignore[arg-type]
+    code_values = {s.value for s in Stage}
+    assert yaml_enum == code_values, (
+        f"SafetyStage enum drift: yaml={yaml_enum} code={code_values}"
     )
 
 

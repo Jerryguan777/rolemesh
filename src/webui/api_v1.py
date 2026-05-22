@@ -30,6 +30,7 @@ from webui.v1.credentials import router as credentials_router
 from webui.v1.mcp_servers import router as mcp_servers_router
 from webui.v1.models import router as models_router
 from webui.v1.runs import router as runs_router
+from webui.v1.safety import router as safety_router
 from webui.v1.skills import (
     coworker_skills_router,
     skills_router,
@@ -74,3 +75,4 @@ router.include_router(approval_policies_router)
 router.include_router(approvals_router)
 router.include_router(skills_router)
 router.include_router(coworker_skills_router)
+router.include_router(safety_router)

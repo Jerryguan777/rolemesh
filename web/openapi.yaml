@@ -1243,6 +1243,186 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
 
+  /api/v1/safety/rules:
+    get:
+      tags: [Safety]
+      operationId: listSafetyRules
+      summary: List safety rules for the caller's tenant
+      description: |
+        Phase 4 (design §3) — GET-only on the v1 surface. Writes
+        (create/update/delete) stay on `/api/admin/safety/rules`
+        because rule mutation is an admin-only operation.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: coworker_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: stage
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/SafetyStage' }
+        - name: enabled
+          in: query
+          required: false
+          schema: { type: boolean }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SafetyRule' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/safety/rules/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [Safety]
+      operationId: getSafetyRule
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SafetyRule' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/safety/rules/{id}/audit:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [Safety]
+      operationId: listSafetyRuleAudit
+      summary: Change-history timeline for one safety rule
+      description: |
+        Newest-first projection of `safety_rules_audit` for one rule.
+        Returns 404 if the rule does not exist in the caller's
+        tenant — RLS on the audit table prevents cross-tenant
+        existence leaks, and the explicit 404 keeps UUID guessing
+        from yielding an empty 200 that signals "wrong tenant".
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500, default: 200 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SafetyRuleAuditEntry' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/safety/checks:
+    get:
+      tags: [Safety]
+      operationId: listSafetyChecks
+      summary: Registered safety checks (rule-editor metadata)
+      description: |
+        Stable-alphabetical ordering. The `config_schema` field is
+        the check's declared Pydantic JSON schema, used by the SPA
+        to render a config form without a second round-trip.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SafetyCheck' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/safety/decisions:
+    get:
+      tags: [Safety]
+      operationId: listSafetyDecisions
+      summary: Paginated safety decisions for the caller's tenant
+      description: |
+        Returns `{ total, items }` so the SPA renders pagination
+        without a second count call. `limit` is capped at 200
+        server-side; the admin `decisions.csv` export covers bulk
+        retrieval (intentionally NOT migrated to v1 per design
+        §3 Phase 4 — the CSV surface stays admin-only).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: verdict_action
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/SafetyVerdictAction' }
+        - name: coworker_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: stage
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/SafetyStage' }
+        - name: from_ts
+          in: query
+          required: false
+          schema: { type: string, format: date-time }
+        - name: to_ts
+          in: query
+          required: false
+          schema: { type: string, format: date-time }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SafetyDecisionPage' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/safety/decisions/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [Safety]
+      operationId: getSafetyDecision
+      summary: Single safety decision detail
+      description: |
+        Cross-tenant lookups return 404 (not 403) so UUID existence
+        does not leak across tenants — same convention as the admin
+        endpoint. `approval_context` is only populated for
+        `verdict_action='require_approval'` rows within the 24-hour
+        retention window.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SafetyDecision' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -2200,3 +2380,177 @@ components:
           type: string
           maxLength: 1000
           nullable: true
+
+    SafetyStage:
+      type: string
+      enum:
+        - input_prompt
+        - pre_tool_call
+        - post_tool_result
+        - model_output
+        - pre_compaction
+        - egress_request
+
+    SafetyVerdictAction:
+      type: string
+      enum: [allow, block, redact, warn, require_approval]
+
+    SafetyCheckCostClass:
+      type: string
+      enum: [cheap, slow]
+
+    SafetyFindingSeverity:
+      type: string
+      enum: [info, low, medium, high, critical]
+
+    SafetyRuleAuditAction:
+      type: string
+      enum: [created, updated, deleted]
+
+    SafetyRule:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - stage
+        - check_id
+        - priority
+        - enabled
+        - description
+        - created_at
+        - updated_at
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        coworker_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            `null` means the rule is tenant-wide (applies to every
+            coworker). Non-null binds the rule to a single coworker.
+        stage: { $ref: '#/components/schemas/SafetyStage' }
+        check_id: { type: string }
+        config:
+          type: object
+          additionalProperties: true
+        priority: { type: integer }
+        enabled: { type: boolean }
+        description: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    SafetyCheck:
+      type: object
+      required:
+        - id
+        - version
+        - stages
+        - cost_class
+      properties:
+        id: { type: string }
+        version: { type: string }
+        stages:
+          type: array
+          items: { $ref: '#/components/schemas/SafetyStage' }
+        cost_class: { $ref: '#/components/schemas/SafetyCheckCostClass' }
+        supported_codes:
+          type: array
+          items: { type: string }
+        config_schema:
+          type: object
+          additionalProperties: true
+          nullable: true
+
+    SafetyFinding:
+      type: object
+      required: [code, severity, message]
+      properties:
+        code: { type: string }
+        severity: { $ref: '#/components/schemas/SafetyFindingSeverity' }
+        message: { type: string }
+        metadata:
+          type: object
+          additionalProperties: true
+          nullable: true
+
+    SafetyDecision:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - stage
+        - verdict_action
+        - context_digest
+        - context_summary
+        - created_at
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        coworker_id:
+          type: string
+          format: uuid
+          nullable: true
+        conversation_id:
+          type: string
+          nullable: true
+        job_id:
+          type: string
+          nullable: true
+        stage: { $ref: '#/components/schemas/SafetyStage' }
+        verdict_action: { $ref: '#/components/schemas/SafetyVerdictAction' }
+        triggered_rule_ids:
+          type: array
+          items: { type: string, format: uuid }
+        findings:
+          type: array
+          items: { $ref: '#/components/schemas/SafetyFinding' }
+        context_digest: { type: string }
+        context_summary: { type: string }
+        approval_context:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: |
+            Populated only for `verdict_action='require_approval'`
+            rows within the 24-hour retention window — cleared by
+            the periodic retention sweep.
+        created_at: { type: string, format: date-time }
+
+    SafetyDecisionPage:
+      type: object
+      required: [total]
+      properties:
+        total:
+          type: integer
+          minimum: 0
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/SafetyDecision' }
+
+    SafetyRuleAuditEntry:
+      type: object
+      required:
+        - id
+        - rule_id
+        - tenant_id
+        - action
+        - created_at
+      properties:
+        id: { type: string, format: uuid }
+        rule_id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        action: { $ref: '#/components/schemas/SafetyRuleAuditAction' }
+        actor_user_id:
+          type: string
+          format: uuid
+          nullable: true
+        before_state:
+          type: object
+          additionalProperties: true
+          nullable: true
+        after_state:
+          type: object
+          additionalProperties: true
+          nullable: true
+        created_at: { type: string, format: date-time }
