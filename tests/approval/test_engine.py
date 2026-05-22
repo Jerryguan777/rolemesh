@@ -316,7 +316,21 @@ class TestHandleProposal:
         assert audit[0].actor_user_id == user_id, (
             "proposal 'created' audit must record the originating user"
         )
-        assert pub.publishes == [], "pending request must not publish approval.decided yet"
+        decided = [
+            (s, d) for s, d in pub.publishes if s.startswith("approval.decided.")
+        ]
+        assert decided == [], (
+            "pending request must not publish approval.decided yet"
+        )
+        # 03a PR2: the engine *does* publish web.approval.required for
+        # the SPA forwarder; assert the subject shape but don't assert
+        # the full envelope here (the per-engine integration tests
+        # exercise the body).
+        webreq = [
+            (s, d) for s, d in pub.publishes if s.startswith("web.approval.required.")
+        ]
+        assert len(webreq) == 1
+        assert webreq[0][0] == f"web.approval.required.{conv_id}"
         assert ch.sent, "at least one approver notification must be attempted"
 
     async def test_no_match_path_creates_executed_trail(self) -> None:
@@ -362,8 +376,11 @@ class TestHandleProposal:
             "system transition to 'approved' should have NULL actor"
         )
         # decided event published for Worker
-        assert len(pub.publishes) == 1
-        assert pub.publishes[0][0] == f"approval.decided.{reqs[0].id}"
+        decided = [
+            (s, d) for s, d in pub.publishes if s.startswith("approval.decided.")
+        ]
+        assert len(decided) == 1
+        assert decided[0][0] == f"approval.decided.{reqs[0].id}"
 
     async def test_empty_approvers_triggers_skipped(self) -> None:
         # Policy with no explicit approvers AND no user-agent assignment

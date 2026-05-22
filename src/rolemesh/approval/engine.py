@@ -53,6 +53,7 @@ from rolemesh.db import (
     set_approval_status,
 )
 
+from .enum_translate import outcome_to_ws_decision
 from .notification import (
     ChannelSender,
     NotificationTargetResolver,
@@ -452,7 +453,7 @@ class ApprovalEngine:
             )
             return
 
-        await self._builder.create_from_proposal(
+        req = await self._builder.create_from_proposal(
             tenant_id=tenant_id,
             coworker_id=coworker_id,
             conversation_id=conversation_id,
@@ -464,6 +465,7 @@ class ApprovalEngine:
             policy=policy,
             approvers=approvers,
         )
+        await self._publish_web_required(req)
 
     async def handle_auto_intercept(
         self,
@@ -540,7 +542,7 @@ class ApprovalEngine:
             )
             return
 
-        await self._builder.create_from_auto_intercept(
+        req = await self._builder.create_from_auto_intercept(
             tenant_id=tenant_id,
             coworker_id=coworker_id,
             conversation_id=conversation_id,
@@ -553,6 +555,7 @@ class ApprovalEngine:
             policy=policy,
             approvers=approvers,
         )
+        await self._publish_web_required(req)
 
     # -- Safety framework bridge (V2 P1.1) -------------------------------
 
@@ -683,6 +686,7 @@ class ApprovalEngine:
                         conversation_id=conv_id,
                         error=str(exc),
                     )
+        await self._publish_web_required(req)
         return req
 
     # -- Decision path ----------------------------------------------------
@@ -749,6 +753,16 @@ class ApprovalEngine:
         await self._publish_decided(
             request_id, tenant_id=tenant_id, status=new_status, note=note
         )
+        # 03a PR2: notify webui WS consumers (alice's chat WS +
+        # bob's queue page) so they refresh without polling.
+        # Independent of the worker fan-out above; a failure on
+        # either does not affect the other.
+        await self._publish_web_resolved(
+            outcome_record.request,
+            outcome=new_status,
+            actor_user_id=user_id,
+            note=note,
+        )
         return outcome_record.request
 
     async def _publish_decided(
@@ -767,6 +781,110 @@ class ApprovalEngine:
             {"tenant_id": tenant_id, "status": status, "note": note}
         ).encode()
         await self._publisher.publish(f"approval.decided.{request_id}", body)
+
+    # -- Webui-stream notifications (03a PR2) ----------------------------
+    #
+    # Two parallel publish surfaces serve very different consumers:
+    #
+    # * ``approval.decided.{request_id}`` (above) targets the executor
+    #   Worker, which claims the row and runs the MCP call.
+    # * ``web.approval.{required|resolved}.*`` (below) targets browser
+    #   WS clients via the webui's forwarder. The forwarder maps the
+    #   wire body into ``event.approval.{required|resolved}`` frames
+    #   per design §4.
+    #
+    # The two surfaces stay separate so a webui-WS-side bug cannot
+    # stall the executor (and vice versa). Both events fire from the
+    # same engine txn, but a failure on one publish does not abort the
+    # other; the worker keeps running, the SPA falls back to channel
+    # notification + manual refresh.
+
+    async def _publish_web_required(self, request: ApprovalRequest) -> None:
+        """Publish ``web.approval.required.{conversation_id}``.
+
+        Skipped silently when the request has no conversation_id
+        (e.g. proposals from a coworker without a chat surface):
+        nothing on the WS side could meaningfully consume the event.
+        """
+        if not request.conversation_id:
+            return
+        body = json.dumps(
+            {
+                "approval_id": request.id,
+                "run_id": request.job_id,
+                "tenant_id": request.tenant_id,
+                "conversation_id": request.conversation_id,
+                "summary": {
+                    "tool_name": _first_tool_name(request.actions),
+                    "args": _first_tool_args(request.actions),
+                    "mcp_server_name": request.mcp_server_name,
+                },
+            }
+        ).encode()
+        subject = f"web.approval.required.{request.conversation_id}"
+        try:
+            await self._publisher.publish(subject, body)
+        except Exception:  # noqa: BLE001 — WS notify is best-effort
+            logger.warning(
+                "approval: web.approval.required publish failed",
+                approval_id=request.id,
+                exc_info=True,
+            )
+
+    async def _publish_web_resolved(
+        self,
+        request: ApprovalRequest,
+        *,
+        outcome: str,
+        actor_user_id: str | None,
+        note: str | None,
+    ) -> None:
+        """Dual-publish ``web.approval.resolved.{conv,req}.<id>``.
+
+        * ``.conv.{conversation_id}`` lets the originating chat WS
+          (subscribed by conversation) hear the resolution without
+          knowing the approval_id.
+        * ``.req.{approval_id}`` lets a queue-page WS (subscribed by
+          approval) hear the resolution without knowing which
+          conversation it belongs to.
+
+        Both subjects carry the same body. The dual fan-out is
+        deliberate: alice's chat WS subscribes by conversation
+        (where her run is hosted), while a queue/audit follower
+        subscribes by approval id; making each side discover the
+        other's key would mean an extra DB hop per WS connection.
+        """
+        # Engine outcome (``approved`` / ``rejected`` / ``expired``
+        # / ``cancelled``) is translated to the WS wire enum at
+        # this boundary — INV-7 mandates the engine never embed a
+        # wire string in its payloads.
+        wire_decision = outcome_to_ws_decision(outcome)
+        body = json.dumps(
+            {
+                "approval_id": request.id,
+                "tenant_id": request.tenant_id,
+                "conversation_id": request.conversation_id,
+                "decision": wire_decision,
+                "actor_user_id": actor_user_id,
+                "note": note,
+            }
+        ).encode()
+        subjects: list[str] = []
+        if request.conversation_id:
+            subjects.append(
+                f"web.approval.resolved.conv.{request.conversation_id}"
+            )
+        subjects.append(f"web.approval.resolved.req.{request.id}")
+        for subject in subjects:
+            try:
+                await self._publisher.publish(subject, body)
+            except Exception:  # noqa: BLE001 — WS notify is best-effort
+                logger.warning(
+                    "approval: web.approval.resolved publish failed",
+                    approval_id=request.id,
+                    subject=subject,
+                    exc_info=True,
+                )
 
     # -- Cancellation (Stop cascade) --------------------------------------
 
@@ -899,6 +1017,33 @@ async def _tenant_owner_ids(tenant_id: str) -> list[str]:
     """Return user_ids of tenant owners."""
     users = await get_users_for_tenant(tenant_id)
     return [u.id for u in users if u.role == "owner"]
+
+
+def _first_tool_name(actions: list[dict[str, Any]]) -> str:
+    """Pull the first action's ``tool_name`` for the WS summary.
+
+    Approval requests carry a batch of actions; the SPA renders a
+    compact one-line summary that names the *primary* tool. Empty /
+    malformed batches fall back to an empty string so the wire
+    field is always present.
+    """
+    if not actions:
+        return ""
+    first = actions[0]
+    if not isinstance(first, dict):
+        return ""
+    return str(first.get("tool_name") or "")
+
+
+def _first_tool_args(actions: list[dict[str, Any]]) -> dict[str, Any]:
+    """Pull the first action's ``params`` for the WS summary."""
+    if not actions:
+        return {}
+    first = actions[0]
+    if not isinstance(first, dict):
+        return {}
+    params = first.get("params") or {}
+    return params if isinstance(params, dict) else {}
 
 
 def _tenant_matches(
