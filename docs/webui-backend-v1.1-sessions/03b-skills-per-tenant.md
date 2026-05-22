@@ -6,7 +6,7 @@
 | Prerequisites | 03a done |
 | Estimated PRs | 4 |
 | Estimated LOC | ~1500 (PR 1 greenfield 切换 + PR 2 命名对齐 + PR 3 v1 endpoints + PR 4 前端) |
-| Status | not started |
+| Status | done (2026-05-21) — 4 commits 91c277d / 0b84aba / 542c439 / eef12db on `feat/ui` |
 
 > **Refresh 起源**：03a 落地后 + greenfield 姿态全面应用，本 prompt 大改两处：
 > 1. **PR 1 改成 greenfield 一次性切换**（与 02b 同模式）：drop `skills.coworker_id` 列 + reader 全切 + writer 改 + admin auth 改 在**同一 commit**完成。原 DRAFT 的"双写期 → backfill → 03+ drop"路径不再适用。
@@ -266,6 +266,65 @@ grep -rn "skills.*coworker_id\|skill\.coworker_id\|Skill.coworker_id" src/ tests
 - [ ] `eval_runs.created_by` 当前 reader 数量（grep 确认 PR 2 排除范围）
 - [ ] `coworker_skills` junction 表当前是否真在用（00b 落地但可能没 writer——03b 是第一个真用）
 
-## Findings (after execution)
+## Findings (after execution)  `[2026-05-21]`
 
-_(empty — 重点记录：grep baseline / 实际 reader 数量、convenience helper 位置最终选择、monaco/codemirror/textarea 编辑器决策、hot-reload subscriber 实现细节、对 Phase 4 / 总结 v1.1 收尾的影响)_
+**4 commits on `feat/ui`** — 91c277d (PR 1) / 0b84aba (PR 2) / 542c439 (PR 3) / eef12db (PR 4).
+
+### Baseline grep + reader cutover (PR 1)
+
+Initial sweep returned **15 hits** outside `src/pi/` (per the spec's exclusion):
+
+```
+src/rolemesh/db/skill.py:100,180,187   ← INSERT + 2 list reads
+src/rolemesh/db/schema.py:340,343,401  ← idx + comment + trigger msg
+src/webui/admin.py:1765,1869,1890,1928 ← 4 auth checks
+tests/test_schema_alters.py:190,196,219,225 ← 4 direct INSERT
+tests/db/test_skills.py:294,357,385    ← 3 direct INSERT
+```
+
+Final grep (post-PR 1) was clean — every live access removed, only schema.py `DROP COLUMN` statements and a doc-string back-reference remain.
+
+The legacy `skills_check_coworker_tenant` SECURITY DEFINER trigger got replaced by a parallel `coworker_skills_check_tenant` trigger on the junction (same `IS DISTINCT FROM` cross-tenant guard, just rebound onto the row that now carries the relationship). Without that the test-pool's bypass-RLS access could have forged cross-tenant bindings — caught by the new `test_coworker_skills_rejects_cross_tenant_binding` test.
+
+### Admin auth helper (PR 1)
+
+Original spec named only `is_skill_enabled_for_coworker` (strict both-AND). Using that for admin auth would have **locked admins out of re-enabling a disabled skill** — the existing `test_toggle_enabled_round_trip` admin test failed when I wired it through. Added a second helper `is_skill_bound_to_coworker` (ignores enabled flags) and routed all 4 admin endpoints through it. The strict helper still ships — used by the v1 layer where projection semantics matter.
+
+This is the kind of thing the spec's "the helper auto-falls out of the read pattern" line under-specifies. Worth a line in the design doc for v2.
+
+### `created_by` rename (PR 2)
+
+Three-layer touch: Python dataclass + `_record_to_skill` mapper + Pydantic `SkillResponse`. OpenAPI yaml skill schemas didn't exist yet (PR 3 adds them), so the rename's TS-layer obligation lived in PR 3. eval_runs.created_by deliberately untouched — new `test_eval_runs_created_by_is_not_affected` is a negative-control to flag any future bulk-rename refactor.
+
+### Editor decision (Open Q 1) — textarea
+
+`web/package.json` shows only `lit / marked / tailwindcss / typescript / vite`. No monaco, no codemirror. Per prompt resolution, textarea ships now; polish chore can swap later without changing the v1 wire surface. Bundle size after PR 4: 207.34 kB raw / 49.55 kB gzipped — a monaco swap would have ~tripled that.
+
+### `create_skill_for_coworker` location (Open Q 3) — public `db/skill.py`
+
+Kept the convenience helper alongside the lower-level primitives, matching 02b's `replace_coworker_mcp_configs` placement. Admin REST and tests both reach for it; v1 endpoints don't (they're catalog-first, bind separately). One-call shape matters for fixtures more than for production code.
+
+### Hot-reload subscriber details (PR 3)
+
+- Subject: `web.coworker.skills_changed` — single-coworker scoped per spec, payload identical to `mcp_changed` (`{coworker_id, tenant_id}`).
+- Stream: same `web-ipc` JetStream stream (max_age=3600s) already created for restart/mcp_changed.
+- Durable name: `orch-web-coworker-skills-changed`.
+- Reload helper: `reload_coworker_skills_into_state(coworker_id, tenant_id, state, fetch_skills)` returns `False` when the coworker isn't in cached state — matching the `mcp_changed` posture, not the `restart` posture. The catalog edit path on the webui side fan-outs one publish per **bound** coworker (`_broadcast_skills_changed`), so a previously-unknown coworker would never receive an event anyway.
+- `CoworkerState` gained `skills: list[Skill]` populated from `list_skills_for_coworker(enabled_only=True)`. The spawn-path container projector still re-reads through `list_skills_for_coworker` directly; the cache is for future request-path code that wants the snapshot without a DB hit.
+
+### INV-5 lint scope (PR 3)
+
+Python ↔ TS only, as locked. New `web/src/api/skill_constants.ts` re-exports `SKILL_MANIFEST_NAME` and (bonus, for PR 4's form validator) the `SKILL_FILE_PATH_RE` regex + a `isValidSkillFilePath` helper. The lint test reads the TS source as text and regex-extracts the string literal — no TS execution required.
+
+### Test count
+
+- PR 1 fixture rewrite: 30 DB-layer tests (existing 17 + 13 net new on per-tenant catalog, double-AND enable, cross-tenant junction guard, helper bound-vs-enabled distinction).
+- PR 2 anti-regression: 4 tests, including the negative-control on `eval_runs.created_by`.
+- PR 3 v1 surface: 14 endpoint-level tests + 2 reload-helper unit tests + 4 contract-test required-set pins + 2 INV-5 consistency checks.
+- PR 4 frontend: 6 vitest scenarios (list view rows, create POST, manifest delete disabled, traversal rejection, enable/disable toggle round-trip).
+
+### Impact on Phase 4 / v1.1 closeout
+
+03b was the last per-entity Phase 3 piece (approvals shipped in 03a). After this, **the only outstanding session is 04 (Safety UI migration)** — a UI-only migration since the safety engine + DB already live behind the legacy admin surface. Phase 4 (orchestration / WS lifecycle hardening) inherits the hot-reload pattern fully validated by 02b + 03b: subject naming, JetStream durable, publish fan-out, reload helper. Future sessions plugging new entities into the hot-reload mesh have a template.
+
+One yellow flag: the v1 catalog DELETE returns 409 with `details.coworker_ids` but the wire UI doesn't yet bulk-unbind from the catalog page. Today the admin has to walk into each coworker detail's skills tab to unbind. Acceptable for v1.1; queue a UX polish chore.
