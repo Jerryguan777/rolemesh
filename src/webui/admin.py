@@ -1661,7 +1661,7 @@ def _skill_to_response(s: Skill, *, coworker_id: str) -> SkillResponse:
         enabled=s.enabled,
         created_at=s.created_at,
         updated_at=s.updated_at,
-        created_by=s.created_by,
+        created_by_user_id=s.created_by_user_id,
         files={
             p: SkillFileInPayload(content=f.content, mime_type=f.mime_type)
             for p, f in s.files.items()
@@ -1732,7 +1732,7 @@ async def create_skill(
         mime_type=files[SKILL_MANIFEST_NAME].mime_type or "text/markdown",
     )
     # Bootstrap admin has user_id="bootstrap" (not a real UUID).
-    # Store NULL in created_by rather than letting asyncpg blow up.
+    # Store NULL in created_by_user_id rather than letting asyncpg blow up.
     try:
         created_by_uuid: str | None = str(_uuid.UUID(user.user_id))
     except (ValueError, AttributeError):

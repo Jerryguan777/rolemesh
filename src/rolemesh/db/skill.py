@@ -72,7 +72,7 @@ def _record_to_skill(row: asyncpg.Record, files: list[SkillFile] | None = None) 
         enabled=bool(row["enabled"]),
         created_at=row["created_at"].isoformat() if row["created_at"] else "",
         updated_at=row["updated_at"].isoformat() if row["updated_at"] else "",
-        created_by=(
+        created_by_user_id=(
             str(row["created_by_user_id"])
             if row["created_by_user_id"] else None
         ),

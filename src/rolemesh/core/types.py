@@ -198,7 +198,7 @@ class Skill:
     enabled: bool = True
     created_at: str = ""
     updated_at: str = ""
-    created_by: str | None = None
+    created_by_user_id: str | None = None
     files: dict[str, SkillFile] = field(default_factory=dict)
 
 
