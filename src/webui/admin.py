@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import StreamingResponse
 
 from rolemesh import db
@@ -1192,6 +1192,39 @@ async def _validate_safety_rule_body(
                         )
 
 
+# ---------------------------------------------------------------------------
+# Phase 4 deprecation markers for the safety GET surface.
+#
+# Per design §3 Phase 4 the v1 surface owns safety reads while admin
+# keeps writes + CSV. The six admin GET endpoints below get RFC 8594
+# `Sunset` + RFC 9745 `Deprecation` + RFC 8288 `Link` headers so any
+# remaining caller (the v1.1 04 session confirmed zero non-test
+# runtime callers) gets a visible signal to migrate.
+#
+# Date is anchored to the 04 session landing day (2026-05-21) plus
+# 180 days = 2026-11-17. Hardcoded rather than computed so the
+# deprecation date does not drift with the calendar.
+# ---------------------------------------------------------------------------
+
+_SAFETY_GET_SUNSET = "Tue, 17 Nov 2026 00:00:00 GMT"
+
+
+def _mark_safety_get_deprecated(
+    response: Response, *, successor_path: str
+) -> None:
+    """Stamp the standard deprecation triple on ``response``.
+
+    ``successor_path`` is the v1 endpoint the caller should migrate
+    to — included as a ``Link: ...; rel="successor-version"`` so a
+    machine-readable upgrade hint is one fetch away.
+    """
+    response.headers["Sunset"] = _SAFETY_GET_SUNSET
+    response.headers["Deprecation"] = "true"
+    response.headers["Link"] = (
+        f'<{successor_path}>; rel="successor-version"'
+    )
+
+
 @router.post(
     "/safety/rules",
     response_model=SafetyRuleResponse,
@@ -1235,11 +1268,15 @@ async def create_safety_rule_ep(
     "/safety/rules", response_model=list[SafetyRuleResponse]
 )
 async def list_safety_rules_ep(
+    response: Response,
     user: AdminUser,
     coworker_id: str | None = None,
     stage: str | None = None,
     enabled: bool | None = None,
 ) -> list[SafetyRuleResponse]:
+    _mark_safety_get_deprecated(
+        response, successor_path="/api/v1/safety/rules"
+    )
     rows = await db.list_safety_rules(
         user.tenant_id,
         coworker_id=coworker_id,
@@ -1254,8 +1291,12 @@ async def list_safety_rules_ep(
 )
 async def get_safety_rule_ep(
     rule_id: str,
+    response: Response,
     user: AdminUser,
 ) -> SafetyRuleResponse:
+    _mark_safety_get_deprecated(
+        response, successor_path=f"/api/v1/safety/rules/{rule_id}"
+    )
     r = await db.get_safety_rule(rule_id, tenant_id=user.tenant_id)
     if r is None:
         raise HTTPException(status_code=404, detail="Rule not found")
@@ -1358,7 +1399,10 @@ async def _publish_rule_changed(
 
 
 @router.get("/safety/checks")
-async def list_safety_checks_ep(_user: AdminUser) -> list[dict[str, object]]:
+async def list_safety_checks_ep(
+    response: Response,
+    _user: AdminUser,
+) -> list[dict[str, object]]:
     """Return metadata for every check registered on the orchestrator.
 
     Includes the pydantic JSON schema so clients (admin UI, API
@@ -1369,6 +1413,9 @@ async def list_safety_checks_ep(_user: AdminUser) -> list[dict[str, object]]:
     Ordering is stable-alphabetical on check_id so dashboards that
     cache results don't see phantom ordering changes.
     """
+    _mark_safety_get_deprecated(
+        response, successor_path="/api/v1/safety/checks"
+    )
     from rolemesh.safety.registry import get_orchestrator_registry
 
     checks = sorted(
@@ -1398,6 +1445,7 @@ async def list_safety_checks_ep(_user: AdminUser) -> list[dict[str, object]]:
 @router.get("/tenants/{tid}/safety/decisions")
 async def list_safety_decisions_ep(
     tid: str,
+    response: Response,
     user: AdminUser,
     verdict_action: str | None = None,
     coworker_id: str | None = None,
@@ -1414,6 +1462,9 @@ async def list_safety_decisions_ep(
     Returns ``{total, items}`` so the UI can render pagination without
     a second call.
     """
+    _mark_safety_get_deprecated(
+        response, successor_path="/api/v1/safety/decisions"
+    )
     if tid != user.tenant_id:
         raise HTTPException(status_code=403, detail="tenant scope mismatch")
     capped = max(1, min(int(limit), 200))
@@ -1443,6 +1494,7 @@ async def list_safety_decisions_ep(
 async def get_safety_decision_ep(
     tid: str,
     decision_id: str,
+    response: Response,
     user: AdminUser,
 ) -> dict[str, object]:
     """Full decision detail including approval_context when present.
@@ -1450,6 +1502,10 @@ async def get_safety_decision_ep(
     Returns 404 for cross-tenant lookup (not 403) — we don't leak UUID
     existence across tenants.
     """
+    _mark_safety_get_deprecated(
+        response,
+        successor_path=f"/api/v1/safety/decisions/{decision_id}",
+    )
     if tid != user.tenant_id:
         raise HTTPException(status_code=404, detail="decision not found")
     row = await db.get_safety_decision(decision_id, tenant_id=tid)
@@ -1462,6 +1518,7 @@ async def get_safety_decision_ep(
 async def list_safety_rule_audit_ep(
     tid: str,
     rule_id: str,
+    response: Response,
     user: AdminUser,
     limit: int = 200,
 ) -> list[dict[str, object]]:
@@ -1472,6 +1529,10 @@ async def list_safety_rule_audit_ep(
     underlying ``safety_rules_audit`` table is append-only, written by
     the DB trigger; this endpoint is pure read.
     """
+    _mark_safety_get_deprecated(
+        response,
+        successor_path=f"/api/v1/safety/rules/{rule_id}/audit",
+    )
     if tid != user.tenant_id:
         raise HTTPException(status_code=403, detail="tenant scope mismatch")
     capped = max(1, min(int(limit), 500))
