@@ -430,6 +430,144 @@ class CoworkerMCPBindingUpdate(BaseModel):
     enabled_tools: list[str] | None = None
 
 
+# ---------------------------------------------------------------------------
+# Skills (design §3 Phase 3 / docs/19-skills-architecture.md)
+# ---------------------------------------------------------------------------
+
+
+_SKILL_NAME_PATTERN_V1 = r"^[a-zA-Z][a-zA-Z0-9_-]{0,63}$"
+
+
+class SkillFile(BaseModel):
+    """Wire projection of a ``skill_files`` row."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    content: str
+    mime_type: str = "text/plain"
+    updated_at: str = ""
+
+
+class SkillFileUpsert(BaseModel):
+    """``PUT /api/v1/skills/{id}/files/{path}`` body.
+
+    Path lives on the URL, content lives in the body. ``mime_type``
+    optional; defaults to ``text/plain`` to match the DB column
+    default.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    content: str
+    mime_type: str = "text/plain"
+
+
+# Embedded file shape inside ``SkillCreate.files`` — accepts either a
+# bare content string (common case) or a richer ``SkillFileUpsert``
+# payload. Kept distinct from ``SkillFile`` (the response shape) so
+# the wire surface for creates stays narrow.
+SkillCreateFile = str | SkillFileUpsert
+
+
+class Skill(BaseModel):
+    """Wire projection of a ``skills`` row plus its file map.
+
+    ``created_by_user_id`` is the (renamed in 00b PR2 / 03b PR 2)
+    audit FK; the wire field tracks the column name post-rename. The
+    catalog is per-tenant — coworker association lives in
+    ``coworker_skills``, queried via the relation endpoint.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    tenant_id: str
+    name: str
+    enabled: bool
+    frontmatter_common: dict[str, object] = Field(default_factory=dict)
+    frontmatter_backend: dict[str, dict[str, object]] = Field(default_factory=dict)
+    files: dict[str, SkillFile] = Field(default_factory=dict)
+    created_at: str
+    updated_at: str
+    created_by_user_id: str | None = None
+
+
+class SkillSummary(BaseModel):
+    """List-view projection — file map and frontmatter dropped to
+    keep the list payload small.
+
+    ``bound_coworker_count`` is the relation-layer projection the
+    list page renders to spot orphaned vs heavily-shared skills.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    tenant_id: str
+    name: str
+    description: str
+    enabled: bool
+    bound_coworker_count: int
+    created_at: str
+    updated_at: str
+
+
+class SkillCreate(BaseModel):
+    """``POST /api/v1/skills`` body.
+
+    The ``files`` map must contain ``SKILL.md`` — the application
+    invariant the handler enforces before the DB write. The
+    frontmatter overrides win over keys parsed from the inline
+    ``SKILL.md`` frontmatter when present.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(pattern=_SKILL_NAME_PATTERN_V1)
+    enabled: bool = True
+    # ``files`` has no default — the handler always rejects payloads
+    # without ``SKILL.md`` anyway, so making this a required wire
+    # field surfaces the empty-payload case as 422 at the validator
+    # rather than 400 from the manifest check downstream.
+    files: dict[str, SkillCreateFile]
+    frontmatter_common: dict[str, object] | None = None
+    frontmatter_backend: dict[str, dict[str, object]] | None = None
+
+
+class SkillUpdate(BaseModel):
+    """``PATCH /api/v1/skills/{id}`` body.
+
+    Metadata-only — file content edits route through the per-file
+    endpoints. ``model_fields_set`` discriminates "field omitted"
+    from "field explicitly set to None" so ``frontmatter_backend: {}``
+    clears the dict rather than silently leaving the existing one
+    in place.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool | None = None
+    frontmatter_common: dict[str, object] | None = None
+    frontmatter_backend: dict[str, dict[str, object]] | None = None
+
+
+class CoworkerSkillBinding(BaseModel):
+    """One ``coworker_skills`` row, wire-side.
+
+    Double-AND projection: this skill is projection-eligible only
+    when ``enabled`` here is True AND the parent catalog skill's
+    own ``enabled`` flag is True. The list endpoint returns the
+    binding's flag; the catalog flag lives on the ``Skill`` payload.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    coworker_id: str
+    skill_id: str
+    enabled: bool
+
+
 class Run(BaseModel):
     """Wire projection of a ``runs`` row.
 

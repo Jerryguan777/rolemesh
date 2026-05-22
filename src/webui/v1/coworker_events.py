@@ -22,6 +22,7 @@ from rolemesh.core.logger import get_logger
 from rolemesh.orchestration.coworker_hot_reload import (
     WEB_COWORKER_MCP_CHANGED_SUBJECT,
     WEB_COWORKER_RESTART_SUBJECT,
+    WEB_COWORKER_SKILLS_CHANGED_SUBJECT,
 )
 
 if TYPE_CHECKING:
@@ -68,6 +69,39 @@ async def publish_coworker_restart(
     except Exception:
         logger.warning(
             "Failed to publish web.coworker.restart; relying on next restart",
+            coworker_id=coworker_id,
+            tenant_id=tenant_id,
+            exc_info=True,
+        )
+
+
+async def publish_coworker_skills_changed(
+    *, coworker_id: str, tenant_id: str,
+) -> None:
+    """Publish ``web.coworker.skills_changed`` for ``(coworker_id, tenant_id)``.
+
+    Fires from the v1 skills + ``coworker_skills`` mutating endpoints.
+    Same best-effort posture as :func:`publish_coworker_restart`. The
+    orchestrator-side subscriber lives in
+    :func:`rolemesh.orchestration.coworker_hot_reload.subscribe_coworker_skills_changed`
+    and refreshes ``CoworkerState.skills`` from the per-tenant
+    catalog so the next container spawn sees the new projection.
+    """
+    if _js is None:
+        logger.debug(
+            "coworker.skills_changed publisher unset; skipping broadcast",
+            coworker_id=coworker_id,
+            tenant_id=tenant_id,
+        )
+        return
+    payload = json.dumps({"coworker_id": coworker_id, "tenant_id": tenant_id})
+    try:
+        await _js.publish(
+            WEB_COWORKER_SKILLS_CHANGED_SUBJECT, payload.encode("utf-8"),
+        )
+    except Exception:
+        logger.warning(
+            "Failed to publish web.coworker.skills_changed",
             coworker_id=coworker_id,
             tenant_id=tenant_id,
             exc_info=True,

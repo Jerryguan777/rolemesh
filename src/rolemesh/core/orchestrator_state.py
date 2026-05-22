@@ -16,6 +16,7 @@ if TYPE_CHECKING:
         Conversation,
         Coworker,
         McpServerConfig,
+        Skill,
         Tenant,
     )
 
@@ -51,6 +52,12 @@ class CoworkerState:
     spawn. The orchestrator boot loop populates it once; the
     ``web.coworker.restart`` / ``web.coworker.mcp_changed`` subscribers
     re-fetch and overwrite it.
+
+    ``skills`` mirrors ``mcp_configs`` for the v1.1 03b per-tenant
+    catalog. Populated via the same boot loop (calling
+    :func:`rolemesh.db.list_skills_for_coworker` with
+    ``enabled_only=True``) and refreshed by the
+    ``web.coworker.skills_changed`` subscriber.
     """
 
     config: Coworker
@@ -58,16 +65,20 @@ class CoworkerState:
     conversations: dict[str, ConversationState] = field(default_factory=dict)
     channel_bindings: dict[str, ChannelBinding] = field(default_factory=dict)
     mcp_configs: list[McpServerConfig] = field(default_factory=list)
+    skills: list[Skill] = field(default_factory=list)
 
     @staticmethod
     def from_coworker(
-        cw: Coworker, mcp_configs: list[McpServerConfig] | None = None,
+        cw: Coworker,
+        mcp_configs: list[McpServerConfig] | None = None,
+        skills: list[Skill] | None = None,
     ) -> CoworkerState:
         """Build a fresh ``CoworkerState`` from a ``Coworker`` DB row."""
         return CoworkerState(
             config=cw,
             trigger_pattern=build_trigger_pattern(cw.name),
             mcp_configs=list(mcp_configs) if mcp_configs else [],
+            skills=list(skills) if skills else [],
         )
 
 

@@ -358,6 +358,168 @@ export interface paths {
         patch: operations["updateCoworkerMCPBinding"];
         trace?: never;
     };
+    "/api/v1/skills": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List the tenant's catalog skills */
+        get: operations["listSkills"];
+        put?: never;
+        /**
+         * Create a per-tenant catalog skill
+         * @description The `files` map must include `SKILL.md` (frontmatter + body of
+         *     the skill manifest). Path traversal in any key is rejected
+         *     with 422. Skill names must match `[a-zA-Z][a-zA-Z0-9_-]{0,63}`.
+         *     Returns 409 `RESOURCE_IN_USE` when a skill with this name
+         *     already exists in the tenant.
+         */
+        post: operations["createSkill"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        /** Fetch a skill with its file map */
+        get: operations["getSkill"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete a catalog skill
+         * @description Returns 409 `RESOURCE_IN_USE` (with `details.coworker_ids`)
+         *     when at least one coworker still binds this skill. Unbind
+         *     first via `DELETE /api/v1/coworkers/{id}/skills/{skill_id}`.
+         */
+        delete: operations["deleteSkill"];
+        options?: never;
+        head?: never;
+        /**
+         * Update skill metadata (not files)
+         * @description Use the per-file endpoints for content edits — this handler
+         *     only touches the catalog row's enabled flag and frontmatter.
+         *     Publishes one `web.coworker.skills_changed` event per
+         *     coworker currently bound to this skill.
+         */
+        patch: operations["updateSkill"];
+        trace?: never;
+    };
+    "/api/v1/skills/{id}/files": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        /** List the file paths in a skill */
+        get: operations["listSkillFiles"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/{id}/files/{path}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+                /**
+                 * @description File path within the skill. Path traversal (e.g. `../`) is
+                 *     rejected with 422. `SKILL.md` is protected from DELETE
+                 *     (returns 409 `SKILL_MANIFEST_PROTECTED`).
+                 */
+                path: string;
+            };
+            cookie?: never;
+        };
+        get: operations["getSkillFile"];
+        /**
+         * Upsert a single file in a skill
+         * @description Creates the file if absent, overwrites it otherwise. Path
+         *     validation (positive whitelist + traversal rejection) runs
+         *     before any DB write. Publishes one `web.coworker.skills_changed`
+         *     event per coworker currently bound to this skill.
+         */
+        put: operations["putSkillFile"];
+        post?: never;
+        /**
+         * Delete a single file from a skill
+         * @description `SKILL.md` is protected — DELETE returns 409
+         *     `SKILL_MANIFEST_PROTECTED`. Publishes one
+         *     `web.coworker.skills_changed` event per coworker currently
+         *     bound to this skill.
+         */
+        delete: operations["deleteSkillFile"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/coworkers/{id}/skills": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        /** List skill bindings for a coworker */
+        get: operations["listCoworkerSkills"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/coworkers/{id}/skills/{skill_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+                skill_id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bind a catalog skill to this coworker
+         * @description Idempotent: re-enabling an already-bound skill is a 200, not
+         *     a 409. Publishes `web.coworker.skills_changed`.
+         */
+        post: operations["enableCoworkerSkill"];
+        /**
+         * Unbind a skill from this coworker
+         * @description Deletes the `coworker_skills` row; the catalog skill remains.
+         *     Publishes `web.coworker.skills_changed`.
+         */
+        delete: operations["disableCoworkerSkill"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/mcp-servers": {
         parameters: {
             query?: never;
@@ -899,6 +1061,121 @@ export interface components {
                 [key: string]: boolean;
             } | null;
             description?: string | null;
+        };
+        SkillFile: {
+            path: string;
+            content: string;
+            /** @default text/plain */
+            mime_type: string;
+            /** Format: date-time */
+            updated_at?: string;
+        };
+        SkillFileUpsert: {
+            content: string;
+            /** @default text/plain */
+            mime_type: string;
+        };
+        Skill: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            tenant_id: string;
+            name: string;
+            enabled: boolean;
+            frontmatter_common?: {
+                [key: string]: unknown;
+            };
+            frontmatter_backend?: {
+                [key: string]: {
+                    [key: string]: unknown;
+                };
+            };
+            /**
+             * @description Map of `path` → `SkillFile`. `SKILL.md` is always present
+             *     (application invariant; deleting it is rejected with 409
+             *     `SKILL_MANIFEST_PROTECTED`).
+             */
+            files?: {
+                [key: string]: components["schemas"]["SkillFile"];
+            };
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+            /** Format: uuid */
+            created_by_user_id?: string | null;
+        };
+        /**
+         * @description List-view projection — drops the file map and frontmatter.
+         *     Use `GET /api/v1/skills/{id}` for the full payload.
+         */
+        SkillSummary: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            tenant_id: string;
+            name: string;
+            description: string;
+            enabled: boolean;
+            /**
+             * @description Number of `coworker_skills` rows referencing this skill,
+             *     any enabled state. The list page renders this so admins
+             *     can spot orphaned vs heavily-shared skills.
+             */
+            bound_coworker_count: number;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        SkillCreate: {
+            name: string;
+            /** @default true */
+            enabled: boolean;
+            /**
+             * @description Map of `path` → file content. `SKILL.md` is required —
+             *     its frontmatter populates `frontmatter_common` and
+             *     `frontmatter_backend`.
+             */
+            files: {
+                [key: string]: string | components["schemas"]["SkillFileUpsert"];
+            };
+            frontmatter_common?: {
+                [key: string]: unknown;
+            } | null;
+            frontmatter_backend?: {
+                [key: string]: {
+                    [key: string]: unknown;
+                };
+            } | null;
+        };
+        /**
+         * @description Metadata-only update. Use the per-file endpoints to change
+         *     file content; this path leaves `skill_files` untouched.
+         */
+        SkillUpdate: {
+            enabled?: boolean;
+            frontmatter_common?: {
+                [key: string]: unknown;
+            } | null;
+            frontmatter_backend?: {
+                [key: string]: {
+                    [key: string]: unknown;
+                };
+            } | null;
+        };
+        /**
+         * @description One `coworker_skills` row, wire-side. The skill is
+         *     projection-eligible only when `enabled` here is true AND
+         *     the parent catalog skill's `enabled` flag is also true
+         *     (double-AND, design §6.3 C).
+         */
+        CoworkerSkillBinding: {
+            /** Format: uuid */
+            coworker_id: string;
+            /** Format: uuid */
+            skill_id: string;
+            enabled: boolean;
         };
         Run: {
             /** Format: uuid */
@@ -1705,6 +1982,345 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listSkills: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillSummary"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    createSkill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SkillCreate"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Skill"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+        };
+    };
+    getSkill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Skill"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteSkill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            /**
+             * @description Skill is still bound to at least one coworker.
+             *     `code="RESOURCE_IN_USE"`, `details.coworker_ids` lists
+             *     the offenders.
+             */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    updateSkill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SkillUpdate"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Skill"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listSkillFiles: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": string[];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    getSkillFile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+                /**
+                 * @description File path within the skill. Path traversal (e.g. `../`) is
+                 *     rejected with 422. `SKILL.md` is protected from DELETE
+                 *     (returns 409 `SKILL_MANIFEST_PROTECTED`).
+                 */
+                path: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillFile"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    putSkillFile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+                /**
+                 * @description File path within the skill. Path traversal (e.g. `../`) is
+                 *     rejected with 422. `SKILL.md` is protected from DELETE
+                 *     (returns 409 `SKILL_MANIFEST_PROTECTED`).
+                 */
+                path: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SkillFileUpsert"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillFile"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["Unprocessable"];
+        };
+    };
+    deleteSkillFile: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+                /**
+                 * @description File path within the skill. Path traversal (e.g. `../`) is
+                 *     rejected with 422. `SKILL.md` is protected from DELETE
+                 *     (returns 409 `SKILL_MANIFEST_PROTECTED`).
+                 */
+                path: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            /**
+             * @description `SKILL.md` cannot be deleted (application-level
+             *     invariant). `code="SKILL_MANIFEST_PROTECTED"`.
+             */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            422: components["responses"]["Unprocessable"];
+        };
+    };
+    listCoworkerSkills: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CoworkerSkillBinding"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    enableCoworkerSkill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+                skill_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CoworkerSkillBinding"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    disableCoworkerSkill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+                skill_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
         };

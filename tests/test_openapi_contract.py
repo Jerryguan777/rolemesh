@@ -36,6 +36,7 @@ from webui.schemas_v1 import (
     Conversation,
     CoworkerMCPBindingCreate,
     CoworkerMCPBindingResponse,
+    CoworkerSkillBinding,
     CredentialResponse,
     CredentialUpsert,
     ErrorResponse,
@@ -44,6 +45,9 @@ from webui.schemas_v1 import (
     Message,
     Model,
     Run,
+    Skill,
+    SkillCreate,
+    SkillSummary,
 )
 
 OPENAPI_PATH = Path(__file__).resolve().parent.parent / "web" / "openapi.yaml"
@@ -455,6 +459,80 @@ def test_v1_approval_decide_required_matches_pydantic_model() -> None:
     assert yaml_enum == set(_HTTP_ACTIONS), (
         f"ApprovalDecide.action enum drift: yaml={yaml_enum} "
         f"engine={set(_HTTP_ACTIONS)}"
+    )
+
+
+def test_phase_3_skills_endpoints_are_present_in_yaml() -> None:
+    """03b session lands these v1 endpoints; the legacy
+    /api/admin/agents/{id}/skills surface stays for the 6-month
+    compatibility window (NOT listed here).
+    """
+    spec = _load_spec()
+    paths = set(spec["paths"].keys())  # type: ignore[union-attr]
+    expected = {
+        "/api/v1/skills",
+        "/api/v1/skills/{id}",
+        "/api/v1/skills/{id}/files",
+        "/api/v1/skills/{id}/files/{path}",
+        "/api/v1/coworkers/{id}/skills",
+        "/api/v1/coworkers/{id}/skills/{skill_id}",
+    }
+    missing = expected - paths
+    assert not missing, f"yaml missing v1 skills endpoints: {sorted(missing)}"
+
+
+def test_v1_skill_required_matches_pydantic_model() -> None:
+    spec = _load_spec()
+    yaml_required = set(_schema(spec, "Skill")["required"])  # type: ignore[arg-type]
+    py_required = {
+        name for name, f in Skill.model_fields.items() if f.is_required()
+    }
+    assert yaml_required == py_required, (
+        f"Skill.required drift: yaml={yaml_required} python={py_required}"
+    )
+
+
+def test_v1_skill_summary_required_matches_pydantic_model() -> None:
+    spec = _load_spec()
+    yaml_required = set(_schema(spec, "SkillSummary")["required"])  # type: ignore[arg-type]
+    py_required = {
+        name
+        for name, f in SkillSummary.model_fields.items()
+        if f.is_required()
+    }
+    assert yaml_required == py_required, (
+        f"SkillSummary.required drift: yaml={yaml_required} "
+        f"python={py_required}"
+    )
+
+
+def test_v1_skill_create_required_matches_pydantic_model() -> None:
+    spec = _load_spec()
+    yaml_required = set(_schema(spec, "SkillCreate")["required"])  # type: ignore[arg-type]
+    py_required = {
+        name
+        for name, f in SkillCreate.model_fields.items()
+        if f.is_required()
+    }
+    assert yaml_required == py_required, (
+        f"SkillCreate.required drift: yaml={yaml_required} "
+        f"python={py_required}"
+    )
+
+
+def test_v1_coworker_skill_binding_required_matches_pydantic_model() -> None:
+    spec = _load_spec()
+    yaml_required = set(
+        _schema(spec, "CoworkerSkillBinding")["required"]  # type: ignore[arg-type]
+    )
+    py_required = {
+        name
+        for name, f in CoworkerSkillBinding.model_fields.items()
+        if f.is_required()
+    }
+    assert yaml_required == py_required, (
+        f"CoworkerSkillBinding.required drift: yaml={yaml_required} "
+        f"python={py_required}"
     )
 
 

@@ -1652,9 +1652,11 @@ async def main() -> None:
     from nats.js.api import StreamConfig as _WebStreamConfig
 
     from rolemesh.db import get_coworker as _db_get_coworker
+    from rolemesh.db import list_skills_for_coworker as _db_list_skills
     from rolemesh.orchestration.coworker_hot_reload import (
         subscribe_coworker_mcp_changed,
         subscribe_coworker_restart,
+        subscribe_coworker_skills_changed,
     )
 
     try:
@@ -1675,6 +1677,17 @@ async def main() -> None:
             coworker_id, tenant_id=tenant_id,
         )
 
+    async def _fetch_skills(coworker_id: str, tenant_id: str):
+        # Projection-eligible only — matches the spawn-time projector
+        # filter. The orchestrator cache feeds container spawn, so
+        # mismatched enabled flags would inflate the tmpfs mount.
+        return await _db_list_skills(
+            coworker_id,
+            tenant_id=tenant_id,
+            enabled_only=True,
+            with_files=True,
+        )
+
     coworker_restart_sub = await subscribe_coworker_restart(
         _transport.js,
         state=_state,
@@ -1693,6 +1706,18 @@ async def main() -> None:
         fetch_mcp_configs=_fetch_mcp_configs,
     )
     egress_responder_subs.append(coworker_mcp_sub)
+
+    # web.coworker.skills_changed — sibling of mcp_changed for the
+    # per-tenant skills catalog (v1.1 03b). Catalog edits and
+    # coworker_skills mutations both publish; subscriber refreshes
+    # ``CoworkerState.skills`` so the next container spawn sees the
+    # new projection.
+    coworker_skills_sub = await subscribe_coworker_skills_changed(
+        _transport.js,
+        state=_state,
+        fetch_skills=_fetch_skills,
+    )
+    egress_responder_subs.append(coworker_skills_sub)
 
     # chore A — orchestrator-side ``web.run.cancel.*`` subscriber.
     # WebUI publishes the event from POST /api/v1/runs/{id}/cancel
