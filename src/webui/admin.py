@@ -1644,10 +1644,17 @@ def _normalize_files(
     return out
 
 
-def _skill_to_response(s: Skill) -> SkillResponse:
+def _skill_to_response(s: Skill, *, coworker_id: str) -> SkillResponse:
+    """Project a catalog skill into the admin response shape.
+
+    The legacy admin endpoint exposes ``coworker_id`` on the wire even
+    though the catalog is per-tenant now. We surface the URL path's
+    ``agent_id`` here so existing clients keep the same response
+    shape during the compatibility window.
+    """
     return SkillResponse(
         id=s.id,
-        coworker_id=s.coworker_id,
+        coworker_id=coworker_id,
         name=s.name,
         frontmatter_common=s.frontmatter_common,
         frontmatter_backend=s.frontmatter_backend,
@@ -1662,12 +1669,12 @@ def _skill_to_response(s: Skill) -> SkillResponse:
     )
 
 
-def _skill_to_summary(s: Skill) -> SkillSummary:
+def _skill_to_summary(s: Skill, *, coworker_id: str) -> SkillSummary:
     desc_raw = s.frontmatter_common.get("description", "")
     description = desc_raw if isinstance(desc_raw, str) else ""
     return SkillSummary(
         id=s.id,
-        coworker_id=s.coworker_id,
+        coworker_id=coworker_id,
         name=s.name,
         description=description,
         enabled=s.enabled,
@@ -1688,7 +1695,7 @@ async def list_skills(
     skills = await db.list_skills_for_coworker(
         agent_id, tenant_id=user.tenant_id, enabled_only=False, with_files=False,
     )
-    return [_skill_to_summary(s) for s in skills]
+    return [_skill_to_summary(s, coworker_id=agent_id) for s in skills]
 
 
 @router.post(
@@ -1731,7 +1738,7 @@ async def create_skill(
     except (ValueError, AttributeError):
         created_by_uuid = None
     try:
-        skill = await db.create_skill(
+        skill = await db.create_skill_for_coworker(
             tenant_id=user.tenant_id,
             coworker_id=agent_id,
             name=body.name,
@@ -1739,16 +1746,16 @@ async def create_skill(
             frontmatter_backend=backend,
             files=files,
             enabled=body.enabled,
-            created_by=created_by_uuid,
+            created_by_user_id=created_by_uuid,
         )
     except asyncpg.UniqueViolationError as exc:
         raise HTTPException(
             status_code=409,
-            detail=f"Skill with name {body.name!r} already exists on this agent",
+            detail=f"Skill with name {body.name!r} already exists in this tenant",
         ) from exc
     except asyncpg.CheckViolationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return _skill_to_response(skill)
+    return _skill_to_response(skill, coworker_id=agent_id)
 
 
 @router.get(
@@ -1762,9 +1769,11 @@ async def get_skill_detail(
 ) -> SkillResponse:
     await _get_agent_or_404(agent_id, user.tenant_id)
     skill = await db.get_skill(skill_id, tenant_id=user.tenant_id)
-    if skill is None or skill.coworker_id != agent_id:
+    if skill is None or not await db.is_skill_bound_to_coworker(
+        skill_id, agent_id, tenant_id=user.tenant_id,
+    ):
         raise HTTPException(status_code=404, detail="Skill not found")
-    return _skill_to_response(skill)
+    return _skill_to_response(skill, coworker_id=agent_id)
 
 
 @router.patch(
@@ -1779,7 +1788,9 @@ async def update_skill(
 ) -> SkillResponse:
     await _get_agent_or_404(agent_id, user.tenant_id)
     existing = await db.get_skill(skill_id, tenant_id=user.tenant_id)
-    if existing is None or existing.coworker_id != agent_id:
+    if existing is None or not await db.is_skill_bound_to_coworker(
+        skill_id, agent_id, tenant_id=user.tenant_id,
+    ):
         raise HTTPException(status_code=404, detail="Skill not found")
 
     files: dict[str, SkillFile] | None = None
@@ -1852,7 +1863,7 @@ async def update_skill(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if updated is None:
         raise HTTPException(status_code=404, detail="Skill not found")
-    return _skill_to_response(updated)
+    return _skill_to_response(updated, coworker_id=agent_id)
 
 
 @router.delete(
@@ -1866,7 +1877,9 @@ async def delete_skill(
 ) -> None:
     await _get_agent_or_404(agent_id, user.tenant_id)
     skill = await db.get_skill(skill_id, tenant_id=user.tenant_id, with_files=False)
-    if skill is None or skill.coworker_id != agent_id:
+    if skill is None or not await db.is_skill_bound_to_coworker(
+        skill_id, agent_id, tenant_id=user.tenant_id,
+    ):
         raise HTTPException(status_code=404, detail="Skill not found")
     await db.delete_skill(skill_id, tenant_id=user.tenant_id)
 
@@ -1887,7 +1900,9 @@ async def update_skill_file(
     """
     await _get_agent_or_404(agent_id, user.tenant_id)
     skill = await db.get_skill(skill_id, tenant_id=user.tenant_id, with_files=False)
-    if skill is None or skill.coworker_id != agent_id:
+    if skill is None or not await db.is_skill_bound_to_coworker(
+        skill_id, agent_id, tenant_id=user.tenant_id,
+    ):
         raise HTTPException(status_code=404, detail="Skill not found")
     try:
         validate_skill_file_path(path)
@@ -1907,7 +1922,7 @@ async def update_skill_file(
         raise HTTPException(status_code=404, detail="Skill not found")
     refreshed = await db.get_skill(skill_id, tenant_id=user.tenant_id)
     assert refreshed is not None
-    return _skill_to_response(refreshed)
+    return _skill_to_response(refreshed, coworker_id=agent_id)
 
 
 @router.delete(
@@ -1925,7 +1940,9 @@ async def delete_skill_file(
     """
     await _get_agent_or_404(agent_id, user.tenant_id)
     skill = await db.get_skill(skill_id, tenant_id=user.tenant_id, with_files=False)
-    if skill is None or skill.coworker_id != agent_id:
+    if skill is None or not await db.is_skill_bound_to_coworker(
+        skill_id, agent_id, tenant_id=user.tenant_id,
+    ):
         raise HTTPException(status_code=404, detail="Skill not found")
     if path == SKILL_MANIFEST_NAME:
         raise HTTPException(

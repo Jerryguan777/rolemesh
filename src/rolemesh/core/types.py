@@ -180,16 +180,18 @@ class SkillFile:
 
 @dataclass
 class Skill:
-    """A per-coworker skill folder. ``frontmatter_common`` carries the
-    keys both backends accept (at least ``name`` and ``description``);
-    ``frontmatter_backend`` has the shape ``{"claude": {...}, "pi": {...}}``
-    for backend-specific overrides. ``files`` is keyed by relative path,
-    always contains ``SKILL.md``.
+    """A per-tenant catalog skill (v1.1 03b). ``frontmatter_common``
+    carries the keys both backends accept (at least ``name`` and
+    ``description``); ``frontmatter_backend`` has the shape
+    ``{"claude": {...}, "pi": {...}}`` for backend-specific overrides.
+    ``files`` is keyed by relative path, always contains ``SKILL.md``.
+
+    Coworker association lives in the ``coworker_skills`` junction
+    table — query it separately when you need a coworker's bindings.
     """
 
     id: str
     tenant_id: str
-    coworker_id: str
     name: str
     frontmatter_common: dict[str, object] = field(default_factory=dict)
     frontmatter_backend: dict[str, dict[str, object]] = field(default_factory=dict)

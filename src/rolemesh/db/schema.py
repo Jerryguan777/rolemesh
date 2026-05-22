@@ -298,24 +298,24 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         )
     """)
 
-    # Skills: per-coworker capability folders. SKILL.md (frontmatter +
-    # body) lives in the row keyed by ``path = 'SKILL.md'`` in
-    # ``skill_files``. Frontmatter is split between common (carries
-    # name/description for both runtimes) and backend-specific
-    # (Claude SDK or Pi loader). See docs/skills-architecture.md.
+    # Skills: per-tenant capability catalog (v1.1 03b greenfield).
+    # SKILL.md (frontmatter + body) lives in the row keyed by
+    # ``path = 'SKILL.md'`` in ``skill_files``. Frontmatter is split
+    # between common (carries name/description for both runtimes) and
+    # backend-specific (Claude SDK or Pi loader). See
+    # docs/skills-architecture.md. Coworker association is via the
+    # ``coworker_skills`` junction table.
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS skills (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-            coworker_id UUID NOT NULL REFERENCES coworkers(id) ON DELETE CASCADE,
             name TEXT NOT NULL CHECK (name ~ '^[a-zA-Z][a-zA-Z0-9_-]{0,63}$'),
             frontmatter_common JSONB NOT NULL DEFAULT '{}',
             frontmatter_backend JSONB NOT NULL DEFAULT '{}',
             enabled BOOLEAN NOT NULL DEFAULT TRUE,
             created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
-            UNIQUE (coworker_id, name)
+            created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL
         )
     """)
     # v1.1 §2.2: greenfield rename of ``created_by`` -> ``created_by_user_id``.
@@ -336,16 +336,35 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             END IF;
         END $$
     """)
+    # v1.1 03b greenfield: drop the legacy ``skills.coworker_id`` column
+    # plus its companion index and the column-level UNIQUE (coworker_id,
+    # name) constraint. On a fresh testcontainer the CREATE TABLE above
+    # never defined them; on a pre-existing dev DB the ALTERs run once
+    # and become idempotent no-ops on subsequent schema.py invocations.
+    # Per-tenant skill identity is now (tenant_id, name) — enforced by
+    # ``skills_tenant_name_unique`` below — and coworker association is
+    # handled by ``coworker_skills``. Order matters: drop the column
+    # last (constraint + index reference it).
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'skills_coworker_id_name_key'
+            ) THEN
+                ALTER TABLE skills DROP CONSTRAINT skills_coworker_id_name_key;
+            END IF;
+        END $$
+    """)
+    await conn.execute("DROP INDEX IF EXISTS idx_skills_coworker")
     await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_skills_coworker ON skills(coworker_id, enabled)"
+        "ALTER TABLE skills DROP COLUMN IF EXISTS coworker_id"
     )
-    # v1.1 §2.2: tenant-unique skill names. The future direction (03b)
-    # is per-tenant skills with ``coworker_id`` NULLABLE; until then this
-    # constraint co-exists with the existing UNIQUE (coworker_id, name)
-    # column-level constraint, so a tenant cannot name two skills the
-    # same regardless of which coworker owns them. Use a guarded DO
-    # block because ALTER TABLE ADD CONSTRAINT has no IF NOT EXISTS and
-    # the constraint must be idempotent across schema.py re-runs.
+    # v1.1 §2.2: tenant-unique skill names. Now the sole identity
+    # constraint on the table (the old column-level UNIQUE
+    # (coworker_id, name) was dropped above as part of the per-tenant
+    # catalog cutover). Guarded DO block keeps the ADD CONSTRAINT
+    # idempotent across schema.py re-runs.
     await conn.execute("""
         DO $$
         BEGIN
@@ -359,6 +378,10 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             END IF;
         END $$
     """)
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_skills_tenant_enabled "
+        "ON skills(tenant_id, enabled)"
+    )
 
     # skill_files holds the file tree. Path validation: positive
     # whitelist (each segment alphanumeric-led, only [A-Za-z0-9_.-]),
@@ -380,45 +403,26 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         )
     """)
 
-    # SECURITY DEFINER trigger: prevents writing a skill whose
-    # ``coworker_id`` belongs to a different tenant than its own
-    # ``tenant_id``. Without DEFINER, the trigger would run RLS-bound
-    # on coworkers and would not be able to see a foreign tenant's
-    # coworker (cw_tenant comes back NULL), missing the attack.
-    # ``IS DISTINCT FROM`` handles NULL safely either way.
-    await conn.execute("""
-        CREATE OR REPLACE FUNCTION skills_check_coworker_tenant()
-        RETURNS TRIGGER
-        SECURITY DEFINER
-        SET search_path = pg_catalog, public
-        LANGUAGE plpgsql AS $func$
-        DECLARE
-            cw_tenant UUID;
-        BEGIN
-            SELECT tenant_id INTO cw_tenant FROM coworkers WHERE id = NEW.coworker_id;
-            IF cw_tenant IS DISTINCT FROM NEW.tenant_id THEN
-                RAISE EXCEPTION
-                    'skills.coworker_id % belongs to a different tenant '
-                    '(or does not exist)', NEW.coworker_id;
-            END IF;
-            RETURN NEW;
-        END
-        $func$;
-    """)
+    # v1.1 03b greenfield: the SECURITY DEFINER cross-tenant trigger on
+    # ``skills.coworker_id`` is moot now that the column is gone. The
+    # equivalent guard for the relation layer is enforced by
+    # ``coworker_skills``' RLS (transitive via the parent coworker) plus
+    # the ``coworker_skills_check_tenant`` trigger below. Drop the old
+    # trigger + function so they don't linger on pre-existing dev DBs.
     await conn.execute(
         "DROP TRIGGER IF EXISTS trg_skills_check_coworker_tenant ON skills"
     )
-    await conn.execute("""
-        CREATE TRIGGER trg_skills_check_coworker_tenant
-            BEFORE INSERT OR UPDATE OF coworker_id, tenant_id ON skills
-            FOR EACH ROW EXECUTE FUNCTION skills_check_coworker_tenant();
-    """)
+    await conn.execute(
+        "DROP FUNCTION IF EXISTS skills_check_coworker_tenant()"
+    )
 
-    # Coworker <-> skill association (v1.1 §2.1). Skills will move to
-    # per-tenant catalog in 03b; this junction table is the future
-    # binding mechanism. ``enabled`` defaults TRUE so adding a binding
-    # is a single INSERT. RLS is enforced transitively via the parent
-    # ``coworkers.tenant_id``.
+    # Coworker <-> skill association (v1.1 §2.1, made load-bearing in
+    # 03b). The skills catalog is per-tenant; this junction is what
+    # binds catalog rows to individual coworkers. ``enabled`` defaults
+    # TRUE so the common case (bind + project) is a single INSERT;
+    # toggling it lets a coworker disable a tenant-wide skill without
+    # touching the catalog row. RLS fires transitively via the parent
+    # ``coworkers.tenant_id`` (see _enable_rls_via_parent_coworker).
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS coworker_skills (
             coworker_id   UUID NOT NULL REFERENCES coworkers(id) ON DELETE CASCADE,
@@ -426,6 +430,44 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             enabled       BOOLEAN NOT NULL DEFAULT TRUE,
             PRIMARY KEY (coworker_id, skill_id)
         )
+    """)
+    # SECURITY DEFINER trigger: reject inserts/updates where the skill
+    # and coworker live in different tenants. Both parents already
+    # enforce per-tenant RLS, but the junction sits between them and
+    # an admin-role caller (test pool or future bootstrap script) can
+    # bypass RLS — without this guard a forged (coworker_A, skill_B)
+    # pair could land. ``IS DISTINCT FROM`` handles NULL (foreign-key
+    # would catch dangling refs but bot tenants returning NULL still
+    # needs explicit rejection).
+    await conn.execute("""
+        CREATE OR REPLACE FUNCTION coworker_skills_check_tenant()
+        RETURNS TRIGGER
+        SECURITY DEFINER
+        SET search_path = pg_catalog, public
+        LANGUAGE plpgsql AS $func$
+        DECLARE
+            cw_tenant UUID;
+            sk_tenant UUID;
+        BEGIN
+            SELECT tenant_id INTO cw_tenant FROM coworkers WHERE id = NEW.coworker_id;
+            SELECT tenant_id INTO sk_tenant FROM skills WHERE id = NEW.skill_id;
+            IF cw_tenant IS DISTINCT FROM sk_tenant THEN
+                RAISE EXCEPTION
+                    'coworker_skills tenant mismatch: coworker % vs skill %',
+                    NEW.coworker_id, NEW.skill_id;
+            END IF;
+            RETURN NEW;
+        END
+        $func$;
+    """)
+    await conn.execute(
+        "DROP TRIGGER IF EXISTS trg_coworker_skills_check_tenant "
+        "ON coworker_skills"
+    )
+    await conn.execute("""
+        CREATE TRIGGER trg_coworker_skills_check_tenant
+            BEFORE INSERT OR UPDATE OF coworker_id, skill_id ON coworker_skills
+            FOR EACH ROW EXECUTE FUNCTION coworker_skills_check_tenant();
     """)
 
     # Password hash for future builtin auth

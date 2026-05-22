@@ -170,32 +170,23 @@ async def test_new_columns_default_to_null() -> None:
 
 
 async def test_skills_tenant_name_unique_constraint_fires() -> None:
-    """Two skills under the same tenant_id with the same name on
-    *different* coworkers must collide at INSERT time. Without the
-    new tenant-level UNIQUE, this would be allowed (the legacy
-    UNIQUE was (coworker_id, name) only) — a future 03b "skills go
-    per-tenant" migration would then be blocked by duplicate names
-    that should never have been written.
+    """Two skills under the same tenant_id with the same name must
+    collide at INSERT time. Post-03b the catalog is per-tenant and
+    ``(tenant_id, name)`` is the only identity constraint.
     """
     t = await create_tenant(name="T", slug=f"uniq-{uuid.uuid4().hex[:6]}")
-    cw1 = await create_coworker(
-        tenant_id=t.id, name="CW1", folder=f"cw1-{uuid.uuid4().hex[:6]}"
-    )
-    cw2 = await create_coworker(
-        tenant_id=t.id, name="CW2", folder=f"cw2-{uuid.uuid4().hex[:6]}"
-    )
     pool = _get_admin_pool()
     async with pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO skills (tenant_id, coworker_id, name) "
-            "VALUES ($1::uuid, $2::uuid, $3)",
-            t.id, cw1.id, "shared-name",
+            "INSERT INTO skills (tenant_id, name) "
+            "VALUES ($1::uuid, $2)",
+            t.id, "shared-name",
         )
         with pytest.raises(asyncpg.UniqueViolationError):
             await conn.execute(
-                "INSERT INTO skills (tenant_id, coworker_id, name) "
-                "VALUES ($1::uuid, $2::uuid, $3)",
-                t.id, cw2.id, "shared-name",
+                "INSERT INTO skills (tenant_id, name) "
+                "VALUES ($1::uuid, $2)",
+                t.id, "shared-name",
             )
 
 
@@ -207,24 +198,18 @@ async def test_skills_tenant_name_unique_does_not_block_cross_tenant() -> None:
     skill X and someone else's tenant blocked me')."""
     t1 = await create_tenant(name="T1", slug=f"x1-{uuid.uuid4().hex[:6]}")
     t2 = await create_tenant(name="T2", slug=f"x2-{uuid.uuid4().hex[:6]}")
-    cw1 = await create_coworker(
-        tenant_id=t1.id, name="CW", folder=f"cw1-{uuid.uuid4().hex[:6]}"
-    )
-    cw2 = await create_coworker(
-        tenant_id=t2.id, name="CW", folder=f"cw2-{uuid.uuid4().hex[:6]}"
-    )
     pool = _get_admin_pool()
     async with pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO skills (tenant_id, coworker_id, name) "
-            "VALUES ($1::uuid, $2::uuid, $3)",
-            t1.id, cw1.id, "duplicate",
+            "INSERT INTO skills (tenant_id, name) "
+            "VALUES ($1::uuid, $2)",
+            t1.id, "duplicate",
         )
         # Cross-tenant: should not raise.
         await conn.execute(
-            "INSERT INTO skills (tenant_id, coworker_id, name) "
-            "VALUES ($1::uuid, $2::uuid, $3)",
-            t2.id, cw2.id, "duplicate",
+            "INSERT INTO skills (tenant_id, name) "
+            "VALUES ($1::uuid, $2)",
+            t2.id, "duplicate",
         )
 
 
