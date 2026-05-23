@@ -15,11 +15,14 @@
 // for now, so a fresh tenant doesn't see a blank screen.
 
 import { LitElement, html, nothing } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { customElement, query, state } from 'lit/decorators.js';
 
 import { ApiError, getApiClient } from '../api/client.js';
-import type { Coworker } from '../api/client.js';
+import type { Coworker, ModelProvider } from '../api/client.js';
 import './coworker-wizard.js';
+import './credential-dialog.js';
+import './mcp-server-dialog.js';
+import type { CoworkerWizard } from './coworker-wizard.js';
 
 @customElement('rm-coworkers-page')
 export class CoworkersPage extends LitElement {
@@ -27,6 +30,10 @@ export class CoworkersPage extends LitElement {
   @state() private loading = true;
   @state() private error: string | null = null;
   @state() private wizardOpen = false;
+  @state() private credDialogOpen = false;
+  @state() private credDialogProvider: ModelProvider | null = null;
+  @state() private mcpDialogOpen = false;
+  @query('rm-coworker-wizard') private wizardEl?: CoworkerWizard;
   private readonly api = getApiClient();
 
   protected override createRenderRoot() {
@@ -116,7 +123,29 @@ export class CoworkersPage extends LitElement {
             // commit close should still surface the new coworker.
             void this.refresh();
           }}
+          @request-credential=${(e: CustomEvent<{ provider: ModelProvider }>) => {
+            this.credDialogProvider = e.detail.provider;
+            this.credDialogOpen = true;
+          }}
+          @request-add-mcp-server=${() => {
+            this.mcpDialogOpen = true;
+          }}
         ></rm-coworker-wizard>
+        <rm-credential-dialog
+          ?open=${this.credDialogOpen}
+          .provider=${this.credDialogProvider}
+          @close=${() => { this.credDialogOpen = false; }}
+          @credential-saved=${() => {
+            void this.wizardEl?.refreshCredentials();
+          }}
+        ></rm-credential-dialog>
+        <rm-mcp-server-dialog
+          ?open=${this.mcpDialogOpen}
+          @close=${() => { this.mcpDialogOpen = false; }}
+          @mcp-server-created=${() => {
+            void this.wizardEl?.refreshMCPServers();
+          }}
+        ></rm-mcp-server-dialog>
       </div>
     `;
   }

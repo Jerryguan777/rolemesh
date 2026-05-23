@@ -10,11 +10,16 @@ import { LitElement, html, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { ApiError, getApiClient } from '../api/client.js';
-import type { CredentialResponse, Model } from '../api/client.js';
+import type {
+  CredentialResponse,
+  Model,
+  ModelProvider,
+} from '../api/client.js';
 import {
   groupModelsByProvider,
   type ProviderGroup,
 } from '../services/models-grouping.js';
+import './credential-dialog.js';
 
 @customElement('rm-models-page')
 export class ModelsPage extends LitElement {
@@ -22,6 +27,8 @@ export class ModelsPage extends LitElement {
   @state() private credentials: CredentialResponse[] = [];
   @state() private loading = true;
   @state() private error: string | null = null;
+  @state() private credDialogOpen = false;
+  @state() private credDialogProvider: ModelProvider | null = null;
   private readonly api = getApiClient();
 
   protected override createRenderRoot() {
@@ -71,12 +78,23 @@ export class ModelsPage extends LitElement {
                 writes land in v2.
               </p>
             </div>
-            <button
-              type="button"
-              class="text-[12px] px-2.5 py-1 rounded-md border border-surface-3 dark:border-d-surface-3
-                text-ink-2 dark:text-d-ink-2 hover:bg-surface-2 dark:hover:bg-d-surface-2 cursor-pointer"
-              @click=${() => void this.refresh()}
-            >Refresh</button>
+            <div class="flex items-center gap-2">
+              <button
+                type="button"
+                class="text-[12px] px-3 py-1.5 rounded-md bg-brand text-white
+                  hover:bg-brand-dark transition-colors cursor-pointer"
+                @click=${() => {
+                  this.credDialogProvider = null;
+                  this.credDialogOpen = true;
+                }}
+              >+ Add credential</button>
+              <button
+                type="button"
+                class="text-[12px] px-2.5 py-1 rounded-md border border-surface-3 dark:border-d-surface-3
+                  text-ink-2 dark:text-d-ink-2 hover:bg-surface-2 dark:hover:bg-d-surface-2 cursor-pointer"
+                @click=${() => void this.refresh()}
+              >Refresh</button>
+            </div>
           </div>
 
           ${this.loading
@@ -92,6 +110,12 @@ export class ModelsPage extends LitElement {
                 ? this.renderEmpty()
                 : this.renderGroups()}
         </div>
+        <rm-credential-dialog
+          ?open=${this.credDialogOpen}
+          .provider=${this.credDialogProvider}
+          @close=${() => { this.credDialogOpen = false; }}
+          @credential-saved=${() => { void this.refresh(); }}
+        ></rm-credential-dialog>
       </div>
     `;
   }
@@ -146,11 +170,20 @@ export class ModelsPage extends LitElement {
                 title="Credential set"
               >ready</span>`
             : html`<span
-                class="ml-auto text-[11px] px-1.5 py-0.5 rounded
-                  bg-amber-100 dark:bg-amber-900/30
-                  text-amber-800 dark:text-amber-200"
-                title="No credential — models in this provider cannot run yet"
-              >needs credential</span>`}
+                  class="ml-auto text-[11px] px-1.5 py-0.5 rounded
+                    bg-amber-100 dark:bg-amber-900/30
+                    text-amber-800 dark:text-amber-200"
+                  title="No credential — models in this provider cannot run yet"
+                >needs credential</span>
+                <button
+                  type="button"
+                  class="text-[11px] px-1.5 py-0.5 rounded
+                    text-amber-800 dark:text-amber-200 underline cursor-pointer"
+                  @click=${() => {
+                    this.credDialogProvider = group.provider;
+                    this.credDialogOpen = true;
+                  }}
+                >+ Add</button>`}
         </header>
         <ul class="divide-y divide-surface-3 dark:divide-d-surface-3">
           ${items.map(

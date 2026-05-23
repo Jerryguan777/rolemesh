@@ -44,7 +44,6 @@ import type {
   CredentialResponse,
   Model,
   ModelProvider,
-  Skill,
   SkillSummary,
   MCPServer,
 } from '../api/client.js';
@@ -762,14 +761,64 @@ export class CoworkerWizard extends LitElement {
     return html`
       <h3 class="text-[15px] font-semibold mb-1">Tools</h3>
       <p class="text-[13px] text-ink-3 dark:text-d-ink-3 mb-4">
-        Bind MCP servers this coworker can call. (Real picker lands in
-        the next commit — for now this step is a placeholder so the
-        wizard can be smoke-tested end-to-end.)
+        Bind MCP servers this coworker can call. Whole-server binding
+        only here — per-tool selection lives on the coworker page.
       </p>
-      <div class="text-[13px] text-ink-3 dark:text-d-ink-3 italic">
-        Tools picker · coming next
-      </div>
+      ${this.mcpServers.length === 0
+        ? html`<div class="text-[13px] text-ink-3 dark:text-d-ink-3">
+            No MCP servers yet — connect one to bind.
+          </div>`
+        : html`<div class="border border-surface-3 dark:border-d-surface-3 rounded-lg overflow-hidden">
+            ${this.mcpServers.map((s) => this.renderToolRow(s))}
+          </div>`}
+      <button
+        type="button"
+        class="mt-3 text-[12.5px] px-3 py-1.5 rounded-md border border-surface-3
+          dark:border-d-surface-3 text-ink-2 dark:text-d-ink-2
+          hover:bg-surface-2 dark:hover:bg-d-surface-2 cursor-pointer"
+        @click=${() => this.requestAddMCPServer()}
+      >+ Connect a new server</button>
     `;
+  }
+
+  private renderToolRow(s: MCPServer) {
+    const checked = this.draft.mcpServerIds.includes(s.id);
+    return html`
+      <label
+        class="flex items-center gap-3 px-3 py-2 border-b border-surface-3
+          dark:border-d-surface-3 last:border-b-0 cursor-pointer
+          hover:bg-surface-2 dark:hover:bg-d-surface-2"
+      >
+        <input
+          type="checkbox"
+          class="rm-checkbox"
+          .checked=${checked}
+          @change=${(e: Event) => this.toggleMcp(s.id, (e.target as HTMLInputElement).checked)}
+        />
+        <div class="flex-1 min-w-0">
+          <div class="text-[13.5px]">${s.name}</div>
+          <div class="text-[11.5px] text-ink-3 dark:text-d-ink-3">
+            ${s.type} · ${s.auth_mode}
+          </div>
+        </div>
+      </label>
+    `;
+  }
+
+  private toggleMcp(id: string, on: boolean) {
+    const set = new Set(this.draft.mcpServerIds);
+    if (on) set.add(id);
+    else set.delete(id);
+    this.draft = { ...this.draft, mcpServerIds: [...set] };
+  }
+
+  private requestAddMCPServer() {
+    this.dispatchEvent(
+      new CustomEvent('request-add-mcp-server', {
+        bubbles: true,
+        composed: true,
+      }),
+    );
   }
 
   private renderSkills() {
@@ -777,12 +826,48 @@ export class CoworkerWizard extends LitElement {
       <h3 class="text-[15px] font-semibold mb-1">Skills</h3>
       <p class="text-[13px] text-ink-3 dark:text-d-ink-3 mb-4">
         Bind skill packages that give this coworker extra know-how.
-        (Real picker lands in the next commit.)
       </p>
-      <div class="text-[13px] text-ink-3 dark:text-d-ink-3 italic">
-        Skills picker · coming next
-      </div>
+      ${this.skills.length === 0
+        ? html`<div class="text-[13px] text-ink-3 dark:text-d-ink-3">
+            No skills available. Create one from Settings → Skills.
+          </div>`
+        : html`<div class="border border-surface-3 dark:border-d-surface-3 rounded-lg overflow-hidden">
+            ${this.skills.map((s) => this.renderSkillRow(s))}
+          </div>`}
     `;
+  }
+
+  private renderSkillRow(s: SkillSummary) {
+    const checked = this.draft.skillIds.includes(s.id);
+    return html`
+      <label
+        class="flex items-center gap-3 px-3 py-2 border-b border-surface-3
+          dark:border-d-surface-3 last:border-b-0 cursor-pointer
+          hover:bg-surface-2 dark:hover:bg-d-surface-2"
+      >
+        <input
+          type="checkbox"
+          class="rm-checkbox"
+          .checked=${checked}
+          @change=${(e: Event) => this.toggleSkill(s.id, (e.target as HTMLInputElement).checked)}
+        />
+        <div class="flex-1 min-w-0">
+          <div class="text-[13.5px]">${s.name}</div>
+          ${s.description
+            ? html`<div class="text-[11.5px] text-ink-3 dark:text-d-ink-3 truncate">
+                ${s.description}
+              </div>`
+            : nothing}
+        </div>
+      </label>
+    `;
+  }
+
+  private toggleSkill(id: string, on: boolean) {
+    const set = new Set(this.draft.skillIds);
+    if (on) set.add(id);
+    else set.delete(id);
+    this.draft = { ...this.draft, skillIds: [...set] };
   }
 
   private renderReview() {
