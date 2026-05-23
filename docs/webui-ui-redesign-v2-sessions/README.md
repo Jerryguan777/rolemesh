@@ -5,22 +5,24 @@
 ## 文件命名
 
 ```
-v2-NN-<topic>.md
-   ^^   ^^^^^^^
- session  描述
+v2-X-<topic>.md
+   ^   ^^^^^^^
+session  描述
 ```
 
-## 当前状态
+## 当前状态（3 session 结构）
 
 | Session | 状态 | 详细度 |
 |---|---|---|
-| v2-00-foundations.md | finalized | 详细 |
-| v2-01-chat-shell.md | finalized | 详细 |
-| v2-02-settings-shell.md | DRAFT | stub，执行前 refresh |
-| v2-03-coworker-wizard.md | DRAFT | stub，执行前 refresh |
-| v2-04-activity-shell.md | DRAFT | stub，执行前 refresh |
-| v2-05-approvals-popover.md | DRAFT | stub，执行前 refresh |
-| v2-06-visual-polish.md | DRAFT | stub，执行前 refresh |
+| v2-A-foundations-and-shells.md | finalized | 详细 |
+| v2-B-coworker-wizard-and-credentials.md | DRAFT | stub，执行前 refresh |
+| v2-C-activity-approvals-polish.md | DRAFT | stub，执行前 refresh |
+
+## Collapse note (2026-05-22)
+
+原本拆 7 个 session（v2-00 到 v2-06）每个 ~500-1200 LOC 共 ~4500 LOC。用户审视后指出：v2 本质是 prototype HTML 翻译 + v1.1 既有组件 slot，不是新 backend 工作。重估实际 ~2600 LOC，合并到 3 session（每个 thematic 整体）。
+
+设计原则继承自 v1.1 retro："Greenfield over compat-window staging when callers are countable"——v2 callers single-dev，可以激进合并。
 
 ## 怎么用
 
@@ -32,16 +34,15 @@ v2-NN-<topic>.md
 执行中发现需要拆 PR 或调整范围的情况，记录到该文件末尾的 Findings 段。
 ```
 
-## Refresh 节奏（继承 v1.1 教训）
+## Refresh 节奏
 
-v1.1 13 个 session 总共 refresh 了 6 次（约 46%）。v2 这次**只详写前 2 个**（v2-00 / v2-01），其它 5 个 stub，执行前一一 refresh。原因：
+- v2-A 详写（次大 session，地基决定下游）
+- v2-B / v2-C DRAFT，执行前 read 上游 Findings + grep 后 refresh
 
-- DRAFT 写得太早会被上游 session 落地的细节打脸
-- 每次 refresh 成本 ~10 分钟；rewrite 整个 session 成本 ~1 小时
-- v1.1 时所有 13 个一上来都详写，结果 6 个被 refresh 改了大半
+v1.1 13 session 中 6 次 refresh = 46%；v2 3 session 目标 ≤ 1 次 refresh（v2-B / v2-C 各最多 refresh 一次）。
 
 ## 不要做的事
 
-- 不要一个 session 跑两个 prompt 文件（context 会乱）
-- 不要把 `<file>.md` 删掉——它是历史档案，Findings 是下游 session 的输入
-- DRAFT 的 prompt 不要在 v2-00/v2-01 执行期间提前批量改——等真开始时再 refresh
+- 不要一个 session 跑两个 prompt 文件
+- 不要把 `<file>.md` 删掉——它是历史档案，Findings 是下游输入
+- DRAFT 的 prompt 不要在 v2-A 执行期间提前批量改——等真开始时再 refresh
