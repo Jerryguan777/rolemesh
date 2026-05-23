@@ -149,7 +149,12 @@ export class RmChatShell extends LitElement {
 
   override connectedCallback() {
     super.connectedCallback();
-    this.style.display = 'block';
+    // Inline styles ship before the first render's <style> block has
+    // a chance to apply, and override the stylesheet rule (higher
+    // specificity). Set display:flex inline so the banner +
+    // sidebar/main layout is correct on first paint.
+    this.style.display = 'flex';
+    this.style.flexDirection = 'column';
     this.style.height = '100%';
     // Force chat-panel's internal sidebar collapsed so we render
     // ONE sidebar (the v2 shell's), not two. chat-panel reads this
@@ -296,15 +301,24 @@ export class RmChatShell extends LitElement {
     return html`
       <style>
         /* Scoped via parent attribute selector so these rules only
-         * touch the shell and not the v1.1 settings shell or login. */
+         * touch the shell and not the v1.1 settings shell or login.
+         * The host is flex-column so the reauth banner can sit
+         * above a fixed-height layout; the inner .cs-layout owns
+         * the grid that splits sidebar + main. */
         rm-chat-shell {
-          display: grid;
-          grid-template-columns: 272px 1fr;
+          display: flex;
+          flex-direction: column;
           height: 100%;
           min-height: 0;
           background: var(--rm-bg);
           color: var(--rm-ink);
           font-family: var(--rm-font-body);
+        }
+        rm-chat-shell .cs-layout {
+          flex: 1;
+          min-height: 0;
+          display: grid;
+          grid-template-columns: 272px 1fr;
         }
         rm-chat-shell .cs-sidebar {
           background: var(--rm-surface-2);
@@ -675,6 +689,7 @@ export class RmChatShell extends LitElement {
         }
       </style>
       <rm-reauth-banner></rm-reauth-banner>
+      <div class="cs-layout">
       <aside class="cs-sidebar">
         <div class="cs-brand">
           <div class="mark">R</div>
@@ -791,6 +806,7 @@ export class RmChatShell extends LitElement {
         <div class="cs-slot">
           <rm-chat-panel class="flex-1 min-h-0"></rm-chat-panel>
         </div>
+      </div>
       </div>
     `;
   }

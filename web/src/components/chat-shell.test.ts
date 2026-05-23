@@ -236,6 +236,24 @@ describe('<rm-chat-shell>', () => {
     expect(localStorage.getItem('rm-sidebar-collapsed')).toBe('true');
   });
 
+  it('lays out reauth banner above a sidebar+main grid (not as a grid item)', async () => {
+    // Regression: connectedCallback used to set `style.display = 'block'`
+    // inline, which beat the rendered <style> grid rule on
+    // specificity. The banner then became grid item #1, the
+    // sidebar got pushed into the 1fr column, and main wrapped to
+    // a new row. Pin the flex-column host + .cs-layout grid wrapper
+    // so this can't regress silently.
+    const el = await mountShell();
+    expect(el.style.display).toBe('flex');
+    expect(el.style.flexDirection).toBe('column');
+    const layout = el.querySelector('.cs-layout');
+    expect(layout, '.cs-layout wrapper must exist').not.toBeNull();
+    const sidebar = el.querySelector('.cs-sidebar');
+    const main = el.querySelector('.cs-main');
+    expect(layout?.contains(sidebar!)).toBe(true);
+    expect(layout?.contains(main!)).toBe(true);
+  });
+
   it('renders one row in the coworker switcher menu per coworker', async () => {
     const el = await mountShell();
     el.querySelector<HTMLButtonElement>(

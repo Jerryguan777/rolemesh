@@ -178,7 +178,11 @@ export class RmSettingsShell extends LitElement {
 
   override connectedCallback() {
     super.connectedCallback();
-    this.style.display = 'block';
+    // Inline style overrides the <style> rule (specificity) — set
+    // flex-column so the reauth-banner can sit above the grid
+    // layout on first paint, before the rendered <style> applies.
+    this.style.display = 'flex';
+    this.style.flexDirection = 'column';
     this.style.height = '100%';
     window.addEventListener('hashchange', this.onHashChange);
   }
@@ -209,13 +213,19 @@ export class RmSettingsShell extends LitElement {
     return html`
       <style>
         rm-settings-shell {
-          display: grid;
-          grid-template-columns: 248px 1fr;
+          display: flex;
+          flex-direction: column;
           height: 100%;
           min-height: 0;
           background: var(--rm-bg);
           color: var(--rm-ink);
           font-family: var(--rm-font-body);
+        }
+        rm-settings-shell .ss-layout {
+          flex: 1;
+          min-height: 0;
+          display: grid;
+          grid-template-columns: 248px 1fr;
         }
         rm-settings-shell .ss-nav {
           background: var(--rm-surface-2);
@@ -315,6 +325,7 @@ export class RmSettingsShell extends LitElement {
         }
       </style>
       <rm-reauth-banner></rm-reauth-banner>
+      <div class="ss-layout">
       <aside class="ss-nav" aria-label="Settings navigation">
         <div class="sttl">
           <b>Settings</b>
@@ -338,6 +349,7 @@ export class RmSettingsShell extends LitElement {
             ${active ? active.render() : nothing}
           </div>
         </div>
+      </div>
       </div>
     `;
   }

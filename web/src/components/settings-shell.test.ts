@@ -158,6 +158,28 @@ describe('<rm-settings-shell>', () => {
     expect(entries.length).toBe(ENTRIES.length);
   });
 
+  it('lays out reauth banner above a sidebar+main grid (not as a grid item)', async () => {
+    // Regression: connectedCallback used to set `style.display = 'block'`
+    // inline, which beat the rendered <style> rule on specificity.
+    // The banner then became grid item #1, the sidebar got pushed
+    // into the 1fr column, and main wrapped to a new row — the
+    // visible result was a sidebar across the top with content
+    // below, instead of side-by-side columns.
+    const el = await mount();
+    const host = el;
+    expect(host.style.display).toBe('flex');
+    expect(host.style.flexDirection).toBe('column');
+    // The sidebar + main MUST be wrapped in a grid container; the
+    // banner is a flex sibling above it. The wrapper carries the
+    // grid template — if someone deletes it the columns collapse.
+    const layout = host.querySelector('.ss-layout');
+    expect(layout, '.ss-layout wrapper must exist').not.toBeNull();
+    const sidebar = host.querySelector('.ss-nav');
+    const main = host.querySelector('.ss-main');
+    expect(layout?.contains(sidebar!)).toBe(true);
+    expect(layout?.contains(main!)).toBe(true);
+  });
+
   it.each(ENTRIES)(
     '%s entry click navigates to #/manage/%s and renders %s',
     async (slug, _title, expectedTag) => {

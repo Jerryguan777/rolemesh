@@ -33,7 +33,12 @@ export class RmActivityShell extends LitElement {
 
   override connectedCallback() {
     super.connectedCallback();
-    this.style.display = 'block';
+    // Set the inline display the stylesheet wants — inline styles
+    // beat the rendered <style> block on specificity, so leaving it
+    // as a bare `block` would collapse the flex layout the body
+    // depends on.
+    this.style.display = 'flex';
+    this.style.flexDirection = 'column';
     this.style.height = '100%';
     window.addEventListener('hashchange', this.onHashChange);
   }
