@@ -28,7 +28,8 @@ import './components/skill-detail-page.js';
 import './components/coworker-skills-tab.js';
 import './components/inline-approval.js';
 import './components/app-shell.js';
-import { installLegacyRedirects } from './router.js';
+import './components/chat-shell.js';
+import { installLegacyRedirects, topLevelShell } from './router.js';
 import {
   fetchAuthConfig,
   getStoredToken,
@@ -57,6 +58,9 @@ export class RmApp extends LitElement {
   }
 
   @state() private authState: AuthState = 'loading';
+  @state() private shell: 'chat' | 'manage' | 'activity' = topLevelShell(
+    location.hash,
+  );
 
   override async connectedCallback() {
     super.connectedCallback();
@@ -66,8 +70,21 @@ export class RmApp extends LitElement {
     window.addEventListener('rm-auth-failed', () => {
       this.authState = 'login';
     });
+    // Re-resolve which shell owns the URL whenever the hash changes,
+    // so navigations between `#/`, `#/manage/...`, `#/activity/...`
+    // swap shells without a full reload.
+    window.addEventListener('hashchange', this.onHashChange);
     await this.resolveAuth();
   }
+
+  override disconnectedCallback() {
+    super.disconnectedCallback();
+    window.removeEventListener('hashchange', this.onHashChange);
+  }
+
+  private onHashChange = () => {
+    this.shell = topLevelShell(location.hash);
+  };
 
   private async resolveAuth() {
     const params = new URLSearchParams(location.search);
@@ -127,6 +144,13 @@ export class RmApp extends LitElement {
     }
     if (this.authState === 'login') {
       return html`<rm-login-page></rm-login-page>`;
+    }
+    // v2 split: `#/` → new chat shell, everything else → legacy
+    // app-shell during the PR 3→PR 4 transition. PR 4 will replace
+    // the `manage` branch with `<rm-settings-shell>` and add a real
+    // activity placeholder.
+    if (this.shell === 'chat') {
+      return html`<rm-chat-shell></rm-chat-shell>`;
     }
     return html`<rm-app-shell></rm-app-shell>`;
   }
