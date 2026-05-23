@@ -1,18 +1,25 @@
 // Read-only Models catalog (#/models).
 //
-// Lists `GET /api/v1/models` grouped by provider. No admin-write
-// surface in v1.1 — design §14 defers that to v2; the empty state
-// instructs the operator to use the backend tooling.
+// Lists `GET /api/v1/models` grouped by provider, augmented with
+// the tenant's `GET /tenant/credentials` so each provider header
+// shows ready / needs-credential status. The grouping logic is in
+// `services/models-grouping.ts` so the v2-B coworker wizard and
+// this page share one source of truth.
 
 import { LitElement, html, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { ApiError, getApiClient } from '../api/client.js';
-import type { Model } from '../api/client.js';
+import type { CredentialResponse, Model } from '../api/client.js';
+import {
+  groupModelsByProvider,
+  type ProviderGroup,
+} from '../services/models-grouping.js';
 
 @customElement('rm-models-page')
 export class ModelsPage extends LitElement {
   @state() private rows: Model[] = [];
+  @state() private credentials: CredentialResponse[] = [];
   @state() private loading = true;
   @state() private error: string | null = null;
   private readonly api = getApiClient();
@@ -30,9 +37,17 @@ export class ModelsPage extends LitElement {
     this.loading = true;
     this.error = null;
     try {
-      this.rows = await this.api.listModels();
+      // Credentials are tenant-scoped metadata only; failing to
+      // load them should not blank the catalog — degrade gracefully.
+      const [models, creds] = await Promise.all([
+        this.api.listModels(),
+        this.api.listCredentials().catch(() => [] as CredentialResponse[]),
+      ]);
+      this.rows = models;
+      this.credentials = creds;
     } catch (err) {
       this.rows = [];
+      this.credentials = [];
       this.error =
         err instanceof ApiError
           ? `${err.status} — ${err.message}`
@@ -40,14 +55,6 @@ export class ModelsPage extends LitElement {
     } finally {
       this.loading = false;
     }
-  }
-
-  private groupByProvider(): Record<string, Model[]> {
-    const groups: Record<string, Model[]> = {};
-    for (const r of this.rows) {
-      (groups[r.provider] ??= []).push(r);
-    }
-    return groups;
   }
 
   override render() {
@@ -108,16 +115,16 @@ export class ModelsPage extends LitElement {
   }
 
   private renderGroups() {
-    const groups = this.groupByProvider();
-    const providers = Object.keys(groups).sort();
+    const groups = groupModelsByProvider(this.rows, this.credentials);
     return html`
       <div class="space-y-4">
-        ${providers.map((p) => this.renderProviderCard(p, groups[p]!))}
+        ${groups.map((g) => this.renderProviderCard(g))}
       </div>
     `;
   }
 
-  private renderProviderCard(provider: string, items: Model[]) {
+  private renderProviderCard(group: ProviderGroup) {
+    const items = group.models;
     return html`
       <section
         class="border border-surface-3 dark:border-d-surface-3 rounded-xl overflow-hidden"
@@ -127,10 +134,23 @@ export class ModelsPage extends LitElement {
             text-[13px] font-medium text-ink-1 dark:text-d-ink-1
             flex items-center gap-2"
         >
-          <span class="capitalize">${provider}</span>
+          <span class="capitalize">${group.provider}</span>
           <span class="text-ink-4 text-[11.5px]">
             (${items.length})
           </span>
+          ${group.hasCredential
+            ? html`<span
+                class="ml-auto text-[11px] px-1.5 py-0.5 rounded
+                  bg-emerald-100 dark:bg-emerald-900/30
+                  text-emerald-700 dark:text-emerald-300"
+                title="Credential set"
+              >ready</span>`
+            : html`<span
+                class="ml-auto text-[11px] px-1.5 py-0.5 rounded
+                  bg-amber-100 dark:bg-amber-900/30
+                  text-amber-800 dark:text-amber-200"
+                title="No credential — models in this provider cannot run yet"
+              >needs credential</span>`}
         </header>
         <ul class="divide-y divide-surface-3 dark:divide-d-surface-3">
           ${items.map(

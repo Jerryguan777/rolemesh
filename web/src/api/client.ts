@@ -24,6 +24,14 @@ type GetResponseBody<
   : never;
 
 export type BackendList = GetResponseBody<'/api/v1/backends', 'get'>;
+export type Backend = components['schemas']['Backend'];
+export type BackendName = components['schemas']['BackendName'];
+export type ModelFamily = components['schemas']['ModelFamily'];
+export type CoworkerCreate = components['schemas']['CoworkerCreate'];
+export type CoworkerMCPBindingCreate =
+  components['schemas']['CoworkerMCPBindingCreate'];
+export type CoworkerMCPBindingResponse =
+  components['schemas']['CoworkerMCPBindingResponse'];
 export type Coworker = components['schemas']['Coworker'];
 export type Conversation = components['schemas']['Conversation'];
 export type Message = components['schemas']['Message'];
@@ -125,6 +133,32 @@ export class ApiClient {
     });
     if (!resp.ok) throw await this.parseError(resp);
     return (await resp.json()) as Me;
+  }
+
+  async createCoworker(body: CoworkerCreate): Promise<Coworker> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/coworkers`, {
+      method: 'POST',
+      headers: this.headers({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Coworker;
+  }
+
+  async bindCoworkerMCPServer(
+    coworkerId: string,
+    body: CoworkerMCPBindingCreate,
+  ): Promise<CoworkerMCPBindingResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(coworkerId)}/mcp-servers`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(body),
+      },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as CoworkerMCPBindingResponse;
   }
 
   async listCoworkers(): Promise<Coworker[]> {
