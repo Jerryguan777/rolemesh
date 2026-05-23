@@ -182,7 +182,11 @@ export class RmChatShell extends LitElement {
     // Force chat-panel's internal sidebar collapsed so we render
     // ONE sidebar (the v2 shell's), not two. chat-panel reads this
     // in its constructor, so we must set it before chat-panel
-    // mounts inside the slot.
+    // mounts inside the slot. The CSS rules below also hide the
+    // inner sidebar visually, but the localStorage flag remains as
+    // belt-and-braces so a user toggling at the chat-panel level
+    // doesn't suddenly re-expand a hidden element. v3 will rip out
+    // the inner sidebar entirely and drop this workaround.
     localStorage.setItem('rm-sidebar-collapsed', 'true');
 
     const params = new URLSearchParams(location.search);
@@ -716,6 +720,31 @@ export class RmChatShell extends LitElement {
           display: flex;
           flex-direction: column;
           overflow: hidden;
+        }
+        /* v2-A polish backlog: the slotted v1.1 <rm-chat-panel>
+         * renders its own <rm-sidebar> + brand+hamburger header.
+         * The v2 chat-shell already provides both, so we hide the
+         * duplicates here without touching chat-panel internals.
+         *
+         * Two visual elements to hide:
+         *   1. The whole inner <rm-sidebar> (left rail).
+         *   2. The first column of chat-panel's top bar (hamburger
+         *      + RoleMesh brand). We deliberately keep the right
+         *      column (Cancel / Connected indicator) — that affordance
+         *      has no v2 replacement yet.
+         *
+         * Selector for #2 is structural rather than class-based
+         * because chat-panel's top bar uses raw tailwind classes.
+         * If chat-panel reorders its top bar this rule no-ops; the
+         * worst case is the v2-A look returns (one extra brand
+         * mark). chat-panel.test.ts catches gross regressions. */
+        rm-chat-shell rm-chat-panel rm-sidebar { display: none; }
+        rm-chat-shell rm-chat-panel
+          > div:first-child
+          > div.flex-1
+          > div.shrink-0
+          > div:first-child {
+          display: none;
         }
         rm-chat-shell .cs-menu {
           position: absolute;

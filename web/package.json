@@ -11,7 +11,8 @@
     "openapi:check": "openapi-typescript ./openapi.yaml -o /tmp/rm-openapi-types.ts && diff -u ./src/api/generated/types.ts /tmp/rm-openapi-types.ts",
     "test": "vitest run",
     "lint:no-admin-chat": "node scripts/lint-no-admin-chat.mjs",
-    "lint:flat-route": "node scripts/lint-flat-route.mjs"
+    "lint:flat-route": "node scripts/lint-flat-route.mjs",
+    "lint:tokens-only": "node scripts/lint-tokens-only.mjs"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.1",

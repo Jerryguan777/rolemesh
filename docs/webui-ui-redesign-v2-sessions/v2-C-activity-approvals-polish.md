@@ -6,7 +6,7 @@
 | Prerequisites | v2-A done + v2-B done + 用户 smoke 通过两者 |
 | Estimated PRs | 3-4 |
 | Estimated LOC | ~1300（取保守 2x：原 600 × 2 + 含 v2 retro + 累积 polish backlog） |
-| Status | not started |
+| Status | done (2026-05-23) — 3 PRs landed on feat/ui-v2; actual ~2710 LOC (4.17× est) |
 
 > **Refresh 起源**：v2-A 已建 `<rm-activity-shell>` 最小占位 + v2-B 累积 polish backlog + 发现 `v1_client.ts ServerEvent` union 缺 approval events 类型。本 refresh 把这些都明确：
 > 1. activity-shell 已存在，v2-C 只**填内容**（Activity index + Approval log tab）
@@ -234,4 +234,128 @@ popover open state、各种 active/selected/disabled 都注意。
 
 ## Findings (after execution) - v2 cycle 收尾 retro
 
-_(empty — 重点记录：v2 整体 retro / popover WS 接通是否真发生 / polish backlog 完成度 / LOC 实际 vs 1300 / 对 v3 启动条件的建议)_
+### Backend WS forward — partial gap discovered
+
+Tracing `src/webui/v1/ws_stream.py` shows the backend DOES forward
+`event.approval.required` / `event.approval.resolved` (03a PR2 lines
+293-302, 397-465). However both subscriptions are **per-conversation**
+(`web.approval.required.{conversation_id}` /
+`web.approval.resolved.conv.{conversation_id}`). For a topbar badge
+that needs cross-conversation visibility this is insufficient — a user
+in conversation A who is approver on conversation B will never see B's
+approvals on their badge.
+
+The session prompt locked in 4 directives that conflict here: "都走 WS
+不走轮询" + "不修 backend" + "badge 永久订阅" + "cross-conversation
+visibility". Resolution chosen with the user mid-session: design the
+front-end against an **assumed** backend endpoint
+(`POST /api/v1/auth/ws-ticket { scope: "user-approvals" }` +
+`WS /api/v1/users/me/approvals/stream`), implemented as
+`UserApprovalsClient`. When the endpoint 404s today, the client cycles
+through `connecting → closed → reconnecting`, and the popover surfaces
+a "Live updates stalled" hint via the `connectionStatus` prop. REST
+polling deliberately NOT added — the gap is a single backend chore.
+
+**v3 backend chore** (block):
+
+1. Add user-scoped NATS subject — e.g. `web.approval.required.user.{user_id}` published in tandem with the existing conv-keyed subject in `src/webui/v1/approval_engine_registry.py` / `src/rolemesh/approval/engine.py` (search for `web.approval.required.`).
+2. Implement WS endpoint `/api/v1/users/me/approvals/stream` that subscribes the signed-in user's subject. ws-ticket payload should resolve `user_id` and bind the WS handler to it.
+3. Extend `/api/v1/auth/ws-ticket` to accept `{ scope: "user-approvals" }` returning a ticket that does NOT require a conversation_id.
+
+Until that lands, the badge will read REST truth via `listApprovals()`
+on shell mount + after each row decide; the popover renders the same
+list. The user can refresh manually or wait for the next decide event
+to trigger a refetch. Smoke testing in the meantime is degraded —
+needs the backend endpoint to verify cross-conv real-time.
+
+### Polish backlog completion (6 items, all 3 PR coverage)
+
+| # | Item | Status | Notes |
+|---|---|---|---|
+| 1 | token lint script | DONE | 32 pre-existing violations across `app.css` (25 hex + 2 font) and `login-page.ts` (7 hex). Allowlisted with `// migration chore` annotation; lint blocks NEW additions only. v3 chore: burn down. |
+| 2 | settings double-card | DONE | `.ss-card` collapsed to `background:none; border:none; padding:0` — v1.1 pages now paint directly on the body. |
+| 3 | mcp-server-dialog unit tests | DONE | 6 cases: open/close, required validation, POST body shape, success emits + closes, failure stays open. |
+| 4 | partial-commit banner reposition | DONE | Moved out of `renderBody()` (was inside step body slot, scrolled with content) into the dialog outer frame above `<rm-wizard>`. Wizard primitive API untouched. |
+| 5 | chat-panel sidebar overlap | DONE | CSS in chat-shell hides `rm-chat-panel rm-sidebar` + the chat-panel topbar's left section (hamburger + duplicate brand). Kept localStorage workaround as belt-and-braces. |
+| 6 | iconChevronRight | DONE | Added; used by Activity index cards. Cross-session value: any settings/listing surface that needs an affordance to drill in. |
+
+### v2 cycle retro
+
+**Session sizing (LOC, actual vs estimated)**
+
+| Session | Estimated LOC | Actual LOC | Ratio |
+|---|---|---|---|
+| v2-A | ~600 | ~1714 | 2.85× |
+| v2-B | ~720 | ~1404 | 1.95× |
+| v2-C | ~650 | ~2710 | 4.17× |
+
+v2-C blew the estimate by 4×. Root causes (in order of weight):
+
+1. **The discovered backend gap turned into a forward-design exercise** — designing UserApprovalsClient with handshake, reconnect, and observable status was real work the brief did not anticipate.
+2. **Activity-shell rebuild** — v2-A landed a minimal placeholder, but v2-C wanted three tabs + an index page. The "fill content" instruction was small; actually doing it cost ~300 LOC.
+3. **mcp-server-dialog tests** — added a full 214-line suite where v2-B left zero.
+4. **Two test fixtures rewritten** — chat-shell's `makeApproval` + ApprovalRequest schema fields had grown since v1.1 (5 extra required fields). Hidden cost across both test suites.
+
+v2 cycle averages out to ~3× LOC per estimate. **v3 baseline: assume
+3× when the work touches a discovered architectural gap; 2× otherwise.**
+
+**Refresh count**
+
+v2 plan budgeted ≤1 prompt refresh per session. Actuals: v2-A 0, v2-B
+1, v2-C 1 (the mid-session "backend gap" clarification asked of the
+user about realtime vs polling). Total = 2 refreshes across 3 sessions
+— under the v1.1 baseline of 6, and the refreshes were architectural
+(WS topology) not procedural (locked-decision drift), which is the
+healthier signal.
+
+**13 locked decisions — post-hoc review**
+
+All 13 v2-prompt locked decisions held:
+
+* #1 popover anchor = absolute overlay ✓
+* #2 badge permanent subscription ✓ (via shell-owned client)
+* #3 no Runs activity tab ✓ (2-card index)
+* #4 partial-commit banner = parent renders, primitive untouched ✓
+* #5 chat-panel sidebar CSS hide ✓
+* #6 token lint scope = `web/src/` ✓
+* (v2-A) keep v1.1 components 0-touched ✓ (only approvals-page got the `mode` prop, additive)
+* (v2-A) `location.href` reload pattern stays ✓ (deferred refactor)
+* (v2-B) Lit boolean property binding rule ✓ (used `.canDecide`, never `?can-decide`)
+* (v2-B) sibling-dialog pattern (credential, mcp-server) ✓
+* (v2-B) partial-commit policy (don't roll back coworker) ✓
+* (v2-B) `<rm-wizard>` primitive API frozen ✓
+* tokens.css single-source ✓ (now lint-enforced)
+
+**Anti-over-engineering applied count**
+
+Cut from v2-C scope before coding:
+
+* chat-panel internal refactor (reactive URL listening) — kept v2-A reload pattern
+* `<rm-wizard>` primitive header-banner slot — solved at parent
+* Live WS via backend changes — assumed-API approach instead
+* mcp-server-dialog redesign — added tests only
+* token lint burn-down for the 32 violations — allowlisted with chore note
+
+Cumulative across v2 cycle: ≥10 explicit "don't do that, defer" decisions
+held the line on scope.
+
+**Reusable lessons (v1.1 retro carry-over check)**
+
+v1.1's 6 reusable lessons mapped against v2-C experience:
+
+| v1.1 lesson | v2-C confirmation |
+|---|---|
+| Lock decisions BEFORE coding | v2-C 6 lockdowns held; 1 mid-session refresh needed only when the *architecture* (not the decision) was contradicted |
+| Tests over coverage | mcp-server-dialog: 6 behaviour-driven cases caught zero bugs but pin the contract for future edits |
+| TS-erased imports break decorator side-effects | Hit AGAIN in activity-shell.test.ts — type-only imports drop the decorator registration. Lesson: import side-effects explicitly even when the test uses the class as a type |
+| Match-the-schema fixtures | ApprovalRequest grew 5 required fields since v1.1; centralized `makeApproval` builders save 2× the work next time |
+| Backend gaps surface late | This session — `event.approval.required` was wire-routable but topology-wrong for the use case |
+| `as unknown as T` only for test fixtures | Used twice; both with explanatory comment |
+
+**v3 / new cycle startup advice**
+
+1. **Before locking decisions, audit the backend topology** — v2-C's contradiction came from the prompt locking "all-WS + no backend changes" without first verifying the WS topic shape supports the UI requirement. Spend 30 minutes on `grep -rn 'web.*subject' src/` per major UI feature.
+2. **Estimate 3× LOC when "architectural gap" risk exists** — v2-A and v2-B were ~2×; v2-C with the gap was 4×. The discovered-gap signal is when the brief uses words like "verify backend forwards X" or "smoke-verify Y".
+3. **The shell-vs-page boundary is the right cut** — chat-shell owning the approvals client (not the page or the popover) gave us one source of truth, no race conditions, and an obvious test seam. Carry this pattern to v3: stateful subscriptions live at the *outermost* component that needs them.
+4. **Allowlist-with-comment is the right lint policy** — burn-down is a separate chore from the introduction prevention.
+5. **The "type-only import drops the decorator" trap WILL hit again** — consider adding a `verbatimModuleSyntax: true` in tsconfig for v3 to surface this at compile time. Out of scope for v2-C.

@@ -313,14 +313,18 @@ export class RmSettingsShell extends LitElement {
         rm-settings-shell .ss-body {
           flex: 1;
           overflow-y: auto;
-          padding: 24px 26px;
           min-height: 0;
         }
+        /* v2-A flagged "double card" — the inner card wrapped each
+         * v1.1 page in a surface bordered box, but every v1.1 page
+         * already paints its own surface + padding. v2-C drops the
+         * wrapper to a transparent positioning container so the
+         * inner page owns the look-and-feel. */
         rm-settings-shell .ss-card {
-          background: var(--rm-surface);
-          border: 1px solid var(--rm-border);
-          border-radius: var(--rm-r-lg);
-          padding: 20px 22px;
+          background: none;
+          border: none;
+          border-radius: 0;
+          padding: 0;
           min-height: 100%;
         }
       </style>

@@ -431,6 +431,13 @@ export class CoworkerWizard extends LitElement {
           aria-modal="true"
           aria-label="New coworker wizard"
         >
+          <!-- v2-B Finding moved the partial-commit banner here. It
+               used to render inside the step body, which meant a user
+               who fixed the failure and re-navigated could scroll the
+               banner off-screen. Pinning it above the wizard primitive
+               keeps it visible regardless of step. The <rm-wizard>
+               primitive API stays untouched (locked decision). -->
+          ${this.submitError ? this.renderSubmitError() : nothing}
           <rm-wizard
             title="New coworker"
             .steps=${this.steps}
@@ -461,19 +468,20 @@ export class CoworkerWizard extends LitElement {
         Loading…
       </div>`;
     }
-    return html`
-      ${this.submitError ? this.renderSubmitError() : nothing}
-      ${this.renderStepBody()}
-    `;
+    return this.renderStepBody();
   }
 
   private renderSubmitError() {
     const err = this.submitError!;
+    // Sits ABOVE <rm-wizard> (see render()) — no top margin needed.
+    // Rounded only at the bottom because the dialog wrapper already
+    // owns the top corners.
     return html`
       <div
-        class="border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20
-          text-red-700 dark:text-red-300 text-[13px] px-3 py-2 rounded-lg mb-4"
+        class="border-b border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20
+          text-red-700 dark:text-red-300 text-[13px] px-4 py-2"
         role="alert"
+        data-testid="coworker-wizard-submit-error"
       >
         <div class="font-medium mb-1">${err.message}</div>
         ${err.mcpFailures.length
