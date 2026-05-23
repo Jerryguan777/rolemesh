@@ -19,12 +19,14 @@ import { customElement, state } from 'lit/decorators.js';
 
 import { ApiError, getApiClient } from '../api/client.js';
 import type { Coworker } from '../api/client.js';
+import './coworker-wizard.js';
 
 @customElement('rm-coworkers-page')
 export class CoworkersPage extends LitElement {
   @state() private rows: Coworker[] = [];
   @state() private loading = true;
   @state() private error: string | null = null;
+  @state() private wizardOpen = false;
   private readonly api = getApiClient();
 
   protected override createRenderRoot() {
@@ -76,12 +78,20 @@ export class CoworkersPage extends LitElement {
                 lands in Phase 2.
               </p>
             </div>
-            <button
-              type="button"
-              class="text-[12px] px-2.5 py-1 rounded-md border border-surface-3 dark:border-d-surface-3
-                text-ink-2 dark:text-d-ink-2 hover:bg-surface-2 dark:hover:bg-d-surface-2 cursor-pointer"
-              @click=${() => void this.refresh()}
-            >Refresh</button>
+            <div class="flex items-center gap-2">
+              <button
+                type="button"
+                class="text-[12px] px-3 py-1.5 rounded-md bg-brand text-white
+                  hover:bg-brand-dark transition-colors cursor-pointer"
+                @click=${() => { this.wizardOpen = true; }}
+              >+ New coworker</button>
+              <button
+                type="button"
+                class="text-[12px] px-2.5 py-1 rounded-md border border-surface-3 dark:border-d-surface-3
+                  text-ink-2 dark:text-d-ink-2 hover:bg-surface-2 dark:hover:bg-d-surface-2 cursor-pointer"
+                @click=${() => void this.refresh()}
+              >Refresh</button>
+            </div>
           </div>
 
           ${this.loading
@@ -97,6 +107,16 @@ export class CoworkersPage extends LitElement {
                 ? this.renderEmpty()
                 : this.renderList()}
         </div>
+        <rm-coworker-wizard
+          ?open=${this.wizardOpen}
+          @close=${() => {
+            this.wizardOpen = false;
+            // Refresh once the wizard closes — a successful create
+            // also navigates away via location.href, but a partial-
+            // commit close should still surface the new coworker.
+            void this.refresh();
+          }}
+        ></rm-coworker-wizard>
       </div>
     `;
   }
