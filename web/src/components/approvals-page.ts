@@ -155,12 +155,17 @@ export class ApprovalsPage extends LitElement {
     // For the log surface, surface the actual final state so the
     // inline-approval card renders "Approved / Rejected / Expired"
     // tone instead of the pending decide buttons.
+    // Backend lifecycle status (`rejected`) maps to the inline-approval
+    // UI status (`denied`); `executing` / `executed` / `skipped` /
+    // `execution_failed` / `execution_stale` collapse to `unknown`
+    // because the card has no dedicated tone for those — they only
+    // exist for the post-decide execution phase.
     const rowStatus =
       this.mode === 'pending'
         ? 'pending'
         : r.status === 'approved'
           ? 'approved'
-          : r.status === 'denied'
+          : r.status === 'rejected'
             ? 'denied'
             : r.status === 'expired'
               ? 'expired'
