@@ -28,6 +28,7 @@ import './components/skill-detail-page.js';
 import './components/coworker-skills-tab.js';
 import './components/inline-approval.js';
 import './components/app-shell.js';
+import { installLegacyRedirects } from './router.js';
 import {
   fetchAuthConfig,
   getStoredToken,
@@ -35,6 +36,12 @@ import {
   isTokenExpired,
   scheduleRefresh,
 } from './services/oidc-auth.js';
+
+// Rewrite any v1.1 flat hash (`#/coworkers`, …) to its v2 nested
+// home (`#/manage/coworkers`, …) before any shell mounts. The
+// handler stays installed for the lifetime of the SPA so bookmarks
+// opened mid-session also redirect.
+installLegacyRedirects();
 
 type AuthState = 'loading' | 'login' | 'authenticated';
 
