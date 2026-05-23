@@ -1,0 +1,116 @@
+/* RoleMesh v2 design tokens.
+ *
+ * Source: docs/webui-ui-redesign-v2-prototype.html `:root` section.
+ * These are the single source of truth for the v2 visual language —
+ * cream backgrounds, terracotta accent, Fraunces serif headings,
+ * Hanken Grotesk body. All v2 components (chat shell, settings
+ * shell, dialog, wizard, future Activity pages) should reference
+ * `var(--rm-*)` rather than hard-coding hex values.
+ *
+ * v1.1 components keep using their existing Tailwind tokens until
+ * they are reskinned; the two systems coexist by namespace (`--rm-*`
+ * is v2-only, Tailwind's `--color-*` is v1.1).
+ *
+ * Custom properties cascade through shadow DOM via inheritance, so
+ * declaring these on `:root` is enough — LitElement shadow trees
+ * pick them up automatically. This is why the file is imported once
+ * from `web/src/app.ts` rather than per-component.
+ */
+
+:root {
+  /* Surfaces */
+  --rm-bg: #FAF8F3;
+  --rm-surface: #FFFFFF;
+  --rm-surface-2: #F3F0E9;
+  --rm-surface-3: #ECE7DC;
+
+  /* Ink */
+  --rm-ink: #2A2620;
+  --rm-ink-2: #6B6557;
+  --rm-ink-3: #9A9385;
+
+  /* Borders */
+  --rm-border: rgba(42, 38, 32, 0.10);
+  --rm-border-2: rgba(42, 38, 32, 0.17);
+
+  /* Accent — terracotta */
+  --rm-accent: #C2613F;
+  --rm-accent-2: #A94E30;
+  --rm-accent-ink: #FFFFFF;
+  --rm-accent-subtle: #F6EBE4;
+
+  /* Status */
+  --rm-good: #2F7D5B;
+  --rm-good-subtle: #E6F1EA;
+  --rm-warn: #9A6B14;
+  --rm-warn-subtle: #F8EFDC;
+  --rm-bad: #A4322F;
+  --rm-bad-subtle: #FBEAEA;
+
+  /* Typography. Google Fonts are loaded from index.html; system
+   * fallbacks come last so the UI remains readable if the CDN is
+   * blocked or slow. */
+  --rm-font-body:
+    'Hanken Grotesk', -apple-system, 'PingFang SC', 'Microsoft YaHei',
+    system-ui, sans-serif;
+  --rm-font-display: 'Fraunces', Georgia, 'Songti SC', serif;
+  --rm-font-mono:
+    'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+
+  /* Radius */
+  --rm-r: 10px;
+  --rm-r-lg: 16px;
+
+  /* Shadow */
+  --rm-shadow-sm: 0 1px 3px rgba(42, 38, 32, 0.04);
+  --rm-shadow-md: 0 8px 28px rgba(42, 38, 32, 0.16);
+  --rm-shadow-lg: 0 24px 60px rgba(30, 27, 23, 0.30);
+
+  /* Transition */
+  --rm-transition: 0.15s ease;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --rm-bg: #1E1B17;
+    --rm-surface: #27231C;
+    --rm-surface-2: #211E18;
+    --rm-surface-3: #322D25;
+
+    --rm-ink: #ECE7DC;
+    --rm-ink-2: #ABA493;
+    --rm-ink-3: #766F61;
+
+    --rm-border: rgba(236, 231, 220, 0.10);
+    --rm-border-2: rgba(236, 231, 220, 0.17);
+
+    --rm-accent: #D6764F;
+    --rm-accent-2: #E08A66;
+    --rm-accent-ink: #221A14;
+    --rm-accent-subtle: #3A2A21;
+
+    --rm-good: #5FB286;
+    --rm-good-subtle: #21342A;
+    --rm-warn: #D2A24E;
+    --rm-warn-subtle: #352B18;
+    --rm-bad: #E0938C;
+    --rm-bad-subtle: #3A2220;
+  }
+}
+
+/* Shared animation keyframes used by v2 components. Declaring them
+ * at the document root means LitElement shadow trees can reference
+ * `animation-name: rm-rise` without redeclaring the keyframes
+ * inside their own scoped CSS. */
+@keyframes rm-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes rm-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes rm-pop {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: none; }
+}

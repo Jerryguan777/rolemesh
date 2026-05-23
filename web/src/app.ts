@@ -1,5 +1,13 @@
 import { LitElement, html } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
+
+// v2 design tokens. Loaded once at app entry so the cream/terracotta
+// palette is available to every component on first paint; CSS custom
+// properties cascade through shadow DOM via inheritance, so this
+// single import covers both light-DOM components (chat-panel) and
+// shadow-DOM v2 primitives (rm-dialog, rm-wizard, …).
+import './styles/tokens.css';
+
 import './components/chat-panel.js';
 import './components/message-list.js';
 import './components/message-item.js';
