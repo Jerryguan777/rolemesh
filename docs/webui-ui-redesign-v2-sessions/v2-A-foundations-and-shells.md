@@ -6,7 +6,9 @@
 | Prerequisites | feat/ui-v2 分支起好（v1.1 已合 main） |
 | Estimated PRs | 4-5 |
 | Estimated LOC | ~1300 |
-| Status | not started |
+| Status | done (2026-05-22) |
+| Actual commits | 4 (PR 5 收尾合并进 PR 4) |
+| Actual LOC | ~3700 added / ~450 deleted（含测试 + lint）|
 
 ## Goal
 
@@ -228,4 +230,82 @@ v2 最大一个 session——把整套视觉地基 + IA 重组一次性完成：
 
 ## Findings (after execution)
 
-_(empty — 重点记录：字体加载实际表现 / Lit shadow DOM 与 Tailwind 4 摩擦细节 / `<dialog>` 原生元素是否有浏览器兼容问题 / 11 页 reskin 实际改了什么 / 旧 `<rm-app-shell>` 删除影响 / 对 v2-B 的影响（特别是 Models page provider grouping 是否要在本 session 抽 helper））_
+### 4 commits（PR 1-4，PR 5 收尾合并进 PR 4）
+
+| Commit | 主题 |
+|---|---|
+| `2eaa1ab` | feat(v2-A/01): tokens.css + Google Fonts + `<rm-dialog>` + `<rm-wizard>` |
+| `2a30263` | feat(v2-A/02): 嵌套 router + 8 个 legacy flat-hash redirects |
+| `249f459` | feat(v2-A/03): `<rm-chat-shell>` + 顶栏 3 图标 + coworker switcher |
+| `dd934d5` | feat(v2-A/04): `<rm-settings-shell>` + `<rm-activity-shell>` + 11 slots + 删除 `<rm-app-shell>` |
+
+### 字体加载实际表现
+
+- Google Fonts CDN 一行 `<link>` 同时载入 Inter（v1.1 保留）+ Fraunces + Hanken Grotesk + JetBrains Mono；prefetch + preconnect 已在 v1.1 时落地，本 session 沿用。
+- system fallback 真生效：`tokens.css` 里 `--rm-font-display` 是 `'Fraunces', Georgia, 'Songti SC', serif`；网络 block / offline 时浏览器自动跳到 Georgia，UI 仍可读。中文环境下额外加 'PingFang SC' / 'Microsoft YaHei' / 'Songti SC' 兼容 macOS / Windows。
+- 没有看到 FOUT 抖动（dev 启动时）——`display=swap` 让 fallback 字体先渲染，Google Fonts 到位后无 layout shift（字号匹配度够）。
+
+### Lit shadow DOM + Tailwind 4 摩擦
+
+- 早早决定 v2 新组件**不**用 Tailwind，避开 Tailwind 4 + shadow DOM 的已知边缘问题。tokens.css 全部用 CSS 变量（`--rm-*`），靠 `:root` 上的声明 + custom property inheritance 穿透 shadow boundary。
+- `<rm-dialog>` 和 `<rm-wizard>` 用 `static styles = css\`\`` 作 shadow DOM；引用 `var(--rm-accent)` 真值正常。
+- 唯一摩擦：`@keyframes` 不跨 shadow root 继承——`tokens.css` 里声明的 `rm-rise`，在 dialog shadow 里看不见。最终在 `<rm-dialog>` 自己的 `static styles` 里也声明了一份 `rm-rise`（容忍轻微重复换"无 cross-root 依赖"）。
+- `<rm-chat-shell>` / `<rm-settings-shell>` / `<rm-activity-shell>` 都用 **light DOM**（`createRenderRoot() { return this }`）——既能 slot v1.1 light-DOM 组件，又能让 Tailwind utility class（chat-panel 里用的）正常解析。
+
+### 原生 `<dialog>` 兼容性
+
+- happy-dom 20.x 实现了 HTMLDialogElement.showModal / close / 'close' 事件；ESC 不会自动触发 `cancel`，所以测试用 `dispatchEvent(new Event('cancel'))` 模拟。生产浏览器（Chromium / Firefox / Safari ≥ 15.4）原生处理 ESC + focus trap + `::backdrop`，零模拟成本。
+- 后续注意：iOS 15 之前 `<dialog>` 没原生支持，但 v2 explicitly assumes evergreen browsers——不打算 polyfill。
+
+### 11 个 settings page 实际改了什么
+
+| Page | 改动范围 |
+|---|---|
+| coworkers / mcp-servers / models / credentials / skills / safety / approval-policies | **0 触碰**——`<rm-settings-shell>` 在外面套 padding + cream surface card；内部组件完全不改 |
+| general / members | 新建占位：复用现成的 `<rm-coming-soon label="..." phase=3>`，不写新组件 |
+| appearance | 新建轻组件 `<rm-appearance-page>`——只 readonly 显示 `prefers-color-scheme` 检测结果 + listen `MediaQueryList.change`，不存任何 user preference（保持 plan §13 locked: 不加 toggle） |
+
+**不预期的连锁修改**：无。settings shell 的 cosmetic wrapper 是单层 `.ss-card` 容器；旧组件继续用自己的 Tailwind 样式，"两套样式叠加"在视觉上是 v2 surface (cream + 圆角) 包住 v1.1 surface (white card)——可以接受，v2-C 做统一 polish 时再 reskin v1.1 组件。
+
+### 旧 `<rm-app-shell>` 删除影响
+
+- `app-shell.ts` + `router-outlet.ts` 两个文件一起 `git rm`（路由表 `ROUTES` + `matchRoute` 也一起删，因为唯一调用方就是 app-shell）。
+- 没有 caller 漏网——`grep -r "rm-app-shell\|app-shell\|router-outlet"` 在 `src/**/*.ts` 已无引用（除注释提到历史的两处）。
+- 影响很小：router.ts 从 230 行缩到 89 行——只保留 `topLevelShell` + `applyLegacyRedirect` + `installLegacyRedirects`。`ROUTES` 数组里的 `phase` / `inSidebar` / `label` 字段全是死代码。
+- 顺带删的 `RouteId` 类型导出——没有外部 import。
+
+### 对 v2-B 的影响
+
+- **Models page provider grouping**：v2-A **没**抽 helper。v1.1 `models-page.ts` 维持原样 slot 进 settings shell；v2-B 拆 `groupModelsByProvider()` helper 时是 fresh write。理由：v2-A 的 cosmetic-only 原则严格遵守，不动业务组件，即使是"明显能复用的工具函数"也留到 v2-B。
+- **`<rm-wizard>` primitive**：已 land + 6 个单元测试 pin 行为；v2-B 落 coworker wizard 时直接拿来用，无需重做。Wizard primitive 是 0 业务逻辑 shell：parent 控 draft state + `canAdvance` + `submit` 回调。
+- **`<rm-dialog>` primitive**：同样可复用——v2-B credential 编辑（per-provider extras）适合放进 `<rm-dialog>`。
+- **`<rm-coming-soon>` 复用 v1.1 原件**——无重复造；general / members 直接用 `<rm-coming-soon label="..." phase=3>`。
+- **`icons.ts`** 抽出 8 个 SVG icon factory（activity / approvals / settings / chevron / plus / search / close / logout）——v2-B / v2-C 共享。
+
+### Coworker / Conversation 切换走 location.href reload
+
+v1.1 `<rm-chat-panel>` 只在 constructor 读 URL params，没有 reactive URL 监听。chat-shell 切换 coworker 或 conversation 时用 `location.href = ...` 触发整页 reload——chat-panel 重新 mount + 重新读 URL。Trade-off：UX 上有一次 reload 抖动；好处：零触碰 chat-panel。
+
+如果 v3 想消除 reload，需要 lift conversation state 上 shell——估算 4-6 小时改动，不在 v2 scope。
+
+### Approvals badge 占位值锁定
+
+顶栏 Approvals icon 的 badge 写死 `approvalsBadge = 0`，不发 GET 请求。理由（plan locked decision #5）：v2-C 一起做实时 popover + 实时 badge，避免"v2-A 假装实现 + v2-C 真实现"的双系统。当前 badge 不显示（< 1 时被 nothing 短路），用户视觉上看不到这个 placeholder。
+
+### 历史会话分组时区
+
+`groupConversations(now)` 用 `new Date(now.getFullYear(), now.getMonth(), now.getDate())` 计算 user local start-of-day。bucket: Today / Yesterday / Earlier。测试用 fixed `now` 验证桶边界——不依赖 system clock。
+
+### 一处 chat-shell 与 chat-panel 共存的微妙
+
+为了让 chat-shell 的 sidebar 是**唯一可见 sidebar**，shell 在 connectedCallback 写 `localStorage.setItem('rm-sidebar-collapsed', 'true')` —— chat-panel constructor 读这个 flag 决定起始折叠状态。用户仍可点 chat-panel 顶栏的 hamburger 展开内嵌 sidebar（两 sidebar 同时显示是个怪状态，但功能不破）。v2-C polish 阶段可以考虑加 CSS 隐藏 chat-panel 内嵌 sidebar 的 hamburger 按钮，或者 lift sidebar state 到 shell。
+
+### 测试 / lint / build / openapi 全绿（118 tests）
+
+- vitest: 118 tests / 17 files / 全部 pass
+- `npm run lint:no-admin-chat`: clean
+- `npm run lint:flat-route`: clean（新加；保护 v2 新代码不出现 v1.1 flat-hash literal）
+- `npm run build`: clean (236 KB JS / 40 KB CSS / 54 KB gzip)
+- `npm run openapi:check`: clean
+- **手动 smoke 未执行**：本 session 全自动跑，未起 `npm run dev` 在浏览器里跑。v1.1 chat 流程 + dark mode 切换需要在合并到 main 前由人手动验证一次。
+
