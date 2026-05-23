@@ -144,7 +144,7 @@ async def _seed_two_requests(job_id: str) -> tuple[str, str, str, str, str, str]
         key=lambda r: r.actions[0]["params"]["i"],
     )
     await engine.handle_decision(
-        request_id=reqs[1].id, tenant_id=t.id, action="approve", user_id=u.id
+        request_id=reqs[1].id, tenant_id=t.id, outcome="approved", user_id=u.id
     )
     return t.id, u.id, cw.id, c.id, reqs[0].id, reqs[1].id
 

@@ -1,6 +1,5 @@
 """Skills DB layer: schema constraints, RLS isolation (incl. transitive
-on skill_files), SECURITY DEFINER cross-tenant trigger, CRUD happy paths,
-and the SKILL.md application invariant.
+on skill_files), CRUD happy paths, and the SKILL.md application invariant.
 
 Runs against the testcontainer Postgres. Two pools at play:
 
@@ -12,6 +11,11 @@ Runs against the testcontainer Postgres. Two pools at play:
 
 Tests are deliberately adversarial: each one tries to do something
 the design says must fail, and asserts it does.
+
+v1.1 03b: ``skills`` is per-tenant; coworker association lives in
+``coworker_skills``. Fixtures use ``create_skill_for_coworker`` (the
+transactional convenience helper that mirrors the old call shape) so
+the rest of the suite stays close to the pre-03b feel.
 """
 
 from __future__ import annotations
@@ -27,11 +31,17 @@ from rolemesh.db import (
     _get_pool,
     create_coworker,
     create_skill,
+    create_skill_for_coworker,
     create_tenant,
     delete_skill,
     delete_skill_file,
+    disable_skill_for_coworker,
+    enable_skill_for_coworker,
     get_skill,
+    is_skill_bound_to_coworker,
+    is_skill_enabled_for_coworker,
     list_skills_for_coworker,
+    list_skills_for_tenant,
     set_skill_file,
     update_skill,
 )
@@ -97,7 +107,7 @@ async def test_create_get_skill_round_trip() -> None:
         "SKILL.md": SkillFile(path="SKILL.md", content="body"),
         "reference.md": SkillFile(path="reference.md", content="ref"),
     }
-    created = await create_skill(
+    created = await create_skill_for_coworker(
         tenant_id=tenant_id,
         coworker_id=coworker_id,
         name="code-review",
@@ -115,14 +125,17 @@ async def test_create_get_skill_round_trip() -> None:
     assert fetched.files["SKILL.md"].content == "body"
 
 
-async def test_list_filters_disabled_when_requested() -> None:
+async def test_list_for_coworker_filters_by_enabled_flags() -> None:
+    """``enabled_only`` is double-AND: both the catalog ``skills.enabled``
+    and per-coworker ``coworker_skills.enabled`` must be TRUE.
+    """
     tenant_id, coworker_id = await _make_tenant_with_coworker("flt")
-    enabled = await create_skill(
+    enabled = await create_skill_for_coworker(
         tenant_id=tenant_id, coworker_id=coworker_id, name="enabled-skill",
         frontmatter_common={"description": _GOOD_DESC},
         frontmatter_backend={}, files=_basic_files(), enabled=True,
     )
-    disabled = await create_skill(
+    disabled = await create_skill_for_coworker(
         tenant_id=tenant_id, coworker_id=coworker_id, name="disabled-skill",
         frontmatter_common={"description": _GOOD_DESC},
         frontmatter_backend={}, files=_basic_files(), enabled=False,
@@ -138,9 +151,101 @@ async def test_list_filters_disabled_when_requested() -> None:
     assert {s.id for s in only_enabled} == {enabled.id}
 
 
+async def test_per_coworker_disable_masks_globally_enabled_skill() -> None:
+    """The per-coworker ``coworker_skills.enabled=FALSE`` masks a
+    catalog skill that is globally enabled. Verifies the second half
+    of the double-AND — flipping only the junction flag.
+    """
+    tenant_id, coworker_id = await _make_tenant_with_coworker("ovr")
+    skill = await create_skill_for_coworker(
+        tenant_id=tenant_id, coworker_id=coworker_id, name="masked",
+        frontmatter_common={"description": _GOOD_DESC},
+        frontmatter_backend={}, files=_basic_files(), enabled=True,
+    )
+    await enable_skill_for_coworker(
+        skill_id=skill.id, coworker_id=coworker_id,
+        tenant_id=tenant_id, enabled=False,
+    )
+    only_enabled = await list_skills_for_coworker(
+        coworker_id, tenant_id=tenant_id, enabled_only=True
+    )
+    assert only_enabled == [], (
+        "coworker_skills.enabled=FALSE should mask a globally-enabled skill"
+    )
+    # ``enabled_only=False`` still surfaces the binding so admin
+    # tooling can see it.
+    all_skills = await list_skills_for_coworker(
+        coworker_id, tenant_id=tenant_id, enabled_only=False
+    )
+    assert {s.id for s in all_skills} == {skill.id}
+
+
+async def test_shared_skill_between_two_coworkers_same_tenant() -> None:
+    """Per-tenant catalog: two coworkers in the same tenant can bind
+    the same skill row. Pre-03b this was impossible (one row per
+    coworker); the test guards against accidentally re-introducing
+    that constraint.
+    """
+    tenant_id, cw_a = await _make_tenant_with_coworker("shr-a")
+    # Second coworker in the SAME tenant.
+    cw_b = (await create_coworker(
+        tenant_id=tenant_id, name="CWshrB",
+        folder=f"cw-shr-b-{uuid.uuid4().hex[:6]}",
+    )).id
+
+    skill = await create_skill(
+        tenant_id=tenant_id,
+        name="shared",
+        frontmatter_common={"description": _GOOD_DESC},
+        frontmatter_backend={},
+        files=_basic_files(),
+    )
+    assert await enable_skill_for_coworker(
+        skill_id=skill.id, coworker_id=cw_a, tenant_id=tenant_id,
+    )
+    assert await enable_skill_for_coworker(
+        skill_id=skill.id, coworker_id=cw_b, tenant_id=tenant_id,
+    )
+
+    a_skills = await list_skills_for_coworker(cw_a, tenant_id=tenant_id)
+    b_skills = await list_skills_for_coworker(cw_b, tenant_id=tenant_id)
+    assert {s.id for s in a_skills} == {skill.id}
+    assert {s.id for s in b_skills} == {skill.id}
+
+
+async def test_delete_coworker_cascades_to_bindings_only() -> None:
+    """Deleting a coworker drops ``coworker_skills`` rows (CASCADE)
+    but leaves the catalog ``skills`` row intact — per-tenant catalog
+    semantics. Verifies the cascade chain we expect after the 03b cut.
+    """
+    tenant_id, coworker_id = await _make_tenant_with_coworker("cwd")
+    s = await create_skill_for_coworker(
+        tenant_id=tenant_id, coworker_id=coworker_id, name="keeper",
+        frontmatter_common={"description": _GOOD_DESC},
+        frontmatter_backend={}, files=_basic_files(),
+    )
+    pool = _get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM coworkers WHERE id = $1::uuid", coworker_id
+        )
+        skills_left = await conn.fetch(
+            "SELECT * FROM skills WHERE id = $1::uuid", s.id
+        )
+        bindings_left = await conn.fetch(
+            "SELECT * FROM coworker_skills WHERE skill_id = $1::uuid", s.id
+        )
+        files_left = await conn.fetch(
+            "SELECT * FROM skill_files WHERE skill_id = $1::uuid", s.id
+        )
+    assert len(skills_left) == 1, "catalog skill row should remain"
+    assert bindings_left == [], "coworker_skills should cascade-delete"
+    assert files_left, "skill_files belong to the catalog row and should stay"
+
+
 async def test_update_replaces_files_atomically() -> None:
     tenant_id, coworker_id = await _make_tenant_with_coworker("upd")
-    s = await create_skill(
+    s = await create_skill_for_coworker(
         tenant_id=tenant_id, coworker_id=coworker_id, name="x",
         frontmatter_common={"description": _GOOD_DESC},
         frontmatter_backend={},
@@ -164,7 +269,7 @@ async def test_update_replaces_files_atomically() -> None:
 
 async def test_set_skill_file_upserts() -> None:
     tenant_id, coworker_id = await _make_tenant_with_coworker("upsert")
-    s = await create_skill(
+    s = await create_skill_for_coworker(
         tenant_id=tenant_id, coworker_id=coworker_id, name="x",
         frontmatter_common={"description": _GOOD_DESC},
         frontmatter_backend={}, files=_basic_files(),
@@ -184,7 +289,7 @@ async def test_set_skill_file_upserts() -> None:
 
 async def test_delete_skill_file_refuses_skill_md() -> None:
     tenant_id, coworker_id = await _make_tenant_with_coworker("rfs")
-    s = await create_skill(
+    s = await create_skill_for_coworker(
         tenant_id=tenant_id, coworker_id=coworker_id, name="x",
         frontmatter_common={"description": _GOOD_DESC},
         frontmatter_backend={}, files=_basic_files(),
@@ -195,7 +300,7 @@ async def test_delete_skill_file_refuses_skill_md() -> None:
 
 async def test_delete_skill_file_returns_false_for_unknown() -> None:
     tenant_id, coworker_id = await _make_tenant_with_coworker("rfn")
-    s = await create_skill(
+    s = await create_skill_for_coworker(
         tenant_id=tenant_id, coworker_id=coworker_id, name="x",
         frontmatter_common={"description": _GOOD_DESC},
         frontmatter_backend={}, files=_basic_files(),
@@ -205,7 +310,7 @@ async def test_delete_skill_file_returns_false_for_unknown() -> None:
 
 async def test_delete_skill_cascades_to_files() -> None:
     tenant_id, coworker_id = await _make_tenant_with_coworker("dcs")
-    s = await create_skill(
+    s = await create_skill_for_coworker(
         tenant_id=tenant_id, coworker_id=coworker_id, name="x",
         frontmatter_common={"description": _GOOD_DESC},
         frontmatter_backend={},
@@ -215,36 +320,12 @@ async def test_delete_skill_cascades_to_files() -> None:
         },
     )
     assert await delete_skill(s.id, tenant_id=tenant_id) is True
-    # File rows should be gone — query via admin to bypass RLS just in case.
     pool = _get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT * FROM skill_files WHERE skill_id = $1::uuid", s.id
         )
     assert rows == []
-
-
-async def test_delete_coworker_cascades_to_skills_and_files() -> None:
-    """coworkers ON DELETE CASCADE must reach the file table too."""
-    tenant_id, coworker_id = await _make_tenant_with_coworker("cwd")
-    s = await create_skill(
-        tenant_id=tenant_id, coworker_id=coworker_id, name="x",
-        frontmatter_common={"description": _GOOD_DESC},
-        frontmatter_backend={}, files=_basic_files(),
-    )
-    pool = _get_pool()
-    async with pool.acquire() as conn:
-        await conn.execute(
-            "DELETE FROM coworkers WHERE id = $1::uuid", coworker_id
-        )
-        skills_left = await conn.fetch(
-            "SELECT * FROM skills WHERE id = $1::uuid", s.id
-        )
-        files_left = await conn.fetch(
-            "SELECT * FROM skill_files WHERE skill_id = $1::uuid", s.id
-        )
-    assert skills_left == []
-    assert files_left == []
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +336,7 @@ async def test_delete_coworker_cascades_to_skills_and_files() -> None:
 async def test_create_without_skill_md_is_rejected() -> None:
     tenant_id, coworker_id = await _make_tenant_with_coworker("inv")
     with pytest.raises(ValueError, match="SKILL.md"):
-        await create_skill(
+        await create_skill_for_coworker(
             tenant_id=tenant_id, coworker_id=coworker_id, name="x",
             frontmatter_common={"description": _GOOD_DESC},
             frontmatter_backend={},
@@ -265,7 +346,7 @@ async def test_create_without_skill_md_is_rejected() -> None:
 
 async def test_update_with_files_missing_skill_md_is_rejected() -> None:
     tenant_id, coworker_id = await _make_tenant_with_coworker("upi")
-    s = await create_skill(
+    s = await create_skill_for_coworker(
         tenant_id=tenant_id, coworker_id=coworker_id, name="x",
         frontmatter_common={"description": _GOOD_DESC},
         frontmatter_backend={}, files=_basic_files(),
@@ -286,16 +367,15 @@ async def test_update_with_files_missing_skill_md_is_rejected() -> None:
 
 
 async def test_db_check_rejects_invalid_skill_name() -> None:
-    tenant_id, coworker_id = await _make_tenant_with_coworker("nch")
+    tenant_id, _ = await _make_tenant_with_coworker("nch")
     pool = _get_pool()
     async with pool.acquire() as conn:
         with pytest.raises(asyncpg.CheckViolationError):
             await conn.execute(
-                "INSERT INTO skills (tenant_id, coworker_id, name, "
+                "INSERT INTO skills (tenant_id, name, "
                 "frontmatter_common, frontmatter_backend) "
-                "VALUES ($1::uuid, $2::uuid, $3, '{}'::jsonb, '{}'::jsonb)",
+                "VALUES ($1::uuid, $2, '{}'::jsonb, '{}'::jsonb)",
                 tenant_id,
-                coworker_id,
                 "1bad-leading-digit",
             )
 
@@ -321,7 +401,7 @@ async def test_db_check_rejects_bad_paths(bad_path: str) -> None:
     tenant_id, coworker_id = await _make_tenant_with_coworker(
         "pch-" + str(abs(hash(bad_path)))[:6]
     )
-    s = await create_skill(
+    s = await create_skill_for_coworker(
         tenant_id=tenant_id, coworker_id=coworker_id, name="x",
         frontmatter_common={"description": _GOOD_DESC},
         frontmatter_backend={}, files=_basic_files(),
@@ -339,56 +419,51 @@ async def test_db_check_rejects_bad_paths(bad_path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# SECURITY DEFINER cross-tenant trigger
+# coworker_skills SECURITY DEFINER cross-tenant trigger
 # ---------------------------------------------------------------------------
 
 
-async def test_cross_tenant_coworker_id_rejected_by_trigger() -> None:
-    """The trigger must reject a forged tenant_id mismatch even when
-    the FK constraint passes (the foreign coworker really does exist
-    — just in a different tenant).
+async def test_coworker_skills_rejects_cross_tenant_binding() -> None:
+    """Skill in tenant A + coworker in tenant B must not be bindable
+    even via the bypass-RLS admin pool. The SECURITY DEFINER trigger
+    on ``coworker_skills`` enforces this — the replacement for the
+    pre-03b ``skills_check_coworker_tenant`` trigger.
     """
     tenant_a, _ = await _make_tenant_with_coworker("xta")
     tenant_b, coworker_b = await _make_tenant_with_coworker("xtb")
+    skill_a = await create_skill(
+        tenant_id=tenant_a, name="forged-bind",
+        frontmatter_common={"description": _GOOD_DESC},
+        frontmatter_backend={}, files=_basic_files(),
+    )
     pool = _get_pool()
     async with pool.acquire() as conn:
-        with pytest.raises(asyncpg.RaiseError, match="different tenant"):
+        with pytest.raises(asyncpg.RaiseError, match="tenant mismatch"):
             await conn.execute(
-                "INSERT INTO skills (tenant_id, coworker_id, name, "
-                "frontmatter_common, frontmatter_backend) "
-                "VALUES ($1::uuid, $2::uuid, $3, '{}'::jsonb, '{}'::jsonb)",
-                tenant_a,  # tenant A says it owns this skill
-                coworker_b,  # ...but the coworker belongs to tenant B
-                "forged",
+                "INSERT INTO coworker_skills (coworker_id, skill_id, enabled) "
+                "VALUES ($1::uuid, $2::uuid, TRUE)",
+                coworker_b, skill_a.id,
             )
 
 
-async def test_cross_tenant_blocked_under_rls_through_app_role(
-    app_pool: asyncpg.Pool[asyncpg.Record],
-) -> None:
-    """Same scenario as above, but exercised through the RLS-bound
-    rolemesh_app role. The two layers (RLS WITH CHECK + SECURITY
-    DEFINER trigger) must both fire against an attempted cross-tenant
-    insert.
+async def test_enable_skill_for_coworker_rejects_foreign_tenant() -> None:
+    """The application-layer helper refuses cross-tenant bindings —
+    returns ``False`` rather than letting the DB trigger fire and
+    blow up.
     """
-    tenant_a, _ = await _make_tenant_with_coworker("rta")
-    tenant_b, coworker_b = await _make_tenant_with_coworker("rtb")
-    async with app_pool.acquire() as conn, conn.transaction():
-        await conn.execute(
-            "SELECT set_config('app.current_tenant_id', $1, true)",
-            tenant_a,
-        )
-        with pytest.raises(
-            (asyncpg.InsufficientPrivilegeError, asyncpg.RaiseError)
-        ):
-            await conn.execute(
-                "INSERT INTO skills (tenant_id, coworker_id, name, "
-                "frontmatter_common, frontmatter_backend) "
-                "VALUES ($1::uuid, $2::uuid, $3, '{}'::jsonb, '{}'::jsonb)",
-                tenant_a,
-                coworker_b,
-                "forged-rls",
-            )
+    tenant_a, _ = await _make_tenant_with_coworker("eta")
+    tenant_b, coworker_b = await _make_tenant_with_coworker("etb")
+    skill_a = await create_skill(
+        tenant_id=tenant_a, name="cross",
+        frontmatter_common={"description": _GOOD_DESC},
+        frontmatter_backend={}, files=_basic_files(),
+    )
+    # Same tenant_id on both sides of the call, but the coworker is in
+    # a different tenant — the EXISTS guard catches it.
+    ok = await enable_skill_for_coworker(
+        skill_id=skill_a.id, coworker_id=coworker_b, tenant_id=tenant_a,
+    )
+    assert ok is False
 
 
 # ---------------------------------------------------------------------------
@@ -399,9 +474,9 @@ async def test_cross_tenant_blocked_under_rls_through_app_role(
 async def test_rls_select_isolates_skills(
     app_pool: asyncpg.Pool[asyncpg.Record],
 ) -> None:
-    tenant_a, coworker_a = await _make_tenant_with_coworker("isa")
+    tenant_a, _ = await _make_tenant_with_coworker("isa")
     tenant_b, coworker_b = await _make_tenant_with_coworker("isb")
-    skill_b = await create_skill(
+    skill_b = await create_skill_for_coworker(
         tenant_id=tenant_b, coworker_id=coworker_b, name="bs",
         frontmatter_common={"description": _GOOD_DESC},
         frontmatter_backend={}, files=_basic_files(),
@@ -425,7 +500,7 @@ async def test_rls_select_isolates_skill_files_transitively(
     """
     tenant_a, _ = await _make_tenant_with_coworker("tisa")
     tenant_b, coworker_b = await _make_tenant_with_coworker("tisb")
-    skill_b = await create_skill(
+    skill_b = await create_skill_for_coworker(
         tenant_id=tenant_b, coworker_id=coworker_b, name="b2",
         frontmatter_common={"description": _GOOD_DESC},
         frontmatter_backend={},
@@ -451,7 +526,7 @@ async def test_rls_unset_guc_returns_empty(
 ) -> None:
     """No tenant context = no rows. Both tables must fail closed."""
     tenant_id, coworker_id = await _make_tenant_with_coworker("ufc")
-    await create_skill(
+    await create_skill_for_coworker(
         tenant_id=tenant_id, coworker_id=coworker_id, name="closed",
         frontmatter_common={"description": _GOOD_DESC},
         frontmatter_backend={}, files=_basic_files(),
@@ -471,7 +546,7 @@ async def test_set_skill_file_returns_none_for_foreign_tenant() -> None:
     """
     tenant_a, _ = await _make_tenant_with_coworker("sfa")
     tenant_b, coworker_b = await _make_tenant_with_coworker("sfb")
-    skill_b = await create_skill(
+    skill_b = await create_skill_for_coworker(
         tenant_id=tenant_b, coworker_id=coworker_b, name="bx",
         frontmatter_common={"description": _GOOD_DESC},
         frontmatter_backend={}, files=_basic_files(),
@@ -490,3 +565,102 @@ async def test_set_skill_file_returns_none_for_foreign_tenant() -> None:
     assert {r["path"] for r in files} == {"SKILL.md"}, (
         "foreign-tenant set_skill_file leaked through"
     )
+
+
+# ---------------------------------------------------------------------------
+# Per-tenant catalog reader
+# ---------------------------------------------------------------------------
+
+
+async def test_list_skills_for_tenant_returns_unbound_rows_too() -> None:
+    """``list_skills_for_tenant`` is the v1 flat reader — it must
+    return catalog rows even when no coworker binding exists yet
+    (the create-then-bind flow).
+    """
+    tenant_id, _ = await _make_tenant_with_coworker("flat")
+    s1 = await create_skill(
+        tenant_id=tenant_id, name="a",
+        frontmatter_common={"description": _GOOD_DESC},
+        frontmatter_backend={}, files=_basic_files(),
+    )
+    s2 = await create_skill(
+        tenant_id=tenant_id, name="b",
+        frontmatter_common={"description": _GOOD_DESC},
+        frontmatter_backend={}, files=_basic_files(),
+    )
+    rows = await list_skills_for_tenant(tenant_id)
+    ids = {s.id for s in rows}
+    assert {s1.id, s2.id} <= ids
+
+
+# ---------------------------------------------------------------------------
+# Binding helpers — bind/enabled state
+# ---------------------------------------------------------------------------
+
+
+async def test_is_skill_bound_vs_enabled_helpers() -> None:
+    """``bound_to`` is looser than ``enabled_for``: disabling either
+    flag flips the latter but not the former.
+    """
+    tenant_id, coworker_id = await _make_tenant_with_coworker("hlp")
+    skill = await create_skill_for_coworker(
+        tenant_id=tenant_id, coworker_id=coworker_id, name="h",
+        frontmatter_common={"description": _GOOD_DESC},
+        frontmatter_backend={}, files=_basic_files(),
+    )
+    assert await is_skill_bound_to_coworker(
+        skill.id, coworker_id, tenant_id=tenant_id
+    )
+    assert await is_skill_enabled_for_coworker(
+        skill.id, coworker_id, tenant_id=tenant_id
+    )
+
+    # Disable on the catalog side.
+    updated = await update_skill(skill.id, tenant_id=tenant_id, enabled=False)
+    assert updated is not None and updated.enabled is False
+    assert await is_skill_bound_to_coworker(
+        skill.id, coworker_id, tenant_id=tenant_id
+    )
+    assert not await is_skill_enabled_for_coworker(
+        skill.id, coworker_id, tenant_id=tenant_id
+    )
+
+    # Re-enable globally; disable per-coworker.
+    await update_skill(skill.id, tenant_id=tenant_id, enabled=True)
+    await enable_skill_for_coworker(
+        skill_id=skill.id, coworker_id=coworker_id,
+        tenant_id=tenant_id, enabled=False,
+    )
+    assert await is_skill_bound_to_coworker(
+        skill.id, coworker_id, tenant_id=tenant_id
+    )
+    assert not await is_skill_enabled_for_coworker(
+        skill.id, coworker_id, tenant_id=tenant_id
+    )
+
+
+async def test_disable_removes_binding_row() -> None:
+    """``disable_skill_for_coworker`` deletes the binding (the v1 DELETE
+    semantic), distinct from setting ``enabled=False`` which keeps it.
+    """
+    tenant_id, coworker_id = await _make_tenant_with_coworker("dis")
+    skill = await create_skill_for_coworker(
+        tenant_id=tenant_id, coworker_id=coworker_id, name="d",
+        frontmatter_common={"description": _GOOD_DESC},
+        frontmatter_backend={}, files=_basic_files(),
+    )
+    removed = await disable_skill_for_coworker(
+        skill_id=skill.id, coworker_id=coworker_id, tenant_id=tenant_id,
+    )
+    assert removed is True
+    assert not await is_skill_bound_to_coworker(
+        skill.id, coworker_id, tenant_id=tenant_id
+    )
+    # Catalog row stays.
+    assert await get_skill(skill.id, tenant_id=tenant_id) is not None
+
+    # Idempotent.
+    again = await disable_skill_for_coworker(
+        skill_id=skill.id, coworker_id=coworker_id, tenant_id=tenant_id,
+    )
+    assert again is False

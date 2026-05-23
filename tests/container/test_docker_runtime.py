@@ -173,7 +173,10 @@ async def test_cleanup_orphans() -> None:
     rt = DockerRuntime()
 
     mock_c1 = MagicMock()
-    mock_c1._container = {"Names": ["/rolemesh-test-1"]}
+    mock_c1._container = {
+        "Names": ["/rolemesh-test-1"],
+        "Image": "rolemesh-agent:latest",
+    }
 
     mock_client = MagicMock()
     mock_client.containers = MagicMock()
@@ -184,7 +187,9 @@ async def test_cleanup_orphans() -> None:
     mock_client.containers.container = MagicMock(return_value=mock_stopped)
     rt._client = mock_client
 
-    removed = await rt.cleanup_orphans("rolemesh-")
+    removed = await rt.cleanup_orphans(
+        "rolemesh-", allowed_images=frozenset({"rolemesh-agent:latest"})
+    )
     assert removed == ["rolemesh-test-1"]
 
 

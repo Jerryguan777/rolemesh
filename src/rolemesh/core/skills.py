@@ -79,7 +79,20 @@ _SKILL_FILE_PATH_RE = re.compile(
 # accidentally, this still rejects traversal segments.
 _SKILL_FILE_PATH_DOT_SEGMENT_RE = re.compile(r"(^|/)\.+($|/)")
 
-SKILL_MD_FILENAME = "SKILL.md"
+# Canonical filename for the manifest of a skill. Every skill stored in
+# the DB must contain a file at exactly this path; the application layer
+# enforces it (see ``db/skill.py`` and ``container/skill_projection.py``).
+SKILL_MANIFEST_NAME = "SKILL.md"
+
+# Deprecated alias retained for one PR cycle to avoid breaking external
+# importers mid-rename. Remove in the next change to this module.
+SKILL_MD_FILENAME = SKILL_MANIFEST_NAME
+
+# Application-layer file-path whitelist for files inside a skill. The DB
+# CHECK constraint mirrors the same regex; this constant exposes the
+# pattern so other modules (e.g. import/export tooling) can validate
+# without re-deriving the regex.
+SKILL_FILE_PATH_RE = _SKILL_FILE_PATH_RE
 
 
 class SkillValidationError(ValueError):

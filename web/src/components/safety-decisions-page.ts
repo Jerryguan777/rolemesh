@@ -1,24 +1,28 @@
 import { LitElement, html, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import {
-  downloadDecisionsCsv,
-  getDecision,
-  getTenantId,
-  listCoworkers,
-  listDecisions,
-  type CoworkerSummary,
-  type DecisionsPage,
+  getApiClient,
   type SafetyDecision,
+  type SafetyDecisionPage,
   type SafetyStage,
   type SafetyVerdictAction,
+} from '../api/client.js';
+import {
+  downloadDecisionsCsv,
+  getTenantId,
+  listCoworkers,
+  type CoworkerSummary,
 } from '../services/safety-admin-client.js';
 
 const PAGE_SIZE = 25;
 
 @customElement('rm-safety-decisions-page')
 export class SafetyDecisionsPage extends LitElement {
+  // tenantId is still cached so the legacy "Export CSV" button can
+  // hand it to the admin CSV endpoint (CSV is not on v1 per design
+  // §3 Phase 4). Decisions reads themselves derive tenant from auth.
   @state() private tenantId: string | null = null;
-  @state() private page: DecisionsPage = { total: 0, items: [] };
+  @state() private page: SafetyDecisionPage = { total: 0, items: [] };
   @state() private coworkers: CoworkerSummary[] = [];
   @state() private loading = true;
   @state() private error: string | null = null;
@@ -38,22 +42,34 @@ export class SafetyDecisionsPage extends LitElement {
 
   override async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    // Coworker list + tenant id come from the admin surface
+    // (CSV export needs the tenant in the URL). A failure here
+    // should NOT block the decisions read which goes through v1
+    // and derives tenant from auth.
     try {
       this.tenantId = await getTenantId();
+    } catch {
+      this.tenantId = null;
+    }
+    try {
       this.coworkers = await listCoworkers();
-    } catch (err) {
-      this.error = err instanceof Error ? err.message : String(err);
+    } catch {
+      this.coworkers = [];
     }
     await this.refresh();
   }
 
   private async refresh(): Promise<void> {
-    if (!this.tenantId) return;
     this.loading = true;
     this.error = null;
     try {
-      this.page = await listDecisions(this.tenantId, {
-        ...this.filters,
+      // v1 derives tenant_id from auth — no path param needed.
+      this.page = await getApiClient().listSafetyDecisions({
+        verdictAction: this.filters.verdict_action,
+        coworkerId: this.filters.coworker_id,
+        stage: this.filters.stage,
+        fromTs: this.filters.from_ts,
+        toTs: this.filters.to_ts,
         limit: PAGE_SIZE,
         offset: this.offset,
       });
@@ -116,13 +132,12 @@ export class SafetyDecisionsPage extends LitElement {
   }
 
   private async openDetail(row: SafetyDecision): Promise<void> {
-    if (!this.tenantId) return;
     try {
-      // Re-fetch to pick up fields the list view omits (approval_context,
-      // context_digest). The list payload already has most of what we
-      // show, but the detail endpoint is the source of truth for the
-      // audit-trail read.
-      this.selected = await getDecision(this.tenantId, row.id);
+      // Re-fetch to pick up fields the list view does not project
+      // (full ``findings`` metadata, ``approval_context`` for
+      // require_approval rows). v1 derives tenant_id from auth so
+      // the URL has no tenant segment.
+      this.selected = await getApiClient().getSafetyDecision(row.id);
     } catch (err) {
       this.error = err instanceof Error ? err.message : String(err);
       this.selected = row;
@@ -263,10 +278,12 @@ export class SafetyDecisionsPage extends LitElement {
             <dt class="text-gray-500">Stage</dt>
             <dd class="col-span-2">${d.stage}</dd>
             <dt class="text-gray-500">Coworker</dt>
-            <dd class="col-span-2">${this.coworkerName(d.coworker_id)}</dd>
+            <dd class="col-span-2">${this.coworkerName(d.coworker_id ?? null)}</dd>
             <dt class="text-gray-500">Rule ids</dt>
             <dd class="col-span-2 font-mono text-xs">
-              ${d.triggered_rule_ids.length === 0 ? '—' : d.triggered_rule_ids.join(', ')}
+              ${(d.triggered_rule_ids ?? []).length === 0
+                ? '—'
+                : (d.triggered_rule_ids ?? []).join(', ')}
             </dd>
             <dt class="text-gray-500">Summary</dt>
             <dd class="col-span-2 font-mono text-xs">${d.context_summary || '—'}</dd>
@@ -274,7 +291,7 @@ export class SafetyDecisionsPage extends LitElement {
             <dd class="col-span-2 font-mono text-xs">${d.context_digest || '—'}</dd>
           </dl>
           <h4 class="font-semibold text-sm mb-2">Findings</h4>
-          ${d.findings.length === 0
+          ${(d.findings ?? []).length === 0
             ? html`<div class="text-sm text-gray-500">No findings.</div>`
             : html`
                 <table class="w-full text-xs border">
@@ -286,7 +303,7 @@ export class SafetyDecisionsPage extends LitElement {
                     </tr>
                   </thead>
                   <tbody>
-                    ${d.findings.map(
+                    ${(d.findings ?? []).map(
                       (f) => html`
                         <tr class="border-t">
                           <td class="p-1 font-mono">${f.code}</td>
@@ -340,7 +357,7 @@ ${JSON.stringify(d.approval_context, null, 2)}</pre
           : nothing}
         ${this.loading
           ? html`<div class="text-gray-500">Loading…</div>`
-          : this.page.items.length === 0
+          : (this.page.items ?? []).length === 0
             ? html`<div class="text-gray-500">No decisions match these filters.</div>`
             : html`
                 <table class="w-full text-sm border">
@@ -355,7 +372,7 @@ ${JSON.stringify(d.approval_context, null, 2)}</pre
                     </tr>
                   </thead>
                   <tbody>
-                    ${this.page.items.map(
+                    ${(this.page.items ?? []).map(
                       (d) => html`
                         <tr
                           class="border-t cursor-pointer hover:bg-surface-1 dark:hover:bg-d-surface-1"
@@ -366,9 +383,9 @@ ${JSON.stringify(d.approval_context, null, 2)}</pre
                           </td>
                           <td>${this.verdictBadge(d.verdict_action)}</td>
                           <td class="text-xs">${d.stage}</td>
-                          <td class="text-xs">${this.coworkerName(d.coworker_id)}</td>
+                          <td class="text-xs">${this.coworkerName(d.coworker_id ?? null)}</td>
                           <td class="text-xs font-mono">
-                            ${d.findings.map((f) => f.code).join(', ') || '—'}
+                            ${(d.findings ?? []).map((f) => f.code).join(', ') || '—'}
                           </td>
                           <td class="text-xs font-mono truncate max-w-[20ch]">
                             ${d.context_summary || '—'}

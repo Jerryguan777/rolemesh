@@ -1,19 +1,18 @@
 import { LitElement, html, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import {
-  createRule,
-  deleteRule,
-  getTenantId,
-  listChecks,
-  listCoworkers,
-  listRuleAudit,
-  listRules,
-  updateRule,
-  type CoworkerSummary,
-  type SafetyCheckMeta,
+  getApiClient,
+  type SafetyCheck,
   type SafetyRule,
   type SafetyRuleAuditEntry,
   type SafetyStage,
+} from '../api/client.js';
+import {
+  createRule,
+  deleteRule,
+  listCoworkers,
+  updateRule,
+  type CoworkerSummary,
 } from '../services/safety-admin-client.js';
 
 type DraftRule = {
@@ -39,7 +38,7 @@ const EMPTY_DRAFT: DraftRule = {
 @customElement('rm-safety-rules-page')
 export class SafetyRulesPage extends LitElement {
   @state() private rules: SafetyRule[] = [];
-  @state() private checks: SafetyCheckMeta[] = [];
+  @state() private checks: SafetyCheck[] = [];
   @state() private coworkers: CoworkerSummary[] = [];
   @state() private loading = true;
   @state() private error: string | null = null;
@@ -63,9 +62,14 @@ export class SafetyRulesPage extends LitElement {
     this.loading = true;
     this.error = null;
     try {
+      // Reads go through the typed v1 ApiClient; writes (create /
+      // update / delete) keep using safety-admin-client because
+      // safety rule mutation is an admin-only operation per design
+      // §3 Phase 4.
+      const api = getApiClient();
       const [rules, checks, coworkers] = await Promise.all([
-        listRules(),
-        listChecks(),
+        api.listSafetyRules(),
+        api.listSafetyChecks(),
         listCoworkers(),
       ]);
       this.rules = rules;
@@ -84,7 +88,7 @@ export class SafetyRulesPage extends LitElement {
     return cw ? cw.name : id.slice(0, 8);
   }
 
-  private checkMeta(id: string): SafetyCheckMeta | null {
+  private checkMeta(id: string): SafetyCheck | null {
     return this.checks.find((c) => c.id === id) ?? null;
   }
 
@@ -98,8 +102,12 @@ export class SafetyRulesPage extends LitElement {
     this.draft = {
       stage: rule.stage,
       check_id: rule.check_id,
-      coworker_id: rule.coworker_id,
-      config: JSON.stringify(rule.config, null, 2),
+      // v1 SafetyRule.coworker_id is `string | null | undefined`
+      // (codegen surfaces "optional + nullable" as both). Collapse
+      // to a strict `string | null` for the draft state so the
+      // <select> never receives `undefined` (DOM coerces to "").
+      coworker_id: rule.coworker_id ?? null,
+      config: JSON.stringify(rule.config ?? {}, null, 2),
       priority: rule.priority,
       enabled: rule.enabled,
       description: rule.description,
@@ -189,8 +197,9 @@ export class SafetyRulesPage extends LitElement {
     this.detailRuleId = rule.id;
     this.detailAudit = [];
     try {
-      const tenantId = await getTenantId();
-      this.detailAudit = await listRuleAudit(tenantId, rule.id);
+      // tenant_id flows from the bearer token server-side (v1
+      // surface) — no admin /tenant round-trip needed.
+      this.detailAudit = await getApiClient().listSafetyRuleAudit(rule.id);
     } catch (err) {
       this.error = err instanceof Error ? err.message : String(err);
     }
@@ -461,7 +470,7 @@ export class SafetyRulesPage extends LitElement {
                                 : nothing}
                             </td>
                             <td>${r.stage}</td>
-                            <td>${this.coworkerName(r.coworker_id)}</td>
+                            <td>${this.coworkerName(r.coworker_id ?? null)}</td>
                             <td>${r.priority}</td>
                             <td>
                               <input

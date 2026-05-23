@@ -503,6 +503,9 @@ async def cleanup_old_safety_approval_contexts(
     own history via ``approval_audit_log``, so nothing is lost by
     clearing the safety-side copy.
     """
+    # inv-1-ok: cross-tenant retention sweep — clearing approval_context
+    # on resolved safety_decisions older than the retention window is
+    # intentionally tenant-agnostic; admin_conn() is the documented hatch.
     async with admin_conn() as conn:
         row = await conn.fetchval(
             """

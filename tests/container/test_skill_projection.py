@@ -33,7 +33,7 @@ from rolemesh.core.skills import SkillValidationError
 from rolemesh.core.types import SkillFile
 from rolemesh.db import (
     create_coworker,
-    create_skill,
+    create_skill_for_coworker as create_skill,
     create_tenant,
     get_coworker,
 )

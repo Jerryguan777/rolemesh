@@ -21,6 +21,7 @@ from rolemesh.db import (
     create_coworker,
     create_tenant,
     create_user,
+    replace_coworker_mcp_configs,
 )
 from rolemesh.safety.registry import (
     build_orchestrator_registry,
@@ -121,12 +122,19 @@ class TestReversibilityGuardRest:
         slow_check_registered: None,
     ) -> None:
         user, tenant_id = await _seed_tenant_with_user()
-        # Coworker with an MCP server declaring a reversible tool.
+        # Coworker with an MCP server declaring a reversible tool —
+        # bindings live in coworker_mcp_servers + mcp_servers now, so
+        # we seed via the relation-write helper after creating the
+        # coworker row.
         cw = await create_coworker(
             tenant_id=tenant_id,
             name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
-            tools=[
+        )
+        await replace_coworker_mcp_configs(
+            cw.id,
+            tenant_id=tenant_id,
+            mcp_configs=[
                 McpServerConfig(
                     name="github",
                     type="http",
@@ -167,7 +175,11 @@ class TestReversibilityGuardRest:
             tenant_id=tenant_id,
             name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
-            tools=[
+        )
+        await replace_coworker_mcp_configs(
+            cw.id,
+            tenant_id=tenant_id,
+            mcp_configs=[
                 McpServerConfig(
                     name="github",
                     type="http",
@@ -205,7 +217,11 @@ class TestReversibilityGuardRest:
             tenant_id=tenant_id,
             name="cw",
             folder=f"cw-{uuid.uuid4().hex[:8]}",
-            tools=[
+        )
+        await replace_coworker_mcp_configs(
+            cw.id,
+            tenant_id=tenant_id,
+            mcp_configs=[
                 McpServerConfig(
                     name="github",
                     type="http",

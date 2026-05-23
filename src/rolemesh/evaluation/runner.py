@@ -103,10 +103,12 @@ class EvalRunner:
         run_id: str,
         timeout_s: float = 300.0,
         user_id: str = "",
+        get_mcp_configs: Any = None,  # Callable[[str], list[McpServerConfig]]
     ) -> None:
         self._runtime = runtime
         self._transport = transport
         self._get_coworker = get_coworker
+        self._get_mcp_configs = get_mcp_configs
         self._run_id = run_id
         self._timeout_s = timeout_s
         # ``user_id`` flows through ``AgentInput`` to ``init.user_id`` in
@@ -132,6 +134,7 @@ class EvalRunner:
                 runtime=self._runtime,
                 transport=self._transport,
                 get_coworker=self._get_coworker,
+                get_mcp_configs=self._get_mcp_configs,
             )
             self._executors[backend.name] = ex
         return ex

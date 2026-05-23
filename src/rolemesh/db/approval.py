@@ -300,7 +300,7 @@ def _record_to_approval_request(row: asyncpg.Record) -> ApprovalRequest:
         tenant_id=str(row["tenant_id"]),
         coworker_id=str(row["coworker_id"]),
         conversation_id=str(row["conversation_id"]) if row["conversation_id"] else None,
-        policy_id=str(row["policy_id"]),
+        policy_id=str(row["policy_id"]) if row["policy_id"] else None,
         user_id=str(row["user_id"]),
         job_id=row["job_id"],
         mcp_server_name=row["mcp_server_name"],
@@ -561,6 +561,9 @@ async def decide_approval_request_full(
         await _set_approval_guc(
             conn, actor_user_id=actor_user_id, note=note, metadata=None
         )
+        # inv-1-ok: tenant_id constrained in the `before` CTE above; the
+        # UPDATE joins on `b.id` so the tenant check is enforced via the
+        # join, not via a redundant predicate.
         row = await conn.fetchrow(
             """
             WITH before AS (
@@ -709,6 +712,8 @@ async def cancel_pending_approvals_for_job(
 
 
 async def list_expired_pending_approvals() -> list[ApprovalRequest]:
+    # inv-1-ok: cross-tenant reconciler — admin_conn() is the documented
+    # hatch for maintenance loops that must sweep every tenant.
     async with admin_conn() as conn:
         rows = await conn.fetch(
             """
@@ -727,6 +732,8 @@ async def list_stuck_approved_approvals(
     claimed by a Worker — either the Worker missed the NATS publish or
     the orchestrator restarted mid-flight. The reconciler republishes
     these."""
+    # inv-1-ok: cross-tenant reconciler sweeping stuck-approved across
+    # every tenant; same pattern as list_expired_pending_approvals.
     async with admin_conn() as conn:
         rows = await conn.fetch(
             """
@@ -747,6 +754,7 @@ async def list_stuck_executing_approvals(
     after claiming but before writing the terminal status. The reconciler
     marks them execution_stale rather than retrying, because we cannot
     tell whether the MCP-side work partially completed."""
+    # inv-1-ok: cross-tenant reconciler sweeping stuck-executing rows.
     async with admin_conn() as conn:
         rows = await conn.fetch(
             """

@@ -1,10 +1,18 @@
-"""NATS message types for web channel communication."""
+"""NATS message types for web channel communication.
+
+Deserialization (``from_bytes``) routes every payload through
+``from_dict_filter_unknown`` so unknown-but-future fields are
+silently dropped — see ``ipc/_unknown_filter.py`` for the contract
+and the INV-2 pinned test for the guarantee.
+"""
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
+
+from rolemesh.ipc._unknown_filter import from_dict_filter_unknown
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,15 +40,7 @@ class WebInboundMessage:
 
     @classmethod
     def from_bytes(cls, data: bytes) -> WebInboundMessage:
-        d = json.loads(data)
-        return cls(
-            chat_id=d["chat_id"],
-            sender_id=d["sender_id"],
-            sender_name=d["sender_name"],
-            text=d["text"],
-            timestamp=d["timestamp"],
-            msg_id=d["msg_id"],
-        )
+        return from_dict_filter_unknown(cls, json.loads(data))
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,8 +65,7 @@ class WebStreamChunk:
 
     @classmethod
     def from_bytes(cls, data: bytes) -> WebStreamChunk:
-        d = json.loads(data)
-        return cls(type=d["type"], content=d.get("content", ""))
+        return from_dict_filter_unknown(cls, json.loads(data))
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,8 +79,7 @@ class WebTypingMessage:
 
     @classmethod
     def from_bytes(cls, data: bytes) -> WebTypingMessage:
-        d = json.loads(data)
-        return cls(is_typing=d["is_typing"])
+        return from_dict_filter_unknown(cls, json.loads(data))
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,5 +103,4 @@ class WebOutboundMessage:
 
     @classmethod
     def from_bytes(cls, data: bytes) -> WebOutboundMessage:
-        d = json.loads(data)
-        return cls(text=d["text"], timestamp=d.get("timestamp", ""))
+        return from_dict_filter_unknown(cls, json.loads(data))

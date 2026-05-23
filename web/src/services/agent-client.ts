@@ -1,3 +1,24 @@
+// Legacy agent client for the pre-v1 chat protocol (`/ws/chat`,
+// `/api/conversations`). Most of this surface is **deprecated** by
+// the v1.1 cutover (session 01c):
+//
+//   - Streaming (token / status / done / error events) is owned by
+//     `web/src/ws/v1_client.ts` going forward.
+//   - REST history / conversation listing now goes through the typed
+//     `ApiClient` in `web/src/api/client.ts` (v1 endpoints).
+//
+// The one method that stays load-bearing is `stop()`, which sends
+// `{type:"stop"}` over `/ws/chat` and triggers the SDK's
+// `interrupt_current_turn`. That is the **only** way to abort a turn
+// without paying a container cold-start tax (design §4.1). Cancel —
+// which *does* tear down the container — lives on the v1 client and
+// the REST `POST /api/v1/runs/{id}/cancel` endpoint; the two surfaces
+// are intentionally separate (Stop vs Cancel hard split).
+//
+// Do not delete this file or repoint Stop at the v1 client without a
+// matching backend protocol change. Tracking work to unify the two
+// is deferred to a later session (designed §4.1 + 01c Out of scope).
+
 import { refreshTokenSilent } from './oidc-auth.js';
 
 export type AgentStatus =
@@ -135,6 +156,11 @@ export class AgentClient {
     };
   }
 
+  /**
+   * @deprecated 01c — chat-panel now sends `request.run` via `V1WsClient`.
+   *     Kept so any not-yet-migrated caller still compiles, but new
+   *     code paths must not call this.
+   */
   send(content: string): void {
     const payload = JSON.stringify({ type: 'message', content, chatId: this.chatId });
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
@@ -160,6 +186,10 @@ export class AgentClient {
     }
   }
 
+  /**
+   * @deprecated 01c — streaming events now go through `V1WsClient.onEvent`.
+   *     The legacy client only carries the Stop signal.
+   */
   subscribe(handler: MessageHandler): () => void {
     this.handlers.add(handler);
     return () => this.handlers.delete(handler);
@@ -223,6 +253,11 @@ export class AgentClient {
     return res;
   }
 
+  /**
+   * @deprecated 01c — use `ApiClient.listConversations(coworkerId)` instead.
+   *     The legacy `/api/conversations` endpoint will be removed once
+   *     all chat code paths land on v1.
+   */
   async fetchConversations(): Promise<ConversationSummary[]> {
     const res = await this.fetchWithRefresh(
       (token) =>
@@ -232,6 +267,9 @@ export class AgentClient {
     return res.json();
   }
 
+  /**
+   * @deprecated 01c — use `ApiClient.listMessages(conversationId)` instead.
+   */
   async fetchMessages(chatId: string): Promise<HistoryMessage[]> {
     const res = await this.fetchWithRefresh(
       (token) =>

@@ -1,4 +1,9 @@
-"""IPC message types for NATS-based communication between Orchestrator and Agent."""
+"""IPC message types for NATS-based communication between Orchestrator and Agent.
+
+Deserialization routes payloads through ``from_dict_filter_unknown``
+so the agent runner happily ignores fields a newer orchestrator
+introduces — forward-compat across rolling upgrades (INV-2).
+"""
 
 from __future__ import annotations
 
@@ -6,6 +11,7 @@ import json
 from dataclasses import asdict, dataclass, field
 
 from rolemesh.auth.permissions import AgentPermissions
+from rolemesh.ipc._unknown_filter import from_dict_filter_unknown
 
 
 @dataclass(frozen=True)
@@ -73,34 +79,26 @@ class AgentInitData:
     @classmethod
     def deserialize(cls, data: bytes) -> AgentInitData:
         raw = json.loads(data)
+
+        # Nested dataclass: route each McpServerSpec through the same
+        # filter so a future orchestrator adding fields cannot break an
+        # older container.
         mcp_raw = raw.get("mcp_servers")
-        mcp_servers = [McpServerSpec(**s) for s in mcp_raw] if mcp_raw else None
+        if mcp_raw is not None:
+            raw["mcp_servers"] = [
+                from_dict_filter_unknown(McpServerSpec, s) for s in mcp_raw
+            ]
 
-        # Backward compat: convert legacy is_main bool to permissions dict
+        # Legacy ``is_main`` bool is translated into the permissions dict
+        # before the field filter runs.
         if "is_main" in raw and "permissions" not in raw:
-            is_main = raw["is_main"]
-            permissions = AgentPermissions.for_role(
-                "super_agent" if is_main else "agent"
+            raw["permissions"] = AgentPermissions.for_role(
+                "super_agent" if raw["is_main"] else "agent"
             ).to_dict()
-        else:
-            permissions = raw.get("permissions") or AgentPermissions().to_dict()
+        # Falsy permissions (missing/None/empty dict) → default-role
+        # permissions, matching the pre-refactor ``raw.get(...) or ...``
+        # semantics.
+        if not raw.get("permissions"):
+            raw["permissions"] = AgentPermissions().to_dict()
 
-        return cls(
-            prompt=raw["prompt"],
-            group_folder=raw["group_folder"],
-            chat_jid=raw["chat_jid"],
-            permissions=permissions,
-            tenant_id=raw.get("tenant_id", ""),
-            coworker_id=raw.get("coworker_id", ""),
-            conversation_id=raw.get("conversation_id", ""),
-            user_id=raw.get("user_id", ""),
-            session_id=raw.get("session_id"),
-            is_scheduled_task=raw.get("is_scheduled_task", False),
-            assistant_name=raw.get("assistant_name"),
-            system_prompt=raw.get("system_prompt"),
-            role_config=raw.get("role_config"),
-            mcp_servers=mcp_servers,
-            approval_policies=raw.get("approval_policies"),
-            safety_rules=raw.get("safety_rules"),
-            slow_check_specs=raw.get("slow_check_specs"),
-        )
+        return from_dict_filter_unknown(cls, raw)

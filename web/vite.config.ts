@@ -1,3 +1,4 @@
+/// <reference types="vitest" />
 import { defineConfig } from 'vite';
 import tailwindcss from '@tailwindcss/vite';
 import { fileURLToPath } from 'node:url';
@@ -23,5 +24,12 @@ export default defineConfig({
         target: 'http://localhost:8080',
       },
     },
+  },
+  test: {
+    // Default `node`; component tests opt into happy-dom via the
+    // `// @vitest-environment happy-dom` pragma at the top of their
+    // file so we only pay the DOM-init cost where it's actually needed.
+    environment: 'node',
+    include: ['src/**/*.test.ts'],
   },
 });

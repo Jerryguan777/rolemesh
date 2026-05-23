@@ -1,0 +1,2557 @@
+openapi: 3.1.0
+info:
+  title: RoleMesh API
+  version: 1.1.0
+  description: |
+    REST contract for the `/api/v1/*` surface introduced by the
+    webui-backend v1.1 design. Only `/api/v1/backends` is implemented
+    in Phase 0; the rest are listed as forward contracts so frontend
+    work can compile against typed types from day one.
+
+    The companion WebSocket endpoint `/api/v1/conversations/{id}/stream`
+    is documented in design §4 (event-driven JSON protocol); OpenAPI 3
+    does not model WS, so it is intentionally omitted here.
+
+    Error responses use the shape declared in design §13:
+    `{code, message, details?}`.
+
+servers:
+  - url: /
+    description: Same-origin (FastAPI serves both the SPA and the API).
+
+tags:
+  - name: Auth
+  - name: Approvals
+  - name: ApprovalPolicies
+  - name: Backends
+  - name: Coworkers
+  - name: Conversations
+  - name: Credentials
+  - name: MCPServers
+  - name: Models
+  - name: Runs
+  - name: Skills
+
+paths:
+  /api/v1/auth/config:
+    get:
+      tags: [Auth]
+      operationId: getAuthConfig
+      summary: Public auth-provider hints
+      description: |
+        Returns provider metadata the SPA needs at boot
+        (login URL, mode). No credentials required.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthConfig' }
+
+  /api/v1/auth/ws-ticket:
+    post:
+      tags: [Auth]
+      operationId: createWsTicket
+      summary: Issue a short-lived ticket for the WS handshake
+      description: |
+        The browser exchanges its long-lived session token for a
+        short-exp JWT (<= 60s) which it then passes as the `ticket`
+        query parameter on the WebSocket handshake. The ticket is
+        bound to one `conversation_id`; the handshake compares it
+        against the path so it cannot be reused across conversations
+        (design §4 / 01a Open Question 1).
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/WsTicketRequest' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WsTicket' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/me:
+    get:
+      tags: [Auth]
+      operationId: getMe
+      summary: Identity of the calling user
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Me' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/backends:
+    get:
+      tags: [Backends]
+      operationId: getBackends
+      summary: Static backend × provider × family compatibility matrix
+      description: |
+        Public metadata: no auth required (design §2.3 / §3 Phase 1).
+        Frontends use this to render the per-coworker configuration
+        form. Cache-Control is set to `max-age=3600`.
+      responses:
+        '200':
+          description: OK
+          headers:
+            Cache-Control:
+              schema: { type: string }
+              description: Always `max-age=3600`.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Backend' }
+
+  /api/v1/coworkers:
+    get:
+      tags: [Coworkers]
+      operationId: listCoworkers
+      summary: List coworkers visible to the caller
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Coworker' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Coworkers]
+      operationId: createCoworker
+      summary: Create a coworker
+      description: |
+        Validates `(agent_backend × model.provider × model.family)`
+        against the static matrix; rejects with `BACKEND_INCOMPAT`
+        if the triple is unsupported and `MISSING_CREDENTIAL` when
+        the tenant has no credential for the model's provider.
+        Design §3 + §13.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CoworkerCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Coworker' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
+  /api/v1/coworkers/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [Coworkers]
+      operationId: getCoworker
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Coworker' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Coworkers]
+      operationId: updateCoworker
+      summary: Partially update a coworker
+      description: |
+        A PATCH that changes `model_id` re-runs the
+        backend / provider / family validation; the same
+        `BACKEND_INCOMPAT` and `MISSING_CREDENTIAL` codes apply.
+        Changing `model_id` also publishes `web.coworker.restart`
+        on NATS so the orchestrator hot-reloads the coworker config
+        (design §7).
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CoworkerUpdate' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Coworker' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+    delete:
+      tags: [Coworkers]
+      operationId: deleteCoworker
+      summary: Delete a coworker (cascades conversations / runs / messages)
+      description: |
+        Cascading delete — conversations, runs and messages owned by
+        this coworker are removed. Design §3 "DELETE 语义" table.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '204':
+          description: No content
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/coworkers/{id}/conversations:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [Conversations]
+      operationId: listCoworkerConversations
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Conversation' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [Conversations]
+      operationId: createCoworkerConversation
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConversationCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Conversation' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/conversations/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [Conversations]
+      operationId: getConversation
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Conversation' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Conversations]
+      operationId: deleteConversation
+      summary: Delete a conversation (cascades messages and runs)
+      description: |
+        Cascading delete — design §3 "DELETE 语义" treats
+        conversations as owned children of coworkers.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '204':
+          description: No content
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/conversations/{id}/messages:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [Conversations]
+      operationId: listConversationMessages
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Message' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/models:
+    get:
+      tags: [Models]
+      operationId: listModels
+      summary: List platform models
+      description: |
+        Public, tenant-agnostic catalog. Optional `provider` /
+        `family` query filters narrow the picker for the coworker
+        wizard. `is_active=false` rows are filtered out by default
+        — admin surfaces are out of scope for v1.1 (design §14).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - in: query
+          name: provider
+          required: false
+          schema: { $ref: '#/components/schemas/ModelProvider' }
+        - in: query
+          name: family
+          required: false
+          schema: { $ref: '#/components/schemas/ModelFamily' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Model' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/models/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [Models]
+      operationId: getModel
+      summary: Fetch one platform model
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Model' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/tenant/credentials:
+    get:
+      tags: [Credentials]
+      operationId: listTenantCredentials
+      summary: List the tenant's configured credentials (no secrets)
+      description: |
+        Returns only metadata (`provider`, timestamps). The encrypted
+        payload never appears on this surface — design §8.1 envelope
+        encryption. Use `PUT` to set a new value.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CredentialResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/tenant/credentials/{provider}:
+    parameters:
+      - in: path
+        name: provider
+        required: true
+        schema: { $ref: '#/components/schemas/ModelProvider' }
+    put:
+      tags: [Credentials]
+      operationId: putTenantCredential
+      summary: Create or overwrite the credential for one provider
+      description: |
+        Body carries the real API key in `api_key`. The webui process
+        encrypts via `CredentialVault.encrypt_json` before INSERT /
+        UPDATE on `tenant_model_credentials`. A successful write
+        publishes one `web.coworker.restart` event on JetStream per
+        affected coworker so the orchestrator hot-reloads the cached
+        config (design §7 hot-load matrix).
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CredentialUpsert' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CredentialResponse' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+    delete:
+      tags: [Credentials]
+      operationId: deleteTenantCredential
+      summary: Remove a credential
+      description: |
+        Returns `409 RESOURCE_IN_USE` (with `details.coworker_ids`)
+        if at least one coworker still references this provider. The
+        SPA renders the count from `details` so the operator can fix
+        the offenders before retrying.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '204':
+          description: No content
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            Credential is still referenced by at least one coworker.
+            `code="RESOURCE_IN_USE"`, `details.coworker_ids` lists
+            the offenders.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/v1/coworkers/{id}/mcp-servers:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [Coworkers]
+      operationId: listCoworkerMCPBindings
+      summary: List a coworker's MCP server bindings
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CoworkerMCPBindingResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [Coworkers]
+      operationId: bindCoworkerMCPServer
+      summary: Bind one MCP server to this coworker
+      description: |
+        `enabled_tools` is tri-state — `null` (or omitted) means all
+        tools enabled, `[]` means all disabled, a non-empty list is a
+        whitelist. Publishes `web.coworker.mcp_changed` on success.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CoworkerMCPBindingCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CoworkerMCPBindingResponse' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/coworkers/{id}/mcp-servers/{mcp_id}:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+      - in: path
+        name: mcp_id
+        required: true
+        schema: { type: string, format: uuid }
+    patch:
+      tags: [Coworkers]
+      operationId: updateCoworkerMCPBinding
+      summary: Update enabled_tools on a binding
+      description: |
+        The only mutable field is `enabled_tools`. `null` means all
+        enabled, `[]` means all disabled, a non-empty list is a
+        whitelist. Publishes `web.coworker.mcp_changed` on success.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CoworkerMCPBindingUpdate' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CoworkerMCPBindingResponse' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Coworkers]
+      operationId: unbindCoworkerMCPServer
+      summary: Unbind an MCP server from this coworker
+      description: |
+        Idempotent: a 404 is returned when the binding does not exist.
+        Publishes `web.coworker.mcp_changed` on success.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '204':
+          description: No content
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/skills:
+    get:
+      tags: [Skills]
+      operationId: listSkills
+      summary: List the tenant's catalog skills
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SkillSummary' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Skills]
+      operationId: createSkill
+      summary: Create a per-tenant catalog skill
+      description: |
+        The `files` map must include `SKILL.md` (frontmatter + body of
+        the skill manifest). Path traversal in any key is rejected
+        with 422. Skill names must match `[a-zA-Z][a-zA-Z0-9_-]{0,63}`.
+        Returns 409 `RESOURCE_IN_USE` when a skill with this name
+        already exists in the tenant.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SkillCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Skill' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
+  /api/v1/skills/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [Skills]
+      operationId: getSkill
+      summary: Fetch a skill with its file map
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Skill' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Skills]
+      operationId: updateSkill
+      summary: Update skill metadata (not files)
+      description: |
+        Use the per-file endpoints for content edits — this handler
+        only touches the catalog row's enabled flag and frontmatter.
+        Publishes one `web.coworker.skills_changed` event per
+        coworker currently bound to this skill.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SkillUpdate' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Skill' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Skills]
+      operationId: deleteSkill
+      summary: Delete a catalog skill
+      description: |
+        Returns 409 `RESOURCE_IN_USE` (with `details.coworker_ids`)
+        when at least one coworker still binds this skill. Unbind
+        first via `DELETE /api/v1/coworkers/{id}/skills/{skill_id}`.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '204':
+          description: No content
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            Skill is still bound to at least one coworker.
+            `code="RESOURCE_IN_USE"`, `details.coworker_ids` lists
+            the offenders.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/v1/skills/{id}/files:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [Skills]
+      operationId: listSkillFiles
+      summary: List the file paths in a skill
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: string }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/skills/{id}/files/{path}:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+      - in: path
+        name: path
+        required: true
+        description: |
+          File path within the skill. Path traversal (e.g. `../`) is
+          rejected with 422. `SKILL.md` is protected from DELETE
+          (returns 409 `SKILL_MANIFEST_PROTECTED`).
+        schema: { type: string }
+    get:
+      tags: [Skills]
+      operationId: getSkillFile
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SkillFile' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Skills]
+      operationId: putSkillFile
+      summary: Upsert a single file in a skill
+      description: |
+        Creates the file if absent, overwrites it otherwise. Path
+        validation (positive whitelist + traversal rejection) runs
+        before any DB write. Publishes one `web.coworker.skills_changed`
+        event per coworker currently bound to this skill.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SkillFileUpsert' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SkillFile' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+    delete:
+      tags: [Skills]
+      operationId: deleteSkillFile
+      summary: Delete a single file from a skill
+      description: |
+        `SKILL.md` is protected — DELETE returns 409
+        `SKILL_MANIFEST_PROTECTED`. Publishes one
+        `web.coworker.skills_changed` event per coworker currently
+        bound to this skill.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '204':
+          description: No content
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            `SKILL.md` cannot be deleted (application-level
+            invariant). `code="SKILL_MANIFEST_PROTECTED"`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
+  /api/v1/coworkers/{id}/skills:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [Coworkers]
+      operationId: listCoworkerSkills
+      summary: List skill bindings for a coworker
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/CoworkerSkillBinding' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/coworkers/{id}/skills/{skill_id}:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+      - in: path
+        name: skill_id
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Coworkers]
+      operationId: enableCoworkerSkill
+      summary: Bind a catalog skill to this coworker
+      description: |
+        Idempotent: re-enabling an already-bound skill is a 200, not
+        a 409. Publishes `web.coworker.skills_changed`.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CoworkerSkillBinding' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Coworkers]
+      operationId: disableCoworkerSkill
+      summary: Unbind a skill from this coworker
+      description: |
+        Deletes the `coworker_skills` row; the catalog skill remains.
+        Publishes `web.coworker.skills_changed`.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '204':
+          description: No content
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/mcp-servers:
+    get:
+      tags: [MCPServers]
+      operationId: listMCPServers
+      summary: List the tenant's MCP servers
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/MCPServer' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [MCPServers]
+      operationId: createMCPServer
+      summary: Register a new MCP server
+      description: |
+        Publishes one `egress.mcp.changed` event (`action="created"`)
+        on success so the gateway picks up the route without an
+        orchestrator restart (design §7).
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MCPServerCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MCPServer' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/mcp-servers/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [MCPServers]
+      operationId: getMCPServer
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MCPServer' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [MCPServers]
+      operationId: updateMCPServer
+      summary: Partially update an MCP server
+      description: |
+        Publishes one `egress.mcp.changed` event (`action="updated"`)
+        on success.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/MCPServerUpdate' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MCPServer' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    delete:
+      tags: [MCPServers]
+      operationId: deleteMCPServer
+      summary: Delete an MCP server
+      description: |
+        Returns `409 RESOURCE_IN_USE` (with `details.coworker_ids`)
+        when at least one coworker still binds this MCP server.
+        Publishes one `egress.mcp.changed` event (`action="deleted"`)
+        on success.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '204':
+          description: No content
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            MCP server is still referenced by at least one coworker.
+            `code="RESOURCE_IN_USE"`, `details.coworker_ids` lists
+            the offenders.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/v1/runs/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [Runs]
+      operationId: getRun
+      summary: Fetch authoritative run state (used by WS reconnect)
+      description: |
+        Clients reconnecting to a stream first GET the run snapshot
+        to decide whether the run is already terminal — design §4
+        "重连" flow.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Run' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/runs/{id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    post:
+      tags: [Runs]
+      operationId: cancelRun
+      summary: Request cancellation of an in-flight run (async)
+      description: |
+        Fire-and-forget: publishes `web.run.cancel.{run_id}` on
+        JetStream and returns 202 immediately. The orchestrator stops
+        the agent container and the lifecycle helper writes
+        `status='cancelled'` once the container has actually halted —
+        clients GET `/api/v1/runs/{id}` to observe the terminal state.
+
+        409 with `code="ALREADY_TERMINAL"` is returned when the run
+        is already in a terminal state at request time (no NATS
+        publish happens in that case).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '202':
+          description: |
+            Cancellation request accepted; orchestrator handles the
+            actual container stop and DB UPDATE asynchronously.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Run' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            Run is already in a terminal state (`code="ALREADY_TERMINAL"`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/v1/approval-policies:
+    get:
+      tags: [ApprovalPolicies]
+      operationId: listApprovalPolicies
+      summary: List the tenant's approval policies
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: coworker_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: enabled
+          in: query
+          required: false
+          schema: { type: boolean }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ApprovalPolicy' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [ApprovalPolicies]
+      operationId: createApprovalPolicy
+      summary: Create an approval policy
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApprovalPolicyCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalPolicy' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
+  /api/v1/approval-policies/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [ApprovalPolicies]
+      operationId: getApprovalPolicy
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalPolicy' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [ApprovalPolicies]
+      operationId: updateApprovalPolicy
+      summary: Partially update an approval policy
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApprovalPolicyUpdate' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalPolicy' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [ApprovalPolicies]
+      operationId: deleteApprovalPolicy
+      summary: Delete an approval policy
+      description: |
+        `approval_requests.policy_id` is `ON DELETE SET NULL`, so
+        already-issued pending requests survive policy removal —
+        the audit trail loses the link but the decision flow
+        continues (design §3 DELETE 语义表).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '204':
+          description: No content
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/approvals:
+    get:
+      tags: [Approvals]
+      operationId: listApprovals
+      summary: List approval requests
+      description: |
+        Default filter is "I am an approver on a pending request"
+        (`scope=mine`, `status=pending`). Admins may pass
+        `scope=all` to see the whole tenant; non-admin callers
+        asking for `scope=all` get 403.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { type: string }
+        - name: scope
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [mine, all]
+            default: mine
+        - name: coworker_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ApprovalRequest' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/approvals/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [Approvals]
+      operationId: getApproval
+      summary: Approval request detail (includes audit_log)
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalRequestDetail' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/approvals/{id}/audit-log:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [Approvals]
+      operationId: getApprovalAuditLog
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ApprovalAuditEntry' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/approvals/{id}/decide:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    post:
+      tags: [Approvals]
+      operationId: decideApproval
+      summary: Approve or reject a pending approval request
+      description: |
+        Wire enum (`approve`/`reject`) is translated to the engine
+        enum at the handler boundary via INV-7's
+        `http_action_to_outcome`. The audit-log row's
+        `actor_user_id` flows through `resolve_actor_user_id`
+        (INV-4) so bootstrap fast-path callers land on the
+        tenant's owner UUID, not the literal `"bootstrap"`.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApprovalDecide' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalRequest' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Caller is not in `resolved_approvers`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Request is no longer pending.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '503':
+          description: |
+            Approval engine is not wired into this process
+            (`code="APPROVAL_ENGINE_UNAVAILABLE"`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/v1/safety/rules:
+    get:
+      tags: [Safety]
+      operationId: listSafetyRules
+      summary: List safety rules for the caller's tenant
+      description: |
+        Phase 4 (design §3) — GET-only on the v1 surface. Writes
+        (create/update/delete) stay on the admin surface because
+        rule mutation is an admin-only operation; see the design
+        doc for the locked decision.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: coworker_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: stage
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/SafetyStage' }
+        - name: enabled
+          in: query
+          required: false
+          schema: { type: boolean }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SafetyRule' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/safety/rules/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [Safety]
+      operationId: getSafetyRule
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SafetyRule' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/safety/rules/{id}/audit:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [Safety]
+      operationId: listSafetyRuleAudit
+      summary: Change-history timeline for one safety rule
+      description: |
+        Newest-first projection of `safety_rules_audit` for one rule.
+        Returns 404 if the rule does not exist in the caller's
+        tenant — RLS on the audit table prevents cross-tenant
+        existence leaks, and the explicit 404 keeps UUID guessing
+        from yielding an empty 200 that signals "wrong tenant".
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500, default: 200 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SafetyRuleAuditEntry' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/safety/checks:
+    get:
+      tags: [Safety]
+      operationId: listSafetyChecks
+      summary: Registered safety checks (rule-editor metadata)
+      description: |
+        Stable-alphabetical ordering. The `config_schema` field is
+        the check's declared Pydantic JSON schema, used by the SPA
+        to render a config form without a second round-trip.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SafetyCheck' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/safety/decisions:
+    get:
+      tags: [Safety]
+      operationId: listSafetyDecisions
+      summary: Paginated safety decisions for the caller's tenant
+      description: |
+        Returns `{ total, items }` so the SPA renders pagination
+        without a second count call. `limit` is capped at 200
+        server-side; the admin `decisions.csv` export covers bulk
+        retrieval (intentionally NOT migrated to v1 per design
+        §3 Phase 4 — the CSV surface stays admin-only).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: verdict_action
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/SafetyVerdictAction' }
+        - name: coworker_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: stage
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/SafetyStage' }
+        - name: from_ts
+          in: query
+          required: false
+          schema: { type: string, format: date-time }
+        - name: to_ts
+          in: query
+          required: false
+          schema: { type: string, format: date-time }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SafetyDecisionPage' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/safety/decisions/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [Safety]
+      operationId: getSafetyDecision
+      summary: Single safety decision detail
+      description: |
+        Cross-tenant lookups return 404 (not 403) so UUID existence
+        does not leak across tenants — same convention as the admin
+        endpoint. `approval_context` is only populated for
+        `verdict_action='require_approval'` rows within the 24-hour
+        retention window.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SafetyDecision' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    IdInPath:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    BadRequest:
+      description: Malformed request.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Unauthorized:
+      description: Missing or invalid credentials.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Forbidden:
+      description: Caller is authenticated but not permitted.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Conflict:
+      description: |
+        Resource conflict — typically a duplicate name within the
+        tenant, or attempted mutation of a terminal-state run.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Unprocessable:
+      description: |
+        Semantic validation failure (e.g. `BACKEND_INCOMPAT`,
+        `MISSING_CREDENTIAL` — design §13).
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: |
+            Stable, machine-readable code. Known values include
+            `RESOURCE_IN_USE`, `BACKEND_INCOMPAT`, `MISSING_CREDENTIAL`,
+            `BOOTSTRAP_NEEDS_TENANT_OWNER`, `NEEDS_USER_PRESENCE`,
+            `WS_TICKET_EXPIRED`, `SKILL_MANIFEST_PROTECTED`,
+            `REAUTH_REQUIRED` (design §13).
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+
+    AuthConfig:
+      type: object
+      required: [mode]
+      properties:
+        mode:
+          type: string
+          enum: [external, oidc, builtin, bootstrap]
+        login_url:
+          type: string
+          nullable: true
+          description: When set, the SPA redirects here for login.
+
+    WsTicketRequest:
+      type: object
+      required: [conversation_id]
+      properties:
+        conversation_id:
+          type: string
+          format: uuid
+          description: |
+            UUID of the conversation the ticket authorises. The WS
+            handshake compares this against the path `conversation_id`
+            and refuses mismatched tickets without a DB hop.
+
+    WsTicket:
+      type: object
+      required: [ticket, expires_in_s]
+      properties:
+        ticket:
+          type: string
+          description: Short-lived JWT (exp <= 60s).
+        expires_in_s:
+          type: integer
+          minimum: 1
+          maximum: 60
+
+    Me:
+      type: object
+      required: [user_id, tenant_id, role]
+      properties:
+        user_id: { type: string }
+        tenant_id: { type: string }
+        name: { type: string }
+        email: { type: string, nullable: true }
+        role:
+          type: string
+          enum: [owner, admin, member]
+
+    BackendName:
+      type: string
+      enum: [claude, pi]
+      description: |
+        Backend runtime identifier. Mirrors
+        `rolemesh.core.backend_capabilities.ALL_BACKENDS`.
+
+    ModelProvider:
+      type: string
+      enum: [anthropic, bedrock, openai, google]
+
+    ModelFamily:
+      type: string
+      enum: [claude, gpt, gemini, llama]
+
+    Backend:
+      type: object
+      required: [name, description, supported_providers, supported_model_families]
+      properties:
+        name:
+          $ref: '#/components/schemas/BackendName'
+        description:
+          type: string
+        supported_providers:
+          type: array
+          items: { $ref: '#/components/schemas/ModelProvider' }
+        supported_model_families:
+          type: array
+          nullable: true
+          description: |
+            `null` means "any family the provider offers" (currently
+            only Pi sets this).
+          items: { $ref: '#/components/schemas/ModelFamily' }
+
+    AgentRole:
+      type: string
+      enum: [super_agent, agent]
+
+    CoworkerStatus:
+      type: string
+      enum: [active, paused, disabled]
+
+    Coworker:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - name
+        - folder
+        - agent_backend
+        - status
+        - agent_role
+        - max_concurrent
+        - created_at
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        name: { type: string }
+        folder: { type: string }
+        agent_backend: { $ref: '#/components/schemas/BackendName' }
+        model_id:
+          type: string
+          format: uuid
+          nullable: true
+        system_prompt:
+          type: string
+          nullable: true
+        status: { $ref: '#/components/schemas/CoworkerStatus' }
+        agent_role: { $ref: '#/components/schemas/AgentRole' }
+        max_concurrent:
+          type: integer
+          minimum: 1
+        created_by_user_id:
+          type: string
+          format: uuid
+          nullable: true
+        created_at: { type: string, format: date-time }
+
+    CoworkerCreate:
+      type: object
+      required: [name, folder, agent_backend]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        folder:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$'
+        agent_backend: { $ref: '#/components/schemas/BackendName' }
+        model_id:
+          type: string
+          format: uuid
+          nullable: true
+        system_prompt:
+          type: string
+          nullable: true
+        max_concurrent:
+          type: integer
+          minimum: 1
+          maximum: 20
+          default: 2
+        agent_role:
+          $ref: '#/components/schemas/AgentRole'
+
+    CoworkerUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        system_prompt:
+          type: string
+          nullable: true
+        model_id:
+          type: string
+          format: uuid
+          nullable: true
+        status: { $ref: '#/components/schemas/CoworkerStatus' }
+        max_concurrent:
+          type: integer
+          minimum: 1
+          maximum: 20
+
+    ChannelType:
+      type: string
+      enum: [web, telegram, slack]
+
+    Conversation:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - coworker_id
+        - channel_binding_id
+        - channel_chat_id
+        - created_at
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        coworker_id: { type: string, format: uuid }
+        channel_binding_id: { type: string, format: uuid }
+        channel_chat_id: { type: string }
+        name:
+          type: string
+          nullable: true
+        requires_trigger:
+          type: boolean
+          default: true
+        created_at: { type: string, format: date-time }
+
+    ConversationCreate:
+      type: object
+      description: |
+        v1 web-chat creation: the server auto-creates the
+        `web` channel binding (if missing) and a fresh
+        `channel_chat_id` so the client does not have to know
+        about channel internals.
+      properties:
+        name:
+          type: string
+          nullable: true
+          description: Optional display label for the SPA conversation list.
+
+    MessageRole:
+      type: string
+      enum: [user, assistant]
+      description: |
+        Wire-level role projection: `is_from_me=TRUE` or
+        `is_bot_message=TRUE` rows surface as `assistant`; everything
+        else as `user`. `system` / `safety` frames are delivered via
+        the WS event stream (design §4) rather than the persisted
+        message log.
+
+    Message:
+      type: object
+      required: [id, role, content, timestamp]
+      properties:
+        id: { type: string }
+        role: { $ref: '#/components/schemas/MessageRole' }
+        content: { type: string }
+        timestamp: { type: string, format: date-time }
+        run_id:
+          type: string
+          format: uuid
+          nullable: true
+
+    RunStatus:
+      type: string
+      enum: [running, completed, failed, cancelled, awaiting_reauth]
+      description: |
+        Engine-wide closed set (design §4 / INV-6).
+        `awaiting_reauth` is reserved for the user-mode MCP path
+        (architecturally present, e2e gated on the OIDC branch) and
+        is treated as terminal: the SPA prompts the user to re-auth
+        and the next agent invocation starts a fresh run.
+
+    RunUsage:
+      type: object
+      description: |
+        Free-form per-turn usage attribution (token counts, cost,
+        per-tool stats). Schema intentionally open — exact keys are
+        determined by the backend; clients should treat it as
+        opaque and key off `total_tokens` / `total_cost_usd` when
+        present.
+      additionalProperties: true
+
+    RunError:
+      type: object
+      description: |
+        Structured failure detail recorded by the lifecycle helper
+        when a run terminates in `failed`, `cancelled`, or
+        `awaiting_reauth`. Keys are intentionally open — engine
+        callers populate `code` / `message` and may attach extra
+        details (`reason` for `awaiting_reauth`, `exit_code` for
+        container crashes).
+      additionalProperties: true
+
+    Model:
+      type: object
+      required: [id, provider, model_id, model_family, display_name, is_active]
+      properties:
+        id: { type: string, format: uuid }
+        provider: { $ref: '#/components/schemas/ModelProvider' }
+        model_id:
+          type: string
+          description: |
+            Provider-side model identifier (e.g. `claude-opus-4-7`).
+        model_family: { $ref: '#/components/schemas/ModelFamily' }
+        display_name: { type: string }
+        is_active: { type: boolean }
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    CredentialResponse:
+      type: object
+      required: [provider, created_at, updated_at]
+      properties:
+        provider: { $ref: '#/components/schemas/ModelProvider' }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    CredentialUpsert:
+      type: object
+      required: [api_key]
+      properties:
+        api_key:
+          type: string
+          minLength: 1
+          maxLength: 4096
+          description: |
+            Plaintext provider API key. Encrypted server-side via
+            envelope encryption before being persisted; never returned
+            on any subsequent GET (design §8.1).
+        extras:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: |
+            Provider-specific extras (e.g. `api_base`, `region`).
+            Schema intentionally open — the credential proxy reads
+            whatever shape the provider needs.
+
+    CoworkerMCPBindingResponse:
+      type: object
+      required: [coworker_id, mcp_server_id]
+      properties:
+        coworker_id: { type: string, format: uuid }
+        mcp_server_id: { type: string, format: uuid }
+        enabled_tools:
+          type: array
+          nullable: true
+          description: |
+            Tri-state: `null` (or absent) means all tools enabled,
+            `[]` means all disabled, a non-empty list is a whitelist.
+          items: { type: string }
+
+    CoworkerMCPBindingCreate:
+      type: object
+      required: [mcp_server_id]
+      properties:
+        mcp_server_id: { type: string, format: uuid }
+        enabled_tools:
+          type: array
+          nullable: true
+          items: { type: string }
+
+    CoworkerMCPBindingUpdate:
+      type: object
+      properties:
+        enabled_tools:
+          type: array
+          nullable: true
+          items: { type: string }
+
+    MCPType:
+      type: string
+      enum: [sse, http]
+
+    MCPAuthMode:
+      type: string
+      enum: [user, service, both]
+      description: |
+        `user` — per-request user OIDC token (architecturally
+        present, e2e gated on the OIDC branch).
+        `service` — server-managed credential.
+        `both` — endpoint accepts either, decided per call.
+
+    MCPServer:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - name
+        - type
+        - url
+        - auth_mode
+        - created_at
+        - updated_at
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        name: { type: string }
+        type: { $ref: '#/components/schemas/MCPType' }
+        url: { type: string }
+        auth_mode: { $ref: '#/components/schemas/MCPAuthMode' }
+        credential_ref:
+          type: string
+          nullable: true
+        extra_headers:
+          type: object
+          additionalProperties: { type: string }
+        tool_reversibility:
+          type: object
+          description: |
+            Per-tool override map: {tool_name: bool}. `true` means
+            the tool is reversible (the safety pipeline may auto-
+            approve it). Empty object means "no override, fall back
+            to the tenant default" — design §2.1.
+          additionalProperties: { type: boolean }
+        description:
+          type: string
+          nullable: true
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    MCPServerCreate:
+      type: object
+      required: [name, type, url, auth_mode]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        type: { $ref: '#/components/schemas/MCPType' }
+        url:
+          type: string
+          minLength: 1
+        auth_mode: { $ref: '#/components/schemas/MCPAuthMode' }
+        credential_ref:
+          type: string
+          nullable: true
+        extra_headers:
+          type: object
+          additionalProperties: { type: string }
+          nullable: true
+        tool_reversibility:
+          type: object
+          additionalProperties: { type: boolean }
+          nullable: true
+        description:
+          type: string
+          nullable: true
+
+    MCPServerUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        type: { $ref: '#/components/schemas/MCPType' }
+        url:
+          type: string
+          minLength: 1
+        auth_mode: { $ref: '#/components/schemas/MCPAuthMode' }
+        credential_ref:
+          type: string
+          nullable: true
+        extra_headers:
+          type: object
+          additionalProperties: { type: string }
+          nullable: true
+        tool_reversibility:
+          type: object
+          additionalProperties: { type: boolean }
+          nullable: true
+        description:
+          type: string
+          nullable: true
+
+    # -----------------------------------------------------------------
+    # Skills (design §3 Phase 3 / docs/19-skills-architecture.md)
+    # -----------------------------------------------------------------
+
+    SkillFile:
+      type: object
+      required: [path, content]
+      properties:
+        path: { type: string }
+        content: { type: string }
+        mime_type:
+          type: string
+          default: text/plain
+        updated_at:
+          type: string
+          format: date-time
+
+    SkillFileUpsert:
+      type: object
+      required: [content]
+      properties:
+        content: { type: string }
+        mime_type:
+          type: string
+          default: text/plain
+
+    Skill:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - name
+        - enabled
+        - created_at
+        - updated_at
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        name: { type: string }
+        enabled: { type: boolean }
+        frontmatter_common:
+          type: object
+          additionalProperties: true
+        frontmatter_backend:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties: true
+        files:
+          type: object
+          description: |
+            Map of `path` → `SkillFile`. `SKILL.md` is always present
+            (application invariant; deleting it is rejected with 409
+            `SKILL_MANIFEST_PROTECTED`).
+          additionalProperties: { $ref: '#/components/schemas/SkillFile' }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        created_by_user_id:
+          type: string
+          format: uuid
+          nullable: true
+
+    SkillSummary:
+      type: object
+      description: |
+        List-view projection — drops the file map and frontmatter.
+        Use `GET /api/v1/skills/{id}` for the full payload.
+      required:
+        - id
+        - tenant_id
+        - name
+        - description
+        - enabled
+        - bound_coworker_count
+        - created_at
+        - updated_at
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string }
+        enabled: { type: boolean }
+        bound_coworker_count:
+          type: integer
+          minimum: 0
+          description: |
+            Number of `coworker_skills` rows referencing this skill,
+            any enabled state. The list page renders this so admins
+            can spot orphaned vs heavily-shared skills.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    SkillCreate:
+      type: object
+      required: [name, files]
+      properties:
+        name:
+          type: string
+          pattern: '^[a-zA-Z][a-zA-Z0-9_-]{0,63}$'
+        enabled:
+          type: boolean
+          default: true
+        files:
+          type: object
+          description: |
+            Map of `path` → file content. `SKILL.md` is required —
+            its frontmatter populates `frontmatter_common` and
+            `frontmatter_backend`.
+          additionalProperties:
+            oneOf:
+              - type: string
+              - $ref: '#/components/schemas/SkillFileUpsert'
+        frontmatter_common:
+          type: object
+          additionalProperties: true
+          nullable: true
+        frontmatter_backend:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties: true
+          nullable: true
+
+    SkillUpdate:
+      type: object
+      description: |
+        Metadata-only update. Use the per-file endpoints to change
+        file content; this path leaves `skill_files` untouched.
+      properties:
+        enabled:
+          type: boolean
+        frontmatter_common:
+          type: object
+          additionalProperties: true
+          nullable: true
+        frontmatter_backend:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties: true
+          nullable: true
+
+    CoworkerSkillBinding:
+      type: object
+      description: |
+        One `coworker_skills` row, wire-side. The skill is
+        projection-eligible only when `enabled` here is true AND
+        the parent catalog skill's `enabled` flag is also true
+        (double-AND, design §6.3 C).
+      required: [coworker_id, skill_id, enabled]
+      properties:
+        coworker_id: { type: string, format: uuid }
+        skill_id: { type: string, format: uuid }
+        enabled: { type: boolean }
+
+    Run:
+      type: object
+      required: [id, conversation_id, status]
+      properties:
+        id: { type: string, format: uuid }
+        conversation_id: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/RunStatus' }
+        usage:
+          $ref: '#/components/schemas/RunUsage'
+        error:
+          allOf:
+            - $ref: '#/components/schemas/RunError'
+          nullable: true
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    # -----------------------------------------------------------------
+    # Approvals (design §3 Phase 3 / §11 INV-4 + INV-7)
+    # -----------------------------------------------------------------
+
+    ApprovalPostExecMode:
+      type: string
+      enum: [report]
+      description: |
+        How approved actions feed back into the conversation. The
+        only mode shipped today is `report` (executor posts a
+        rendered summary); the closed enum is preserved so future
+        modes land as a typed contract change.
+
+    ApprovalRequestStatus:
+      type: string
+      description: |
+        Lifecycle status of an `approval_requests` row. Closed set
+        enforced by the DB CHECK constraint; surfacing it as an
+        enum lets the SPA branch on the value without string
+        comparisons against bare text.
+      enum:
+        - pending
+        - approved
+        - rejected
+        - expired
+        - cancelled
+        - skipped
+        - executing
+        - executed
+        - execution_failed
+        - execution_stale
+
+    ApprovalRequestSource:
+      type: string
+      enum: [proposal, auto_intercept, safety_require_approval]
+
+    ApprovalPolicy:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - mcp_server_name
+        - tool_name
+        - condition_expr
+        - auto_expire_minutes
+        - post_exec_mode
+        - enabled
+        - priority
+        - created_at
+        - updated_at
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        coworker_id:
+          type: string
+          format: uuid
+          nullable: true
+        mcp_server_name: { type: string }
+        tool_name: { type: string }
+        condition_expr:
+          type: object
+          additionalProperties: true
+        approver_user_ids:
+          type: array
+          items: { type: string, format: uuid }
+        notify_conversation_id:
+          type: string
+          format: uuid
+          nullable: true
+        auto_expire_minutes:
+          type: integer
+          minimum: 1
+          maximum: 10080
+        post_exec_mode: { $ref: '#/components/schemas/ApprovalPostExecMode' }
+        enabled: { type: boolean }
+        priority:
+          type: integer
+          minimum: -1000
+          maximum: 1000
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    ApprovalPolicyCreate:
+      type: object
+      required: [mcp_server_name, tool_name, condition_expr]
+      properties:
+        mcp_server_name:
+          type: string
+          minLength: 1
+        tool_name:
+          type: string
+          minLength: 1
+        condition_expr:
+          type: object
+          additionalProperties: true
+        coworker_id:
+          type: string
+          format: uuid
+          nullable: true
+        approver_user_ids:
+          type: array
+          items: { type: string, format: uuid }
+        notify_conversation_id:
+          type: string
+          format: uuid
+          nullable: true
+        auto_expire_minutes:
+          type: integer
+          minimum: 1
+          maximum: 10080
+          default: 60
+        post_exec_mode:
+          $ref: '#/components/schemas/ApprovalPostExecMode'
+        enabled:
+          type: boolean
+          default: true
+        priority:
+          type: integer
+          minimum: -1000
+          maximum: 1000
+          default: 0
+
+    ApprovalPolicyUpdate:
+      type: object
+      properties:
+        mcp_server_name:
+          type: string
+          minLength: 1
+        tool_name:
+          type: string
+          minLength: 1
+        condition_expr:
+          type: object
+          additionalProperties: true
+        approver_user_ids:
+          type: array
+          items: { type: string, format: uuid }
+        notify_conversation_id:
+          type: string
+          format: uuid
+          nullable: true
+        auto_expire_minutes:
+          type: integer
+          minimum: 1
+          maximum: 10080
+        post_exec_mode:
+          $ref: '#/components/schemas/ApprovalPostExecMode'
+        enabled: { type: boolean }
+        priority:
+          type: integer
+          minimum: -1000
+          maximum: 1000
+
+    ApprovalRequest:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - coworker_id
+        - user_id
+        - job_id
+        - mcp_server_name
+        - source
+        - status
+        - post_exec_mode
+        - requested_at
+        - expires_at
+        - created_at
+        - updated_at
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        coworker_id: { type: string, format: uuid }
+        conversation_id:
+          type: string
+          format: uuid
+          nullable: true
+        policy_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            NULL when (a) the request originated from a path with
+            no matching policy (proposal default-mode flow), or
+            (b) the policy was deleted after the request was
+            issued (`ON DELETE SET NULL`).
+        user_id: { type: string, format: uuid }
+        job_id: { type: string }
+        mcp_server_name: { type: string }
+        actions:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        action_hashes:
+          type: array
+          items: { type: string }
+        rationale:
+          type: string
+          nullable: true
+        source: { $ref: '#/components/schemas/ApprovalRequestSource' }
+        status: { $ref: '#/components/schemas/ApprovalRequestStatus' }
+        post_exec_mode: { $ref: '#/components/schemas/ApprovalPostExecMode' }
+        resolved_approvers:
+          type: array
+          items: { type: string, format: uuid }
+        requested_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    ApprovalAuditEntry:
+      type: object
+      required: [id, request_id, action, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        request_id: { type: string, format: uuid }
+        action: { type: string }
+        actor_user_id:
+          type: string
+          format: uuid
+          nullable: true
+        note:
+          type: string
+          nullable: true
+        metadata:
+          type: object
+          additionalProperties: true
+        created_at: { type: string, format: date-time }
+
+    ApprovalRequestDetail:
+      allOf:
+        - $ref: '#/components/schemas/ApprovalRequest'
+        - type: object
+          required: [audit_log]
+          properties:
+            audit_log:
+              type: array
+              items: { $ref: '#/components/schemas/ApprovalAuditEntry' }
+
+    ApprovalDecide:
+      type: object
+      required: [action]
+      properties:
+        action:
+          type: string
+          enum: [approve, reject]
+          description: |
+            HTTP wire enum. Translated by
+            `http_action_to_outcome` (INV-7) at the handler
+            boundary into the engine's `ApprovalOutcome`.
+        note:
+          type: string
+          maxLength: 1000
+          nullable: true
+
+    SafetyStage:
+      type: string
+      enum:
+        - input_prompt
+        - pre_tool_call
+        - post_tool_result
+        - model_output
+        - pre_compaction
+        - egress_request
+
+    SafetyVerdictAction:
+      type: string
+      enum: [allow, block, redact, warn, require_approval]
+
+    SafetyCheckCostClass:
+      type: string
+      enum: [cheap, slow]
+
+    SafetyFindingSeverity:
+      type: string
+      enum: [info, low, medium, high, critical]
+
+    SafetyRuleAuditAction:
+      type: string
+      enum: [created, updated, deleted]
+
+    SafetyRule:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - stage
+        - check_id
+        - priority
+        - enabled
+        - description
+        - created_at
+        - updated_at
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        coworker_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            `null` means the rule is tenant-wide (applies to every
+            coworker). Non-null binds the rule to a single coworker.
+        stage: { $ref: '#/components/schemas/SafetyStage' }
+        check_id: { type: string }
+        config:
+          type: object
+          additionalProperties: true
+        priority: { type: integer }
+        enabled: { type: boolean }
+        description: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    SafetyCheck:
+      type: object
+      required:
+        - id
+        - version
+        - stages
+        - cost_class
+      properties:
+        id: { type: string }
+        version: { type: string }
+        stages:
+          type: array
+          items: { $ref: '#/components/schemas/SafetyStage' }
+        cost_class: { $ref: '#/components/schemas/SafetyCheckCostClass' }
+        supported_codes:
+          type: array
+          items: { type: string }
+        config_schema:
+          type: object
+          additionalProperties: true
+          nullable: true
+
+    SafetyFinding:
+      type: object
+      required: [code, severity, message]
+      properties:
+        code: { type: string }
+        severity: { $ref: '#/components/schemas/SafetyFindingSeverity' }
+        message: { type: string }
+        metadata:
+          type: object
+          additionalProperties: true
+          nullable: true
+
+    SafetyDecision:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - stage
+        - verdict_action
+        - context_digest
+        - context_summary
+        - created_at
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        coworker_id:
+          type: string
+          format: uuid
+          nullable: true
+        conversation_id:
+          type: string
+          nullable: true
+        job_id:
+          type: string
+          nullable: true
+        stage: { $ref: '#/components/schemas/SafetyStage' }
+        verdict_action: { $ref: '#/components/schemas/SafetyVerdictAction' }
+        triggered_rule_ids:
+          type: array
+          items: { type: string, format: uuid }
+        findings:
+          type: array
+          items: { $ref: '#/components/schemas/SafetyFinding' }
+        context_digest: { type: string }
+        context_summary: { type: string }
+        approval_context:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: |
+            Populated only for `verdict_action='require_approval'`
+            rows within the 24-hour retention window — cleared by
+            the periodic retention sweep.
+        created_at: { type: string, format: date-time }
+
+    SafetyDecisionPage:
+      type: object
+      required: [total]
+      properties:
+        total:
+          type: integer
+          minimum: 0
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/SafetyDecision' }
+
+    SafetyRuleAuditEntry:
+      type: object
+      required:
+        - id
+        - rule_id
+        - tenant_id
+        - action
+        - created_at
+      properties:
+        id: { type: string, format: uuid }
+        rule_id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        action: { $ref: '#/components/schemas/SafetyRuleAuditAction' }
+        actor_user_id:
+          type: string
+          format: uuid
+          nullable: true
+        before_state:
+          type: object
+          additionalProperties: true
+          nullable: true
+        after_state:
+          type: object
+          additionalProperties: true
+          nullable: true
+        created_at: { type: string, format: date-time }

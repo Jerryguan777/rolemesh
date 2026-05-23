@@ -25,6 +25,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from nats.js.api import StreamConfig
+from rolemesh.auth.bootstrap_actor import BootstrapActorError
+from rolemesh.auth.bootstrap_users import init_bootstrap_users
 from rolemesh.db import (
     _get_pool,
     close_database,
@@ -88,6 +90,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await auth.init_auth(_get_pool())
     await auth.init_auth_provider()
 
+    # BOOTSTRAP_USERS multi-user fast-path (§5.2.1). Parsing happens
+    # once at startup so a malformed spec fails the process boot
+    # instead of intermittently failing requests. The function is a
+    # no-op when the env var is unset.
+    init_bootstrap_users()
+
     # Initialize TokenVault for OIDC token mirroring (mirrors orchestrator init).
     # This is per-process: orchestrator and webui each hold their own vault.
     from rolemesh.auth.token_vault import create_vault_from_env
@@ -96,6 +104,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _vault = await create_vault_from_env()
     if _vault is not None:
         oidc_routes.set_token_vault(_vault)
+
+    # v1.1 §8.1: install the LLM CredentialVault singleton. Fails loud
+    # if ``CREDENTIAL_VAULT_KEY`` is unset — INV-VAULT-1. Done here
+    # (not at import time) so test apps that skip the lifespan don't
+    # accidentally depend on the env var.
+    from rolemesh.auth.credential_vault import (
+        create_credential_vault_from_env,
+        set_credential_vault,
+    )
+
+    set_credential_vault(create_credential_vault_from_env())
 
     # Approval engine for the WebUI's decide endpoint. The orchestrator
     # process also owns an engine of its own for IPC events; they do not
@@ -140,10 +159,34 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # snapshot fetch on boot handles missed deltas as a backstop.
     _admin.set_mcp_publisher(_nc)
 
+    # v1.1 §7: wire the coworker hot-reload publisher. PATCH on
+    # /api/v1/coworkers/{id} (model_id change) emits
+    # ``web.coworker.restart`` via JetStream so the orchestrator
+    # re-reads the row without a full restart.
+    from webui.v1 import coworker_events, run_events, ws_stream
+
+    coworker_events.set_jetstream(js)
+    # v1.1 §4 (INV-6): wire the run-cancel publisher. POST
+    # /api/v1/runs/{id}/cancel emits ``web.run.cancel.{run_id}`` so
+    # the orchestrator stops the container and the lifecycle helper
+    # writes the terminal UPDATE — the webui never writes
+    # ``status='cancelled'`` directly (avoids ghost containers).
+    run_events.set_jetstream(js)
+    # v1.1 §4: wire the WS /api/v1/conversations/{id}/stream
+    # endpoint's JetStream context. The route itself is mounted
+    # at app-build time (below), but the JS handle is what each
+    # connection uses to publish ``web.inbound.*`` / subscribe
+    # to ``web.stream.*``.
+    ws_stream.set_jetstream(js)
+
     yield
 
     # Shutdown
+    coworker_events.set_jetstream(None)
+    run_events.set_jetstream(None)
+    ws_stream.set_jetstream(None)
     _admin.set_mcp_publisher(None)
+    set_credential_vault(None)
     await auth.close_auth()
     await _close_db()
     if _nc is not None:
@@ -152,6 +195,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(lifespan=lifespan)
+
+
+@app.exception_handler(BootstrapActorError)
+async def _bootstrap_actor_error_handler(
+    request: object, exc: BootstrapActorError
+) -> JSONResponse:
+    """INV-4: surface a deterministic 503 + error code when an audit
+    write needs a real actor but the bootstrap pseudo-user is in use
+    and the tenant has no owner. The frontend distinguishes this from
+    a generic failure via the ``code`` field.
+    """
+    return JSONResponse(
+        status_code=exc.status,
+        content={
+            "code": exc.code,
+            "message": str(exc),
+            "details": {"tenant_id": exc.tenant_id},
+        },
+    )
 
 # CORS for embedded SaaS scenarios where the browser sends credentials
 # (httpOnly refresh cookie) cross-origin. Only enabled when CORS_ORIGINS is set.
@@ -282,8 +344,27 @@ async def websocket_chat(
     await ws.handle_ws(websocket, agent_id, token, chat_id)
 
 
-# Admin API router
+# Admin API router (legacy /api/admin)
 app.include_router(admin_router)
+
+# v1 router: new prefixed surface introduced by webui-backend v1.1.
+from webui.api_v1 import router as api_v1_router  # noqa: E402
+from webui.v1.errors import install_error_handler  # noqa: E402
+
+# Flatten ErrorResponseException -> root JSON body for every /api/v1
+# 4xx so the typed client can ``narrow`` on the {code, message,
+# details?} envelope. Without this, FastAPI's default handler nests
+# the envelope inside ``{"detail": ...}`` and the codegen-generated
+# TS client can't decode it.
+install_error_handler(app)
+app.include_router(api_v1_router)
+
+# Mount the v1 WebSocket stream alongside the REST surface. The
+# legacy ``/ws/chat`` handler remains so existing SPA builds keep
+# working during the 01c migration window.
+from webui.v1.ws_stream import register_routes as _register_v1_ws  # noqa: E402
+
+_register_v1_ws(app)
 
 # OIDC PKCE router (only when AUTH_MODE=oidc)
 if os.environ.get("AUTH_MODE", "external") == "oidc":

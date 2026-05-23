@@ -30,7 +30,9 @@ from rolemesh.db import (
     get_tasks_for_coworker,
     get_tenant,
     get_tenant_by_slug,
+    list_coworker_mcp_configs,
     log_task_run,
+    replace_coworker_mcp_configs,
     set_session,
     store_message,
     update_conversation_last_invocation,
@@ -126,19 +128,39 @@ async def test_create_and_get_coworker() -> None:
         folder="ops-bot",
         agent_role="super_agent",
         max_concurrent=3,
-        tools=[
-            McpServerConfig(name="my-mcp-server", type="sse", url="http://localhost:9100/mcp/"),
+    )
+    # MCP configs now live in coworker_mcp_servers + mcp_servers
+    # (02b dropped the inline JSONB). Seed via the high-level admin
+    # helper so we exercise the same write path the admin endpoint
+    # uses, then read back through the relation projection.
+    await replace_coworker_mcp_configs(
+        cw.id,
+        tenant_id=t.id,
+        mcp_configs=[
+            McpServerConfig(
+                name="my-mcp-server",
+                type="sse",
+                url="http://localhost:9100/mcp/",
+            ),
         ],
     )
     assert cw.id
     assert cw.agent_role == "super_agent"
     assert cw.max_concurrent == 3
-    assert cw.tools == [McpServerConfig(name="my-mcp-server", type="sse", url="http://localhost:9100/mcp/")]
     assert cw.agent_backend == "claude"
 
     fetched = await get_coworker(cw.id, tenant_id=t.id)
     assert fetched is not None
     assert fetched.name == "Ops Bot"
+
+    mcp_configs = await list_coworker_mcp_configs(cw.id, tenant_id=t.id)
+    assert mcp_configs == [
+        McpServerConfig(
+            name="my-mcp-server",
+            type="sse",
+            url="http://localhost:9100/mcp/",
+        ),
+    ]
 
     by_folder = await get_coworker_by_folder(t.id, "ops-bot")
     assert by_folder is not None

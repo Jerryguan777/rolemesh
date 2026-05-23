@@ -218,6 +218,9 @@ async def get_due_tasks(tenant_id: str | None = None) -> list[ScheduledTask]:
                 now,
             )
     else:
+        # inv-1-ok: cross-tenant scheduler sweep — the tenant_id-less
+        # branch is the documented multi-tenant scheduler path; the
+        # caller iterates results to dispatch jobs per-tenant.
         async with admin_conn() as conn:
             rows = await conn.fetch(
                 """

@@ -246,7 +246,9 @@ class ApprovalRequestResponse(BaseModel):
     tenant_id: str
     coworker_id: str
     conversation_id: str | None = None
-    policy_id: str
+    # nullable: auto_execute proposals + SET NULL cascade from
+    # policy DELETE both leave this column empty.
+    policy_id: str | None = None
     user_id: str
     job_id: str
     mcp_server_name: str
@@ -363,7 +365,7 @@ class SkillResponse(BaseModel):
     enabled: bool
     created_at: str
     updated_at: str
-    created_by: str | None = None
+    created_by_user_id: str | None = None
     files: dict[str, SkillFileInPayload] = Field(default_factory=dict)
 
 
