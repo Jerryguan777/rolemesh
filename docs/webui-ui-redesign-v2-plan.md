@@ -65,7 +65,7 @@ v2-C (activity + approvals popover + polish + v2 retro)
 | Session | 标题 | 状态 | 完成日期 | 备注 |
 |---|---|---|---|---|
 | v2-A | Foundations + Chat shell + Settings shell | done | 2026-05-22 | 4 commits on feat/ui-v2; Findings 见 session prompt |
-| v2-B | Coworker wizard + Credentials | not started — DRAFT | — | 执行前 refresh |
+| v2-B | Coworker wizard + Credentials | done | 2026-05-23 | 3 commits on feat/ui-v2; Findings 见 session prompt |
 | v2-C | Activity + Approvals popover + polish | not started — DRAFT | — | 执行前 refresh |
 
 ## 如何执行一个 session

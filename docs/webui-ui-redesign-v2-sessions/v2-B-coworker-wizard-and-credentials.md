@@ -6,7 +6,7 @@
 | Prerequisites | v2-A done（tokens / dialog / wizard primitive / chat shell / settings shell / icons.ts 全就位）+ 用户 smoke 验证 chat 不退化 |
 | Estimated PRs | 3 |
 | Estimated LOC | ~1400（v2-A 实证 LOC 是估算 2.85x；本 session 含 wizard 6 step + dialog + helper + 大量 tests）|
-| Status | not started |
+| Status | done 2026-05-23 (3 commits on feat/ui-v2) |
 
 > **Refresh 起源**：v2-A 落地后 prompt 大改：
 > 1. 把 `<rm-wizard>` / `<rm-dialog>` 实际 API 写进 prompt（v2-A 实现的 prop / event 名）—— 不再是 "primitive ready" 抽象描述
@@ -298,4 +298,66 @@ export type DialogCloseReason = 'x' | 'backdrop' | 'esc' | 'programmatic';
 
 ## Findings (after execution)
 
-_(empty — 重点记录：slugify 算法 edge case 处理 / `groupModelsByProvider` 最终签名 / credential dialog per-provider 字段最终 schema / 失败回滚 vs partial commit 策略 / 对 v2-C 的影响 / LOC 实际 vs 1400 估算 / 测试占比)_
+执行日期：2026-05-23（feat/ui-v2 上 3 commits：PR3 `4dec191` → PR1 `d0c320c` → PR2 `496e4fc`）。
+
+### LOC 实际 vs 估算
+
+| | LOC | 占比 |
+|---|---:|---:|
+| 业务代码 | ~1760 | 65% |
+| 测试 | ~999 | 36% |
+| **总计 added** | **2727** | — |
+| 估算 | 1400 | — |
+| 实际 ÷ 估算 | **1.95x** | — |
+
+与 v2-A 的 2.85x 相当；session 估算系数收敛到 2x 比较稳。测试占比 36% 偏高但合理——本 session 真新逻辑（slugify / 6-step gating / partial-commit / per-provider extras）值得 anti-mirror 的契约钉子。
+
+### Decisions taken in-session
+
+1. **slugify 算法**：lowercase → 非 `[a-z0-9_-]` 替换成 `-` → 收 `-+` → 去掉开头非 alphanumeric → 去掉末尾 `-` → truncate 到 64。
+   - `"Marketing Helper"` → `"marketing-helper"` ✓
+   - `"-foo"` → `"foo"`（backend regex 拒绝首位 `-`）
+   - `"123"` → `"123"`（regex 允许首位数字）
+   - `"   "` → `""`（让 canAdvance 拒绝 + 提示 name required，不再报错）
+   - 长度 > 64 → 直接 truncate（不报错；advanced override 给用户精细控）
+2. **`groupModelsByProvider` 签名**：`(models, credentials, backend?)` → `ProviderGroup[]`。`backend` 可选；传时同时过滤 `supported_providers` + `supported_model_families`（null = any family）。这两个过滤在 helper 里一起做（locked 决策 #3），避免 wizard step 3 还要自己再过滤一次。空 group 会 drop 掉，即使该 provider 有 credential——避免 UI 出现"有 credential 但没模型可选"的空卡。
+3. **credential dialog per-provider 字段最终 schema**：
+   - `anthropic`: `api_key` only
+   - `openai`: `api_key` + 可选 `extras.api_base`
+   - `google`: `api_key` only
+   - `bedrock`: `api_key` 当作 `aws_access_key_id` + 必填 `extras.aws_secret_access_key` + 必填 `extras.region`（default `us-west-2`）+ 可选 `extras.aws_session_token`
+   - body shape：`{ api_key, extras: {...} | null }`（无 extras 时 explicit null，避免后端误读空对象）
+4. **失败回滚 vs partial commit**：locked 决策已锁定 partial commit。submit 路径：
+   - `POST /coworkers` 失败 → 整体 abort，原地报错，wizard 不关闭
+   - 任一 mcp / skill 绑定失败 → 不回滚 coworker，banner 列出失败 id，wizard 不关闭，用户可选择关闭或继续操作。失败 id 在 v3 重试路径里能定位。
+5. **MCP server inline dialog**：v1.1 `<rm-mcp-servers-page>` 只有 inline form panel（非 dialog），所以本 session **新建** `<rm-mcp-server-dialog>` 简化版（仅 name / type / url / auth_mode；extra_headers / tool_reversibility 留给老 page 完整编辑）。
+6. **Skill inline create**：v1.1 `<rm-skills-page>` 同样是 inline form，不是 dialog；本 session **不**新建 skill dialog，Step 5 空状态文案引导去 settings/skills 创建（保持 v1.1 边界）。
+
+### Architecture / impl notes
+
+- **Lit 布尔属性绑定陷阱**：v2-A `<rm-wizard>` 的 `@property({type: Boolean, attribute: 'can-advance'})` **default = true**。父用 `?can-advance=${false}` 只移除属性但不触发 property 写回，primitive 仍读到 true。修复：父全部改用 property binding（`.canAdvance=${...}` / `.busy=${...}`），跳过 attribute 路径。**v2-C 写 component 时一律默认 property binding for booleans。**
+- **Sibling dialog 容器位置**：credential-dialog + mcp-server-dialog 必须是 wizard 的 sibling（不是 child），原生 `<dialog>` 的 top-layer 自动 stack 在 wizard overlay 之上。由 `<rm-coworkers-page>` host 它们；wizard 通过 `request-credential` / `request-add-mcp-server` 事件冒泡通知。
+- **catalogue lazy load**：wizard 在 `open=true` 第一次时并发 fetch `getBackends / listModels / listCredentials / listMCPServers / listSkills`。credentials / mcp / skills 失败 graceful degrade（空数组），不阻塞 wizard 渲染。
+- **public refresh API**：wizard 暴露 `refreshCredentials()` / `refreshMCPServers()` / `refreshSkills()` 给 sibling dialog 触发的 host 调用。这是 locked #3 的实现细节——dialog 关闭后 host 显式调用 wizard.refreshX()，不靠 wizard 自己监听全局事件。
+- **`getApiClient()` 上的新 client 方法**：`createCoworker` + `bindCoworkerMCPServer`。v1.1 client.ts 之前只 expose 到 v1.1 surface，没有创建 / MCP 绑定方法——v2-B wizard submit 必须的 4 个 method（create / bind mcp / enable skill / put credential）现在三个齐了；`enableCoworkerSkill` 已存在。
+- **`groupModelsByProvider` 兼容 backend 缺省**：传 `null`/`undefined` 不做 provider/family 过滤——Models page 复用这个分支，wizard 总是传 backend。
+
+### 对 v2-C 的影响
+
+- **icons.ts 没增加新 icon**——保持 8 个不变（spec 要求 unless really cross-session 复用）。v2-C 如果需要 activity / approvals popover 的新 icon，独立追加。
+- **`<rm-coworker-wizard>` 公开的 refresh API + sibling event 模式**：v2-C 的 activity / approvals popover 如果要类似 inline 补 credential 模式（unlikely），可以照抄这套 host-mediated event + refresh 方法。
+- **v1.1 `<rm-coworkers-page>` 已加 wizard host**：list/edit/delete 路径 0 退化，但 v2-C 触碰 coworkers-page 时要小心 wizard / credential-dialog / mcp-server-dialog 三个 sibling 都挂着，state graph 比之前复杂。
+- **partial-commit banner UX**：本 session 把 banner 留在 review step 内；v2-C 可以考虑挪到 wizard 的固定 banner 区。**当前实现已经足够工作但不优雅。**
+- **`location.href` redirect**：wizard create 成功后还是用 `location.href` reload（沿用 v2-A），不动；v3 chore 真修。
+
+### Acceptance criteria 状态
+
+- ✅ 6-step wizard 全跑通；happy-path submit 测试钉了 POST /coworkers body 形状 + `location.href` 包含 `agent_id=<new-id>`
+- ✅ folder slug 自动派生 + 正则校验 + advanced override（3 个 slugify 单元测试 + canAdvance 守门测试）
+- ✅ Bedrock 凭据 dialog 显示 4 字段（access key id / secret / region / session token）+ region 默认 us-west-2
+- ✅ 内联补 credential：wizard 派 `request-credential` 事件 → coworkers-page host credential-dialog → `credential-saved` 事件 → host 调 `wizard.refreshCredentials()` → 该组解锁。无 animation（locked #2）
+- ✅ Models page 用 grouping helper + ready/locked badge + 每组缺凭据时 inline "+ Add" link
+- ✅ v1.1 `<rm-coworkers-page>` list/edit/delete 不退化（只追加 wizard 触发路径；测试 153 → 160 → 全绿无回归）
+- ✅ v1.1 models 现有测试不退化（v1.1 没有 models-page 单测；settings-shell 钉了 `rm-models-page` 还在 → 通过）
+- ✅ vitest 160 全绿 / build 绿 / lint:no-admin-chat 绿 / lint:flat-route 绿 / openapi:check 绿
+- ⚠️ 手动 smoke：单元测试侧 6-step 已 e2e 走过（happy + partial-commit failure modes 都钉了）；浏览器 smoke 留给用户确认（CLAUDE.md "UI / frontend changes" 要求；本 session 没起 dev server）
