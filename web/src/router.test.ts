@@ -12,7 +12,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   applyLegacyRedirect,
   installLegacyRedirects,
-  matchRoute,
   topLevelShell,
 } from './router.js';
 
@@ -75,27 +74,6 @@ describe('topLevelShell', () => {
     expect(topLevelShell('#/')).toBe('chat');
     expect(topLevelShell('')).toBe('chat');
     expect(topLevelShell('#/unknown')).toBe('chat');
-  });
-});
-
-describe('matchRoute', () => {
-  // The legacy app-shell still depends on matchRoute() during the
-  // PR 2→PR 4 transition. The v2 nested hash must therefore match
-  // the same route id as the v1.1 flat hash.
-  it('resolves the v2 nested coworkers hash to the coworkers route', () => {
-    expect(matchRoute('#/manage/coworkers').id).toBe('coworkers');
-  });
-  it('keeps resolving the v1.1 flat hash to the same route (for staged transitions)', () => {
-    expect(matchRoute('#/coworkers').id).toBe('coworkers');
-  });
-  it('prefers the longer /admin/safety/decisions prefix over /admin/safety', () => {
-    expect(matchRoute('#/admin/safety/decisions').id).toBe('safety-decisions');
-    expect(matchRoute('#/admin/safety/rules').id).toBe('safety-rules');
-  });
-  it('resolves activity decisions hash', () => {
-    expect(matchRoute('#/activity/safety-decisions').id).toBe(
-      'safety-decisions',
-    );
   });
 });
 

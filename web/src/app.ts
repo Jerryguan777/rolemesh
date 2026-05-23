@@ -15,20 +15,11 @@ import './components/message-editor.js';
 import './components/sidebar.js';
 import './components/reauth-banner.js';
 import './components/login-page.js';
-import './components/safety-rules-page.js';
-import './components/safety-decisions-page.js';
 import './components/coming-soon.js';
-import './components/coworkers-page.js';
-import './components/credentials-page.js';
-import './components/mcp-servers-page.js';
-import './components/models-page.js';
-import './components/approvals-page.js';
-import './components/skills-page.js';
-import './components/skill-detail-page.js';
-import './components/coworker-skills-tab.js';
 import './components/inline-approval.js';
-import './components/app-shell.js';
 import './components/chat-shell.js';
+import './components/settings-shell.js';
+import './components/activity-shell.js';
 import { installLegacyRedirects, topLevelShell } from './router.js';
 import {
   fetchAuthConfig,
@@ -47,10 +38,12 @@ installLegacyRedirects();
 type AuthState = 'loading' | 'login' | 'authenticated';
 
 // `<rm-app>` is the auth state machine + outermost host. Once
-// authenticated, it hands the entire page over to `<rm-app-shell>`
-// which owns the application chrome (sidebar / topbar / outlet).
-// The shell's outlet reads `location.hash` to decide which page
-// component to render — see `web/src/router.ts`.
+// authenticated, it picks one of three v2 shells based on the top
+// level of the current hash:
+//   `#/`           → `<rm-chat-shell>`
+//   `#/manage/*`   → `<rm-settings-shell>`
+//   `#/activity/*` → `<rm-activity-shell>` (mostly placeholder)
+// A hashchange listener swaps shells without a full reload.
 @customElement('rm-app')
 export class RmApp extends LitElement {
   protected override createRenderRoot() {
@@ -70,9 +63,6 @@ export class RmApp extends LitElement {
     window.addEventListener('rm-auth-failed', () => {
       this.authState = 'login';
     });
-    // Re-resolve which shell owns the URL whenever the hash changes,
-    // so navigations between `#/`, `#/manage/...`, `#/activity/...`
-    // swap shells without a full reload.
     window.addEventListener('hashchange', this.onHashChange);
     await this.resolveAuth();
   }
@@ -101,7 +91,6 @@ export class RmApp extends LitElement {
     if (sessionStorage.getItem('oidc_code')) {
       const exchanged = await handleCallback();
       if (exchanged) {
-        // Token now in sessionStorage; chat-panel reads it from there
         this.authState = 'authenticated';
         this.startRefreshScheduler(exchanged.id_token);
         return;
@@ -129,9 +118,8 @@ export class RmApp extends LitElement {
 
   private startRefreshScheduler(token: string): void {
     scheduleRefresh(token, (newToken) => {
-      // Notify chat-panel to update its agent client and reconnect WebSocket
       window.dispatchEvent(
-        new CustomEvent('rm-token-refreshed', { detail: newToken })
+        new CustomEvent('rm-token-refreshed', { detail: newToken }),
       );
     });
   }
@@ -145,14 +133,15 @@ export class RmApp extends LitElement {
     if (this.authState === 'login') {
       return html`<rm-login-page></rm-login-page>`;
     }
-    // v2 split: `#/` → new chat shell, everything else → legacy
-    // app-shell during the PR 3→PR 4 transition. PR 4 will replace
-    // the `manage` branch with `<rm-settings-shell>` and add a real
-    // activity placeholder.
-    if (this.shell === 'chat') {
-      return html`<rm-chat-shell></rm-chat-shell>`;
+    switch (this.shell) {
+      case 'manage':
+        return html`<rm-settings-shell></rm-settings-shell>`;
+      case 'activity':
+        return html`<rm-activity-shell></rm-activity-shell>`;
+      case 'chat':
+      default:
+        return html`<rm-chat-shell></rm-chat-shell>`;
     }
-    return html`<rm-app-shell></rm-app-shell>`;
   }
 }
 
