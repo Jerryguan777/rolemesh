@@ -69,6 +69,25 @@ export function iconSettings(size = 19): SVGTemplateResult {
   `;
 }
 
+/** Chevron-right — Activity index cards, breadcrumb separators. */
+export function iconChevronRight(size = 15): SVGTemplateResult {
+  return svg`
+    <svg
+      width=${size}
+      height=${size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <path d="m9 6 6 6-6 6"/>
+    </svg>
+  `;
+}
+
 /** Chevron-down — used by coworker switcher / user pill / menus. */
 export function iconChevronDown(size = 15): SVGTemplateResult {
   return svg`

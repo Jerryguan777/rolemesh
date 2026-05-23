@@ -19,7 +19,7 @@
 // 提示"; Phase 3 fills that placeholder in.
 
 import { LitElement, html, nothing } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 
 import { ApiError, getApiClient } from '../api/client.js';
 import type { ApprovalRequest, Me } from '../api/client.js';
@@ -27,11 +27,21 @@ import type { ApprovalRequest, Me } from '../api/client.js';
 import './inline-approval.js';
 
 type Scope = 'mine' | 'all';
+/** `pending` = default queue (inline decide buttons + 'mine'/'all'
+ *  scope toggle). `resolved` = Activity log surface; backend has no
+ *  single `status=resolved` enum, so we fetch unfiltered and drop
+ *  pending client-side. */
+export type ApprovalsPageMode = 'pending' | 'resolved';
 
 const REFRESH_INTERVAL_MS = 15_000;
 
 @customElement('rm-approvals-page')
 export class ApprovalsPage extends LitElement {
+  /** Which slice of the approval list to render. Default `pending`
+   *  keeps the legacy `<rm-approvals-page>` behaviour intact. Activity
+   *  shell passes `resolved` for the audit log tab. */
+  @property() mode: ApprovalsPageMode = 'pending';
+
   @state() private rows: ApprovalRequest[] = [];
   @state() private loading = true;
   @state() private error: string | null = null;
@@ -66,14 +76,30 @@ export class ApprovalsPage extends LitElement {
     }
   }
 
+  override updated(changed: Map<string, unknown>): void {
+    // Toggling `mode` between the chat-shell "Approvals" page and the
+    // activity-shell "Approval log" tab must trigger a refetch — the
+    // resolved view fetches unfiltered rows where the pending view
+    // would have fetched only status='pending'.
+    if (changed.has('mode')) {
+      void this.refresh();
+    }
+  }
+
   private async refresh(): Promise<void> {
     this.loading = true;
     this.error = null;
     try {
-      this.rows = await this.api.listApprovals({
+      const rows = await this.api.listApprovals({
         scope: this.scope,
-        status: 'pending',
+        // `resolved` view fetches unfiltered (backend has no
+        // collective resolved status) and prunes pending below.
+        status: this.mode === 'pending' ? 'pending' : null,
       });
+      this.rows =
+        this.mode === 'resolved'
+          ? rows.filter((r) => r.status !== 'pending')
+          : rows;
     } catch (err) {
       this.rows = [];
       this.error =
@@ -99,15 +125,19 @@ export class ApprovalsPage extends LitElement {
   }
 
   private renderEmpty() {
+    const title =
+      this.mode === 'pending' ? 'No pending approvals' : 'No approval history';
+    const subtitle =
+      this.mode === 'pending'
+        ? `You're all caught up — new approvals will appear here in real time.`
+        : 'Resolved approvals will be listed here as they accumulate.';
     return html`
       <div
         class="border border-dashed border-surface-3 dark:border-d-surface-3
           rounded-lg px-4 py-8 text-center text-ink-3 dark:text-d-ink-3"
       >
-        <div class="text-[13px] font-medium">No pending approvals</div>
-        <div class="text-[12px] mt-1">
-          You're all caught up — new approvals will appear here in real time.
-        </div>
+        <div class="text-[13px] font-medium">${title}</div>
+        <div class="text-[12px] mt-1">${subtitle}</div>
       </div>
     `;
   }
@@ -116,8 +146,27 @@ export class ApprovalsPage extends LitElement {
     const action = (r.actions ?? [])[0] ?? {};
     const toolName = String(action.tool_name ?? '');
     const args = (action.params ?? {}) as Record<string, unknown>;
+    // `resolved` view renders read-only — no decide affordance for
+    // already-decided rows, regardless of who the caller is.
     const canDecide =
-      !!this.me && (r.resolved_approvers ?? []).includes(this.me.user_id);
+      this.mode === 'pending' &&
+      !!this.me &&
+      (r.resolved_approvers ?? []).includes(this.me.user_id);
+    // For the log surface, surface the actual final state so the
+    // inline-approval card renders "Approved / Rejected / Expired"
+    // tone instead of the pending decide buttons.
+    const rowStatus =
+      this.mode === 'pending'
+        ? 'pending'
+        : r.status === 'approved'
+          ? 'approved'
+          : r.status === 'denied'
+            ? 'denied'
+            : r.status === 'expired'
+              ? 'expired'
+              : r.status === 'cancelled'
+                ? 'cancelled'
+                : 'unknown';
     return html`
       <li class="list-none">
         <rm-inline-approval
@@ -125,8 +174,8 @@ export class ApprovalsPage extends LitElement {
           tool-name=${toolName}
           .args=${args}
           mcp-server=${r.mcp_server_name}
-          status="pending"
-          ?can-decide=${canDecide}
+          status=${rowStatus}
+          .canDecide=${canDecide}
           @rm-approval-decided=${() => this.onDecided()}
         ></rm-inline-approval>
         <div class="text-[11px] text-ink-3 dark:text-d-ink-3 mt-1 ml-1">
@@ -144,10 +193,12 @@ export class ApprovalsPage extends LitElement {
           <div class="flex items-baseline justify-between mb-4">
             <div>
               <h1 class="text-[20px] font-semibold text-ink-0 dark:text-d-ink-0">
-                Approvals
+                ${this.mode === 'pending' ? 'Approvals' : 'Approval log'}
               </h1>
               <p class="text-[13px] text-ink-3 dark:text-d-ink-3 mt-0.5">
-                Pending tool calls awaiting an approver decision.
+                ${this.mode === 'pending'
+                  ? 'Pending tool calls awaiting an approver decision.'
+                  : 'Past approval decisions on this tenant.'}
               </p>
             </div>
             <div class="flex gap-2">

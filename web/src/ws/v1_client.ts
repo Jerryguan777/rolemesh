@@ -74,6 +74,28 @@ export interface RunRequiresReauthEvent extends ServerEventBase {
   run_id?: string;
   reason?: string;
 }
+// Approval engine events forwarded by ws_stream.py (03a PR2). The
+// per-conversation stream carries .required/.resolved frames for the
+// active chat; the user-scoped stream (UserApprovalsClient) carries
+// the same shape across every conversation the caller approves on.
+export interface ApprovalRequiredEvent extends ServerEventBase {
+  type: 'event.approval.required';
+  approval_id: string;
+  run_id?: string;
+  summary: {
+    tool_name?: string;
+    mcp_server_name?: string;
+    args?: Record<string, unknown>;
+    [k: string]: unknown;
+  };
+}
+export interface ApprovalResolvedEvent extends ServerEventBase {
+  type: 'event.approval.resolved';
+  approval_id: string;
+  decision: 'approve' | 'deny' | 'expired' | 'cancelled';
+  actor_user_id?: string;
+  note?: string;
+}
 
 export type ServerEvent =
   | RunStartedEvent
@@ -81,6 +103,8 @@ export type ServerEvent =
   | RunCompletedEvent
   | RunErrorEvent
   | RunRequiresReauthEvent
+  | ApprovalRequiredEvent
+  | ApprovalResolvedEvent
   | ServerEventBase;
 
 export type ConnectionStatus =
