@@ -509,9 +509,30 @@ export class RmChatShell extends LitElement {
         rm-chat-shell .cs-brand {
           display: flex;
           align-items: center;
-          padding: 14px 14px 10px;
+          padding: 18px 16px 12px;
         }
-        rm-chat-shell .cs-brand b { font-weight: 600; font-size: 14.5px; }
+        /* Wordmark — Fraunces serif at a display size with a 2-tone
+         * "Role" / "Mesh" split (ink + accent terracotta). Optical-size
+         * 144 + width 100 tighten through Fraunces' variable font for
+         * a more confident logo feel without shipping a separate
+         * logo asset. */
+        rm-chat-shell .cs-brand-wm {
+          display: inline-flex;
+          align-items: baseline;
+          font-family: var(--rm-font-display);
+          font-size: 23px;
+          line-height: 1;
+          letter-spacing: -0.01em;
+          font-weight: 500;
+          font-variation-settings: 'opsz' 144, 'wdth' 100;
+        }
+        rm-chat-shell .cs-brand-pri {
+          color: var(--rm-ink);
+        }
+        rm-chat-shell .cs-brand-sec {
+          color: var(--rm-accent);
+          font-weight: 600;
+        }
         rm-chat-shell .coswitch {
           margin: 2px 8px 8px;
           display: flex;
@@ -936,7 +957,10 @@ export class RmChatShell extends LitElement {
       <div class="cs-layout">
       <aside class="cs-sidebar">
         <div class="cs-brand">
-          <b>RoleMesh</b>
+          <span class="cs-brand-wm" data-testid="brand-wordmark">
+            <span class="cs-brand-pri">Role</span><span
+              class="cs-brand-sec">Mesh</span>
+          </span>
         </div>
 
         <div class="coswitch-wrap">

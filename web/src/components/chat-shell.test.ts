@@ -613,14 +613,22 @@ describe('<rm-chat-shell>', () => {
     expect(dot()?.getAttribute('data-connected')).toBe('false');
   });
 
-  it('drops the "R" logo mark — sidebar brand is text-only', async () => {
+  it('renders a 2-tone wordmark (Role + Mesh) without the legacy R square', async () => {
     const el = await mountShell();
     const brand = el.querySelector('.cs-brand');
     expect(brand).not.toBeNull();
-    // The mark <div> used to read "R" and held the accent-coloured
-    // square. v3 removes it; only the wordmark remains.
+    // The "R" accent-coloured square used to live here. Pin its
+    // absence so a future revert doesn't sneak back the dup-with-
+    // sidebar avatar.
     expect(brand?.querySelector('.mark')).toBeNull();
-    expect(brand?.textContent?.trim()).toBe('RoleMesh');
+    // The text reads RoleMesh top-to-bottom — pin the split via the
+    // semantic spans so visual tweaks to either half don't break
+    // the test, but the structure remains observable.
+    const wm = el.querySelector('[data-testid="brand-wordmark"]');
+    expect(wm).not.toBeNull();
+    expect(wm?.textContent?.replace(/\s+/g, '')).toBe('RoleMesh');
+    expect(wm?.querySelector('.cs-brand-pri')?.textContent).toBe('Role');
+    expect(wm?.querySelector('.cs-brand-sec')?.textContent).toBe('Mesh');
   });
 
   it('opens the user-pill menu and exposes Settings + Log out', async () => {
