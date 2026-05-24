@@ -83,11 +83,6 @@ export class ModelsPage extends LitElement {
             </svg>
             Add credential
           </button>
-          <button
-            type="button"
-            class="rm-add-secondary"
-            @click=${() => void this.refresh()}
-          >Refresh</button>
         </div>
         <p class="rm-sub">
           Models are grouped by provider. A provider's models become
@@ -139,8 +134,7 @@ export class ModelsPage extends LitElement {
             : html`<span class="rm-credstate rm-credstate--miss">no credential</span>
                    <button
                      type="button"
-                     class="rm-add-secondary"
-                     style="margin-left: auto;"
+                     class="rm-connectbtn"
                      @click=${() => {
                        this.credDialogProvider = group.provider;
                        this.credDialogOpen = true;

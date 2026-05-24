@@ -191,11 +191,6 @@ export class SkillsPage extends LitElement {
             </svg>
             New skill
           </a>
-          <button
-            type="button"
-            class="rm-add-secondary"
-            @click=${() => void this.refreshList()}
-          >Refresh</button>
         </div>
         <p class="rm-sub">
           Tenant-wide catalog. Bind a skill to a coworker on the

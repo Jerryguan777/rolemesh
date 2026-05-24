@@ -23,6 +23,8 @@
  * inner padding + fade-in animation. */
 .rm-spane {
   padding: 24px 28px;
+  max-width: 720px;
+  margin: 0 auto;
   animation: rm-fade 0.18s ease both;
 }
 
@@ -240,6 +242,25 @@
   background: var(--rm-warn-subtle);
   color: var(--rm-warn);
 }
+
+/* Outlined Connect button — sits in a provider group's header when
+ * the credential is missing. Higher visual weight than .rm-add-secondary
+ * (terracotta outline draws the eye), lower than .rm-add (which is a
+ * full primary). Prototype `.connectbtn` lines 277-278. */
+.rm-connectbtn {
+  margin-left: auto;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--rm-accent);
+  border: 1px solid var(--rm-accent);
+  padding: 4px 12px;
+  border-radius: 7px;
+  background: none;
+  cursor: pointer;
+  font-family: inherit;
+  transition: var(--rm-transition);
+}
+.rm-connectbtn:hover { background: var(--rm-accent-subtle); }
 
 /* Empty state — used when the list returns []. */
 .rm-empty {

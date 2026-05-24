@@ -125,11 +125,6 @@ export class CoworkersPage extends LitElement {
             </svg>
             New coworker
           </button>
-          <button
-            type="button"
-            class="rm-add-secondary"
-            @click=${() => void this.refresh()}
-          >Refresh</button>
         </div>
         <p class="rm-sub">
           Each coworker is assembled from an engine, a model, bound MCP

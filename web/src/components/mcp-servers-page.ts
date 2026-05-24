@@ -115,11 +115,6 @@ export class MCPServersPage extends LitElement {
             </svg>
             New MCP server
           </button>
-          <button
-            type="button"
-            class="rm-add-secondary"
-            @click=${() => void this.refresh()}
-          >Refresh</button>
         </div>
         <p class="rm-sub">
           Tenant-scoped registry. Changes hot-reload to the egress gateway.

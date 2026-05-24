@@ -126,9 +126,19 @@ export class CredentialsPage extends LitElement {
           <h2>Credentials</h2>
           <button
             type="button"
-            class="rm-add-secondary"
-            @click=${() => void this.refresh()}
-          >Refresh</button>
+            class="rm-add"
+            @click=${() => {
+              // null provider = let the dialog show its provider picker
+              this.dialogProvider = null;
+              this.dialogOpen = true;
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M12 5v14M5 12h14"/>
+            </svg>
+            Add credential
+          </button>
         </div>
         <p class="rm-sub">
           One credential per provider. Keys are envelope-encrypted
