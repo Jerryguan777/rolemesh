@@ -56,6 +56,12 @@
   --rm-font-display: 'Fraunces', Georgia, 'Songti SC', serif;
   --rm-font-mono:
     'JetBrains Mono', 'SF Mono', ui-monospace, monospace;
+  /* Wordmark / logo treatments. Distinct from --rm-font-display so a
+   * future redesign can swap the logo type independently of long-
+   * form serif heads. Space Grotesk fits the Vercel/Linear tech-logo
+   * idiom: geometric sans with a touch of character. */
+  --rm-font-logo:
+    'Space Grotesk', 'Hanken Grotesk', system-ui, sans-serif;
 
   /* Radius */
   --rm-r: 10px;

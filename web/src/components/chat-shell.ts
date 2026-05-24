@@ -511,20 +511,19 @@ export class RmChatShell extends LitElement {
           align-items: center;
           padding: 18px 16px 12px;
         }
-        /* Wordmark — Fraunces serif at a display size with a 2-tone
-         * "Role" / "Mesh" split (ink + accent terracotta). Optical-size
-         * 144 + width 100 tighten through Fraunces' variable font for
-         * a more confident logo feel without shipping a separate
-         * logo asset. */
+        /* Wordmark — Space Grotesk (var(--rm-font-logo)) with a
+         * 2-tone "Role" / "Mesh" split (ink + accent terracotta).
+         * Geometric tech-sans idiom (Vercel/Linear); a tighter
+         * letter-spacing (-0.02em) sharpens the silhouette at logo
+         * scale. */
         rm-chat-shell .cs-brand-wm {
           display: inline-flex;
           align-items: baseline;
-          font-family: var(--rm-font-display);
-          font-size: 23px;
+          font-family: var(--rm-font-logo);
+          font-size: 27px;
           line-height: 1;
-          letter-spacing: -0.01em;
+          letter-spacing: -0.02em;
           font-weight: 500;
-          font-variation-settings: 'opsz' 144, 'wdth' 100;
         }
         rm-chat-shell .cs-brand-pri {
           color: var(--rm-ink);
