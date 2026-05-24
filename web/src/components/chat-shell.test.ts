@@ -731,6 +731,43 @@ describe('<rm-chat-shell>', () => {
     expect(row?.textContent?.trim()).toBe('New chat');
   });
 
+  it('hides unnamed empty conversations from history, except the active one', async () => {
+    loc.restore();
+    loc = stubLocation('#/', '?agent_id=cw-a&chat_id=cv-active');
+    // Three rows:
+    //   cv-active — unnamed, no messages — IS the active conv, must stay
+    //   cv-ghost  — unnamed, no messages — must be hidden
+    //   cv-named  — named, no messages — must stay (user gave it a label)
+    //   cv-real   — unnamed, has a message — must stay (preview wins)
+    listConvsSpy.mockResolvedValue([
+      conv('cv-active', null as unknown as string, new Date('2026-05-23')),
+      conv('cv-ghost', null as unknown as string, new Date('2026-05-22')),
+      conv('cv-named', 'Quarterly report', new Date('2026-05-21')),
+      conv('cv-real', null as unknown as string, new Date('2026-05-20')),
+    ]);
+    listMessagesSpy.mockImplementation((id: string) => {
+      if (id === 'cv-real') {
+        return Promise.resolve([
+          {
+            id: 'm-1',
+            role: 'user' as const,
+            content: 'How is Q3 tracking?',
+            timestamp: '2026-05-20T00:00:00Z',
+          },
+        ]);
+      }
+      return Promise.resolve([]);
+    });
+    const el = await mountShell();
+    const rows = el.querySelectorAll('[data-testid="conversation-row"]');
+    const ids = Array.from(rows).map((r) => r.getAttribute('data-conv-id'));
+    expect(ids).toContain('cv-active');
+    expect(ids).toContain('cv-named');
+    expect(ids).toContain('cv-real');
+    // The ghost row must be filtered out.
+    expect(ids).not.toContain('cv-ghost');
+  });
+
   it('a failed listMessages does not blow up the sidebar (row keeps fallback)', async () => {
     listConvsSpy.mockResolvedValue([
       conv('cv-bad', null as unknown as string, new Date()),

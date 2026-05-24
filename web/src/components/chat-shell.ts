@@ -145,6 +145,16 @@ export class RmChatShell extends LitElement {
    *  who explicitly renames a chat shouldn't see the preview clobber
    *  their label). */
   @state() private convPreviews = new Map<string, string>();
+  /** conversation_ids known to have zero messages on the server
+   *  (i.e. listMessages returned []). Populated by
+   *  `loadConversationPreviews` after each request completes. Used
+   *  by `renderConvGroup` to hide history rows that would otherwise
+   *  read "New chat" — the row is meaningless to the user since
+   *  they have not asked anything yet. The currently active
+   *  conversation is exempted: bootstrap may have just auto-created
+   *  it to land on a connected page, and hiding it would leave the
+   *  user inside an invisible row. */
+  @state() private emptyConvIds = new Set<string>();
   /** Mirror of `<rm-message-editor>.connected`, which itself mirrors
    *  the legacy AgentClient socket state in chat-panel. We absorb
    *  the `agent-connection` event so the tenant pill can render the
@@ -430,7 +440,14 @@ export class RmChatShell extends LitElement {
   /** Fetch the first user message for each conversation lacking a
    *  preview, in parallel. Conversations the user explicitly named
    *  via `Conversation.name` keep their name; previews are a
-   *  fallback for unnamed rows. */
+   *  fallback for unnamed rows.
+   *
+   *  Also tracks which conversations have ZERO messages on the
+   *  server: those land in `emptyConvIds` so the sidebar can hide
+   *  the otherwise meaningless "New chat" rows (the empty state is
+   *  invariably a user-clicked-+New-chat-then-didn't-send, or our
+   *  own bootstrap auto-create).
+   */
   private async loadConversationPreviews(): Promise<void> {
     const needed = this.conversations.filter(
       (c) => !this.convPreviews.has(c.id),
@@ -440,15 +457,27 @@ export class RmChatShell extends LitElement {
       needed.map((c) => this.api.listMessages(c.id)),
     );
     const next = new Map(this.convPreviews);
+    const nextEmpty = new Set(this.emptyConvIds);
     for (let i = 0; i < needed.length; i += 1) {
       const r = results[i];
       if (r.status !== 'fulfilled') continue;
+      if (r.value.length === 0) {
+        // Truly empty — mark for hiding (active conv is exempted at
+        // render time).
+        nextEmpty.add(needed[i].id);
+        continue;
+      }
+      // Conversation has at least one message — defensively remove
+      // it from the empty set in case a previous load thought it
+      // was empty and a refresh now sees content.
+      nextEmpty.delete(needed[i].id);
       const firstUser = r.value.find((m) => m.role === 'user');
       const source = firstUser ?? r.value[0];
       if (!source || !source.content) continue;
       next.set(needed[i].id, RmChatShell.formatPreview(source.content));
     }
     this.convPreviews = next;
+    this.emptyConvIds = nextEmpty;
   }
 
   // Document-level click closes whichever popover is open. We attach
@@ -585,7 +614,17 @@ export class RmChatShell extends LitElement {
 
   override render(): TemplateResult {
     const active = this.activeCoworker;
-    const groups = groupConversations(this.conversations);
+    // Hide empty-and-unnamed conversation rows from the history list.
+    // The active conversation is always kept — bootstrap may have
+    // just auto-created it, and the user is sitting in it right now.
+    // A conversation the user explicitly named via `Conversation.name`
+    // also stays, even if no messages have landed yet.
+    const visibleConversations = this.conversations.filter((c) => {
+      if (c.id === this.activeConversationId) return true;
+      if (c.name && c.name.trim()) return true;
+      return !this.emptyConvIds.has(c.id);
+    });
+    const groups = groupConversations(visibleConversations);
     const tenantLabel = this.me?.tenant_id
       ? `${this.me.tenant_id.slice(0, 12)} · prod`
       : 'workspace · prod';
