@@ -32,6 +32,7 @@ const getMeSpy = vi.fn();
 const listConvsSpy = vi.fn();
 const listApprovalsSpy = vi.fn();
 const listMessagesSpy = vi.fn();
+const createConvSpy = vi.fn();
 
 vi.mock('../api/client.js', async () => {
   const actual = await vi.importActual<typeof import('../api/client.js')>(
@@ -45,6 +46,7 @@ vi.mock('../api/client.js', async () => {
       listCoworkerConversations: listConvsSpy,
       listApprovals: listApprovalsSpy,
       listMessages: listMessagesSpy,
+      createCoworkerConversation: createConvSpy,
       setToken: vi.fn(),
     }),
   };
@@ -312,6 +314,7 @@ describe('<rm-chat-shell>', () => {
       listConvsSpy,
       listApprovalsSpy,
       listMessagesSpy,
+      createConvSpy,
     ].forEach((s) => s.mockReset());
     listCoworkersSpy.mockResolvedValue([COWORKER_A, COWORKER_B]);
     getMeSpy.mockResolvedValue(ME);
@@ -320,6 +323,13 @@ describe('<rm-chat-shell>', () => {
     ]);
     listApprovalsSpy.mockResolvedValue([]);
     listMessagesSpy.mockResolvedValue([]);
+    // Default: createCoworkerConversation produces a shell row the
+    // tests can match by id. Individual tests override when they
+    // need to assert a specific creation.
+    createConvSpy.mockResolvedValue({
+      id: 'created-default',
+      created_at: '2026-05-23T00:00:00Z',
+    });
     originalFetch = globalThis.fetch;
     globalThis.fetch = vi
       .fn()
@@ -376,7 +386,12 @@ describe('<rm-chat-shell>', () => {
     expect(names!.some((n) => n?.includes('Finance coworker'))).toBe(true);
   });
 
-  it('clicking another coworker navigates with a new ?agent_id', async () => {
+  it('clicking another coworker lands on that coworker AND its latest existing conversation', async () => {
+    // Mock cw-b's history with two rows; the newer one must win.
+    listConvsSpy.mockResolvedValue([
+      conv('older', null as unknown as string, new Date('2026-05-01')),
+      conv('newest', null as unknown as string, new Date('2026-05-22')),
+    ]);
     const el = await mountShell();
     el.querySelector<HTMLButtonElement>(
       '[data-testid="coworker-switcher"]',
@@ -386,11 +401,128 @@ describe('<rm-chat-shell>', () => {
       '[data-coworker-id="cw-b"]',
     )!;
     finance.click();
+    await settle(el);
+    // One navigation only — we resolve the chat_id pre-navigate so
+    // the next page lands connected, not on a Disconnected blank.
     expect(loc.hrefAssignments.length).toBe(1);
     expect(loc.hrefAssignments[0]).toContain('agent_id=cw-b');
-    // Switching coworker must reset chat — chat_id must NOT be in
-    // the new URL so chat-panel starts fresh.
-    expect(loc.hrefAssignments[0]).not.toContain('chat_id=');
+    expect(loc.hrefAssignments[0]).toContain('chat_id=newest');
+  });
+
+  it('bootstrap: when URL has agent_id but no chat_id, replaceState injects the latest conv id', async () => {
+    // Stub the URL to have agent_id but no chat_id, so bootstrap
+    // has to find a chat for it. The sidebar conv list returns one
+    // row; bootstrap should pick it and update the URL.
+    loc.restore();
+    loc = stubLocation('#/', '?agent_id=cw-a');
+    listConvsSpy.mockResolvedValue([
+      conv('boot-cv', null as unknown as string, new Date('2026-05-23')),
+    ]);
+    const replaceSpy = vi
+      .spyOn(history, 'replaceState')
+      .mockImplementation(() => {});
+    try {
+      await mountShell();
+      const replaceUrls = replaceSpy.mock.calls.map(
+        (c) => String(c[2] ?? ''),
+      );
+      const found = replaceUrls.find((u) => u.includes('chat_id=boot-cv'));
+      expect(found, 'history.replaceState must include chat_id').toBeDefined();
+      // No full reload — replaceState only.
+      expect(loc.hrefAssignments).toHaveLength(0);
+    } finally {
+      replaceSpy.mockRestore();
+    }
+  });
+
+  it('bootstrap: empty coworker → POSTs a fresh conversation, then replaceState', async () => {
+    loc.restore();
+    loc = stubLocation('#/', '?agent_id=cw-a');
+    listConvsSpy.mockResolvedValue([]);
+    createConvSpy.mockResolvedValue({
+      id: 'boot-new',
+      created_at: '2026-05-23T00:00:00Z',
+    });
+    const replaceSpy = vi
+      .spyOn(history, 'replaceState')
+      .mockImplementation(() => {});
+    try {
+      await mountShell();
+      expect(createConvSpy).toHaveBeenCalledWith('cw-a');
+      const replaceUrls = replaceSpy.mock.calls.map(
+        (c) => String(c[2] ?? ''),
+      );
+      expect(
+        replaceUrls.some((u) => u.includes('chat_id=boot-new')),
+        'replaceState should carry the freshly-created chat_id',
+      ).toBe(true);
+    } finally {
+      replaceSpy.mockRestore();
+    }
+  });
+
+  it('+ New chat creates a conversation upfront, then navigates with chat_id', async () => {
+    createConvSpy.mockResolvedValue({
+      id: 'fresh-on-newchat',
+      created_at: '2026-05-23T00:00:00Z',
+    });
+    const el = await mountShell();
+    el.querySelector<HTMLButtonElement>('[data-testid="new-chat"]')!.click();
+    await settle(el);
+    expect(createConvSpy).toHaveBeenCalledWith('cw-a');
+    const navUrl = loc.hrefAssignments.at(-1) ?? '';
+    expect(navUrl).toContain('chat_id=fresh-on-newchat');
+  });
+
+  it('chat-panel only mounts AFTER bootstrap resolves (avoids stale-URL paint)', async () => {
+    // Block bootstrap on a pending promise — chat-panel must stay
+    // unmounted while it waits. This is the whole point of the
+    // `bootstrapped` gate: chat-panel reads URL params in its
+    // constructor, so we must NOT mount it before the URL is fixed
+    // up with the resolved chat_id.
+    let resolveListCoworkers: (v: typeof COWORKER_A[]) => void = () => {};
+    listCoworkersSpy.mockImplementation(
+      () =>
+        new Promise((r) => {
+          resolveListCoworkers = r;
+        }),
+    );
+    const el = document.createElement('rm-chat-shell') as RmChatShell;
+    document.body.appendChild(el);
+    // One render tick — enough to paint the loading placeholder, but
+    // listCoworkers is still pending so bootstrap can't complete.
+    await el.updateComplete;
+    await el.updateComplete;
+    expect(el.querySelector('rm-chat-panel')).toBeNull();
+    expect(
+      el.querySelector('[data-testid="chat-bootstrapping"]'),
+    ).not.toBeNull();
+    // Release bootstrap; chat-panel should mount on the next paint.
+    resolveListCoworkers([COWORKER_A, COWORKER_B]);
+    await settle(el);
+    expect(el.querySelector('rm-chat-panel')).not.toBeNull();
+    expect(
+      el.querySelector('[data-testid="chat-bootstrapping"]'),
+    ).toBeNull();
+  });
+
+  it('switches to a coworker with zero history by POSTing a new conversation first', async () => {
+    listConvsSpy.mockResolvedValue([]); // cw-b has nothing yet
+    createConvSpy.mockResolvedValue({
+      id: 'fresh-cv',
+      created_at: '2026-05-23T00:00:00Z',
+    });
+    const el = await mountShell();
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="coworker-switcher"]',
+    )!.click();
+    await settle(el);
+    el.querySelector<HTMLButtonElement>(
+      '[data-coworker-id="cw-b"]',
+    )!.click();
+    await settle(el);
+    expect(createConvSpy).toHaveBeenCalledWith('cw-b');
+    expect(loc.hrefAssignments[0]).toContain('chat_id=fresh-cv');
   });
 
   it('clicking "Manage coworkers…" goes to the settings shell hash', async () => {
@@ -492,15 +624,21 @@ describe('<rm-chat-shell>', () => {
   });
 
   it('clicking a conversation row navigates with a new ?chat_id', async () => {
-    listConvsSpy.mockResolvedValue([conv('cv-9', 'My chat', new Date())]);
+    // Two rows — bootstrap auto-selects the newest, so we click the
+    // OLDER one to assert that navigation actually fires (clicking
+    // the already-active row is a documented no-op).
+    listConvsSpy.mockResolvedValue([
+      conv('cv-old', 'Older chat', new Date('2026-04-01')),
+      conv('cv-new', 'Newer chat', new Date('2026-05-22')),
+    ]);
     const el = await mountShell();
-    const row = el.querySelector<HTMLButtonElement>(
-      '[data-testid="conversation-row"]',
+    const older = el.querySelector<HTMLButtonElement>(
+      '[data-conv-id="cv-old"]',
     )!;
-    expect(row).not.toBeNull();
-    row.click();
+    expect(older).not.toBeNull();
+    older.click();
     expect(loc.hrefAssignments.length).toBe(1);
-    expect(loc.hrefAssignments[0]).toContain('chat_id=cv-9');
+    expect(loc.hrefAssignments[0]).toContain('chat_id=cv-old');
     // It MUST also include the current agent_id so chat-panel still
     // knows which coworker owns the conversation.
     expect(loc.hrefAssignments[0]).toContain('agent_id=cw-a');

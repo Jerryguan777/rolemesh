@@ -145,6 +145,12 @@ export class RmChatShell extends LitElement {
    *  the `agent-connection` event so the tenant pill can render the
    *  green/red dot the way chat-panel's top bar used to. */
   @state() private agentConnected = false;
+  /** Flipped to true once bootstrap finishes resolving (or creating)
+   *  a chat_id for the active coworker. chat-panel is mounted only
+   *  AFTER this flips so it reads the post-resolution URL params in
+   *  its constructor and lands on an immediately-connected state
+   *  instead of an empty "Disconnected" page. */
+  @state() private bootstrapped = false;
   /** Which popover, if any, is open. Only one at a time to keep
    *  keyboard handling simple. */
   @state() private openMenu: '' | 'coworker' | 'user' | 'approvals' = '';
@@ -315,6 +321,63 @@ export class RmChatShell extends LitElement {
     if (meResult.status === 'fulfilled') this.me = meResult.value;
     if (this.activeCoworkerId) {
       await this.refreshConversations(this.activeCoworkerId);
+      // Land on a CONNECTED chat by default: if the URL doesn't pin
+      // a chat_id, pick the coworker's most recent conversation (or
+      // POST a fresh one when the coworker has none). Without this
+      // step the user lands on chat-panel's empty state showing
+      // "Disconnected" until they click into a history row.
+      if (!this.activeConversationId) {
+        const chatId = await this.resolveDefaultChatId(this.activeCoworkerId);
+        if (chatId) {
+          this.activeConversationId = chatId;
+          // history.replaceState (NOT a full assign) — chat-panel
+          // reads URL params in its constructor; we update the URL
+          // *before* chat-panel mounts (gated on `bootstrapped`) so
+          // it picks up chat_id on its first paint. replaceState
+          // keeps the back button from bouncing through the dead
+          // intermediate URL. Wrapped because happy-dom + some
+          // browser configurations refuse cross-path replaceState;
+          // the missing URL update is recoverable (chat-panel just
+          // won't see chat_id and renders Disconnected — strictly
+          // worse than the happy path, not broken).
+          try {
+            const next = this.buildHref(this.activeCoworkerId, chatId);
+            history.replaceState(null, '', next);
+          } catch (err) {
+            console.warn('chat-shell: replaceState rejected', err);
+          }
+        }
+      }
+    }
+    this.bootstrapped = true;
+  }
+
+  /** Find the most recent conversation for `coworkerId`, or POST a
+   *  fresh one when the coworker has no history yet. Returns null
+   *  only on outright failure (both list AND create rejected) — the
+   *  caller renders the empty state in that case.
+   *
+   *  Sort key: `created_at` ISO-8601 string; lexicographic compare
+   *  matches chronological order. The Conversation schema doesn't
+   *  expose `updated_at` yet, so "most recent" is "most recently
+   *  created" today. */
+  private async resolveDefaultChatId(
+    coworkerId: string,
+  ): Promise<string | null> {
+    const existing = [...this.conversations];
+    if (existing.length > 0) {
+      existing.sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+      return existing[0].id;
+    }
+    try {
+      const fresh = await this.api.createCoworkerConversation(coworkerId);
+      // Splice the new row into our local list so the sidebar shows
+      // it immediately without a follow-up refetch.
+      this.conversations = [fresh, ...this.conversations];
+      return fresh.id;
+    } catch (err) {
+      console.warn('chat-shell: createCoworkerConversation failed', err);
+      return null;
     }
   }
 
@@ -403,14 +466,32 @@ export class RmChatShell extends LitElement {
     return `${location.pathname}${qs ? '?' + qs : ''}#/`;
   }
 
-  private navigateCoworker(coworkerId: string): void {
+  private async navigateCoworker(coworkerId: string): Promise<void> {
     if (coworkerId === this.activeCoworkerId) {
       this.openMenu = '';
       return;
     }
-    // Switching coworker resets chat — drop the conversation id so
-    // chat-panel starts fresh. Reload picks up the new agent_id.
-    location.href = this.buildHref(coworkerId, null);
+    this.openMenu = '';
+    // Resolve a chat_id BEFORE navigating so the next page lands
+    // connected. Fall back to a no-chat URL if both listing AND
+    // creation fail — the post-reload bootstrap retry will surface
+    // any persistent issue rather than us leaving the user stuck.
+    let chatId: string | null = null;
+    try {
+      const convs = await this.api.listCoworkerConversations(coworkerId);
+      if (convs.length > 0) {
+        const sorted = [...convs].sort((a, b) =>
+          a.created_at < b.created_at ? 1 : -1,
+        );
+        chatId = sorted[0].id;
+      } else {
+        const fresh = await this.api.createCoworkerConversation(coworkerId);
+        chatId = fresh.id;
+      }
+    } catch (err) {
+      console.warn('chat-shell: navigateCoworker resolve failed', err);
+    }
+    location.href = this.buildHref(coworkerId, chatId);
   }
 
   private navigateConversation(chatId: string): void {
@@ -419,9 +500,23 @@ export class RmChatShell extends LitElement {
     location.href = this.buildHref(this.activeCoworkerId, chatId);
   }
 
-  private startNewChat = () => {
+  private startNewChat = async (): Promise<void> => {
     if (!this.activeCoworkerId) return;
-    location.href = this.buildHref(this.activeCoworkerId, null);
+    // + New chat is always an explicit "fresh conversation" intent —
+    // create the row up front instead of letting chat-panel lazy-
+    // create on first send. The user lands on a connected empty
+    // composer, not on a Disconnected placeholder.
+    try {
+      const fresh = await this.api.createCoworkerConversation(
+        this.activeCoworkerId,
+      );
+      location.href = this.buildHref(this.activeCoworkerId, fresh.id);
+    } catch (err) {
+      console.warn('chat-shell: startNewChat create failed', err);
+      // Fall back: navigate without a chat_id; bootstrap on the next
+      // page will pick up an existing conv or retry the create.
+      location.href = this.buildHref(this.activeCoworkerId, null);
+    }
   };
 
   private openActivity = () => {
@@ -797,6 +892,13 @@ export class RmChatShell extends LitElement {
           flex-direction: column;
           overflow: hidden;
         }
+        rm-chat-shell .cs-boot {
+          flex: 1;
+          display: grid;
+          place-items: center;
+          color: var(--rm-ink-3);
+          font-size: 13px;
+        }
         /* v2-A polish backlog: the slotted v1.1 <rm-chat-panel>
          * renders its own <rm-sidebar> + brand+hamburger header.
          * The v2 chat-shell already provides both, so we hide the
@@ -1081,7 +1183,12 @@ export class RmChatShell extends LitElement {
           </span>
         </div>
         <div class="cs-slot">
-          <rm-chat-panel class="flex-1 min-h-0"></rm-chat-panel>
+          ${this.bootstrapped
+            ? html`<rm-chat-panel class="flex-1 min-h-0"></rm-chat-panel>`
+            : html`<div
+                class="cs-boot"
+                data-testid="chat-bootstrapping"
+              >Loading…</div>`}
         </div>
       </div>
       </div>
