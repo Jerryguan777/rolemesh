@@ -6,7 +6,7 @@
 // `services/models-grouping.ts` so the v2-B coworker wizard and
 // this page share one source of truth.
 
-import { LitElement, html, nothing } from 'lit';
+import { LitElement, html } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { ApiError, getApiClient } from '../api/client.js';
@@ -66,50 +66,42 @@ export class ModelsPage extends LitElement {
 
   override render() {
     return html`
-      <div class="h-full w-full overflow-y-auto px-6 py-6">
-        <div class="max-w-3xl mx-auto">
-          <div class="flex items-baseline justify-between mb-4">
-            <div>
-              <h1 class="text-[20px] font-semibold text-ink-0 dark:text-d-ink-0">
-                Models
-              </h1>
-              <p class="text-[13px] text-ink-3 dark:text-d-ink-3 mt-0.5">
-                Platform-managed catalog. Read-only here — admin
-                writes land in v2.
-              </p>
-            </div>
-            <div class="flex items-center gap-2">
-              <button
-                type="button"
-                class="text-[12px] px-3 py-1.5 rounded-md bg-brand text-white
-                  hover:bg-brand-dark transition-colors cursor-pointer"
-                @click=${() => {
-                  this.credDialogProvider = null;
-                  this.credDialogOpen = true;
-                }}
-              >+ Add credential</button>
-              <button
-                type="button"
-                class="text-[12px] px-2.5 py-1 rounded-md border border-surface-3 dark:border-d-surface-3
-                  text-ink-2 dark:text-d-ink-2 hover:bg-surface-2 dark:hover:bg-d-surface-2 cursor-pointer"
-                @click=${() => void this.refresh()}
-              >Refresh</button>
-            </div>
-          </div>
-
-          ${this.loading
-            ? html`<div class="text-[13px] text-ink-3 dark:text-d-ink-3">Loading…</div>`
-            : this.error
-              ? html`
-                  <div
-                    class="border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20
-                      text-red-700 dark:text-red-300 text-[13px] px-3 py-2 rounded-lg"
-                  >${this.error}</div>
-                `
-              : this.rows.length === 0
-                ? this.renderEmpty()
-                : this.renderGroups()}
+      <div class="rm-spane">
+        <div class="rm-ch">
+          <h2>Models</h2>
+          <button
+            type="button"
+            class="rm-add"
+            @click=${() => {
+              this.credDialogProvider = null;
+              this.credDialogOpen = true;
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M12 5v14M5 12h14"/>
+            </svg>
+            Add credential
+          </button>
+          <button
+            type="button"
+            class="rm-add-secondary"
+            @click=${() => void this.refresh()}
+          >Refresh</button>
         </div>
+        <p class="rm-sub">
+          Models are grouped by provider. A provider's models become
+          usable once its credential is set.
+        </p>
+
+        ${this.loading
+          ? html`<div class="rm-banner-loading">Loading…</div>`
+          : this.error
+            ? html`<div class="rm-banner-err">${this.error}</div>`
+            : this.rows.length === 0
+              ? this.renderEmpty()
+              : this.renderGroups()}
+
         <rm-credential-dialog
           ?open=${this.credDialogOpen}
           .provider=${this.credDialogProvider}
@@ -122,18 +114,10 @@ export class ModelsPage extends LitElement {
 
   private renderEmpty() {
     return html`
-      <div
-        class="border border-dashed border-surface-3 dark:border-d-surface-3
-          rounded-xl px-6 py-10 text-center text-[13px] text-ink-2 dark:text-d-ink-2"
-      >
-        <p class="mb-1.5 font-medium text-ink-1 dark:text-d-ink-1">
-          No models available
-        </p>
-        <p class="leading-relaxed">
-          The platform catalog appears empty. Re-run the schema seed
-          (<code>_create_schema</code>) or check the
-          <code>models</code> table directly.
-        </p>
+      <div class="rm-empty">
+        <span class="rm-empty-title">No models available</span>
+        The platform catalog appears empty — check the
+        <code>models</code> table.
       </div>
     `;
   }
@@ -141,76 +125,55 @@ export class ModelsPage extends LitElement {
   private renderGroups() {
     const groups = groupModelsByProvider(this.rows, this.credentials);
     return html`
-      <div class="space-y-4">
-        ${groups.map((g) => this.renderProviderCard(g))}
+      ${groups.map((g) => this.renderProviderGroup(g))}
+    `;
+  }
+
+  private renderProviderGroup(group: ProviderGroup) {
+    return html`
+      <div class="rm-provgrp">
+        <div class="rm-provhd">
+          <b>${group.provider}</b>
+          ${group.hasCredential
+            ? html`<span class="rm-credstate rm-credstate--ok">credential set</span>`
+            : html`<span class="rm-credstate rm-credstate--miss">no credential</span>
+                   <button
+                     type="button"
+                     class="rm-add-secondary"
+                     style="margin-left: auto;"
+                     @click=${() => {
+                       this.credDialogProvider = group.provider;
+                       this.credDialogOpen = true;
+                     }}
+                   >Connect</button>`}
+        </div>
+        ${group.models.map((m) => this.renderModelCard(m, group.hasCredential))}
       </div>
     `;
   }
 
-  private renderProviderCard(group: ProviderGroup) {
-    const items = group.models;
+  private renderModelCard(m: Model, hasCredential: boolean): unknown {
+    const dim = !m.is_active || !hasCredential;
+    const initials = m.display_name
+      .replace(/[^A-Za-z0-9 ]/g, '')
+      .split(/\s+/)
+      .map((w) => w[0])
+      .join('')
+      .slice(0, 2)
+      .toUpperCase() || '?';
     return html`
-      <section
-        class="border border-surface-3 dark:border-d-surface-3 rounded-xl overflow-hidden"
-      >
-        <header
-          class="px-4 py-2 bg-surface-2 dark:bg-d-surface-2
-            text-[13px] font-medium text-ink-1 dark:text-d-ink-1
-            flex items-center gap-2"
-        >
-          <span class="capitalize">${group.provider}</span>
-          <span class="text-ink-4 text-[11.5px]">
-            (${items.length})
-          </span>
-          ${group.hasCredential
-            ? html`<span
-                class="ml-auto text-[11px] px-1.5 py-0.5 rounded
-                  bg-emerald-100 dark:bg-emerald-900/30
-                  text-emerald-700 dark:text-emerald-300"
-                title="Credential set"
-              >ready</span>`
-            : html`<span
-                  class="ml-auto text-[11px] px-1.5 py-0.5 rounded
-                    bg-amber-100 dark:bg-amber-900/30
-                    text-amber-800 dark:text-amber-200"
-                  title="No credential — models in this provider cannot run yet"
-                >needs credential</span>
-                <button
-                  type="button"
-                  class="text-[11px] px-1.5 py-0.5 rounded
-                    text-amber-800 dark:text-amber-200 underline cursor-pointer"
-                  @click=${() => {
-                    this.credDialogProvider = group.provider;
-                    this.credDialogOpen = true;
-                  }}
-                >+ Add</button>`}
-        </header>
-        <ul class="divide-y divide-surface-3 dark:divide-d-surface-3">
-          ${items.map(
-            (m) => html`
-              <li class="px-4 py-2.5 flex items-center gap-3">
-                <div class="min-w-0 flex-1">
-                  <div class="text-[13.5px] text-ink-0 dark:text-d-ink-0 truncate">
-                    ${m.display_name}
-                  </div>
-                  <div class="text-[11.5px] text-ink-3 dark:text-d-ink-3 mt-0.5 font-mono truncate">
-                    ${m.model_id}
-                  </div>
-                </div>
-                <span class="text-[11.5px] text-ink-3 dark:text-d-ink-3">
-                  ${m.model_family}
-                </span>
-                ${m.is_active
-                  ? nothing
-                  : html`<span
-                      class="text-[11px] px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/40
-                        text-amber-800 dark:text-amber-200"
-                    >inactive</span>`}
-              </li>
-            `,
-          )}
-        </ul>
-      </section>
+      <div class=${`rm-card ${dim ? 'rm-card--dim' : ''}`}>
+        <span class="rm-ic">${initials}</span>
+        <span class="rm-mn">
+          <b>${m.display_name}</b>
+          <span>${m.model_id} · ${m.model_family}</span>
+        </span>
+        ${!m.is_active
+          ? html`<span class="rm-pill rm-pill-warn">inactive</span>`
+          : hasCredential
+            ? html`<span class="rm-pill rm-pill-on">ready</span>`
+            : html`<span class="rm-pill rm-pill-off">needs credential</span>`}
+      </div>
     `;
   }
 }

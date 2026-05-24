@@ -7,6 +7,10 @@ import { customElement, state } from 'lit/decorators.js';
 // single import covers both light-DOM components (chat-panel) and
 // shadow-DOM v2 primitives (rm-dialog, rm-wizard, …).
 import './styles/tokens.css';
+// Shared visual language for the settings pages (Coworkers / MCP /
+// Skills / Models / Credentials). Lives next to tokens.css so all
+// v2 stylesheets load before any component mounts.
+import './styles/settings-pages.css';
 
 import './components/chat-panel.js';
 import './components/message-list.js';

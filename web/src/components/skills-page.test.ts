@@ -109,11 +109,12 @@ describe('SkillsPage list view', () => {
   });
 
   it('renders a row per skill with the bound coworker count', () => {
-    // Use the list row link specifically — `+ New skill` also matches
-    // ``a[href^="#/skills/"]`` (it points at #/skills/new).
-    const link = page.querySelector('ul a[href^="#/skills/"]') as HTMLAnchorElement;
-    expect(link).toBeTruthy();
-    expect(link.textContent).toContain('alpha');
-    expect(link.textContent).toContain('2 coworker');
+    // v2-C reskin: rows are `.rm-card` divs (clickable), not <a>
+    // anchors. The skill metadata (name + bound count) still lives
+    // in the row; both pieces of text show in the visible content.
+    const card = page.querySelector('.rm-card[data-skill-id]');
+    expect(card).toBeTruthy();
+    expect(card?.textContent).toContain('alpha');
+    expect(card?.textContent).toContain('2 coworker');
   });
 });

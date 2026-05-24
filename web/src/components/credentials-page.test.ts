@@ -77,73 +77,62 @@ describe('CredentialsPage', () => {
         updated_at: new Date().toISOString(),
       },
     ]);
-    // Force a refresh.
     await (page as unknown as { refresh: () => Promise<void> }).refresh();
     await page.updateComplete;
 
-    // Render should NOT contain the literal plaintext anywhere.
-    // We use a sentinel that nothing in the component template
-    // would legitimately produce.
+    // v2-C reskin moved credential capture into <rm-credential-dialog>;
+    // the credentials-page itself NEVER paints a password input (the
+    // dialog mounts one only while open). Pin both halves:
+    //   - no plaintext sentinel anywhere in the page tree
+    //   - the row card surfaces a "set" pill, not the key
     const sentinel = 'sk-leaky-sentinel-1234';
     expect(page.innerHTML).not.toContain(sentinel);
 
-    // The password input must not have its value reset to the key —
-    // the placeholder should hint "Enter a new key to rotate" rather
-    // than leaking length information.
-    const inputs = page.querySelectorAll('input[type="password"]');
-    expect(inputs.length).toBeGreaterThan(0);
-    for (const i of inputs) {
-      const inp = i as HTMLInputElement;
-      expect(inp.value).toBe('');
-      const ph = inp.getAttribute('placeholder') ?? '';
-      // The placeholder must not contain digits the user might
-      // mistake for a real-length hint (e.g. "20 chars stored").
-      expect(/\d/.test(ph)).toBe(false);
-    }
+    const row = page.querySelector('[data-provider="anthropic"]');
+    expect(row, 'anthropic row should render').not.toBeNull();
+    expect(row?.querySelector('.rm-pill-on')?.textContent?.trim()).toBe('set');
+    // The dialog is mounted as a sibling but stays closed at rest;
+    // the page itself has zero <input> elements.
+    const pageInputs = Array.from(page.querySelectorAll('input')).filter(
+      (i) => i.closest('rm-credential-dialog') === null,
+    );
+    expect(pageInputs.length).toBe(0);
   });
 
-  it('clears the draft after a successful PUT', async () => {
-    // No existing rows on the list response.
-    listSpy.mockResolvedValue([]);
-    putSpy.mockResolvedValue({
-      provider: 'anthropic',
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    });
-
-    // Find the input for ``anthropic`` and inject a draft via the
-    // public state hook so we exercise the same store the component
-    // updates.
-    const inputs = page.querySelectorAll('input[type="password"]');
-    assertElement(inputs[0] as HTMLElement);
-    const target = inputs[0] as HTMLInputElement;
-    target.value = 'sk-ant-test-1234';
-    target.dispatchEvent(new Event('input'));
+  it('clicking the edit icon opens the credential dialog scoped to that provider', async () => {
+    listSpy.mockResolvedValue([
+      {
+        provider: 'anthropic',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    ]);
+    await (page as unknown as { refresh: () => Promise<void> }).refresh();
     await page.updateComplete;
 
-    // Click Save.
-    const saveBtn = Array.from(page.querySelectorAll('button')).find(
-      (b) => b.textContent?.trim() === 'Save',
+    // Reach into internals to pin the dialog state transition. The
+    // public surface (clicking the icon then watching for the dialog
+    // markup) is exercised manually + via playwright; this case pins
+    // the wire-up.
+    const row = page.querySelector('[data-provider="anthropic"]');
+    const editBtn = row?.querySelector<HTMLButtonElement>(
+      '[data-testid="credential-edit"]',
     );
-    expect(saveBtn).toBeTruthy();
-    saveBtn!.click();
-    // Two microtask flushes: one for the await chain inside save,
-    // then refresh+render.
-    await Promise.resolve();
-    await Promise.resolve();
+    expect(editBtn).not.toBeNull();
+    editBtn!.click();
     await page.updateComplete;
+    const internals = page as unknown as {
+      dialogOpen: boolean;
+      dialogProvider: string | null;
+    };
+    expect(internals.dialogOpen).toBe(true);
+    expect(internals.dialogProvider).toBe('anthropic');
 
-    // The PUT must have received the plaintext exactly once.
-    expect(putSpy).toHaveBeenCalledWith('anthropic', {
-      api_key: 'sk-ant-test-1234',
-    });
-    // After save, the draft must be cleared in DOM — no recoverable
-    // plaintext lingering in the input's ``value`` attribute.
-    const updatedInputs = page.querySelectorAll(
-      'input[type="password"]',
-    ) as NodeListOf<HTMLInputElement>;
-    for (const i of updatedInputs) {
-      expect(i.value).toBe('');
-    }
+    // The PUT-side contract (save then clear draft, never leak the
+    // value back into a DOM attribute) lives on the dialog, and is
+    // exercised by credential-dialog.test.ts. The credentials-page
+    // is now just the launcher — its responsibility ends at "open
+    // the dialog with the correct provider".
+    void putSpy;
   });
 });

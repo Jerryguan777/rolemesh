@@ -1,0 +1,272 @@
+/* Shared settings-page visual language.
+ *
+ * Source: docs/webui-ui-redesign-v2-prototype.html lines 220-243.
+ * The prototype's settings pages share one card-list idiom across
+ * Coworkers / MCP servers / Skills / Models / Credentials. Putting
+ * the rules in a single file (rather than inline <style> in each
+ * page component) keeps all five pages visually consistent and
+ * lets a future palette tweak land in one place.
+ *
+ * Class namespace: `rm-` to avoid colliding with the v1.1 Tailwind
+ * tokens still in use elsewhere. Light-DOM components reference
+ * these classes directly; the rules live on `:root` siblings so
+ * Lit shadow roots inherit through the cascade.
+ *
+ * v1.1 pages keep their Tailwind classes as a fallback — the
+ * reskin opts in by switching to these classes, not by collapsing
+ * the old utility set.
+ */
+
+/* Page wrapper — replaces the legacy `<div class="h-full w-full
+ * overflow-y-auto px-6 py-6">` outer container. The settings-shell
+ * .ss-body already owns the scroll, so .rm-spane just paints the
+ * inner padding + fade-in animation. */
+.rm-spane {
+  padding: 24px 28px;
+  animation: rm-fade 0.18s ease both;
+}
+
+/* Header row — title on the left, primary "+ Add" button on the
+ * right. Mirrors prototype `.ch / .ch h2 / .ch .add`. */
+.rm-ch {
+  display: flex;
+  align-items: center;
+  margin-bottom: 4px;
+}
+.rm-ch h2 {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--rm-ink);
+}
+.rm-ch .rm-add {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--rm-accent);
+  color: var(--rm-accent-ink);
+  padding: 7px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  transition: var(--rm-transition);
+}
+.rm-ch .rm-add:hover { background: var(--rm-accent-2); }
+.rm-ch .rm-add:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Secondary action — refresh, cancel, etc. — sits next to .rm-add.
+ * Quieter visual weight; matches the muted action chips in the
+ * prototype's settings header. */
+.rm-ch .rm-add-secondary {
+  background: none;
+  border: 1px solid var(--rm-border-2);
+  color: var(--rm-ink-2);
+  padding: 6px 11px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: var(--rm-transition);
+  margin-left: 8px;
+}
+.rm-ch .rm-add-secondary:hover {
+  background: var(--rm-surface-2);
+  color: var(--rm-ink);
+}
+
+/* Subtitle line below the header. */
+.rm-sub {
+  color: var(--rm-ink-3);
+  font-size: 13px;
+  margin: 0 0 18px;
+}
+
+/* List row card — replaces the legacy bordered <ul>/<li> grid. Each
+ * card stands alone with margin, hovers to a slight lift. */
+.rm-card {
+  border: 1px solid var(--rm-border);
+  border-radius: var(--rm-r);
+  background: var(--rm-surface);
+  margin-bottom: 9px;
+  padding: 13px 15px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  transition: var(--rm-transition);
+  position: relative;
+}
+.rm-card:hover {
+  border-color: var(--rm-border-2);
+  background: var(--rm-surface-2);
+}
+.rm-card.rm-card--dim { opacity: 0.55; }
+
+/* Initials avatar at the start of the card. Per-row background +
+ * ink colours come from inline `style`; .rm-ic is the box shape. */
+.rm-ic {
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  font-weight: 600;
+  font-size: 13px;
+  background: var(--rm-accent-subtle);
+  color: var(--rm-accent-2);
+}
+
+/* Main column — name (.rm-mn b) + subtitle (.rm-mn span). */
+.rm-mn { flex: 1; min-width: 0; }
+.rm-mn b {
+  font-weight: 600;
+  font-size: 14px;
+  display: block;
+  color: var(--rm-ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rm-mn span {
+  font-size: 12.5px;
+  color: var(--rm-ink-3);
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Status pill — pill-on (green) / pill-warn (amber) / pill-off
+ * (muted) / pill-bad (red). Right-aligned via flex order. */
+.rm-pill {
+  font-size: 11.5px;
+  padding: 3px 9px;
+  border-radius: 99px;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+.rm-pill.rm-pill-on    { background: var(--rm-good-subtle);   color: var(--rm-good); }
+.rm-pill.rm-pill-warn  { background: var(--rm-warn-subtle);   color: var(--rm-warn); }
+.rm-pill.rm-pill-off   { background: var(--rm-surface-3);     color: var(--rm-ink-3); }
+.rm-pill.rm-pill-bad   { background: var(--rm-bad-subtle);    color: var(--rm-bad); }
+
+/* "X coworkers" muted meta count. Monospace to match the prototype's
+ * data-density treatment. */
+.rm-meta {
+  font-size: 12px;
+  color: var(--rm-ink-3);
+  font-family: var(--rm-font-mono);
+  flex-shrink: 0;
+}
+
+/* Inline error message under a card row. */
+.rm-row-error {
+  font-size: 12px;
+  color: var(--rm-bad);
+  padding: 4px 15px 8px;
+  margin-top: -4px;
+}
+
+/* Hover-revealed action group (Edit + Delete icons). Same opacity
+ * fade pattern as before, just lifted here so every settings page
+ * gets it identically. */
+.rm-card .rm-row-acts {
+  opacity: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  transition: opacity 0.13s;
+}
+.rm-card:hover .rm-row-acts,
+.rm-card:focus-within .rm-row-acts {
+  opacity: 1;
+}
+.rm-iconbtn {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  display: grid;
+  place-items: center;
+  color: var(--rm-ink-3);
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: var(--rm-transition);
+  font-family: inherit;
+}
+.rm-iconbtn:hover {
+  background: var(--rm-surface-3);
+  color: var(--rm-ink);
+}
+.rm-iconbtn.rm-iconbtn--danger:hover {
+  background: var(--rm-bad-subtle);
+  color: var(--rm-bad);
+}
+
+/* Provider group (Models page) — heading row + nested cards. */
+.rm-provgrp { margin-bottom: 18px; }
+.rm-provhd {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--rm-ink-3);
+}
+.rm-provhd b {
+  font-size: 13px;
+  color: var(--rm-ink);
+  font-weight: 600;
+}
+.rm-credstate {
+  font-size: 11px;
+  padding: 2px 9px;
+  border-radius: 99px;
+  font-weight: 500;
+}
+.rm-credstate.rm-credstate--ok {
+  background: var(--rm-good-subtle);
+  color: var(--rm-good);
+}
+.rm-credstate.rm-credstate--miss {
+  background: var(--rm-warn-subtle);
+  color: var(--rm-warn);
+}
+
+/* Empty state — used when the list returns []. */
+.rm-empty {
+  border: 1px dashed var(--rm-border-2);
+  border-radius: var(--rm-r);
+  padding: 28px 18px;
+  text-align: center;
+  color: var(--rm-ink-3);
+  font-size: 13px;
+}
+.rm-empty .rm-empty-title {
+  display: block;
+  font-weight: 500;
+  color: var(--rm-ink-2);
+  margin-bottom: 4px;
+}
+
+/* Loading / error banner used by every page consistently. */
+.rm-banner-err {
+  border: 1px solid var(--rm-bad-subtle);
+  background: var(--rm-bad-subtle);
+  color: var(--rm-bad);
+  font-size: 13px;
+  padding: 10px 12px;
+  border-radius: var(--rm-r);
+}
+.rm-banner-loading {
+  color: var(--rm-ink-3);
+  font-size: 13px;
+}

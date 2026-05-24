@@ -181,143 +181,98 @@ export class SkillsPage extends LitElement {
 
   private renderList() {
     return html`
-      <div class="h-full w-full overflow-y-auto px-6 py-6">
-        <div class="max-w-3xl mx-auto">
-          <div class="flex items-baseline justify-between mb-4">
-            <div>
-              <h1 class="text-[20px] font-semibold text-ink-0 dark:text-d-ink-0">
-                Skills
-              </h1>
-              <p class="text-[13px] text-ink-3 dark:text-d-ink-3 mt-0.5">
-                Tenant-wide catalog. Bind a skill to a coworker on the
-                coworker detail page.
-              </p>
-            </div>
-            <a
-              href="#/skills/new"
-              class="text-[12px] px-3 py-1.5 rounded-md bg-brand text-white
-                hover:bg-brand-dark transition-colors"
-            >+ New skill</a>
-          </div>
-
-          ${this.loading
-            ? html`<div class="text-[13px] text-ink-3 dark:text-d-ink-3">Loading…</div>`
-            : this.listError
-              ? html`<div
-                  class="border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20
-                    text-red-700 dark:text-red-300 text-[13px] px-3 py-2 rounded-lg"
-                >${this.listError}</div>`
-              : this.rows.length === 0
-                ? this.renderListEmpty()
-                : this.renderRows()}
+      <div class="rm-spane">
+        <div class="rm-ch">
+          <h2>Skills</h2>
+          <a href="#/skills/new" class="rm-add" style="text-decoration: none;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M12 5v14M5 12h14"/>
+            </svg>
+            New skill
+          </a>
+          <button
+            type="button"
+            class="rm-add-secondary"
+            @click=${() => void this.refreshList()}
+          >Refresh</button>
         </div>
+        <p class="rm-sub">
+          Tenant-wide catalog. Bind a skill to a coworker on the
+          coworker detail page.
+        </p>
+
+        ${this.loading
+          ? html`<div class="rm-banner-loading">Loading…</div>`
+          : this.listError
+            ? html`<div class="rm-banner-err">${this.listError}</div>`
+            : this.rows.length === 0
+              ? this.renderListEmpty()
+              : this.renderRows()}
       </div>
     `;
   }
 
   private renderListEmpty() {
     return html`
-      <div
-        class="border border-dashed border-surface-3 dark:border-d-surface-3
-          rounded-xl px-6 py-10 text-center text-[13px] text-ink-2 dark:text-d-ink-2"
-      >
-        <p class="mb-1.5 font-medium text-ink-1 dark:text-d-ink-1">
-          No skills yet
-        </p>
-        <p class="leading-relaxed">
-          Click <strong>+ New skill</strong> to create your first one.
-        </p>
+      <div class="rm-empty">
+        <span class="rm-empty-title">No skills yet</span>
+        Click <b>+ New skill</b> above to create your first one.
       </div>
     `;
   }
 
   private renderRows() {
-    // Same hover-icon pattern as coworkers / mcp-servers pages. The
-    // row body remains a clickable anchor that takes the user to
-    // detail; the action icons sit next to it and stopPropagation so
-    // clicking them doesn't also navigate.
     return html`
-      <style>
-        rm-skills-page .row-acts {
-          opacity: 0;
-          transition: opacity 0.13s;
-        }
-        rm-skills-page .skill-row:hover .row-acts,
-        rm-skills-page .skill-row:focus-within .row-acts {
-          opacity: 1;
-        }
-        rm-skills-page .icon-btn {
-          width: 28px;
-          height: 28px;
-          border-radius: 7px;
-          display: grid;
-          place-items: center;
-          color: var(--rm-ink-3);
-          background: none;
-          border: none;
-          cursor: pointer;
-          transition: 0.13s;
-        }
-        rm-skills-page .icon-btn:hover {
-          background: var(--rm-surface-3);
-          color: var(--rm-ink);
-        }
-        rm-skills-page .icon-btn.danger:hover {
-          background: var(--rm-bad-subtle);
-          color: var(--rm-bad);
-        }
-      </style>
-      <ul class="divide-y divide-surface-3 dark:divide-d-surface-3 border border-surface-3 dark:border-d-surface-3 rounded-xl overflow-hidden">
-        ${this.rows.map((r) => {
-          const delErr = this.deleteError[r.id] || '';
-          return html`
-            <li class="skill-row flex items-center gap-3 px-4 py-3 hover:bg-surface-2 dark:hover:bg-d-surface-2" data-skill-id=${r.id}>
-              <a
-                href=${`#/skills/${encodeURIComponent(r.id)}`}
-                class="min-w-0 flex-1 block"
-              >
-                <div class="flex items-baseline gap-2">
-                  <div class="text-[14px] font-medium text-ink-0 dark:text-d-ink-0 truncate">
-                    ${r.name}
-                  </div>
-                  ${r.enabled
-                    ? nothing
-                    : html`<span class="text-[10.5px] uppercase tracking-wide
-                        px-1.5 py-0.5 rounded bg-surface-3 dark:bg-d-surface-3
-                        text-ink-3 dark:text-d-ink-3">disabled</span>`}
-                  <span class="text-[11.5px] text-ink-3 dark:text-d-ink-3 ml-auto">
-                    ${r.bound_coworker_count} coworker(s)
-                  </span>
-                </div>
-                ${r.description
-                  ? html`<div class="text-[12px] text-ink-2 dark:text-d-ink-2 mt-0.5 truncate">
-                      ${r.description}
-                    </div>`
-                  : nothing}
-                ${delErr
-                  ? html`<div class="text-[11.5px] text-red-600 dark:text-red-300 mt-1">${delErr}</div>`
-                  : nothing}
-              </a>
-              <div class="row-acts flex items-center gap-1 shrink-0">
-                <button
-                  type="button"
-                  class="icon-btn"
-                  title="Edit skill"
-                  data-testid="skill-edit"
-                  @click=${(e: Event) => { e.preventDefault(); this.editSkill(r); }}
-                >${iconPencil(15)}</button>
-                <button
-                  type="button"
-                  class="icon-btn danger"
-                  title="Delete skill"
-                  data-testid="skill-delete"
-                  @click=${(e: Event) => { e.preventDefault(); void this.deleteSkill(r); }}
-                >${iconTrash(15)}</button>
-              </div>
-            </li>
-          `;
-        })}
-      </ul>
+      ${this.rows.map((r) => {
+        const delErr = this.deleteError[r.id] || '';
+        const initial = (r.name?.[0] ?? '?').toUpperCase();
+        return html`
+          <div
+            class="rm-card"
+            data-skill-id=${r.id}
+            style="cursor: pointer;"
+            role="link"
+            tabindex="0"
+            @click=${() => this.editSkill(r)}
+          >
+            <span class="rm-ic">${initial}</span>
+            <span class="rm-mn">
+              <b>${r.name}</b>
+              <span>${r.description ?? '—'}</span>
+            </span>
+            <span class="rm-meta">${r.bound_coworker_count} coworker(s)</span>
+            ${r.enabled
+              ? nothing
+              : html`<span class="rm-pill rm-pill-off">disabled</span>`}
+            <span class="rm-row-acts">
+              <button
+                type="button"
+                class="rm-iconbtn"
+                title="Edit skill"
+                data-testid="skill-edit"
+                @click=${(e: Event) => {
+                  e.stopPropagation();
+                  this.editSkill(r);
+                }}
+              >${iconPencil(15)}</button>
+              <button
+                type="button"
+                class="rm-iconbtn rm-iconbtn--danger"
+                title="Delete skill"
+                data-testid="skill-delete"
+                @click=${(e: Event) => {
+                  e.stopPropagation();
+                  void this.deleteSkill(r);
+                }}
+              >${iconTrash(15)}</button>
+            </span>
+            ${delErr
+              ? html`<div class="rm-row-error">${delErr}</div>`
+              : nothing}
+          </div>
+        `;
+      })}
     `;
   }
 
