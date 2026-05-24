@@ -11,6 +11,8 @@ import { customElement, state } from 'lit/decorators.js';
 
 import { ApiError, getApiClient } from '../api/client.js';
 import type { MCPServer, MCPServerCreate } from '../api/client.js';
+import './mcp-server-dialog.js';
+import { iconPencil, iconTrash } from './icons.js';
 
 type MCPType = MCPServerCreate['type'];
 type AuthMode = MCPServerCreate['auth_mode'];
@@ -25,6 +27,8 @@ export class MCPServersPage extends LitElement {
   @state() private formError: string | null = null;
   @state() private busy = false;
   @state() private deleteError: Record<string, string> = {};
+  @state() private editDialogOpen = false;
+  @state() private editTarget: MCPServer | null = null;
   private readonly api = getApiClient();
 
   protected override createRenderRoot() {
@@ -99,6 +103,12 @@ export class MCPServersPage extends LitElement {
   // clear, leaving the old <rm-mcp-servers-page> stranded in the DOM
   // whenever the settings shell switched tabs.
   private async removeServer(row: MCPServer): Promise<void> {
+    const ok = window.confirm(
+      `Delete MCP server "${row.name}"?\n\n` +
+        'Coworkers bound to this server will lose access to its tools. ' +
+        'Cannot be undone.',
+    );
+    if (!ok) return;
     this.deleteError = { ...this.deleteError, [row.id]: '' };
     try {
       await this.api.deleteMCPServer(row.id);
@@ -109,6 +119,11 @@ export class MCPServersPage extends LitElement {
         [row.id]: this.errMessage(err),
       };
     }
+  }
+
+  private openEdit(row: MCPServer): void {
+    this.editTarget = row;
+    this.editDialogOpen = true;
   }
 
   override render() {
@@ -148,6 +163,15 @@ export class MCPServersPage extends LitElement {
                 ? this.renderEmpty()
                 : this.renderList()}
         </div>
+        <rm-mcp-server-dialog
+          ?open=${this.editDialogOpen}
+          .editing=${this.editTarget}
+          @close=${() => {
+            this.editDialogOpen = false;
+            this.editTarget = null;
+          }}
+          @mcp-server-updated=${() => { void this.refresh(); }}
+        ></rm-mcp-server-dialog>
       </div>
     `;
   }
@@ -291,6 +315,36 @@ export class MCPServersPage extends LitElement {
 
   private renderList() {
     return html`
+      <style>
+        rm-mcp-servers-page .row-acts {
+          opacity: 0;
+          transition: opacity 0.13s;
+        }
+        rm-mcp-servers-page .mcp-row:hover .row-acts,
+        rm-mcp-servers-page .mcp-row:focus-within .row-acts {
+          opacity: 1;
+        }
+        rm-mcp-servers-page .icon-btn {
+          width: 28px;
+          height: 28px;
+          border-radius: 7px;
+          display: grid;
+          place-items: center;
+          color: var(--rm-ink-3);
+          background: none;
+          border: none;
+          cursor: pointer;
+          transition: 0.13s;
+        }
+        rm-mcp-servers-page .icon-btn:hover {
+          background: var(--rm-surface-3);
+          color: var(--rm-ink);
+        }
+        rm-mcp-servers-page .icon-btn.danger:hover {
+          background: var(--rm-bad-subtle);
+          color: var(--rm-bad);
+        }
+      </style>
       <ul class="divide-y divide-surface-3 dark:divide-d-surface-3 border border-surface-3 dark:border-d-surface-3 rounded-xl overflow-hidden">
         ${this.rows.map((r) => this.renderRow(r))}
       </ul>
@@ -299,8 +353,11 @@ export class MCPServersPage extends LitElement {
 
   private renderRow(r: MCPServer) {
     const delErr = this.deleteError[r.id] || '';
+    // Wrap row in a hover-reveal action group identical in spirit to
+    // the prototype's `cardActsHTML` pattern: icons hide at rest, ride
+    // in on hover/focus, and use the shared icon-btn styles.
     return html`
-      <li class="px-4 py-3">
+      <li class="mcp-row px-4 py-3" data-mcp-id=${r.id}>
         <div class="flex items-start gap-3">
           <div class="min-w-0 flex-1">
             <div class="text-[14px] font-medium text-ink-0 dark:text-d-ink-0 truncate">
@@ -325,12 +382,22 @@ export class MCPServersPage extends LitElement {
                 </div>`
               : nothing}
           </div>
-          <button
-            type="button"
-            class="text-[12px] px-2.5 py-1 rounded-md border border-red-300 dark:border-red-700
-              text-red-700 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/20 cursor-pointer"
-            @click=${() => void this.removeServer(r)}
-          >Delete</button>
+          <div class="row-acts flex items-center gap-1 shrink-0">
+            <button
+              type="button"
+              class="icon-btn"
+              title="Edit MCP server"
+              data-testid="mcp-edit"
+              @click=${() => this.openEdit(r)}
+            >${iconPencil(15)}</button>
+            <button
+              type="button"
+              class="icon-btn danger"
+              title="Delete MCP server"
+              data-testid="mcp-delete"
+              @click=${() => void this.removeServer(r)}
+            >${iconTrash(15)}</button>
+          </div>
         </div>
         ${delErr
           ? html`<div class="text-[12px] text-red-600 dark:text-red-300 mt-2">${delErr}</div>`

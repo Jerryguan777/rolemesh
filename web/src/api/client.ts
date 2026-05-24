@@ -28,6 +28,7 @@ export type Backend = components['schemas']['Backend'];
 export type BackendName = components['schemas']['BackendName'];
 export type ModelFamily = components['schemas']['ModelFamily'];
 export type CoworkerCreate = components['schemas']['CoworkerCreate'];
+export type CoworkerUpdate = components['schemas']['CoworkerUpdate'];
 export type CoworkerMCPBindingCreate =
   components['schemas']['CoworkerMCPBindingCreate'];
 export type CoworkerMCPBindingResponse =
@@ -168,6 +169,32 @@ export class ApiClient {
     });
     if (!resp.ok) throw await this.parseError(resp);
     return (await resp.json()) as Coworker[];
+  }
+
+  /** Patch selected fields on a coworker. Backend treats ABSENT keys
+   *  as "leave alone"; explicit nulls follow the per-field rules in
+   *  webui/schemas_v1.CoworkerUpdate. */
+  async updateCoworker(id: string, body: CoworkerUpdate): Promise<Coworker> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(id)}`,
+      {
+        method: 'PATCH',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(body),
+      },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Coworker;
+  }
+
+  /** Hard-delete a coworker. Backend uses DB ON DELETE CASCADE to drop
+   *  conversations / runs / messages — there is no soft-delete path. */
+  async deleteCoworker(id: string): Promise<void> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(id)}`,
+      { method: 'DELETE', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
   }
 
   async listCoworkerConversations(coworkerId: string): Promise<Conversation[]> {

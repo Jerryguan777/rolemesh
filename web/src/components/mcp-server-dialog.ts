@@ -19,6 +19,11 @@ import type { MCPServer, MCPServerCreate } from '../api/client.js';
 @customElement('rm-mcp-server-dialog')
 export class MCPServerDialog extends LitElement {
   @property({ type: Boolean }) open = false;
+  /** When set, the dialog runs in **edit mode**: form is seeded from
+   *  this row, the submit button PATCHes instead of POSTs, and the
+   *  emitted event is `mcp-server-updated` (not `-created`). Pass
+   *  `null` (or omit) for the create flow. */
+  @property({ attribute: false }) editing: MCPServer | null = null;
 
   @state() private form: MCPServerCreate = this.emptyForm();
   @state() private busy = false;
@@ -32,7 +37,18 @@ export class MCPServerDialog extends LitElement {
 
   override willUpdate(changed: Map<string, unknown>) {
     if (changed.has('open') && this.open) {
-      this.form = this.emptyForm();
+      // Seed form from `editing` for the edit flow; otherwise start
+      // blank. The seed runs once per open transition so a parent
+      // changing `editing` mid-open won't clobber the user's edits.
+      this.form = this.editing
+        ? {
+            name: this.editing.name,
+            type: this.editing.type,
+            url: this.editing.url,
+            auth_mode: this.editing.auth_mode,
+            description: this.editing.description ?? null,
+          }
+        : this.emptyForm();
       this.err = null;
       this.busy = false;
     }
@@ -56,13 +72,21 @@ export class MCPServerDialog extends LitElement {
     this.busy = true;
     this.err = null;
     try {
-      const server = await this.api.createMCPServer({ ...this.form });
+      // PATCH vs POST depending on which mode we're in. The events
+      // are also distinct so the parent can refresh its list and tell
+      // the user what just happened without inspecting the row id.
+      const result = this.editing
+        ? await this.api.updateMCPServer(this.editing.id, { ...this.form })
+        : await this.api.createMCPServer({ ...this.form });
       this.dispatchEvent(
-        new CustomEvent<{ server: MCPServer }>('mcp-server-created', {
-          detail: { server },
-          bubbles: true,
-          composed: true,
-        }),
+        new CustomEvent<{ server: MCPServer }>(
+          this.editing ? 'mcp-server-updated' : 'mcp-server-created',
+          {
+            detail: { server: result },
+            bubbles: true,
+            composed: true,
+          },
+        ),
       );
       this.open = false;
       this.dispatchEvent(
@@ -84,9 +108,12 @@ export class MCPServerDialog extends LitElement {
   };
 
   override render() {
+    const title = this.editing
+      ? `Edit MCP server: ${this.editing.name}`
+      : 'Connect MCP server';
     return html`
       <rm-dialog
-        title="Connect MCP server"
+        title=${title}
         ?open=${this.open}
         ?close-on-backdrop=${!this.busy}
         ?close-on-esc=${!this.busy}
@@ -188,7 +215,7 @@ export class MCPServerDialog extends LitElement {
               disabled:opacity-60"
             ?disabled=${this.busy}
             @click=${() => void this.save()}
-          >${this.busy ? 'Saving…' : 'Add server'}</button>
+          >${this.busy ? 'Saving…' : this.editing ? 'Save changes' : 'Add server'}</button>
         </div>
       </rm-dialog>
     `;

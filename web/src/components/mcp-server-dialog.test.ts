@@ -31,11 +31,49 @@ interface Stub {
   shouldFail: { status: number; message: string } | null;
 }
 
-function installFetch(): Stub {
+interface PatchCall {
+  url: string;
+  body: Record<string, unknown>;
+}
+
+function installFetch(patchSink?: PatchCall[]): Stub {
   const original = globalThis.fetch;
   const stub: Stub = { restore: () => {}, calls: [], shouldFail: null };
   globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
+    // PATCH path — used by edit mode. Same /api/v1/mcp-servers/{id}
+    // base, just a different verb. Capture into the patchSink so the
+    // edit-mode test can assert on body shape.
+    if (
+      /\/api\/v1\/mcp-servers\/[\w-]+$/.test(url) &&
+      init?.method === 'PATCH'
+    ) {
+      if (patchSink) {
+        patchSink.push({ url, body: JSON.parse(init.body as string) });
+      }
+      const idMatch = /\/api\/v1\/mcp-servers\/([\w-]+)$/.exec(url);
+      const id = idMatch?.[1] ?? 'm-edited';
+      const body = JSON.parse(init.body as string);
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({
+            id,
+            tenant_id: 't1',
+            name: body.name ?? 'unnamed',
+            type: body.type ?? 'http',
+            url: body.url ?? '',
+            auth_mode: body.auth_mode ?? 'service',
+            description: body.description ?? null,
+            created_at: '2026-05-23T00:00:00Z',
+            updated_at: '2026-05-23T01:00:00Z',
+          }),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          },
+        ),
+      );
+    }
     if (url.endsWith('/api/v1/mcp-servers') && init?.method === 'POST') {
       const body = JSON.parse(init.body as string);
       stub.calls.push({ url, body });
@@ -189,6 +227,62 @@ describe('<rm-mcp-server-dialog>', () => {
     // LEAST one fires + the open flag flipped.
     expect(closes.length).toBeGreaterThanOrEqual(1);
     expect(el.open).toBe(false);
+  });
+
+  it('edit mode: seeds form from `editing`, submit PATCHes + emits mcp-server-updated', async () => {
+    // Re-install fetch with a PATCH sink so we can assert on the
+    // body. The default `installFetch` from beforeEach doesn't track
+    // PATCHes — the test wants to see exactly what was sent.
+    stub.restore();
+    const patches: PatchCall[] = [];
+    stub = installFetch(patches);
+    const existing: MCPServer = {
+      id: 'm-99',
+      tenant_id: 't1',
+      name: 'shopify-admin',
+      type: 'http',
+      url: 'https://mcp.shopify/sse',
+      auth_mode: 'service',
+      description: 'pre-existing',
+      created_at: '2026-05-23T00:00:00Z',
+      updated_at: '2026-05-23T00:00:00Z',
+    } as MCPServer;
+    const el = mount();
+    el.editing = existing;
+    el.open = true;
+    await settle(el);
+    // Form should be seeded from `existing`.
+    const [nameInput, urlInput] = el.querySelectorAll('input');
+    expect(nameInput.value).toBe('shopify-admin');
+    expect(urlInput.value).toBe('https://mcp.shopify/sse');
+    // Submit button reads "Save changes" in edit mode.
+    const saveBtn = [...el.querySelectorAll('button')].find((b) =>
+      b.textContent?.includes('Save changes'),
+    )!;
+    expect(saveBtn, 'Save changes button').not.toBeUndefined();
+    // Edit the name then save.
+    nameInput.value = 'shopify-admin-v2';
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle(el);
+    const updatedEvents: CustomEvent[] = [];
+    el.addEventListener('mcp-server-updated', (e) =>
+      updatedEvents.push(e as CustomEvent),
+    );
+    const createdEvents: CustomEvent[] = [];
+    el.addEventListener('mcp-server-created', (e) =>
+      createdEvents.push(e as CustomEvent),
+    );
+    saveBtn.click();
+    await settle(el);
+    expect(patches).toHaveLength(1);
+    expect(patches[0].url).toContain('/api/v1/mcp-servers/m-99');
+    expect(patches[0].body.name).toBe('shopify-admin-v2');
+    // The updated event fires, NOT the created event — a parent
+    // listening only for `-created` shouldn't fire its create flow.
+    expect(updatedEvents).toHaveLength(1);
+    expect(createdEvents).toHaveLength(0);
+    // POST path was NOT used.
+    expect(stub.calls).toHaveLength(0);
   });
 
   it('surfaces server error inline and keeps the dialog open on failure', async () => {

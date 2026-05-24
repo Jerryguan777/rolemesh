@@ -15,6 +15,7 @@ import { ApiError, getApiClient } from '../api/client.js';
 import type { SkillCreate, SkillSummary } from '../api/client.js';
 
 import './skill-detail-page.js';
+import { iconPencil, iconTrash } from './icons.js';
 
 type Mode = 'list' | 'new' | 'detail';
 
@@ -48,6 +49,8 @@ export class SkillsPage extends LitElement {
 
   @state() private form = this.emptyForm();
   @state() private formError: string | null = null;
+  /** Per-row delete error. Cleared on refresh. */
+  @state() private deleteError: Record<string, string> = {};
 
   private readonly api = getApiClient();
   private readonly onHashChange = (): void => this.syncFromHash();
@@ -104,6 +107,7 @@ export class SkillsPage extends LitElement {
   private async refreshList(): Promise<void> {
     this.loading = true;
     this.listError = null;
+    this.deleteError = {};
     try {
       this.rows = await this.api.listSkills();
     } catch (err) {
@@ -111,6 +115,35 @@ export class SkillsPage extends LitElement {
       this.listError = this.errMessage(err);
     } finally {
       this.loading = false;
+    }
+  }
+
+  private editSkill(row: SkillSummary): void {
+    // Editing piggybacks on the existing detail page (#/skills/:id),
+    // which already has the SKILL.md / files editor wired up — no
+    // need for a separate edit dialog at the list level.
+    location.hash = `#/skills/${encodeURIComponent(row.id)}`;
+  }
+
+  private async deleteSkill(row: SkillSummary): Promise<void> {
+    const ok = window.confirm(
+      `Delete skill "${row.name}"?\n\n` +
+        (row.bound_coworker_count > 0
+          ? `${row.bound_coworker_count} coworker(s) currently bind this skill ` +
+            'and will lose access. '
+          : '') +
+        'Cannot be undone.',
+    );
+    if (!ok) return;
+    this.deleteError = { ...this.deleteError, [row.id]: '' };
+    try {
+      await this.api.deleteSkill(row.id);
+      await this.refreshList();
+    } catch (err) {
+      this.deleteError = {
+        ...this.deleteError,
+        [row.id]: this.errMessage(err),
+      };
     }
   }
 
@@ -199,35 +232,91 @@ export class SkillsPage extends LitElement {
   }
 
   private renderRows() {
+    // Same hover-icon pattern as coworkers / mcp-servers pages. The
+    // row body remains a clickable anchor that takes the user to
+    // detail; the action icons sit next to it and stopPropagation so
+    // clicking them doesn't also navigate.
     return html`
+      <style>
+        rm-skills-page .row-acts {
+          opacity: 0;
+          transition: opacity 0.13s;
+        }
+        rm-skills-page .skill-row:hover .row-acts,
+        rm-skills-page .skill-row:focus-within .row-acts {
+          opacity: 1;
+        }
+        rm-skills-page .icon-btn {
+          width: 28px;
+          height: 28px;
+          border-radius: 7px;
+          display: grid;
+          place-items: center;
+          color: var(--rm-ink-3);
+          background: none;
+          border: none;
+          cursor: pointer;
+          transition: 0.13s;
+        }
+        rm-skills-page .icon-btn:hover {
+          background: var(--rm-surface-3);
+          color: var(--rm-ink);
+        }
+        rm-skills-page .icon-btn.danger:hover {
+          background: var(--rm-bad-subtle);
+          color: var(--rm-bad);
+        }
+      </style>
       <ul class="divide-y divide-surface-3 dark:divide-d-surface-3 border border-surface-3 dark:border-d-surface-3 rounded-xl overflow-hidden">
-        ${this.rows.map((r) => html`
-          <li>
-            <a
-              href=${`#/skills/${encodeURIComponent(r.id)}`}
-              class="block px-4 py-3 hover:bg-surface-2 dark:hover:bg-d-surface-2"
-            >
-              <div class="flex items-baseline gap-2">
-                <div class="text-[14px] font-medium text-ink-0 dark:text-d-ink-0 truncate">
-                  ${r.name}
+        ${this.rows.map((r) => {
+          const delErr = this.deleteError[r.id] || '';
+          return html`
+            <li class="skill-row flex items-center gap-3 px-4 py-3 hover:bg-surface-2 dark:hover:bg-d-surface-2" data-skill-id=${r.id}>
+              <a
+                href=${`#/skills/${encodeURIComponent(r.id)}`}
+                class="min-w-0 flex-1 block"
+              >
+                <div class="flex items-baseline gap-2">
+                  <div class="text-[14px] font-medium text-ink-0 dark:text-d-ink-0 truncate">
+                    ${r.name}
+                  </div>
+                  ${r.enabled
+                    ? nothing
+                    : html`<span class="text-[10.5px] uppercase tracking-wide
+                        px-1.5 py-0.5 rounded bg-surface-3 dark:bg-d-surface-3
+                        text-ink-3 dark:text-d-ink-3">disabled</span>`}
+                  <span class="text-[11.5px] text-ink-3 dark:text-d-ink-3 ml-auto">
+                    ${r.bound_coworker_count} coworker(s)
+                  </span>
                 </div>
-                ${r.enabled
-                  ? nothing
-                  : html`<span class="text-[10.5px] uppercase tracking-wide
-                      px-1.5 py-0.5 rounded bg-surface-3 dark:bg-d-surface-3
-                      text-ink-3 dark:text-d-ink-3">disabled</span>`}
-                <span class="text-[11.5px] text-ink-3 dark:text-d-ink-3 ml-auto">
-                  ${r.bound_coworker_count} coworker(s)
-                </span>
+                ${r.description
+                  ? html`<div class="text-[12px] text-ink-2 dark:text-d-ink-2 mt-0.5 truncate">
+                      ${r.description}
+                    </div>`
+                  : nothing}
+                ${delErr
+                  ? html`<div class="text-[11.5px] text-red-600 dark:text-red-300 mt-1">${delErr}</div>`
+                  : nothing}
+              </a>
+              <div class="row-acts flex items-center gap-1 shrink-0">
+                <button
+                  type="button"
+                  class="icon-btn"
+                  title="Edit skill"
+                  data-testid="skill-edit"
+                  @click=${(e: Event) => { e.preventDefault(); this.editSkill(r); }}
+                >${iconPencil(15)}</button>
+                <button
+                  type="button"
+                  class="icon-btn danger"
+                  title="Delete skill"
+                  data-testid="skill-delete"
+                  @click=${(e: Event) => { e.preventDefault(); void this.deleteSkill(r); }}
+                >${iconTrash(15)}</button>
               </div>
-              ${r.description
-                ? html`<div class="text-[12px] text-ink-2 dark:text-d-ink-2 mt-0.5 truncate">
-                    ${r.description}
-                  </div>`
-                : nothing}
-            </a>
-          </li>
-        `)}
+            </li>
+          `;
+        })}
       </ul>
     `;
   }

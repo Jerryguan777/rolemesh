@@ -18,21 +18,29 @@ import { LitElement, html, nothing } from 'lit';
 import { customElement, query, state } from 'lit/decorators.js';
 
 import { ApiError, getApiClient } from '../api/client.js';
-import type { Coworker, ModelProvider } from '../api/client.js';
+import type { Coworker, Model, ModelProvider } from '../api/client.js';
 import './coworker-wizard.js';
+import './coworker-edit-dialog.js';
 import './credential-dialog.js';
 import './mcp-server-dialog.js';
 import type { CoworkerWizard } from './coworker-wizard.js';
+import { iconPencil, iconTrash } from './icons.js';
 
 @customElement('rm-coworkers-page')
 export class CoworkersPage extends LitElement {
   @state() private rows: Coworker[] = [];
+  @state() private models: Model[] = [];
   @state() private loading = true;
   @state() private error: string | null = null;
   @state() private wizardOpen = false;
   @state() private credDialogOpen = false;
   @state() private credDialogProvider: ModelProvider | null = null;
   @state() private mcpDialogOpen = false;
+  @state() private editDialogOpen = false;
+  @state() private editTarget: Coworker | null = null;
+  /** Per-row delete error, keyed by coworker id. Cleared on the next
+   *  refresh so a successful retry returns the row to its normal state. */
+  @state() private deleteError: Record<string, string> = {};
   @query('rm-coworker-wizard') private wizardEl?: CoworkerWizard;
   private readonly api = getApiClient();
 
@@ -48,16 +56,54 @@ export class CoworkersPage extends LitElement {
   private async refresh(): Promise<void> {
     this.loading = true;
     this.error = null;
-    try {
-      this.rows = await this.api.listCoworkers();
-    } catch (err) {
+    this.deleteError = {};
+    // Fetch coworkers and models in parallel — the edit dialog needs
+    // the model catalogue to render its dropdown; the list itself
+    // doesn't need it for the row label since the chat-shell carries
+    // the lookup. Failure on either is non-fatal: empty models list
+    // hides the dropdown, empty coworker list shows the empty state.
+    const [cwResult, mdResult] = await Promise.allSettled([
+      this.api.listCoworkers(),
+      this.api.listModels(),
+    ]);
+    if (cwResult.status === 'fulfilled') {
+      this.rows = cwResult.value;
+    } else {
+      const err = cwResult.reason;
       this.rows = [];
       this.error =
         err instanceof ApiError
           ? `${err.status} — ${err.message}`
           : (err as Error).message ?? 'unknown error';
-    } finally {
-      this.loading = false;
+    }
+    this.models = mdResult.status === 'fulfilled' ? mdResult.value : [];
+    this.loading = false;
+  }
+
+  private openEdit(c: Coworker): void {
+    this.editTarget = c;
+    this.editDialogOpen = true;
+  }
+
+  private async confirmDelete(c: Coworker): Promise<void> {
+    const ok = window.confirm(
+      `Delete coworker "${c.name}"?\n\n` +
+        'This also drops every conversation, run, and message the ' +
+        'coworker has on file (cascaded by the database). Cannot be undone.',
+    );
+    if (!ok) return;
+    this.deleteError = { ...this.deleteError, [c.id]: '' };
+    try {
+      await this.api.deleteCoworker(c.id);
+      await this.refresh();
+    } catch (err) {
+      this.deleteError = {
+        ...this.deleteError,
+        [c.id]:
+          err instanceof ApiError
+            ? `${err.status} — ${err.body?.message ?? err.message}`
+            : (err as Error).message ?? 'delete failed',
+      };
     }
   }
 
@@ -146,6 +192,16 @@ export class CoworkersPage extends LitElement {
             void this.wizardEl?.refreshMCPServers();
           }}
         ></rm-mcp-server-dialog>
+        <rm-coworker-edit-dialog
+          ?open=${this.editDialogOpen}
+          .coworker=${this.editTarget}
+          .models=${this.models}
+          @close=${() => {
+            this.editDialogOpen = false;
+            this.editTarget = null;
+          }}
+          @coworker-saved=${() => { void this.refresh(); }}
+        ></rm-coworker-edit-dialog>
       </div>
     `;
   }
@@ -168,11 +224,46 @@ export class CoworkersPage extends LitElement {
   }
 
   private renderList() {
+    // CSS contract: `.coworker-row` is the hover target; `.row-acts`
+    // group sits at opacity:0 until the row is hovered or focused.
+    // Inline <style> here matches the v2 pattern in chat-shell —
+    // page-scoped rules ride with the rendered output instead of
+    // living in a separate stylesheet.
     return html`
+      <style>
+        rm-coworkers-page .row-acts {
+          opacity: 0;
+          transition: opacity 0.13s;
+        }
+        rm-coworkers-page .coworker-row:hover .row-acts,
+        rm-coworkers-page .coworker-row:focus-within .row-acts {
+          opacity: 1;
+        }
+        rm-coworkers-page .icon-btn {
+          width: 28px;
+          height: 28px;
+          border-radius: 7px;
+          display: grid;
+          place-items: center;
+          color: var(--rm-ink-3);
+          background: none;
+          border: none;
+          cursor: pointer;
+          transition: 0.13s;
+        }
+        rm-coworkers-page .icon-btn:hover {
+          background: var(--rm-surface-3);
+          color: var(--rm-ink);
+        }
+        rm-coworkers-page .icon-btn.danger:hover {
+          background: var(--rm-bad-subtle);
+          color: var(--rm-bad);
+        }
+      </style>
       <ul class="divide-y divide-surface-3 dark:divide-d-surface-3 border border-surface-3 dark:border-d-surface-3 rounded-xl overflow-hidden">
         ${this.rows.map(
           (c) => html`
-            <li class="flex items-center gap-4 px-4 py-3">
+            <li class="coworker-row flex items-center gap-4 px-4 py-3" data-coworker-id=${c.id}>
               <div
                 class="w-9 h-9 rounded-lg bg-gradient-to-br from-brand-light to-brand
                   flex items-center justify-center text-white text-[14px] font-semibold
@@ -194,6 +285,27 @@ export class CoworkersPage extends LitElement {
                         <span class="text-brand">super</span>`
                     : nothing}
                 </div>
+                ${this.deleteError[c.id]
+                  ? html`<div class="text-[11.5px] text-red-600 dark:text-red-300 mt-1">
+                      ${this.deleteError[c.id]}
+                    </div>`
+                  : nothing}
+              </div>
+              <div class="row-acts flex items-center gap-1">
+                <button
+                  type="button"
+                  class="icon-btn"
+                  title="Edit coworker"
+                  data-testid="coworker-edit"
+                  @click=${() => this.openEdit(c)}
+                >${iconPencil(15)}</button>
+                <button
+                  type="button"
+                  class="icon-btn danger"
+                  title="Delete coworker"
+                  data-testid="coworker-delete"
+                  @click=${() => void this.confirmDelete(c)}
+                >${iconTrash(15)}</button>
               </div>
               <button
                 type="button"
