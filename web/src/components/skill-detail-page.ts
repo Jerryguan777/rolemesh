@@ -143,7 +143,7 @@ export class SkillDetailPage extends LitElement {
     this.deleteError = null;
     try {
       await this.api.deleteSkill(this.detail.id);
-      location.hash = '#/skills';
+      location.hash = '#/manage/skills';
     } catch (err) {
       this.deleteError = this.errMessage(err);
     } finally {

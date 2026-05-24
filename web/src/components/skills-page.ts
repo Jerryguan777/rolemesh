@@ -25,11 +25,21 @@ interface ParsedHash {
 }
 
 function parseHash(hash: string): ParsedHash {
-  if (hash === '#/skills' || hash === '#/skills/') {
+  // Accept both v1.1 flat (`#/skills/...`) and v2 nested
+  // (`#/manage/skills/...`) shapes. The router.ts redirect handler
+  // normalizes the flat form to the nested one on hashchange, but
+  // (a) editSkill / submitNew may write the v2 form directly to skip
+  // the redirect bounce, and (b) the in-flight flat URL exists for
+  // one tick before redirect — both should resolve to the same
+  // mode here.
+  const normalized = hash.startsWith('#/manage/skills')
+    ? '#/skills' + hash.slice('#/manage/skills'.length)
+    : hash;
+  if (normalized === '#/skills' || normalized === '#/skills/') {
     return { mode: 'list', skillId: null };
   }
-  if (hash === '#/skills/new') return { mode: 'new', skillId: null };
-  const match = hash.match(/^#\/skills\/([^/]+)$/);
+  if (normalized === '#/skills/new') return { mode: 'new', skillId: null };
+  const match = normalized.match(/^#\/skills\/([^/]+)$/);
   if (match) return { mode: 'detail', skillId: decodeURIComponent(match[1]) };
   return { mode: 'list', skillId: null };
 }
@@ -121,8 +131,10 @@ export class SkillsPage extends LitElement {
   private editSkill(row: SkillSummary): void {
     // Editing piggybacks on the existing detail page (#/skills/:id),
     // which already has the SKILL.md / files editor wired up — no
-    // need for a separate edit dialog at the list level.
-    location.hash = `#/skills/${encodeURIComponent(row.id)}`;
+    // need for a separate edit dialog at the list level. Writing the
+    // v2 nested form directly avoids the legacy redirect bouncing
+    // through `#/skills/<id>` for one tick.
+    location.hash = `#/manage/skills/${encodeURIComponent(row.id)}`;
   }
 
   private async deleteSkill(row: SkillSummary): Promise<void> {
@@ -163,7 +175,7 @@ export class SkillsPage extends LitElement {
     };
     try {
       const created = await this.api.createSkill(body);
-      location.hash = `#/skills/${created.id}`;
+      location.hash = `#/manage/skills/${created.id}`;
     } catch (err) {
       this.formError = this.errMessage(err);
     } finally {
