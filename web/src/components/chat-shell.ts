@@ -992,6 +992,11 @@ export class RmChatShell extends LitElement {
           color: var(--rm-ink-3);
           font-size: 11.5px;
           margin-left: auto;
+          /* The Backend · Model subtitle can run long
+           * ("Claude · Claude Sonnet 4.6 (Bedrock)"). Keep it on one
+           * line so it doesn't wrap under the coworker name and
+           * push the row to two lines. */
+          white-space: nowrap;
         }
         rm-chat-shell .cs-menu .mlabel {
           font-size: 11px;
@@ -1011,7 +1016,18 @@ export class RmChatShell extends LitElement {
         rm-chat-shell .approvals-wrap {
           position: relative;
         }
-        rm-chat-shell .cs-menu.coworker { top: 0; left: 100%; margin-left: 6px; }
+        /* Coworker menu pops out to the right of the switcher button
+         * (top:0; left:100%). The min-width override is load-bearing:
+         * the default .cs-menu min-width is 220px which used to fit
+         * the old "operations" / "super_agent" subtitle, but the new
+         * "Backend · Model display_name" can hit ~38 characters and
+         * was forcing a 2-line wrap. */
+        rm-chat-shell .cs-menu.coworker {
+          top: 0;
+          left: 100%;
+          margin-left: 6px;
+          min-width: 340px;
+        }
         rm-chat-shell .cs-menu.user { bottom: 100%; left: 8px; right: 8px; min-width: auto; margin-bottom: 4px; }
         rm-chat-shell .cs-menu.approvals {
           top: 100%; right: 0; margin-top: 4px;
