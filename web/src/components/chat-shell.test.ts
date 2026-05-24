@@ -256,19 +256,35 @@ describe('groupConversations', () => {
   // relying on test clock state.
   const now = new Date('2026-05-22T12:00:00Z');
 
-  it('groups items at start of today into Today', () => {
+  it('groups items at start of today into Today, newest-first within the bucket', () => {
     const startOfToday = new Date(
       now.getFullYear(),
       now.getMonth(),
       now.getDate(),
     );
+    // Input order is oldest-then-newest; output must be flipped so
+    // a freshly-created chat lands at the top of the rail.
     const g = groupConversations(
       [conv('1', 'a', startOfToday), conv('2', 'b', now)],
       now,
     );
     expect(g.length).toBe(1);
     expect(g[0].label).toBe('Today');
-    expect(g[0].items.map((c) => c.id)).toEqual(['1', '2']);
+    expect(g[0].items.map((c) => c.id)).toEqual(['2', '1']);
+  });
+
+  it('sorts Today bucket newest-first regardless of input order', () => {
+    // Three rows scattered in input order; pin the output is
+    // strictly newest → oldest within Today.
+    const t0 = new Date('2026-05-23T08:00:00Z');
+    const t1 = new Date('2026-05-23T10:00:00Z');
+    const t2 = new Date('2026-05-23T12:00:00Z');
+    const fixedNow = new Date('2026-05-23T13:00:00Z');
+    const g = groupConversations(
+      [conv('a', 'a', t0), conv('c', 'c', t2), conv('b', 'b', t1)],
+      fixedNow,
+    );
+    expect(g[0].items.map((c) => c.id)).toEqual(['c', 'b', 'a']);
   });
 
   it('groups items from the previous local day into Yesterday', () => {

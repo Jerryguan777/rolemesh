@@ -104,6 +104,12 @@ function initialsFor(name: string): string {
  * the Conversation schema does not expose `updated_at`; v3 can swap
  * in updated_at when the API surfaces it.
  *
+ * Within each bucket, rows are sorted **newest-first** by
+ * `created_at`. The backend's list ordering is not contractual, so
+ * relying on it would mean a freshly-created chat (via + New chat)
+ * could land mid-list instead of at the top — exactly the bug a
+ * user just reported. Pin the sort here.
+ *
  * Exported for unit testing.
  */
 export function groupConversations(
@@ -125,6 +131,13 @@ export function groupConversations(
     else if (created >= startOfYesterday) yesterday.push(c);
     else earlier.push(c);
   }
+  // created_at is ISO-8601 — lexicographic compare matches chronology,
+  // so we can sort on the raw string without parsing a Date per row.
+  const newestFirst = (a: Conversation, b: Conversation) =>
+    a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0;
+  today.sort(newestFirst);
+  yesterday.sort(newestFirst);
+  earlier.sort(newestFirst);
   return [
     { label: 'Today', items: today },
     { label: 'Yesterday', items: yesterday },
