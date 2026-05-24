@@ -10,11 +10,18 @@
 //
 // Format:    "Claude · Claude Opus 4.7"
 //            "Pi · GPT-4o"
-//            "Claude · (no model)"          ← coworker.model_id is null
-//            "Claude"                       ← model lookup failed
+//            "Claude"                       ← coworker.model_id is null
+//                                              OR model lookup failed
 //
 // The separator is a middle-dot (`·`) — softer than the `|` the user
 // drafted, matches v2 prototype's tone for hierarchical labels.
+//
+// Why null model_id renders as backend-only (no "(no model)" hint):
+// most pre-v1.1 coworker rows have model_id=NULL even though chat
+// works fine — the agent process reads PI_MODEL_ID from the
+// environment in that case (see `agent/executor.py`), so "(no model)"
+// would be misleading. Treat null as "unknown to the SPA" and let
+// the backend keep its own resolution policy.
 
 import type { BackendName, Coworker, Model } from '../api/client.js';
 
@@ -39,7 +46,7 @@ export function coworkerSubtitle(
   modelsById?: Map<string, Model>,
 ): string {
   const backend = backendLabel(c.agent_backend);
-  if (!c.model_id) return `${backend} · (no model)`;
+  if (!c.model_id) return backend;
   const model = modelsById?.get(c.model_id);
   if (!model) return backend;
   return `${backend} · ${model.display_name}`;

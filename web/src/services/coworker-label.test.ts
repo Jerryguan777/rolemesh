@@ -72,8 +72,12 @@ describe('coworkerSubtitle', () => {
   });
 
   it('falls back to just the backend when model_id is null', () => {
+    // Most pre-v1.1 coworker rows have NULL model_id but still chat
+    // fine (the agent reads PI_MODEL_ID from env). Don't surface a
+    // "(no model)" hint that misleads users — the backend label
+    // alone is honest about what the SPA actually knows.
     const cw = makeCoworker({ model_id: null });
-    expect(coworkerSubtitle(cw)).toBe('Claude · (no model)');
+    expect(coworkerSubtitle(cw)).toBe('Claude');
   });
 
   it('falls back to just the backend when the model lookup misses', () => {

@@ -160,9 +160,9 @@ describe('<rm-message-editor>', () => {
       '[data-testid="composer-coworker-option"]',
     );
     expect(opts.length).toBe(2);
-    // Row 0 (cw-a, model_id null) — backend only with no-model hint.
+    // Row 0 (cw-a, model_id null) — backend label only, no model hint.
     expect(opts[0].textContent).toContain('Claude');
-    expect(opts[0].textContent).toContain('(no model)');
+    expect(opts[0].textContent ?? '').not.toContain('·');
     // Row 1 (cw-b, model resolved) — "Claude · GPT-4o".
     expect(opts[1].textContent).toContain('Claude');
     expect(opts[1].textContent).toContain('GPT-4o');
