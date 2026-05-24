@@ -236,7 +236,8 @@ export class SkillsPage extends LitElement {
               <b>${r.name}</b>
               <span>${r.description ?? '—'}</span>
             </span>
-            <span class="rm-meta">${r.bound_coworker_count} coworker(s)</span>
+            <span class="rm-meta"
+              >${r.bound_coworker_count} coworker${r.bound_coworker_count === 1 ? '' : 's'}</span>
             ${r.enabled
               ? nothing
               : html`<span class="rm-pill rm-pill-off">disabled</span>`}

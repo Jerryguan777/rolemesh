@@ -20,6 +20,11 @@ export class MCPServersPage extends LitElement {
   @state() private loading = true;
   @state() private listError: string | null = null;
   @state() private deleteError: Record<string, string> = {};
+  /** Per-MCP-server bound-coworker count. Backend doesn't surface
+   *  this on the MCPServer model (unlike Skill.bound_coworker_count),
+   *  so we compute it here by walking every coworker's bindings.
+   *  Map miss = "still loading" or "no bindings" — both render as 0. */
+  @state() private coworkerCounts: Map<string, number> = new Map();
   /** Single dialog backs BOTH create AND edit. `editTarget` null =
    *  create flow; non-null = edit flow (rm-mcp-server-dialog branches
    *  on its `editing` prop). v2-C dropped the inline create form to
@@ -48,6 +53,37 @@ export class MCPServersPage extends LitElement {
     } finally {
       this.loading = false;
     }
+    // Kick off the coworker-count tally in the background — the list
+    // paints right away, counts stream in. We don't await: a delayed
+    // count is preferable to a blocked render.
+    void this.recountBindings();
+  }
+
+  /** Tally `coworker_count` per MCP server by walking every coworker's
+   *  bindings. Backend doesn't surface this on the MCPServer model
+   *  (Skill.bound_coworker_count is the analog there); doing it
+   *  client-side adds N small GETs (one per coworker, ~10-20 in a
+   *  typical tenant). All failures are swallowed — the row's "0
+   *  coworker(s)" hint is benign if the count never arrives. */
+  private async recountBindings(): Promise<void> {
+    let coworkers: { id: string }[] = [];
+    try {
+      coworkers = await this.api.listCoworkers();
+    } catch {
+      return;
+    }
+    const next = new Map<string, number>();
+    const results = await Promise.allSettled(
+      coworkers.map((c) => this.api.listCoworkerMCPServers(c.id)),
+    );
+    for (const r of results) {
+      if (r.status !== 'fulfilled') continue;
+      for (const binding of r.value) {
+        const id = binding.mcp_server_id;
+        next.set(id, (next.get(id) ?? 0) + 1);
+      }
+    }
+    this.coworkerCounts = next;
   }
 
   private errMessage(err: unknown): string {
@@ -157,24 +193,17 @@ export class MCPServersPage extends LitElement {
     `;
   }
 
-  /** Pick a pill modifier based on auth_mode. `service` is the
-   *  no-fuss state; `user` / `both` requires a per-user OIDC token
-   *  so we warn-tint to surface the dependency. */
-  private authPillClass(authMode: MCPServer['auth_mode']): string {
-    if (authMode === 'service') return 'rm-pill rm-pill-on';
-    return 'rm-pill rm-pill-warn';
-  }
-
   private renderRow(r: MCPServer) {
     const delErr = this.deleteError[r.id] || '';
+    const count = this.coworkerCounts.get(r.id) ?? 0;
     return html`
       <div class="rm-card" data-mcp-id=${r.id}>
         <span class="rm-ic">${(r.name?.[0] ?? '?').toUpperCase()}</span>
         <span class="rm-mn">
           <b>${r.name}</b>
-          <span>${r.type} · ${r.url}</span>
+          <span>${r.type} · auth: ${r.auth_mode} · ${r.url}</span>
         </span>
-        <span class=${this.authPillClass(r.auth_mode)}>${r.auth_mode}</span>
+        <span class="rm-meta">${count} coworker${count === 1 ? '' : 's'}</span>
         <span class="rm-row-acts">
           <button
             type="button"
