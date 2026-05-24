@@ -40,7 +40,10 @@ function setHash(hash: string): void {
 }
 
 
-describe('SkillsPage new view', () => {
+describe('SkillsPage new-skill flow (via dialog)', () => {
+  // v2-C unified create + edit into <rm-skill-dialog>. The
+  // route-based `#/skills/new` page is gone; the hash now opens
+  // the dialog over the list.
   let page: SkillsPage;
 
   beforeEach(async () => {
@@ -57,23 +60,32 @@ describe('SkillsPage new view', () => {
     setHash('#/');
   });
 
-  it('posts createSkill with SKILL.md when Create is clicked', async () => {
+  it('opens the skill dialog in create mode when hash is #/skills/new', () => {
+    const dialog = page.querySelector('rm-skill-dialog');
+    expect(dialog).toBeTruthy();
+    expect((dialog as { editing?: unknown }).editing).toBeNull();
+    expect((dialog as { open?: boolean }).open).toBe(true);
+  });
+
+  it('clicking Create skill in the dialog calls createSkill with SKILL.md', async () => {
     const nameInput = page.querySelector(
-      'input[type="text"]',
+      '[data-testid="skill-dialog-name"]',
     ) as HTMLInputElement;
+    expect(nameInput).toBeTruthy();
     nameInput.value = 'demo';
     nameInput.dispatchEvent(new Event('input'));
+    await settle(page);
 
-    const createBtn = Array.from(page.querySelectorAll('button')).find(
-      (b) => b.textContent?.trim() === 'Create',
-    ) as HTMLButtonElement;
-    expect(createBtn).toBeTruthy();
     createSkillSpy.mockResolvedValue({
       id: 'new-id', tenant_id: 't', name: 'demo', enabled: true,
       frontmatter_common: {}, frontmatter_backend: {}, files: {},
       created_at: '', updated_at: '',
     });
-    createBtn.click();
+    const saveBtn = page.querySelector(
+      '[data-testid="skill-dialog-save"]',
+    ) as HTMLButtonElement;
+    expect(saveBtn).toBeTruthy();
+    saveBtn.click();
     await settle(page);
 
     expect(createSkillSpy).toHaveBeenCalledTimes(1);
@@ -81,6 +93,8 @@ describe('SkillsPage new view', () => {
     expect(arg.name).toBe('demo');
     expect(arg.enabled).toBe(true);
     expect(Object.keys(arg.files)).toContain('SKILL.md');
+    // Body still carries the YAML frontmatter the dialog injects.
+    expect(arg.files['SKILL.md']).toContain('name: demo');
   });
 });
 

@@ -10,11 +10,11 @@
 import { LitElement, html, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import { SKILL_MANIFEST_NAME } from '../api/skill_constants.js';
 import { ApiError, getApiClient } from '../api/client.js';
-import type { SkillCreate, SkillSummary } from '../api/client.js';
+import type { SkillSummary } from '../api/client.js';
 
 import './skill-detail-page.js';
+import './skill-dialog.js';
 import { iconPencil, iconTrash } from './icons.js';
 
 type Mode = 'list' | 'new' | 'detail';
@@ -55,12 +55,13 @@ export class SkillsPage extends LitElement {
   @state() private rows: SkillSummary[] = [];
   @state() private loading = false;
   @state() private listError: string | null = null;
-  @state() private busy = false;
-
-  @state() private form = this.emptyForm();
-  @state() private formError: string | null = null;
   /** Per-row delete error. Cleared on refresh. */
   @state() private deleteError: Record<string, string> = {};
+  /** Dialog state. `editTarget` null = create flow; non-null = edit
+   *  flow. v2-C replaced the route-based create page (`#/skills/new`)
+   *  with this dialog to match the prototype layout. */
+  @state() private dialogOpen = false;
+  @state() private editTarget: SkillSummary | null = null;
 
   private readonly api = getApiClient();
   private readonly onHashChange = (): void => this.syncFromHash();
@@ -80,32 +81,34 @@ export class SkillsPage extends LitElement {
     window.removeEventListener('hashchange', this.onHashChange);
   }
 
-  private emptyForm(): { name: string; skillMd: string } {
-    return {
-      name: '',
-      skillMd:
-        '---\n' +
-        'name: \n' +
-        'description: \n' +
-        '---\n' +
-        '# Workflow\n',
-    };
-  }
-
   private syncFromHash(): void {
     const { mode, skillId } = parseHash(location.hash);
     const switched =
       !this.synced || this.mode !== mode || this.skillId !== skillId;
     this.synced = true;
+    // mode='new' from the URL is a legacy path — bounce it to the
+    // list and open the dialog instead. Keeps bookmarked `#/skills/new`
+    // links functional without a renderNew() page.
+    if (mode === 'new') {
+      this.mode = 'list';
+      this.skillId = null;
+      try {
+        history.replaceState(null, '', `${location.pathname}${location.search}#/manage/skills`);
+      } catch {
+        // happy-dom or sandboxes can refuse cross-path replaceState;
+        // the dialog still opens, just with a stale URL.
+      }
+      this.dialogOpen = true;
+      this.editTarget = null;
+      void this.refreshList();
+      return;
+    }
     this.mode = mode;
     this.skillId = skillId;
     if (!switched) return;
     this.listError = null;
-    this.formError = null;
     if (mode === 'list') {
       void this.refreshList();
-    } else if (mode === 'new') {
-      this.form = this.emptyForm();
     }
   }
 
@@ -129,12 +132,17 @@ export class SkillsPage extends LitElement {
   }
 
   private editSkill(row: SkillSummary): void {
-    // Editing piggybacks on the existing detail page (#/skills/:id),
-    // which already has the SKILL.md / files editor wired up — no
-    // need for a separate edit dialog at the list level. Writing the
-    // v2 nested form directly avoids the legacy redirect bouncing
-    // through `#/skills/<id>` for one tick.
-    location.hash = `#/manage/skills/${encodeURIComponent(row.id)}`;
+    // Edit reuses the unified <rm-skill-dialog>. The dialog fetches
+    // the full Skill (with file contents) on open via api.getSkill.
+    // Legacy bookmark links to `#/manage/skills/<id>` still resolve
+    // to <rm-skill-detail-page> (advanced multi-file editor).
+    this.editTarget = row;
+    this.dialogOpen = true;
+  }
+
+  private openCreateDialog(): void {
+    this.editTarget = null;
+    this.dialogOpen = true;
   }
 
   private async deleteSkill(row: SkillSummary): Promise<void> {
@@ -159,35 +167,10 @@ export class SkillsPage extends LitElement {
     }
   }
 
-  private async submitNew(): Promise<void> {
-    const { name, skillMd } = this.form;
-    if (!name.trim()) {
-      this.formError = 'Name is required.';
-      return;
-    }
-    this.busy = true;
-    this.formError = null;
-    const body: SkillCreate = {
-      name: name.trim(),
-      // openapi-typescript marks fields with a `default` as required.
-      enabled: true,
-      files: { [SKILL_MANIFEST_NAME]: skillMd },
-    };
-    try {
-      const created = await this.api.createSkill(body);
-      location.hash = `#/manage/skills/${created.id}`;
-    } catch (err) {
-      this.formError = this.errMessage(err);
-    } finally {
-      this.busy = false;
-    }
-  }
-
   override render() {
     if (this.mode === 'detail' && this.skillId) {
       return html`<rm-skill-detail-page skill-id=${this.skillId}></rm-skill-detail-page>`;
     }
-    if (this.mode === 'new') return this.renderNew();
     return this.renderList();
   }
 
@@ -196,13 +179,17 @@ export class SkillsPage extends LitElement {
       <div class="rm-spane">
         <div class="rm-ch">
           <h2>Skills</h2>
-          <a href="#/skills/new" class="rm-add" style="text-decoration: none;">
+          <button
+            type="button"
+            class="rm-add"
+            @click=${this.openCreateDialog}
+          >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
               stroke="currentColor" stroke-width="2" aria-hidden="true">
               <path d="M12 5v14M5 12h14"/>
             </svg>
             New skill
-          </a>
+          </button>
         </div>
         <p class="rm-sub">
           Tenant-wide catalog. Bind a skill to a coworker on the
@@ -216,6 +203,17 @@ export class SkillsPage extends LitElement {
             : this.rows.length === 0
               ? this.renderListEmpty()
               : this.renderRows()}
+
+        <rm-skill-dialog
+          ?open=${this.dialogOpen}
+          .editing=${this.editTarget}
+          @close=${() => {
+            this.dialogOpen = false;
+            this.editTarget = null;
+          }}
+          @skill-created=${() => { void this.refreshList(); }}
+          @skill-updated=${() => { void this.refreshList(); }}
+        ></rm-skill-dialog>
       </div>
     `;
   }
@@ -284,82 +282,4 @@ export class SkillsPage extends LitElement {
     `;
   }
 
-  private renderNew() {
-    return html`
-      <div class="h-full w-full overflow-y-auto px-6 py-6">
-        <div class="max-w-2xl mx-auto">
-          <div class="flex items-baseline justify-between mb-4">
-            <h1 class="text-[20px] font-semibold text-ink-0 dark:text-d-ink-0">
-              New skill
-            </h1>
-            <a
-              href="#/skills"
-              class="text-[12px] text-ink-3 dark:text-d-ink-3 hover:underline"
-            >Cancel</a>
-          </div>
-
-          <label class="block text-[12px] text-ink-2 dark:text-d-ink-2 mb-3">
-            <span class="block mb-1">Name</span>
-            <input
-              type="text"
-              class="w-full text-[13px] px-3 py-1.5 rounded-md border border-surface-3 dark:border-d-surface-3
-                bg-surface-1 dark:bg-d-surface-1"
-              placeholder="e.g. code-review"
-              .value=${this.form.name}
-              @input=${(e: Event) =>
-                (this.form = {
-                  ...this.form,
-                  name: (e.target as HTMLInputElement).value,
-                })}
-            />
-            <span class="text-[11px] text-ink-3 dark:text-d-ink-3 block mt-1">
-              Letters / digits / underscore / hyphen; must start with a
-              letter; up to 64 characters.
-            </span>
-          </label>
-
-          <label class="block text-[12px] text-ink-2 dark:text-d-ink-2 mb-3">
-            <span class="block mb-1">${SKILL_MANIFEST_NAME}</span>
-            <textarea
-              rows="18"
-              spellcheck="false"
-              class="w-full text-[12.5px] px-3 py-2 rounded-md border border-surface-3 dark:border-d-surface-3
-                bg-surface-1 dark:bg-d-surface-1 font-mono leading-relaxed"
-              .value=${this.form.skillMd}
-              @input=${(e: Event) =>
-                (this.form = {
-                  ...this.form,
-                  skillMd: (e.target as HTMLTextAreaElement).value,
-                })}
-            ></textarea>
-            <span class="text-[11px] text-ink-3 dark:text-d-ink-3 block mt-1">
-              YAML frontmatter required. <strong>description</strong>
-              must be at least 16 characters. Quote any value that
-              looks like a YAML boolean (e.g.
-              <code>name: "on"</code>).
-            </span>
-          </label>
-
-          ${this.formError
-            ? html`<div class="text-[12px] text-red-600 dark:text-red-300 mb-2">${this.formError}</div>`
-            : nothing}
-
-          <div class="flex items-center justify-end gap-2">
-            <a
-              href="#/skills"
-              class="text-[12px] px-3 py-1.5 rounded-md border border-surface-3 dark:border-d-surface-3
-                text-ink-2 dark:text-d-ink-2"
-            >Cancel</a>
-            <button
-              type="button"
-              class="text-[12px] px-3 py-1.5 rounded-md bg-brand text-white hover:bg-brand-dark
-                disabled:opacity-60 disabled:cursor-not-allowed"
-              ?disabled=${this.busy}
-              @click=${() => void this.submitNew()}
-            >Create</button>
-          </div>
-        </div>
-      </div>
-    `;
-  }
 }
