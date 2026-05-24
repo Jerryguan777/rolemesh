@@ -629,7 +629,10 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             CREATE TABLE IF NOT EXISTS sessions (
                 conversation_id UUID PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
                 tenant_id UUID NOT NULL REFERENCES tenants(id),
-                coworker_id UUID NOT NULL REFERENCES coworkers(id),
+                -- ON DELETE CASCADE: a session is the SDK/Pi resume-key
+                -- for a specific coworker container; deleting the coworker
+                -- makes the session pointer meaningless.
+                coworker_id UUID NOT NULL REFERENCES coworkers(id) ON DELETE CASCADE,
                 session_id TEXT NOT NULL
             )
         """)
@@ -734,7 +737,11 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             CREATE TABLE IF NOT EXISTS scheduled_tasks (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 tenant_id UUID NOT NULL REFERENCES tenants(id),
-                coworker_id UUID NOT NULL REFERENCES coworkers(id),
+                -- ON DELETE CASCADE: a scheduled task owns no execution
+                -- runtime — when its coworker is deleted there is no
+                -- agent to dispatch to. CASCADE keeps the scheduler
+                -- queue in sync with the live coworker set.
+                coworker_id UUID NOT NULL REFERENCES coworkers(id) ON DELETE CASCADE,
                 conversation_id UUID REFERENCES conversations(id),
                 prompt TEXT NOT NULL,
                 schedule_type TEXT NOT NULL,
@@ -797,7 +804,15 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         CREATE TABLE IF NOT EXISTS approval_requests (
             id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             tenant_id          UUID NOT NULL REFERENCES tenants(id),
-            coworker_id        UUID NOT NULL REFERENCES coworkers(id),
+            -- ON DELETE SET NULL (NOT CASCADE): approval_requests are
+            -- audit records — the "who approved what tool call when"
+            -- trail must survive coworker deletion for compliance.
+            -- Column made nullable so the SET NULL transition is legal
+            -- at the SQL level. Existing queries that filter by
+            -- coworker_id continue to work (rows with NULL just don't
+            -- match those queries — desired behaviour for "show
+            -- approvals for live coworkers").
+            coworker_id        UUID REFERENCES coworkers(id) ON DELETE SET NULL,
             conversation_id    UUID REFERENCES conversations(id),
             -- policy_id is nullable: proposals that do not match any policy
             -- (short-circuit auto-executed path) keep NULL so the admin UI
