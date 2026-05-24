@@ -29,7 +29,22 @@ import { LitElement, html, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { keyed } from 'lit/directives/keyed.js';
 
-import { iconChevronDown, iconClose, iconSettings } from './icons.js';
+import {
+  iconBook,
+  iconChevronDown,
+  iconChip,
+  iconClipboardCheck,
+  iconClose,
+  iconHome,
+  iconKey,
+  iconServer,
+  iconSettings,
+  iconShield,
+  iconSun,
+  iconUser,
+  iconUsers,
+} from './icons.js';
+import type { SVGTemplateResult } from 'lit';
 import './reauth-banner.js';
 import './coworkers-page.js';
 import './mcp-servers-page.js';
@@ -46,6 +61,10 @@ interface NavEntry {
   /** Sub-path under `#/manage/`. */
   slug: string;
   label: string;
+  /** Small SVG that sits left of the label in the rail. Matches the
+   *  prototype `.ni > svg` pattern (docs/webui-ui-redesign-v2-prototype.html
+   *  lines 489-502). */
+  icon: () => SVGTemplateResult;
   /** Optional badge text shown right-aligned in the nav row. */
   badge?: string;
   /** Renders the page body. */
@@ -75,6 +94,7 @@ const NAV_GROUPS: NavGroup[] = [
       {
         slug: 'coworkers',
         label: 'Coworkers',
+        icon: () => iconUser(16),
         render: () => html`<rm-coworkers-page></rm-coworkers-page>`,
       },
     ],
@@ -85,21 +105,25 @@ const NAV_GROUPS: NavGroup[] = [
       {
         slug: 'mcp-servers',
         label: 'MCP servers',
+        icon: () => iconServer(16),
         render: () => html`<rm-mcp-servers-page></rm-mcp-servers-page>`,
       },
       {
         slug: 'skills',
         label: 'Skills',
+        icon: () => iconBook(16),
         render: () => html`<rm-skills-page></rm-skills-page>`,
       },
       {
         slug: 'models',
         label: 'Models',
+        icon: () => iconChip(16),
         render: () => html`<rm-models-page></rm-models-page>`,
       },
       {
         slug: 'credentials',
         label: 'Credentials',
+        icon: () => iconKey(16),
         render: () => html`<rm-credentials-page></rm-credentials-page>`,
       },
     ],
@@ -110,11 +134,13 @@ const NAV_GROUPS: NavGroup[] = [
       {
         slug: 'safety',
         label: 'Safety rules',
+        icon: () => iconShield(16),
         render: () => html`<rm-safety-rules-page></rm-safety-rules-page>`,
       },
       {
         slug: 'approval-policies',
         label: 'Approval policies',
+        icon: () => iconClipboardCheck(16),
         render: () => html`<rm-approvals-page></rm-approvals-page>`,
       },
     ],
@@ -125,12 +151,14 @@ const NAV_GROUPS: NavGroup[] = [
       {
         slug: 'general',
         label: 'General',
+        icon: () => iconHome(16),
         render: () =>
           html`<rm-coming-soon label="General" phase=${3}></rm-coming-soon>`,
       },
       {
         slug: 'members',
         label: 'Members',
+        icon: () => iconUsers(16),
         render: () =>
           html`<rm-coming-soon label="Members" phase=${3}></rm-coming-soon>`,
       },
@@ -142,6 +170,7 @@ const NAV_GROUPS: NavGroup[] = [
       {
         slug: 'appearance',
         label: 'Appearance',
+        icon: () => iconSun(16),
         render: () => html`<rm-appearance-page></rm-appearance-page>`,
       },
     ],
@@ -276,6 +305,18 @@ export class RmSettingsShell extends LitElement {
           color: var(--rm-accent-2);
           font-weight: 500;
         }
+        /* Nav icon — sits a notch lighter than the label text at rest;
+         * follows the row's color on hover/active because the SVG uses
+         * stroke="currentColor". */
+        rm-settings-shell .ss-nav .ni .ni-icon {
+          display: inline-flex;
+          color: var(--rm-ink-3);
+          flex-shrink: 0;
+        }
+        rm-settings-shell .ss-nav .ni:hover .ni-icon,
+        rm-settings-shell .ss-nav .ni.active .ni-icon {
+          color: inherit;
+        }
         rm-settings-shell .ss-close {
           width: 28px;
           height: 28px;
@@ -375,7 +416,8 @@ export class RmSettingsShell extends LitElement {
             aria-current=${entry.slug === activeSlug ? 'page' : 'false'}
             @click=${() => this.navigate(entry.slug)}
           >
-            ${entry.label}
+            <span class="ni-icon">${entry.icon()}</span>
+            <span class="ni-label">${entry.label}</span>
           </button>
         `,
       )}

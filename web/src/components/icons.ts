@@ -187,6 +187,124 @@ export function iconTrash(size = 15): SVGTemplateResult {
   `;
 }
 
+/** Settings-nav icons (per docs/webui-ui-redesign-v2-prototype.html
+ *  lines 489-502). Sized 16×16 to fit the .ni rail; stroke-width 1.8
+ *  matches the prototype's quiet line weight. */
+
+/** Coworker — head + shoulders silhouette. */
+export function iconUser(size = 16): SVGTemplateResult {
+  return svg`
+    <svg width=${size} height=${size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+      <circle cx="12" cy="8" r="4"/>
+      <path d="M4 21v-1a8 8 0 0 1 16 0v1"/>
+    </svg>
+  `;
+}
+
+/** MCP servers — stacked rack units. */
+export function iconServer(size = 16): SVGTemplateResult {
+  return svg`
+    <svg width=${size} height=${size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" stroke-width="1.8" stroke-linecap="round"
+      aria-hidden="true">
+      <rect x="3" y="4" width="18" height="7" rx="1.5"/>
+      <rect x="3" y="13" width="18" height="7" rx="1.5"/>
+      <path d="M7 7.5h.01M7 16.5h.01"/>
+    </svg>
+  `;
+}
+
+/** Skills — book / folder spine. */
+export function iconBook(size = 16): SVGTemplateResult {
+  return svg`
+    <svg width=${size} height=${size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"
+      aria-hidden="true">
+      <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+      <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+    </svg>
+  `;
+}
+
+/** Models — chip / square within square. */
+export function iconChip(size = 16): SVGTemplateResult {
+  return svg`
+    <svg width=${size} height=${size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+      <rect x="5" y="5" width="14" height="14" rx="2"/>
+      <rect x="9" y="9" width="6" height="6"/>
+      <path d="M9 2v3M15 2v3M9 19v3M15 19v3M2 9h3M2 15h3M19 9h3M19 15h3"/>
+    </svg>
+  `;
+}
+
+/** Credentials — key. */
+export function iconKey(size = 16): SVGTemplateResult {
+  return svg`
+    <svg width=${size} height=${size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+      <circle cx="8" cy="15" r="4"/>
+      <path d="m10.85 12.15 8-8M18 6l2 2M14 8l2 2"/>
+    </svg>
+  `;
+}
+
+/** Safety rules — shield. */
+export function iconShield(size = 16): SVGTemplateResult {
+  return svg`
+    <svg width=${size} height=${size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+    </svg>
+  `;
+}
+
+/** Approval policies — clipboard check (same shape as iconApprovals
+ *  but at the 16/1.8 weight of the nav rail). */
+export function iconClipboardCheck(size = 16): SVGTemplateResult {
+  return svg`
+    <svg width=${size} height=${size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+      <path d="M9 11l3 3L22 4"/>
+      <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+    </svg>
+  `;
+}
+
+/** General — home / house. */
+export function iconHome(size = 16): SVGTemplateResult {
+  return svg`
+    <svg width=${size} height=${size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+      <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+    </svg>
+  `;
+}
+
+/** Members — multi-user. */
+export function iconUsers(size = 16): SVGTemplateResult {
+  return svg`
+    <svg width=${size} height=${size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+      <circle cx="9" cy="7" r="4"/>
+      <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+    </svg>
+  `;
+}
+
+/** Appearance — sun/star burst. */
+export function iconSun(size = 16): SVGTemplateResult {
+  return svg`
+    <svg width=${size} height=${size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+      <circle cx="12" cy="12" r="5"/>
+      <path d="M12 1v2M12 21v2M4.2 4.2l1.4 1.4M18.4 18.4l1.4 1.4M1 12h2M21 12h2"/>
+    </svg>
+  `;
+}
+
 /** X close button — dialog header, popover dismiss. */
 export function iconClose(size = 16): SVGTemplateResult {
   return svg`

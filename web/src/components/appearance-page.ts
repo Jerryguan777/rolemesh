@@ -23,13 +23,18 @@ export class AppearancePage extends LitElement {
       display: block;
       font-family: var(--rm-font-body);
       color: var(--rm-ink);
+      /* Center the card within the settings-shell .ss-body. Padding
+       * gives breathing room above/below; margin auto on .card
+       * pulls the fixed-width box to the horizontal center. */
+      padding: 28px 24px;
     }
     .card {
       border: 1px solid var(--rm-border);
       border-radius: var(--rm-r);
       background: var(--rm-surface);
-      padding: 18px 20px;
+      padding: 22px 24px;
       max-width: 560px;
+      margin: 0 auto;
     }
     h3 {
       margin: 0 0 4px;
