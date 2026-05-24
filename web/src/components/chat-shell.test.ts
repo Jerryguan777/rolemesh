@@ -355,6 +355,23 @@ describe('<rm-chat-shell>', () => {
     expect(localStorage.getItem('rm-sidebar-collapsed')).toBe('true');
   });
 
+  it('main column carries min-height:0 + overflow:hidden so chat scroll stays internal', async () => {
+    // Regression: without these two rules, .cs-main sizes to the
+    // chat-panel's content (grid items default to min-height:auto).
+    // The whole .cs-layout then overflows upward, the outer shell
+    // becomes the scroll container, and the sidebar scrolls in
+    // lockstep with the chat. Pin the CSS contract so a future
+    // refactor doesn't silently bring back the dual-scroll bug.
+    const el = await mountShell();
+    const main = el.querySelector('.cs-main') as HTMLElement | null;
+    expect(main).not.toBeNull();
+    const cs = getComputedStyle(main!);
+    // happy-dom reports the raw "0" — browsers normalise to "0px";
+    // accept either since we only care about the value semantics.
+    expect(['0', '0px']).toContain(cs.minHeight);
+    expect(cs.overflow).toBe('hidden');
+  });
+
   it('lays out reauth banner above a sidebar+main grid (not as a grid item)', async () => {
     // Regression: connectedCallback used to set `style.display = 'block'`
     // inline, which beat the rendered <style> grid rule on

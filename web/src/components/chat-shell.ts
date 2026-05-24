@@ -807,6 +807,15 @@ export class RmChatShell extends LitElement {
           display: flex;
           flex-direction: column;
           min-width: 0;
+          /* min-height: 0 is load-bearing — grid items default to
+           * min-height:auto, which sizes the cell to its content.
+           * Without this, a long chat overflows .cs-main upward into
+           * .cs-layout, the entire shell scrolls (taking the sidebar
+           * with it), and the composer at the bottom gets pushed off
+           * screen. Pin it so chat-panel's internal scroll surface
+           * is the only thing that actually scrolls. */
+          min-height: 0;
+          overflow: hidden;
         }
         rm-chat-shell .cs-tbar {
           height: 52px;
