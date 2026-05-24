@@ -45,7 +45,12 @@ import {
   type Conversation,
   type Coworker,
   type Me,
+  type Model,
 } from '../api/client.js';
+import {
+  coworkerSubtitle,
+  modelsByIdMap,
+} from '../services/coworker-label.js';
 import { UserApprovalsClient, type UserApprovalsStatus } from '../ws/user_approvals_client.js';
 import './chat-panel.js';
 import './reauth-banner.js';
@@ -145,6 +150,11 @@ export class RmChatShell extends LitElement {
    *  the `agent-connection` event so the tenant pill can render the
    *  green/red dot the way chat-panel's top bar used to. */
   @state() private agentConnected = false;
+  /** Tenant model catalogue — used to render the "Backend · Model"
+   *  subtitle for each coworker. Lookup map keyed by Model.id. A
+   *  failed listModels call leaves the map empty; coworker subtitles
+   *  then degrade to just the backend label (see coworkerSubtitle). */
+  @state() private modelsById: Map<string, Model> = new Map();
   /** Flipped to true once bootstrap finishes resolving (or creating)
    *  a chat_id for the active coworker. chat-panel is mounted only
    *  AFTER this flips so it reads the post-resolution URL params in
@@ -304,9 +314,10 @@ export class RmChatShell extends LitElement {
   private async bootstrap(): Promise<void> {
     // All three are independent — fire in parallel so first paint
     // does not wait on the slowest endpoint.
-    const [coworkersResult, meResult] = await Promise.allSettled([
+    const [coworkersResult, meResult, modelsResult] = await Promise.allSettled([
       this.api.listCoworkers(),
       this.api.getMe(),
+      this.api.listModels(),
     ]);
     if (coworkersResult.status === 'fulfilled') {
       this.coworkers = coworkersResult.value;
@@ -319,6 +330,12 @@ export class RmChatShell extends LitElement {
       console.warn('chat-shell: listCoworkers failed', coworkersResult.reason);
     }
     if (meResult.status === 'fulfilled') this.me = meResult.value;
+    if (modelsResult.status === 'fulfilled') {
+      this.modelsById = modelsByIdMap(modelsResult.value);
+    } else {
+      // Subtitle degrades to just the backend label — non-fatal.
+      console.warn('chat-shell: listModels failed', modelsResult.reason);
+    }
     if (this.activeCoworkerId) {
       await this.refreshConversations(this.activeCoworkerId);
       // Land on a CONNECTED chat by default: if the URL doesn't pin
@@ -1088,7 +1105,9 @@ export class RmChatShell extends LitElement {
             >${initialsFor(active?.name ?? '?')}</span>
             <span class="csw-txt">
               <b>${active?.name ?? 'No coworker'}</b>
-              <span>${active?.agent_role ?? '—'}</span>
+              <span>${active
+                ? coworkerSubtitle(active, this.modelsById)
+                : '—'}</span>
             </span>
             ${iconChevronDown(15)}
           </button>
@@ -1141,7 +1160,7 @@ export class RmChatShell extends LitElement {
           ${active
             ? html`
                 <span class="with">
-                  <span>${active.agent_role}</span>
+                  <span>${coworkerSubtitle(active, this.modelsById)}</span>
                 </span>
               `
             : nothing}
@@ -1249,7 +1268,7 @@ export class RmChatShell extends LitElement {
                     style=${`background:${colourForCoworker(c)};`}
                   ></span>
                   ${c.name}
-                  <small>${c.agent_role}</small>
+                  <small>${coworkerSubtitle(c, this.modelsById)}</small>
                 </button>
               `,
             )}

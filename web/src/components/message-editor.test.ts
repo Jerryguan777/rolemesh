@@ -17,6 +17,7 @@ import type { MessageEditor } from './message-editor.js';
 import type { Coworker } from '../api/client.js';
 
 const listCoworkersSpy = vi.fn();
+const listModelsSpy = vi.fn();
 
 vi.mock('../api/client.js', async () => {
   const actual = await vi.importActual<typeof import('../api/client.js')>(
@@ -26,6 +27,7 @@ vi.mock('../api/client.js', async () => {
     ...actual,
     getApiClient: () => ({
       listCoworkers: listCoworkersSpy,
+      listModels: listModelsSpy,
     }),
   };
 });
@@ -101,6 +103,8 @@ describe('<rm-message-editor>', () => {
 
   beforeEach(() => {
     listCoworkersSpy.mockReset();
+    listModelsSpy.mockReset();
+    listModelsSpy.mockResolvedValue([]);
     listCoworkersSpy.mockResolvedValue([
       makeCoworker('cw-a', 'Ops coworker', 'operations'),
       makeCoworker('cw-b', 'Finance coworker', 'finance'),
@@ -128,6 +132,43 @@ describe('<rm-message-editor>', () => {
     const el = await mount();
     const chip = el.querySelector('[data-testid="composer-coworker-btn"]');
     expect(chip?.textContent).toContain('Ops coworker');
+  });
+
+  it('coworker dropdown row subtitle is Backend · Model (not agent_role)', async () => {
+    listCoworkersSpy.mockResolvedValue([
+      // model_id pins one row to a known model in the catalogue;
+      // the other has no model so we verify the graceful fallback.
+      makeCoworker('cw-a', 'Ops coworker', 'operations'),
+      { ...makeCoworker('cw-b', 'Finance coworker', 'finance'), model_id: 'mdl-1' },
+    ]);
+    listModelsSpy.mockResolvedValue([
+      {
+        id: 'mdl-1',
+        provider: 'openai',
+        model_id: 'gpt-4o',
+        model_family: 'gpt-4',
+        display_name: 'GPT-4o',
+        is_active: true,
+      },
+    ]);
+    const el = await mount();
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="composer-coworker-btn"]',
+    )!.click();
+    await settle(el);
+    const opts = el.querySelectorAll(
+      '[data-testid="composer-coworker-option"]',
+    );
+    expect(opts.length).toBe(2);
+    // Row 0 (cw-a, model_id null) — backend only with no-model hint.
+    expect(opts[0].textContent).toContain('Claude');
+    expect(opts[0].textContent).toContain('(no model)');
+    // Row 1 (cw-b, model resolved) — "Claude · GPT-4o".
+    expect(opts[1].textContent).toContain('Claude');
+    expect(opts[1].textContent).toContain('GPT-4o');
+    // Neither row should still say agent_role.
+    expect(opts[0].textContent ?? '').not.toContain('operations');
+    expect(opts[1].textContent ?? '').not.toContain('finance');
   });
 
   it('opens the coworker menu on chip click and lists every coworker', async () => {

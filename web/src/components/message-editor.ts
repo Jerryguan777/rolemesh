@@ -22,7 +22,11 @@
 import { LitElement, html, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import { getApiClient, type Coworker } from '../api/client.js';
+import { getApiClient, type Coworker, type Model } from '../api/client.js';
+import {
+  coworkerSubtitle,
+  modelsByIdMap,
+} from '../services/coworker-label.js';
 
 export type AgentState = 'idle' | 'running' | 'stopping';
 
@@ -66,6 +70,10 @@ export class MessageEditor extends LitElement {
   @state() private focused = false;
   @state() private coworkers: Coworker[] = [];
   @state() private activeCoworkerId: string | null = null;
+  /** Tenant model catalogue — used by `coworkerSubtitle` to print the
+   *  "Backend · Model" hint in the coworker dropdown. Failure here
+   *  degrades gracefully (subtitle drops the model half). */
+  @state() private modelsById: Map<string, Model> = new Map();
   @state() private menuOpen = false;
   @state() private kebabOpen = false;
   @state() private attachToast = false;
@@ -76,6 +84,7 @@ export class MessageEditor extends LitElement {
     super.connectedCallback();
     this.activeCoworkerId = new URLSearchParams(location.search).get('agent_id');
     void this.loadCoworkers();
+    void this.loadModels();
     document.addEventListener('click', this.onDocumentClick, true);
   }
 
@@ -91,6 +100,16 @@ export class MessageEditor extends LitElement {
       // A failure here is non-fatal — the editor still sends messages;
       // only the switcher dropdown goes empty.
       this.coworkers = [];
+    }
+  }
+
+  private async loadModels(): Promise<void> {
+    try {
+      const models = await getApiClient().listModels();
+      this.modelsById = modelsByIdMap(models);
+    } catch {
+      // Non-fatal — coworker subtitle falls back to backend-only.
+      this.modelsById = new Map();
     }
   }
 
@@ -278,7 +297,9 @@ export class MessageEditor extends LitElement {
         >
           <span class="w-2 h-2 rounded-full shrink-0" style=${`background:${colourForCoworker(c)}`}></span>
           <span class="flex-1 truncate">${c.name}</span>
-          <span class="text-[11px] text-ink-3 dark:text-d-ink-3 truncate">${c.agent_role}</span>
+          <span class="text-[11px] text-ink-3 dark:text-d-ink-3 truncate">
+            ${coworkerSubtitle(c, this.modelsById)}
+          </span>
         </button>
       `)}
     `;

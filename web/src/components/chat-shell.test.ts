@@ -33,6 +33,7 @@ const listConvsSpy = vi.fn();
 const listApprovalsSpy = vi.fn();
 const listMessagesSpy = vi.fn();
 const createConvSpy = vi.fn();
+const listModelsSpy = vi.fn();
 
 vi.mock('../api/client.js', async () => {
   const actual = await vi.importActual<typeof import('../api/client.js')>(
@@ -47,6 +48,7 @@ vi.mock('../api/client.js', async () => {
       listApprovals: listApprovalsSpy,
       listMessages: listMessagesSpy,
       createCoworkerConversation: createConvSpy,
+      listModels: listModelsSpy,
       setToken: vi.fn(),
     }),
   };
@@ -315,6 +317,7 @@ describe('<rm-chat-shell>', () => {
       listApprovalsSpy,
       listMessagesSpy,
       createConvSpy,
+      listModelsSpy,
     ].forEach((s) => s.mockReset());
     listCoworkersSpy.mockResolvedValue([COWORKER_A, COWORKER_B]);
     getMeSpy.mockResolvedValue(ME);
@@ -330,6 +333,7 @@ describe('<rm-chat-shell>', () => {
       id: 'created-default',
       created_at: '2026-05-23T00:00:00Z',
     });
+    listModelsSpy.mockResolvedValue([]);
     originalFetch = globalThis.fetch;
     globalThis.fetch = vi
       .fn()
@@ -766,6 +770,35 @@ describe('<rm-chat-shell>', () => {
     );
     await settle(el);
     expect(dot()?.getAttribute('data-connected')).toBe('false');
+  });
+
+  it('renders the coworker subtitle as Backend · Model, not agent_role', async () => {
+    // Pin the v2-C label change: the sidebar coworker switcher used
+    // to surface c.agent_role ("agent" / "super_agent"), which the
+    // v2 design explicitly hides. Now subtitle is "Backend · Model
+    // display_name", looked up via the models map.
+    listCoworkersSpy.mockResolvedValue([
+      // agent_backend=claude, model_id=mdl-1
+      { ...COWORKER_A, model_id: 'mdl-1' },
+    ]);
+    listModelsSpy.mockResolvedValue([
+      {
+        id: 'mdl-1',
+        provider: 'anthropic',
+        model_id: 'claude-sonnet-4-7',
+        model_family: 'claude-sonnet',
+        display_name: 'Claude Sonnet 4.7',
+        is_active: true,
+      },
+    ]);
+    const el = await mountShell();
+    const switcher = el.querySelector(
+      '[data-testid="coworker-switcher"] .csw-txt',
+    );
+    expect(switcher?.textContent).toContain('Claude');
+    expect(switcher?.textContent).toContain('Claude Sonnet 4.7');
+    // The forbidden value must NOT leak through.
+    expect(switcher?.textContent ?? '').not.toMatch(/operations|super_agent/);
   });
 
   it('renders a 2-tone wordmark (Role + Mesh) without the legacy R square', async () => {
