@@ -91,7 +91,14 @@ export class MCPServersPage extends LitElement {
     }
   }
 
-  private async remove(row: MCPServer): Promise<void> {
+  // Renamed from `remove` (v1.1) — `HTMLElement.prototype.remove`
+  // exists as a no-arg "detach this element from the DOM" method, and
+  // Lit's NodePart._$clear calls it during teardown. Overriding it
+  // with a 1-arg method (taking a row) made every Lit-driven unmount
+  // throw "Cannot read properties of undefined (reading 'id')" mid-
+  // clear, leaving the old <rm-mcp-servers-page> stranded in the DOM
+  // whenever the settings shell switched tabs.
+  private async removeServer(row: MCPServer): Promise<void> {
     this.deleteError = { ...this.deleteError, [row.id]: '' };
     try {
       await this.api.deleteMCPServer(row.id);
@@ -322,7 +329,7 @@ export class MCPServersPage extends LitElement {
             type="button"
             class="text-[12px] px-2.5 py-1 rounded-md border border-red-300 dark:border-red-700
               text-red-700 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/20 cursor-pointer"
-            @click=${() => void this.remove(r)}
+            @click=${() => void this.removeServer(r)}
           >Delete</button>
         </div>
         ${delErr

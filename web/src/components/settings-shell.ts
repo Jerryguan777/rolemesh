@@ -27,6 +27,7 @@
 
 import { LitElement, html, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
+import { keyed } from 'lit/directives/keyed.js';
 
 import { iconChevronDown, iconClose, iconSettings } from './icons.js';
 import './reauth-banner.js';
@@ -350,7 +351,9 @@ export class RmSettingsShell extends LitElement {
         </div>
         <div class="ss-body">
           <div class="ss-card" data-testid="settings-active-pane">
-            ${active ? active.render() : nothing}
+            ${active
+              ? keyed(activeSlug, active.render())
+              : nothing}
           </div>
         </div>
       </div>

@@ -93,7 +93,10 @@ export class CredentialsPage extends LitElement {
     }
   }
 
-  private async remove(provider: ModelProvider): Promise<void> {
+  // Renamed from `remove` to avoid overriding HTMLElement.prototype.remove;
+  // see mcp-servers-page.ts for the matching diagnostic — Lit's NodePart
+  // teardown calls element.remove() with zero args and would throw here.
+  private async removeCredential(provider: ModelProvider): Promise<void> {
     this.inFlight = { ...this.inFlight, [provider]: true };
     this.putErrors = { ...this.putErrors, [provider]: '' };
     try {
@@ -225,7 +228,7 @@ export class CredentialsPage extends LitElement {
                   text-red-700 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/20 cursor-pointer
                   disabled:opacity-60 disabled:cursor-not-allowed"
                 ?disabled=${busy}
-                @click=${() => void this.remove(provider)}
+                @click=${() => void this.removeCredential(provider)}
               >Delete</button>`
             : null}
         </div>

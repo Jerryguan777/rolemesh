@@ -209,6 +209,40 @@ describe('<rm-settings-shell>', () => {
     },
   );
 
+  it('switching slugs replaces the previous page (no stacked siblings)', async () => {
+    // Regression — v1.1 MCPServersPage / CredentialsPage shipped a
+    // private `remove(row)` method that shadowed
+    // `HTMLElement.prototype.remove()`. Lit's NodePart teardown calls
+    // `element.remove()` (no args) to detach the old page on a tab
+    // switch; the 1-arg shadow threw "Cannot read properties of
+    // undefined (reading 'id')" mid-clear, so the old element stayed
+    // in the DOM next to the new one. The fix renamed the methods to
+    // `removeServer` / `removeCredential`; pin the contract here so
+    // a future reintroduction of `remove(row)` fails this test
+    // instead of regressing the visible behaviour.
+    loc.restore();
+    loc = stubHash('#/manage/mcp-servers');
+    const el = await mount();
+    const pane = () =>
+      el.querySelector('[data-testid="settings-active-pane"]')!;
+    expect(pane().children).toHaveLength(1);
+    expect(pane().children[0].tagName).toBe('RM-MCP-SERVERS-PAGE');
+
+    // Walk through a few tabs that previously triggered the stack.
+    for (const slug of ['skills', 'credentials', 'mcp-servers']) {
+      const btn = el.querySelector<HTMLButtonElement>(
+        `[data-testid="settings-nav-entry"][data-slug="${slug}"]`,
+      );
+      btn!.click();
+      await settle(el);
+      // Exactly one page must remain — the new one. No leftovers.
+      expect(
+        pane().children,
+        `pane should have exactly 1 child after navigating to ${slug}`,
+      ).toHaveLength(1);
+    }
+  });
+
   it('highlights the active entry with class="active"', async () => {
     loc.restore();
     loc = stubHash('#/manage/skills');
