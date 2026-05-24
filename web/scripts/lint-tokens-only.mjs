@@ -36,6 +36,10 @@ const ALLOWLIST_FILES = new Set([
   // user-identification colour), not a brand token. Leaving as a
   // tracked known-exception until v3 lifts it into tokens.css.
   'components/chat-shell.ts',
+  // message-editor duplicates the same coworker-avatar palette so
+  // its dropdown chip dot matches the sidebar swatch. Same v3 chore:
+  // lift AVATAR_COLOURS into a shared module.
+  'components/message-editor.ts',
   // Legacy global stylesheet predating the token system. v2-C lint
   // ships in lockfile mode — these need a dedicated migration chore
   // (~25 colour literals + 2 font literals). Tracked in v2-C

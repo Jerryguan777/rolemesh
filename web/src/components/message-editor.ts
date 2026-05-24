@@ -1,7 +1,51 @@
-import { LitElement, html } from 'lit';
+// <rm-message-editor> — composer for the chat-panel.
+//
+// History: shipped in v1.1 as a textarea + send button. v2-C grows the
+// toolbar to match `docs/webui-ui-redesign-v2-prototype.html` (lines
+// 449-466): an attach affordance on the left, a coworker selector in
+// the middle, and the send button on the right. The selector is a
+// second access path to the same switch chat-shell offers in its
+// sidebar — useful when the user wants to address THIS message to a
+// different coworker without leaving the conversation.
+//
+// Why self-fetching coworkers: chat-panel does not own the coworker
+// catalogue (it only tracks `activeCoworkerId` from the URL). Wiring
+// the list down would mean touching chat-panel, which v2-A's locked
+// "v1.1 zero-touched" rule discourages. The editor is small enough
+// that one extra API call on mount is the right trade-off.
+//
+// Why attach is a no-op: design has no spec'd upload backend yet.
+// The button satisfies the prototype look so users do not file
+// "missing feature" bugs; clicking surfaces a transient toast that
+// explains the v3 dependency.
+
+import { LitElement, html, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
+import { getApiClient, type Coworker } from '../api/client.js';
+
 export type AgentState = 'idle' | 'running' | 'stopping';
+
+/** Coworker avatar palette — mirror of chat-shell's, kept inline so
+ *  the editor doesn't import from a sibling. v3 should lift the
+ *  palette + hash function into a shared module. */
+const AVATAR_COLOURS = [
+  '#C2613F',
+  '#3F7DC2',
+  '#2F7D5B',
+  '#8A5BC2',
+  '#C29A3F',
+  '#C23F77',
+];
+
+function colourForCoworker(c: Coworker | null): string {
+  if (!c) return AVATAR_COLOURS[0];
+  let hash = 0;
+  for (let i = 0; i < c.id.length; i += 1) {
+    hash = (hash * 31 + c.id.charCodeAt(i)) | 0;
+  }
+  return AVATAR_COLOURS[Math.abs(hash) % AVATAR_COLOURS.length];
+}
 
 @customElement('rm-message-editor')
 export class MessageEditor extends LitElement {
@@ -11,10 +55,51 @@ export class MessageEditor extends LitElement {
   //  stopping — dimmed Stop button with spinner ring, disabled
   @property({ type: String }) agentState: AgentState = 'idle';
   @property({ type: Boolean }) connected = false;
+
   @state() private value = '';
   @state() private focused = false;
+  @state() private coworkers: Coworker[] = [];
+  @state() private activeCoworkerId: string | null = null;
+  @state() private menuOpen = false;
+  @state() private attachToast = false;
 
   protected override createRenderRoot() { return this; }
+
+  override connectedCallback(): void {
+    super.connectedCallback();
+    this.activeCoworkerId = new URLSearchParams(location.search).get('agent_id');
+    void this.loadCoworkers();
+    document.addEventListener('click', this.onDocumentClick, true);
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    document.removeEventListener('click', this.onDocumentClick, true);
+  }
+
+  private async loadCoworkers(): Promise<void> {
+    try {
+      this.coworkers = await getApiClient().listCoworkers();
+    } catch {
+      // A failure here is non-fatal — the editor still sends messages;
+      // only the switcher dropdown goes empty.
+      this.coworkers = [];
+    }
+  }
+
+  private onDocumentClick = (e: MouseEvent) => {
+    if (!this.menuOpen) return;
+    const target = e.target as Node | null;
+    if (!target) return;
+    const trigger = this.querySelector('[data-testid="composer-coworker-btn"]');
+    const menu = this.querySelector('[data-testid="composer-coworker-menu"]');
+    if (trigger?.contains(target) || menu?.contains(target)) return;
+    this.menuOpen = false;
+  };
+
+  private get activeCoworker(): Coworker | null {
+    return this.coworkers.find((c) => c.id === this.activeCoworkerId) ?? null;
+  }
 
   private handleKeyDown(e: KeyboardEvent) {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
@@ -29,7 +114,7 @@ export class MessageEditor extends LitElement {
 
   private handleSend() {
     // Follow-up messages are allowed even while the agent is running.
-    // The orchestrator queues them for after the current turn (see README).
+    // The orchestrator queues them for after the current turn.
     if (!this.value.trim()) return;
     this.dispatchEvent(new CustomEvent('send', {
       detail: { content: this.value },
@@ -49,6 +134,29 @@ export class MessageEditor extends LitElement {
     else if (this.agentState === 'running') this.handleStop();
     // stopping: no-op (button is disabled)
   }
+
+  private toggleMenu = () => {
+    this.menuOpen = !this.menuOpen;
+  };
+
+  private selectCoworker = (id: string) => {
+    this.menuOpen = false;
+    if (id === this.activeCoworkerId) return;
+    // Same reload pattern chat-shell uses (locked v2-A decision —
+    // chat-panel reads agent_id from URL in its constructor, so the
+    // simplest swap is a full reload).
+    const params = new URLSearchParams(location.search);
+    params.set('agent_id', id);
+    params.delete('chat_id');
+    location.href = `${location.pathname}?${params.toString()}#/`;
+  };
+
+  private onAttachClick = () => {
+    // Surface a brief toast so users understand the affordance is
+    // intentional but not yet backed by an upload pipeline.
+    this.attachToast = true;
+    setTimeout(() => { this.attachToast = false; }, 2400);
+  };
 
   private get canSend(): boolean {
     return this.agentState === 'idle' && this.value.trim().length > 0;
@@ -73,7 +181,7 @@ export class MessageEditor extends LitElement {
   }
 
   private get buttonClass(): string {
-    const base = 'flex items-center justify-center w-7 h-7 rounded-lg transition-all duration-150 relative';
+    const base = 'flex items-center justify-center w-8 h-8 rounded-lg transition-all duration-150 relative ml-auto';
     if (this.agentState === 'idle') {
       return this.canSend
         ? `${base} bg-brand text-white hover:bg-brand-dark active:scale-95 shadow-sm`
@@ -100,37 +208,119 @@ export class MessageEditor extends LitElement {
     return false;  // running: always enabled
   }
 
-  override render() {
+  private renderCoworkerMenu() {
+    if (this.coworkers.length === 0) {
+      return html`<div
+        class="px-3 py-2 text-[12.5px] text-ink-3 dark:text-d-ink-3"
+      >No coworkers configured</div>`;
+    }
     return html`
-      <div class="rounded-2xl border transition-all duration-200
-        ${this.focused
-          ? 'border-brand/50 shadow-[0_0_0_3px_rgba(99,102,241,0.08)] dark:shadow-[0_0_0_3px_rgba(99,102,241,0.12)]'
-          : 'border-surface-3 dark:border-d-surface-3 shadow-sm'}
-        bg-surface-0 dark:bg-d-surface-1">
+      <div class="px-2.5 pt-2 pb-1 text-[11px] font-semibold uppercase tracking-wider text-ink-3 dark:text-d-ink-3">
+        Switch coworker
+      </div>
+      ${this.coworkers.map((c) => html`
+        <button
+          type="button"
+          class=${`flex items-center gap-2.5 w-full text-left px-2.5 py-1.5 rounded-md text-[13px] hover:bg-surface-2 dark:hover:bg-d-surface-2 cursor-pointer ${c.id === this.activeCoworkerId ? 'bg-surface-2 dark:bg-d-surface-2' : ''}`}
+          data-testid="composer-coworker-option"
+          data-coworker-id=${c.id}
+          @click=${() => this.selectCoworker(c.id)}
+        >
+          <span class="w-2 h-2 rounded-full shrink-0" style=${`background:${colourForCoworker(c)}`}></span>
+          <span class="flex-1 truncate">${c.name}</span>
+          <span class="text-[11px] text-ink-3 dark:text-d-ink-3 truncate">${c.agent_role}</span>
+        </button>
+      `)}
+    `;
+  }
 
-        <textarea
-          class="w-full resize-none bg-transparent px-3.5 py-3 text-[13.5px] text-ink-0 dark:text-d-ink-0 placeholder:text-ink-3 dark:placeholder:text-d-ink-3 outline-none leading-relaxed"
-          placeholder=${this.connected ? 'Send a message...' : 'Connecting...'}
-          rows="1"
-          style="max-height: 160px; field-sizing: content; min-height: 1lh;"
-          .value=${this.value}
-          ?disabled=${!this.connected}
-          @input=${this.handleInput}
-          @keydown=${this.handleKeyDown}
-          @focus=${() => { this.focused = true; }}
-          @blur=${() => { this.focused = false; }}
-        ></textarea>
+  override render() {
+    const active = this.activeCoworker;
+    const placeholder = active
+      ? `Message ${active.name}…`
+      : this.connected
+        ? 'Send a message…'
+        : 'Connecting…';
+    return html`
+      <div class="relative">
+        <div class="rounded-2xl border transition-all duration-200
+          ${this.focused
+            ? 'border-brand/50 shadow-[0_0_0_3px_rgba(99,102,241,0.08)] dark:shadow-[0_0_0_3px_rgba(99,102,241,0.12)]'
+            : 'border-surface-3 dark:border-d-surface-3 shadow-sm'}
+          bg-surface-0 dark:bg-d-surface-1">
 
-        <div class="flex items-center justify-end px-2.5 pb-2">
-          <button
-            class=${this.buttonClass}
-            ?disabled=${this.buttonDisabled}
-            title=${this.buttonTitle}
-            @click=${this.handleButtonClick}
-          >
-            ${this.renderButtonContent()}
-          </button>
+          <textarea
+            class="w-full resize-none bg-transparent px-3.5 py-3 text-[13.5px] text-ink-0 dark:text-d-ink-0 placeholder:text-ink-3 dark:placeholder:text-d-ink-3 outline-none leading-relaxed"
+            placeholder=${placeholder}
+            rows="1"
+            style="max-height: 160px; field-sizing: content; min-height: 1lh;"
+            .value=${this.value}
+            ?disabled=${!this.connected}
+            @input=${this.handleInput}
+            @keydown=${this.handleKeyDown}
+            @focus=${() => { this.focused = true; }}
+            @blur=${() => { this.focused = false; }}
+          ></textarea>
+
+          <div class="flex items-center gap-1.5 px-2 pb-2">
+            <button
+              type="button"
+              class="flex items-center justify-center w-8 h-8 rounded-lg text-ink-2 dark:text-d-ink-2 hover:bg-surface-2 dark:hover:bg-d-surface-2 transition-colors cursor-pointer"
+              title="Attach files (coming in v3)"
+              data-testid="composer-attach"
+              @click=${this.onAttachClick}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="m21.4 11.05-9.19 9.2a5 5 0 0 1-7.07-7.08l9.19-9.19a3.33 3.33 0 0 1 4.71 4.71l-9.2 9.19a1.67 1.67 0 0 1-2.36-2.36l8.49-8.48"/>
+              </svg>
+            </button>
+
+            <div class="relative">
+              <button
+                type="button"
+                class="flex items-center gap-2 h-8 px-2.5 rounded-lg text-[13px] text-ink-2 dark:text-d-ink-2 hover:bg-surface-2 dark:hover:bg-d-surface-2 border border-transparent hover:border-surface-3 dark:hover:border-d-surface-3 transition-colors cursor-pointer"
+                data-testid="composer-coworker-btn"
+                aria-haspopup="menu"
+                aria-expanded=${this.menuOpen}
+                @click=${this.toggleMenu}
+              >
+                <span
+                  class="w-2 h-2 rounded-full shrink-0"
+                  style=${`background:${colourForCoworker(active)}`}
+                ></span>
+                <span class="max-w-[160px] truncate">${active?.name ?? 'No coworker'}</span>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="text-ink-3 dark:text-d-ink-3">
+                  <path d="m6 9 6 6 6-6"/>
+                </svg>
+              </button>
+              ${this.menuOpen
+                ? html`<div
+                    class="absolute bottom-full left-0 mb-1.5 z-30 min-w-[240px] rounded-lg border border-surface-3 dark:border-d-surface-3 bg-surface-0 dark:bg-d-surface-1 shadow-lg p-1.5"
+                    role="menu"
+                    data-testid="composer-coworker-menu"
+                  >${this.renderCoworkerMenu()}</div>`
+                : nothing}
+            </div>
+
+            <button
+              class=${this.buttonClass}
+              ?disabled=${this.buttonDisabled}
+              title=${this.buttonTitle}
+              data-testid="composer-send"
+              @click=${this.handleButtonClick}
+            >
+              ${this.renderButtonContent()}
+            </button>
+          </div>
         </div>
+
+        ${this.attachToast
+          ? html`<div
+              class="absolute -top-9 left-0 right-0 mx-auto w-fit px-3 py-1.5 rounded-md bg-ink-0 dark:bg-d-ink-0 text-white text-[12px] shadow-lg pointer-events-none"
+              data-testid="composer-attach-toast"
+              role="status"
+            >File upload is a v3 feature.</div>`
+          : nothing}
       </div>
     `;
   }

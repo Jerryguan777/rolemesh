@@ -739,10 +739,15 @@ export class RmChatShell extends LitElement {
          * worst case is the v2-A look returns (one extra brand
          * mark). chat-panel.test.ts catches gross regressions. */
         rm-chat-shell rm-chat-panel rm-sidebar { display: none; }
+        /* ":first-child" on .shrink-0 is critical — chat-panel has
+         * THREE direct .shrink-0 children (top bar, agent status,
+         * composer); a plain "> div.shrink-0" would eat the composer
+         * too. The top bar is always the first .shrink-0 child of
+         * the main column. */
         rm-chat-shell rm-chat-panel
           > div:first-child
           > div.flex-1
-          > div.shrink-0
+          > div.shrink-0:first-child
           > div:first-child {
           display: none;
         }
