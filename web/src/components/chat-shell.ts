@@ -134,6 +134,12 @@ export class RmChatShell extends LitElement {
   @state() private me: Me | null = null;
   @state() private activeCoworkerId: string | null = null;
   @state() private activeConversationId: string | null = null;
+  /** conversation_id → preview text derived from the first user
+   *  message. Computed lazily on sidebar refresh; the Conversation
+   *  schema's optional `name` field still wins when present (a user
+   *  who explicitly renames a chat shouldn't see the preview clobber
+   *  their label). */
+  @state() private convPreviews = new Map<string, string>();
   /** Which popover, if any, is open. Only one at a time to keep
    *  keyboard handling simple. */
   @state() private openMenu: '' | 'coworker' | 'user' | 'approvals' = '';
@@ -306,6 +312,49 @@ export class RmChatShell extends LitElement {
       console.warn('chat-shell: listCoworkerConversations failed', err);
       this.conversations = [];
     }
+    // Kick off preview loads. We do not await — the sidebar paints
+    // immediately with whatever label is available; each preview
+    // streams in and triggers a re-render via the @state Map. A
+    // failure for one conversation leaves the row showing the
+    // `name` (or "New chat") fallback without dragging the whole
+    // sidebar into an error state.
+    void this.loadConversationPreviews();
+  }
+
+  /** Truncate to a sidebar-friendly width. The visible rail is
+   *  ~240px wide; ~48 chars fits one line at the body font size with
+   *  some margin. Single ellipsis at the cut point.
+   *
+   *  Strips leading/trailing whitespace and collapses newlines so a
+   *  multi-line first message doesn't expand the row. */
+  private static formatPreview(raw: string, max = 48): string {
+    const cleaned = raw.replace(/\s+/g, ' ').trim();
+    if (cleaned.length <= max) return cleaned;
+    return cleaned.slice(0, max - 1).trimEnd() + '…';
+  }
+
+  /** Fetch the first user message for each conversation lacking a
+   *  preview, in parallel. Conversations the user explicitly named
+   *  via `Conversation.name` keep their name; previews are a
+   *  fallback for unnamed rows. */
+  private async loadConversationPreviews(): Promise<void> {
+    const needed = this.conversations.filter(
+      (c) => !this.convPreviews.has(c.id),
+    );
+    if (needed.length === 0) return;
+    const results = await Promise.allSettled(
+      needed.map((c) => this.api.listMessages(c.id)),
+    );
+    const next = new Map(this.convPreviews);
+    for (let i = 0; i < needed.length; i += 1) {
+      const r = results[i];
+      if (r.status !== 'fulfilled') continue;
+      const firstUser = r.value.find((m) => m.role === 'user');
+      const source = firstUser ?? r.value[0];
+      if (!source || !source.content) continue;
+      next.set(needed[i].id, RmChatShell.formatPreview(source.content));
+    }
+    this.convPreviews = next;
   }
 
   // Document-level click closes whichever popover is open. We attach
@@ -446,20 +495,7 @@ export class RmChatShell extends LitElement {
         rm-chat-shell .cs-brand {
           display: flex;
           align-items: center;
-          gap: 9px;
           padding: 14px 14px 10px;
-        }
-        rm-chat-shell .cs-brand .mark {
-          width: 26px;
-          height: 26px;
-          border-radius: 8px;
-          background: var(--rm-accent);
-          color: var(--rm-accent-ink);
-          display: grid;
-          place-items: center;
-          font-weight: 600;
-          font-size: 13px;
-          flex-shrink: 0;
         }
         rm-chat-shell .cs-brand b { font-weight: 600; font-size: 14.5px; }
         rm-chat-shell .coswitch {
@@ -877,8 +913,7 @@ export class RmChatShell extends LitElement {
       <div class="cs-layout">
       <aside class="cs-sidebar">
         <div class="cs-brand">
-          <div class="mark">R</div>
-          <div><b>RoleMesh</b></div>
+          <b>RoleMesh</b>
         </div>
 
         <div class="coswitch-wrap">
@@ -1001,18 +1036,23 @@ export class RmChatShell extends LitElement {
     return html`
       <div class="cgroup">
         <div class="grouplabel">${group.label}</div>
-        ${group.items.map(
-          (c) => html`
+        ${group.items.map((c) => {
+          const label =
+            (c.name && c.name.trim())
+              ? c.name
+              : (this.convPreviews.get(c.id) ?? 'New chat');
+          return html`
             <button
               class=${`conv ${c.id === this.activeConversationId ? 'active' : ''}`}
               data-testid="conversation-row"
               data-conv-id=${c.id}
+              title=${label}
               @click=${() => this.navigateConversation(c.id)}
             >
-              <span class="t">${c.name ?? 'Conversation'}</span>
+              <span class="t">${label}</span>
             </button>
-          `,
-        )}
+          `;
+        })}
       </div>
     `;
   }

@@ -31,6 +31,7 @@ const listCoworkersSpy = vi.fn();
 const getMeSpy = vi.fn();
 const listConvsSpy = vi.fn();
 const listApprovalsSpy = vi.fn();
+const listMessagesSpy = vi.fn();
 
 vi.mock('../api/client.js', async () => {
   const actual = await vi.importActual<typeof import('../api/client.js')>(
@@ -43,6 +44,7 @@ vi.mock('../api/client.js', async () => {
       getMe: getMeSpy,
       listCoworkerConversations: listConvsSpy,
       listApprovals: listApprovalsSpy,
+      listMessages: listMessagesSpy,
       setToken: vi.fn(),
     }),
   };
@@ -304,15 +306,20 @@ describe('<rm-chat-shell>', () => {
   let originalFetch: typeof globalThis.fetch;
 
   beforeEach(() => {
-    [listCoworkersSpy, getMeSpy, listConvsSpy, listApprovalsSpy].forEach((s) =>
-      s.mockReset(),
-    );
+    [
+      listCoworkersSpy,
+      getMeSpy,
+      listConvsSpy,
+      listApprovalsSpy,
+      listMessagesSpy,
+    ].forEach((s) => s.mockReset());
     listCoworkersSpy.mockResolvedValue([COWORKER_A, COWORKER_B]);
     getMeSpy.mockResolvedValue(ME);
     listConvsSpy.mockResolvedValue([
       conv('c-1', 'Today thread', new Date()),
     ]);
     listApprovalsSpy.mockResolvedValue([]);
+    listMessagesSpy.mockResolvedValue([]);
     originalFetch = globalThis.fetch;
     globalThis.fetch = vi
       .fn()
@@ -497,6 +504,93 @@ describe('<rm-chat-shell>', () => {
     // It MUST also include the current agent_id so chat-panel still
     // knows which coworker owns the conversation.
     expect(loc.hrefAssignments[0]).toContain('agent_id=cw-a');
+  });
+
+  it('uses Conversation.name as the row label when one is set', async () => {
+    listConvsSpy.mockResolvedValue([conv('cv-9', 'My chat', new Date())]);
+    const el = await mountShell();
+    const row = el.querySelector('[data-testid="conversation-row"]');
+    expect(row?.textContent?.trim()).toBe('My chat');
+    // No need to fetch messages when the name already provides a label,
+    // but the implementation still warms previews in the background;
+    // we don't pin that — only the visible label matters here.
+  });
+
+  it('falls back to the first user message when Conversation.name is null', async () => {
+    listConvsSpy.mockResolvedValue([
+      conv('cv-null', null as unknown as string, new Date()),
+    ]);
+    listMessagesSpy.mockResolvedValue([
+      {
+        id: 'm-sys',
+        role: 'assistant',
+        content: 'Hello, how can I help?',
+        timestamp: '2026-05-23T00:00:00Z',
+      },
+      {
+        id: 'm-user',
+        role: 'user',
+        content: 'Help me ship the v2 UI redesign',
+        timestamp: '2026-05-23T00:00:01Z',
+      },
+    ]);
+    const el = await mountShell();
+    const row = el.querySelector('[data-testid="conversation-row"]');
+    expect(row?.textContent?.trim()).toBe('Help me ship the v2 UI redesign');
+  });
+
+  it('truncates a long first message with an ellipsis (~48 chars)', async () => {
+    const longMsg =
+      'This is an unusually verbose user message that should ' +
+      'absolutely get truncated to fit the sidebar rail without ' +
+      'wrapping or breaking the layout in unpleasant ways.';
+    listConvsSpy.mockResolvedValue([
+      conv('cv-long', null as unknown as string, new Date()),
+    ]);
+    listMessagesSpy.mockResolvedValue([
+      {
+        id: 'm-1',
+        role: 'user',
+        content: longMsg,
+        timestamp: '2026-05-23T00:00:00Z',
+      },
+    ]);
+    const el = await mountShell();
+    const row = el.querySelector('[data-testid="conversation-row"]');
+    const text = row?.textContent?.trim() ?? '';
+    expect(text.length).toBeLessThan(longMsg.length);
+    expect(text.endsWith('…')).toBe(true);
+  });
+
+  it('shows "New chat" when there is neither name nor any messages', async () => {
+    listConvsSpy.mockResolvedValue([
+      conv('cv-empty', null as unknown as string, new Date()),
+    ]);
+    listMessagesSpy.mockResolvedValue([]);
+    const el = await mountShell();
+    const row = el.querySelector('[data-testid="conversation-row"]');
+    expect(row?.textContent?.trim()).toBe('New chat');
+  });
+
+  it('a failed listMessages does not blow up the sidebar (row keeps fallback)', async () => {
+    listConvsSpy.mockResolvedValue([
+      conv('cv-bad', null as unknown as string, new Date()),
+    ]);
+    listMessagesSpy.mockRejectedValue(new Error('boom'));
+    const el = await mountShell();
+    const row = el.querySelector('[data-testid="conversation-row"]');
+    expect(row).not.toBeNull();
+    expect(row?.textContent?.trim()).toBe('New chat');
+  });
+
+  it('drops the "R" logo mark — sidebar brand is text-only', async () => {
+    const el = await mountShell();
+    const brand = el.querySelector('.cs-brand');
+    expect(brand).not.toBeNull();
+    // The mark <div> used to read "R" and held the accent-coloured
+    // square. v3 removes it; only the wordmark remains.
+    expect(brand?.querySelector('.mark')).toBeNull();
+    expect(brand?.textContent?.trim()).toBe('RoleMesh');
   });
 
   it('opens the user-pill menu and exposes Settings + Log out', async () => {
