@@ -583,6 +583,36 @@ describe('<rm-chat-shell>', () => {
     expect(row?.textContent?.trim()).toBe('New chat');
   });
 
+  it('tenant pill connection dot flips to "off" when an agent-connection event reports disconnected', async () => {
+    // v2-C dropped chat-panel's standalone "Disconnected" indicator;
+    // the dot now lives in chat-shell's tenant pill. Message-editor
+    // bubbles `agent-connection` whenever its `connected` prop flips.
+    const el = await mountShell();
+    // Default render is disconnected (no event yet) — confirm baseline.
+    const dot = () =>
+      el.querySelector('[data-testid="connection-dot"]');
+    expect(dot()?.getAttribute('data-connected')).toBe('false');
+    // Simulate the editor's event landing on the shell.
+    el.dispatchEvent(
+      new CustomEvent('agent-connection', {
+        detail: { connected: true },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    await settle(el);
+    expect(dot()?.getAttribute('data-connected')).toBe('true');
+    el.dispatchEvent(
+      new CustomEvent('agent-connection', {
+        detail: { connected: false },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    await settle(el);
+    expect(dot()?.getAttribute('data-connected')).toBe('false');
+  });
+
   it('drops the "R" logo mark — sidebar brand is text-only', async () => {
     const el = await mountShell();
     const brand = el.querySelector('.cs-brand');

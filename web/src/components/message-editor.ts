@@ -55,12 +55,19 @@ export class MessageEditor extends LitElement {
   //  stopping — dimmed Stop button with spinner ring, disabled
   @property({ type: String }) agentState: AgentState = 'idle';
   @property({ type: Boolean }) connected = false;
+  /** True iff a hard-cancel REST call would do anything — set by the
+   *  parent (chat-panel) from its run-lifecycle state. v2-C moved the
+   *  Cancel button out of the chat-panel top bar and into the kebab
+   *  here, but the cancel logic still belongs to chat-panel; we only
+   *  surface the affordance. */
+  @property({ type: Boolean }) canCancel = false;
 
   @state() private value = '';
   @state() private focused = false;
   @state() private coworkers: Coworker[] = [];
   @state() private activeCoworkerId: string | null = null;
   @state() private menuOpen = false;
+  @state() private kebabOpen = false;
   @state() private attachToast = false;
 
   protected override createRenderRoot() { return this; }
@@ -88,14 +95,40 @@ export class MessageEditor extends LitElement {
   }
 
   private onDocumentClick = (e: MouseEvent) => {
-    if (!this.menuOpen) return;
     const target = e.target as Node | null;
     if (!target) return;
-    const trigger = this.querySelector('[data-testid="composer-coworker-btn"]');
-    const menu = this.querySelector('[data-testid="composer-coworker-menu"]');
-    if (trigger?.contains(target) || menu?.contains(target)) return;
-    this.menuOpen = false;
+    if (this.menuOpen) {
+      const trigger = this.querySelector('[data-testid="composer-coworker-btn"]');
+      const menu = this.querySelector('[data-testid="composer-coworker-menu"]');
+      if (!trigger?.contains(target) && !menu?.contains(target)) {
+        this.menuOpen = false;
+      }
+    }
+    if (this.kebabOpen) {
+      const trigger = this.querySelector('[data-testid="composer-kebab-btn"]');
+      const menu = this.querySelector('[data-testid="composer-kebab-menu"]');
+      if (!trigger?.contains(target) && !menu?.contains(target)) {
+        this.kebabOpen = false;
+      }
+    }
   };
+
+  override updated(changed: Map<string, unknown>): void {
+    // Surface `connected` flips so chat-shell can render the
+    // connection state in its tenant pill (no more standalone
+    // Connected/Disconnected row inside chat-panel's top bar). The
+    // event bubbles + composes through Light DOM so the shell can
+    // catch it via plain @agent-connection on its slot.
+    if (changed.has('connected')) {
+      this.dispatchEvent(
+        new CustomEvent<{ connected: boolean }>('agent-connection', {
+          detail: { connected: this.connected },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+    }
+  }
 
   private get activeCoworker(): Coworker | null {
     return this.coworkers.find((c) => c.id === this.activeCoworkerId) ?? null;
@@ -137,6 +170,20 @@ export class MessageEditor extends LitElement {
 
   private toggleMenu = () => {
     this.menuOpen = !this.menuOpen;
+    if (this.menuOpen) this.kebabOpen = false;
+  };
+
+  private toggleKebab = () => {
+    this.kebabOpen = !this.kebabOpen;
+    if (this.kebabOpen) this.menuOpen = false;
+  };
+
+  private requestCancel = () => {
+    this.kebabOpen = false;
+    if (!this.canCancel) return;
+    this.dispatchEvent(
+      new CustomEvent('request-cancel', { bubbles: true, composed: true }),
+    );
   };
 
   private selectCoworker = (id: string) => {
@@ -181,7 +228,10 @@ export class MessageEditor extends LitElement {
   }
 
   private get buttonClass(): string {
-    const base = 'flex items-center justify-center w-8 h-8 rounded-lg transition-all duration-150 relative ml-auto';
+    // Kebab carries the right-alignment now (it sits immediately
+    // before us with `ml-auto`); send is its sibling so no margin
+    // class needed here.
+    const base = 'flex items-center justify-center w-8 h-8 rounded-lg transition-all duration-150 relative';
     if (this.agentState === 'idle') {
       return this.canSend
         ? `${base} bg-brand text-white hover:bg-brand-dark active:scale-95 shadow-sm`
@@ -302,6 +352,45 @@ export class MessageEditor extends LitElement {
                 : nothing}
             </div>
 
+            <div class="relative ml-auto">
+              <button
+                type="button"
+                class="flex items-center justify-center w-8 h-8 rounded-lg text-ink-2 dark:text-d-ink-2 hover:bg-surface-2 dark:hover:bg-d-surface-2 transition-colors cursor-pointer"
+                title="More actions"
+                data-testid="composer-kebab-btn"
+                aria-haspopup="menu"
+                aria-expanded=${this.kebabOpen}
+                @click=${this.toggleKebab}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <circle cx="12" cy="5" r="1.6"/>
+                  <circle cx="12" cy="12" r="1.6"/>
+                  <circle cx="12" cy="19" r="1.6"/>
+                </svg>
+              </button>
+              ${this.kebabOpen
+                ? html`<div
+                    class="absolute bottom-full right-0 mb-1.5 z-30 min-w-[260px] rounded-lg border border-surface-3 dark:border-d-surface-3 bg-surface-0 dark:bg-d-surface-1 shadow-lg p-1.5"
+                    role="menu"
+                    data-testid="composer-kebab-menu"
+                  >
+                    <button
+                      type="button"
+                      class=${`flex flex-col items-start gap-0.5 w-full text-left px-2.5 py-1.5 rounded-md text-[13px] ${this.canCancel ? 'text-red-700 dark:text-red-300 hover:bg-surface-2 dark:hover:bg-d-surface-2 cursor-pointer' : 'text-ink-4 dark:text-d-ink-4 cursor-not-allowed'}`}
+                      data-testid="composer-kebab-cancel"
+                      ?disabled=${!this.canCancel}
+                      @click=${this.requestCancel}
+                    >
+                      <span class="font-medium">Cancel run</span>
+                      <span class="text-[11px] text-ink-3 dark:text-d-ink-3">
+                        ${this.canCancel
+                          ? 'Hard stop — releases the container.'
+                          : 'No active run to cancel.'}
+                      </span>
+                    </button>
+                  </div>`
+                : nothing}
+            </div>
             <button
               class=${this.buttonClass}
               ?disabled=${this.buttonDisabled}

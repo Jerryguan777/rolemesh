@@ -730,8 +730,10 @@ export class ChatPanel extends LitElement {
               <rm-message-editor
                 .agentState=${stopDisabled && this.runState !== 'stopping' ? 'idle' : this.runState === 'stopping' ? 'stopping' : 'running'}
                 .connected=${this.connected}
+                .canCancel=${!cancelDisabled}
                 @send=${(e: CustomEvent) => void this.handleSend(e)}
                 @stop=${() => this.handleStop()}
+                @request-cancel=${() => void this.handleCancel()}
               ></rm-message-editor>
               <div class="text-center mt-2.5 text-[11px] text-ink-3 dark:text-d-ink-3 select-none">
                 AI responses may be inaccurate. Verify important information.

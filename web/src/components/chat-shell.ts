@@ -140,6 +140,11 @@ export class RmChatShell extends LitElement {
    *  who explicitly renames a chat shouldn't see the preview clobber
    *  their label). */
   @state() private convPreviews = new Map<string, string>();
+  /** Mirror of `<rm-message-editor>.connected`, which itself mirrors
+   *  the legacy AgentClient socket state in chat-panel. We absorb
+   *  the `agent-connection` event so the tenant pill can render the
+   *  green/red dot the way chat-panel's top bar used to. */
+  @state() private agentConnected = false;
   /** Which popover, if any, is open. Only one at a time to keep
    *  keyboard handling simple. */
   @state() private openMenu: '' | 'coworker' | 'user' | 'approvals' = '';
@@ -200,6 +205,7 @@ export class RmChatShell extends LitElement {
     this.activeConversationId = params.get('chat_id');
     void this.bootstrap();
     document.addEventListener('click', this.onDocumentClick, true);
+    this.addEventListener('agent-connection', this.onAgentConnection);
     // Tests inject the client via setApprovalsClient() BEFORE attach;
     // production code path lazily mints one here so we don't churn the
     // unit-test stub.
@@ -216,8 +222,16 @@ export class RmChatShell extends LitElement {
   override disconnectedCallback() {
     super.disconnectedCallback();
     document.removeEventListener('click', this.onDocumentClick, true);
+    this.removeEventListener('agent-connection', this.onAgentConnection);
     this.teardownApprovals();
   }
+
+  private onAgentConnection = (e: Event) => {
+    const detail = (e as CustomEvent<{ connected: boolean }>).detail;
+    if (detail && typeof detail.connected === 'boolean') {
+      this.agentConnected = detail.connected;
+    }
+  };
 
   private wireApprovalsClient(): void {
     const c = this.approvalsClient;
@@ -750,6 +764,12 @@ export class RmChatShell extends LitElement {
           border-radius: 50%;
           background: var(--rm-good);
         }
+        /* Connection dot doubles as the chat-panel "Connected" /
+         * "Disconnected" indicator since v2-C dropped chat-panel's
+         * top bar. Red while the legacy AgentClient socket is down. */
+        rm-chat-shell .cs-tenant .grn.off {
+          background: var(--rm-bad);
+        }
         rm-chat-shell .cs-slot {
           flex: 1;
           min-height: 0;
@@ -775,16 +795,19 @@ export class RmChatShell extends LitElement {
          * worst case is the v2-A look returns (one extra brand
          * mark). chat-panel.test.ts catches gross regressions. */
         rm-chat-shell rm-chat-panel rm-sidebar { display: none; }
-        /* ":first-child" on .shrink-0 is critical — chat-panel has
-         * THREE direct .shrink-0 children (top bar, agent status,
-         * composer); a plain "> div.shrink-0" would eat the composer
-         * too. The top bar is always the first .shrink-0 child of
-         * the main column. */
+        /* Hide chat-panel's whole top bar — its only payload was
+         * (left) duplicate hamburger + RoleMesh brand and (right)
+         * Cancel + Connected indicator. Both halves are now replaced
+         * by v2 surfaces: the v2 sidebar / topbar covers the left,
+         * the composer kebab carries Cancel, and the tenant pill
+         * doubles as the connection indicator. ":first-child" is
+         * still load-bearing — chat-panel has THREE .shrink-0
+         * children (top bar, agent status, composer); we only want
+         * the first one gone. */
         rm-chat-shell rm-chat-panel
           > div:first-child
           > div.flex-1
-          > div.shrink-0:first-child
-          > div:first-child {
+          > div.shrink-0:first-child {
           display: none;
         }
         rm-chat-shell .cs-menu {
@@ -1020,8 +1043,18 @@ export class RmChatShell extends LitElement {
             title="Settings"
             @click=${this.openSettings}
           >${iconSettings(19)}</button>
-          <span class="cs-tenant" data-testid="tenant-pill">
-            <span class="grn"></span>${tenantLabel}
+          <span
+            class="cs-tenant"
+            data-testid="tenant-pill"
+            title=${this.agentConnected
+              ? `${tenantLabel} · connected`
+              : `${tenantLabel} · disconnected`}
+          >
+            <span
+              class=${`grn ${this.agentConnected ? '' : 'off'}`}
+              data-testid="connection-dot"
+              data-connected=${this.agentConnected ? 'true' : 'false'}
+            ></span>${tenantLabel}
           </span>
         </div>
         <div class="cs-slot">

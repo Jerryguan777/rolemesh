@@ -210,6 +210,86 @@ describe('<rm-message-editor>', () => {
     expect(events).toHaveLength(0);
   });
 
+  it('renders the kebab button next to send', async () => {
+    const el = await mount();
+    expect(el.querySelector('[data-testid="composer-kebab-btn"]')).not.toBeNull();
+  });
+
+  it('kebab Cancel item is disabled when canCancel=false (no active run)', async () => {
+    const el = await mount();
+    el.canCancel = false;
+    await settle(el);
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="composer-kebab-btn"]',
+    )!.click();
+    await settle(el);
+    const cancel = el.querySelector<HTMLButtonElement>(
+      '[data-testid="composer-kebab-cancel"]',
+    )!;
+    expect(cancel.disabled).toBe(true);
+    const events: Event[] = [];
+    el.addEventListener('request-cancel', (e) => events.push(e));
+    cancel.click();
+    expect(events).toHaveLength(0);
+  });
+
+  it('kebab Cancel item emits request-cancel when canCancel=true', async () => {
+    const el = await mount();
+    el.canCancel = true;
+    await settle(el);
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="composer-kebab-btn"]',
+    )!.click();
+    await settle(el);
+    const events: Event[] = [];
+    el.addEventListener('request-cancel', (e) => events.push(e));
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="composer-kebab-cancel"]',
+    )!.click();
+    expect(events).toHaveLength(1);
+    // The menu auto-closes after the click so the user sees feedback.
+    await settle(el);
+    expect(el.querySelector('[data-testid="composer-kebab-menu"]')).toBeNull();
+  });
+
+  it('emits agent-connection whenever the connected prop flips', async () => {
+    const el = await mount();
+    const events: CustomEvent[] = [];
+    el.addEventListener('agent-connection', (e) =>
+      events.push(e as CustomEvent),
+    );
+    el.connected = false;
+    await settle(el);
+    el.connected = true;
+    await settle(el);
+    expect(events.length).toBeGreaterThanOrEqual(2);
+    expect((events.at(-1)!.detail as { connected: boolean }).connected).toBe(
+      true,
+    );
+  });
+
+  it('opens at most ONE menu at a time (coworker + kebab are mutually exclusive)', async () => {
+    const el = await mount();
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="composer-coworker-btn"]',
+    )!.click();
+    await settle(el);
+    expect(
+      el.querySelector('[data-testid="composer-coworker-menu"]'),
+    ).not.toBeNull();
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="composer-kebab-btn"]',
+    )!.click();
+    await settle(el);
+    // Opening kebab must close the coworker menu.
+    expect(
+      el.querySelector('[data-testid="composer-coworker-menu"]'),
+    ).toBeNull();
+    expect(
+      el.querySelector('[data-testid="composer-kebab-menu"]'),
+    ).not.toBeNull();
+  });
+
   it('a failed listCoworkers leaves the editor usable (empty selector menu only)', async () => {
     listCoworkersSpy.mockRejectedValue(new Error('boom'));
     const el = await mount();
