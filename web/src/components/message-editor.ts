@@ -297,7 +297,12 @@ export class MessageEditor extends LitElement {
         >
           <span class="w-2 h-2 rounded-full shrink-0" style=${`background:${colourForCoworker(c)}`}></span>
           <span class="flex-1 truncate">${c.name}</span>
-          <span class="text-[11px] text-ink-3 dark:text-d-ink-3 truncate">
+          <!-- shrink-0 + whitespace-nowrap: keep the Backend · Model
+               subtitle on one line. If the row is too narrow to fit
+               name + subtitle, the truncate on name (flex-1) kicks
+               in first — the subtitle is the more important hint
+               so we keep it intact. -->
+          <span class="text-[11px] text-ink-3 dark:text-d-ink-3 whitespace-nowrap shrink-0">
             ${coworkerSubtitle(c, this.modelsById)}
           </span>
         </button>
@@ -366,7 +371,7 @@ export class MessageEditor extends LitElement {
               </button>
               ${this.menuOpen
                 ? html`<div
-                    class="absolute bottom-full left-0 mb-1.5 z-30 min-w-[240px] rounded-lg border border-surface-3 dark:border-d-surface-3 bg-surface-0 dark:bg-d-surface-1 shadow-lg p-1.5"
+                    class="absolute bottom-full left-0 mb-1.5 z-30 min-w-[340px] rounded-lg border border-surface-3 dark:border-d-surface-3 bg-surface-0 dark:bg-d-surface-1 shadow-lg p-1.5"
                     role="menu"
                     data-testid="composer-coworker-menu"
                   >${this.renderCoworkerMenu()}</div>`
