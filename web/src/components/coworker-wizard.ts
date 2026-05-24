@@ -105,10 +105,28 @@ interface SubmitFailure {
 @customElement('rm-coworker-wizard')
 export class CoworkerWizard extends LitElement {
   @property({ type: Boolean, reflect: true }) open = false;
+  /** When set, the wizard runs in **edit mode**:
+   *
+   *  - Form seeds from this row + the coworker's existing MCP and
+   *    skill bindings (fetched on open).
+   *  - Title and submit-button label switch to "Edit"/"Save changes".
+   *  - Slug (folder) and engine (agent_backend) render as read-only
+   *    with a "Cannot be changed after creation" hint — both back
+   *    durable filesystem / container state that a rename would
+   *    orphan.
+   *  - Submit calls PATCH /api/v1/coworkers/{id} for the 5 mutable
+   *    fields + diffs MCP / skill bindings into bind/unbind calls.
+   *
+   *  Pass `null` (default) for the original create flow. */
+  @property({ attribute: false }) editing: Coworker | null = null;
 
   @state() private currentStep = 0;
   @state() private creating = false;
   @state() private submitError: SubmitFailure | null = null;
+  /** Snapshot of the bindings at edit-mode open. Used by submit to
+   *  compute the bind/unbind diff. */
+  @state() private originalMcpServerIds: string[] = [];
+  @state() private originalSkillIds: string[] = [];
 
   // Catalogue state — loaded lazily on first open.
   @state() private backends: Backend[] = [];
@@ -153,8 +171,16 @@ export class CoworkerWizard extends LitElement {
   }
 
   override willUpdate(changed: Map<string, unknown>) {
-    if (changed.has('open') && this.open && !this.cataloguesLoaded) {
-      void this.loadCatalogues();
+    if (changed.has('open') && this.open) {
+      if (!this.cataloguesLoaded) void this.loadCatalogues();
+      // Edit mode: seed the draft from the target row + its current
+      // MCP / skill bindings. Done on EACH open transition so a stale
+      // post-edit row doesn't get reused if the parent reopens with a
+      // different target. Falls through to emptyDraft when `editing`
+      // is null (create flow).
+      if (this.editing) {
+        void this.seedFromEditing(this.editing);
+      }
     }
     if (changed.has('open') && !this.open) {
       // Closing — reset so the next open starts fresh.
@@ -162,7 +188,49 @@ export class CoworkerWizard extends LitElement {
       this.currentStep = 0;
       this.fieldErrors = {};
       this.submitError = null;
+      this.originalMcpServerIds = [];
+      this.originalSkillIds = [];
     }
+  }
+
+  private async seedFromEditing(cw: Coworker): Promise<void> {
+    // Pre-fill the simple fields immediately so the wizard has the
+    // right header / step-1 content even before bindings come back.
+    this.draft = {
+      name: cw.name,
+      // The folder string IS the immutable slug — surface it via the
+      // override field so renderIdentity shows it; isValidSlug guards
+      // already-stored slugs (backend regex was looser pre-v1.1).
+      folderOverride: cw.folder,
+      instructions: cw.system_prompt ?? '',
+      agentBackend: cw.agent_backend,
+      modelId: cw.model_id ?? null,
+      mcpServerIds: [],
+      skillIds: [],
+    };
+    // Fetch bindings in parallel; failures degrade to empty so the
+    // wizard remains usable (the user can still edit identity / model).
+    const [mcpResult, skillResult] = await Promise.allSettled([
+      this.api.listCoworkerMCPServers(cw.id),
+      this.api.listCoworkerSkills(cw.id),
+    ]);
+    const mcpIds =
+      mcpResult.status === 'fulfilled'
+        ? mcpResult.value.map((b) => b.mcp_server_id)
+        : [];
+    const skillIds =
+      skillResult.status === 'fulfilled'
+        ? skillResult.value
+            .filter((b) => (b as { enabled?: boolean }).enabled !== false)
+            .map((b) => b.skill_id)
+        : [];
+    this.draft = {
+      ...this.draft,
+      mcpServerIds: mcpIds,
+      skillIds: skillIds,
+    };
+    this.originalMcpServerIds = [...mcpIds];
+    this.originalSkillIds = [...skillIds];
   }
 
   private async loadCatalogues(): Promise<void> {
@@ -300,38 +368,83 @@ export class CoworkerWizard extends LitElement {
     this.creating = true;
     this.submitError = null;
 
+    // Branch on mode. Edit goes through PATCH + binding diffs; create
+    // goes through the original POST + sequential binding loop.
     let coworker: Coworker | null = null;
-    try {
-      const body: CoworkerCreate = {
-        name: this.draft.name.trim(),
-        folder: this.effectiveSlug,
-        agent_backend: this.draft.agentBackend!,
-        model_id: this.draft.modelId,
-        system_prompt: this.draft.instructions.trim() || null,
-        // max_concurrent / agent_role intentionally not surfaced
-        // (locked decisions #10 / #13 — backend default applies).
-        max_concurrent: 2,
-      };
-      coworker = await this.api.createCoworker(body);
-    } catch (err) {
-      this.submitError = {
-        coworkerFailed: true,
-        coworkerId: null,
-        mcpFailures: [],
-        skillFailures: [],
-        message:
-          err instanceof ApiError
-            ? `${err.status} — ${err.message}`
-            : (err as Error).message,
-      };
-      this.creating = false;
-      return;
+    if (this.editing) {
+      try {
+        coworker = await this.api.updateCoworker(this.editing.id, {
+          name: this.draft.name.trim(),
+          model_id: this.draft.modelId ?? undefined,
+          system_prompt: this.draft.instructions.trim() || null,
+        });
+      } catch (err) {
+        this.submitError = {
+          coworkerFailed: true,
+          coworkerId: null,
+          mcpFailures: [],
+          skillFailures: [],
+          message:
+            err instanceof ApiError
+              ? `${err.status} — ${err.message}`
+              : (err as Error).message,
+        };
+        this.creating = false;
+        return;
+      }
+    } else {
+      try {
+        const body: CoworkerCreate = {
+          name: this.draft.name.trim(),
+          folder: this.effectiveSlug,
+          agent_backend: this.draft.agentBackend!,
+          model_id: this.draft.modelId,
+          system_prompt: this.draft.instructions.trim() || null,
+          // max_concurrent / agent_role intentionally not surfaced
+          // (locked decisions #10 / #13 — backend default applies).
+          max_concurrent: 2,
+        };
+        coworker = await this.api.createCoworker(body);
+      } catch (err) {
+        this.submitError = {
+          coworkerFailed: true,
+          coworkerId: null,
+          mcpFailures: [],
+          skillFailures: [],
+          message:
+            err instanceof ApiError
+              ? `${err.status} — ${err.message}`
+              : (err as Error).message,
+        };
+        this.creating = false;
+        return;
+      }
     }
 
-    // Coworker created. Now bind tools + skills sequentially. Failure
-    // here does NOT roll back — banner the partial result.
+    // Coworker created OR updated. Compute the binding plan: in edit
+    // mode it's a diff (only the deltas), in create mode it's all of
+    // the draft's selections. Partial failures DON'T roll back.
+    const isEdit = this.editing !== null;
+    const oldMcp = new Set(this.originalMcpServerIds);
+    const newMcp = new Set(this.draft.mcpServerIds);
+    const mcpToAdd = isEdit
+      ? this.draft.mcpServerIds.filter((id) => !oldMcp.has(id))
+      : this.draft.mcpServerIds;
+    const mcpToRemove = isEdit
+      ? this.originalMcpServerIds.filter((id) => !newMcp.has(id))
+      : [];
+
+    const oldSkill = new Set(this.originalSkillIds);
+    const newSkill = new Set(this.draft.skillIds);
+    const skillToAdd = isEdit
+      ? this.draft.skillIds.filter((id) => !oldSkill.has(id))
+      : this.draft.skillIds;
+    const skillToRemove = isEdit
+      ? this.originalSkillIds.filter((id) => !newSkill.has(id))
+      : [];
+
     const mcpFailures: { id: string; reason: string }[] = [];
-    for (const id of this.draft.mcpServerIds) {
+    for (const id of mcpToAdd) {
       try {
         await this.api.bindCoworkerMCPServer(coworker.id, {
           mcp_server_id: id,
@@ -346,11 +459,33 @@ export class CoworkerWizard extends LitElement {
         });
       }
     }
+    for (const id of mcpToRemove) {
+      try {
+        await this.api.unbindCoworkerMCPServer(coworker.id, id);
+      } catch (err) {
+        mcpFailures.push({
+          id,
+          reason:
+            err instanceof ApiError ? err.message : (err as Error).message,
+        });
+      }
+    }
 
     const skillFailures: { id: string; reason: string }[] = [];
-    for (const id of this.draft.skillIds) {
+    for (const id of skillToAdd) {
       try {
         await this.api.enableCoworkerSkill(coworker.id, id);
+      } catch (err) {
+        skillFailures.push({
+          id,
+          reason:
+            err instanceof ApiError ? err.message : (err as Error).message,
+        });
+      }
+    }
+    for (const id of skillToRemove) {
+      try {
+        await this.api.disableCoworkerSkill(coworker.id, id);
       } catch (err) {
         skillFailures.push({
           id,
@@ -366,14 +501,17 @@ export class CoworkerWizard extends LitElement {
       // Partial success — keep wizard open so the user can see what
       // happened. They can retry bindings from the coworker page.
       const total = mcpFailures.length + skillFailures.length;
+      const verb = isEdit ? 'updated' : 'created';
       this.submitError = {
         coworkerFailed: false,
         coworkerId: coworker.id,
         mcpFailures,
         skillFailures,
-        message: `Coworker created, but ${total} binding${total > 1 ? 's' : ''} failed. You can finish wiring it up from the coworker page.`,
+        message: `Coworker ${verb}, but ${total} binding${total > 1 ? 's' : ''} failed. You can finish wiring it up from the coworker page.`,
       };
-      // Notify so the page list can refresh.
+      // Notify so the page list can refresh — same event in both modes
+      // (the `partial:true` flag already tells the parent it's recoverable
+      // state). The parent reads `editing` itself if it needs to branch.
       this.dispatchEvent(
         new CustomEvent<{ coworkerId: string; partial: true }>('coworker-created', {
           detail: { coworkerId: coworker.id, partial: true },
@@ -384,9 +522,7 @@ export class CoworkerWizard extends LitElement {
       return;
     }
 
-    // Full success — redirect to the new coworker chat. Reuses
-    // v2-A's location.href reload pattern (acceptable per refresh
-    // notes; full fix is a v3 chore).
+    // Full success.
     this.dispatchEvent(
       new CustomEvent<{ coworkerId: string; partial: false }>('coworker-created', {
         detail: { coworkerId: coworker.id, partial: false },
@@ -394,6 +530,19 @@ export class CoworkerWizard extends LitElement {
         composed: true,
       }),
     );
+    if (isEdit) {
+      // Edit success: just close the wizard. Parent (coworkers-page)
+      // refreshes its list via @coworker-created. No need to navigate
+      // away because the user is already looking at the right page.
+      this.open = false;
+      this.dispatchEvent(
+        new CustomEvent('close', { bubbles: true, composed: true }),
+      );
+      return;
+    }
+    // Create success — redirect to the new coworker chat. Reuses
+    // v2-A's location.href reload pattern (acceptable per refresh
+    // notes; full fix is a v3 chore).
     const params = new URLSearchParams(location.search);
     params.set('agent_id', coworker.id);
     params.delete('chat_id');
@@ -439,12 +588,16 @@ export class CoworkerWizard extends LitElement {
                primitive API stays untouched (locked decision). -->
           ${this.submitError ? this.renderSubmitError() : nothing}
           <rm-wizard
-            title="New coworker"
+            title=${this.editing
+              ? `Edit coworker: ${this.editing.name}`
+              : 'New coworker'}
             .steps=${this.steps}
             .currentStep=${this.currentStep}
             .canAdvance=${this.canAdvance}
             .busy=${this.creating}
-            submit-label=${this.creating ? 'Creating…' : 'Create coworker'}
+            submit-label=${this.creating
+              ? (this.editing ? 'Saving…' : 'Creating…')
+              : (this.editing ? 'Save changes' : 'Create coworker')}
             @step-change=${this.onStepChange}
             @submit=${this.handleSubmit}
             @close=${this.close}
@@ -561,28 +714,34 @@ export class CoworkerWizard extends LitElement {
           : nothing}
       </div>
 
-      <details class="mb-3">
-        <summary class="text-[12.5px] text-ink-2 dark:text-d-ink-2 cursor-pointer">
-          Advanced — override slug
-        </summary>
-        <div class="mt-2">
-          <input
-            type="text"
-            class="w-full font-mono text-[13px] px-3 py-2 rounded-md border border-surface-3
-              dark:border-d-surface-3 bg-surface-1 dark:bg-d-surface-1
-              text-ink-0 dark:text-d-ink-0 focus:outline-none focus:ring-2 focus:ring-brand"
-            placeholder=${this.derivedSlug || 'marketing-helper'}
-            .value=${this.draft.folderOverride ?? ''}
-            @input=${(e: Event) => {
-              const v = (e.target as HTMLInputElement).value;
-              this.draft = {
-                ...this.draft,
-                folderOverride: v === '' ? null : v,
-              };
-            }}
-          />
-        </div>
-      </details>
+      ${this.editing
+        ? html`<div class="mb-3 text-[12.5px] text-ink-3 dark:text-d-ink-3">
+            <span class="font-medium">Slug:</span>
+            <code class="font-mono ml-1">${this.editing.folder}</code>
+            <span class="ml-2">— immutable (container folder is tied to this name).</span>
+          </div>`
+        : html`<details class="mb-3">
+            <summary class="text-[12.5px] text-ink-2 dark:text-d-ink-2 cursor-pointer">
+              Advanced — override slug
+            </summary>
+            <div class="mt-2">
+              <input
+                type="text"
+                class="w-full font-mono text-[13px] px-3 py-2 rounded-md border border-surface-3
+                  dark:border-d-surface-3 bg-surface-1 dark:bg-d-surface-1
+                  text-ink-0 dark:text-d-ink-0 focus:outline-none focus:ring-2 focus:ring-brand"
+                placeholder=${this.derivedSlug || 'marketing-helper'}
+                .value=${this.draft.folderOverride ?? ''}
+                @input=${(e: Event) => {
+                  const v = (e.target as HTMLInputElement).value;
+                  this.draft = {
+                    ...this.draft,
+                    folderOverride: v === '' ? null : v,
+                  };
+                }}
+              />
+            </div>
+          </details>`}
 
       <div>
         <label class="block text-[12.5px] font-medium mb-1">Instructions</label>
@@ -610,17 +769,28 @@ export class CoworkerWizard extends LitElement {
       <p class="text-[13px] text-ink-3 dark:text-d-ink-3 mb-4">
         The framework that runs this coworker — it also decides which models you can use.
       </p>
+      ${this.editing
+        ? html`<div class="mb-3 text-[12.5px] text-ink-3 dark:text-d-ink-3">
+            Engine is fixed at <code class="font-mono">${this.editing.agent_backend}</code> for the lifetime
+            of a coworker — changing the runtime would orphan its sessions.
+            Delete + recreate if you really need a different one.
+          </div>`
+        : nothing}
       <div class="space-y-3">
         ${this.backends.map((b) => {
           const selected = this.draft.agentBackend === b.name;
+          const isLocked = this.editing !== null;
           return html`
             <button
               type="button"
-              class="w-full text-left border rounded-lg px-4 py-3 transition cursor-pointer
+              class="w-full text-left border rounded-lg px-4 py-3 transition
+                ${isLocked && !selected ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}
                 ${selected
                   ? 'border-brand bg-brand/5 dark:bg-brand/10'
                   : 'border-surface-3 dark:border-d-surface-3 hover:bg-surface-2 dark:hover:bg-d-surface-2'}"
+              ?disabled=${isLocked}
               @click=${() => {
+                if (this.editing) return;
                 this.draft = {
                   ...this.draft,
                   agentBackend: b.name,

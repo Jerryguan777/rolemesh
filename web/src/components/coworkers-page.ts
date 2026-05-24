@@ -18,9 +18,8 @@ import { LitElement, html, nothing } from 'lit';
 import { customElement, query, state } from 'lit/decorators.js';
 
 import { ApiError, getApiClient } from '../api/client.js';
-import type { Coworker, Model, ModelProvider } from '../api/client.js';
+import type { Coworker, ModelProvider } from '../api/client.js';
 import './coworker-wizard.js';
-import './coworker-edit-dialog.js';
 import './credential-dialog.js';
 import './mcp-server-dialog.js';
 import type { CoworkerWizard } from './coworker-wizard.js';
@@ -29,14 +28,14 @@ import { iconPencil, iconTrash } from './icons.js';
 @customElement('rm-coworkers-page')
 export class CoworkersPage extends LitElement {
   @state() private rows: Coworker[] = [];
-  @state() private models: Model[] = [];
   @state() private loading = true;
   @state() private error: string | null = null;
   @state() private wizardOpen = false;
   @state() private credDialogOpen = false;
   @state() private credDialogProvider: ModelProvider | null = null;
   @state() private mcpDialogOpen = false;
-  @state() private editDialogOpen = false;
+  /** When set, the wizard runs in edit mode (pre-fills + PATCH on
+   *  submit). `null` = create mode. */
   @state() private editTarget: Coworker | null = null;
   /** Per-row delete error, keyed by coworker id. Cleared on the next
    *  refresh so a successful retry returns the row to its normal state. */
@@ -57,32 +56,25 @@ export class CoworkersPage extends LitElement {
     this.loading = true;
     this.error = null;
     this.deleteError = {};
-    // Fetch coworkers and models in parallel — the edit dialog needs
-    // the model catalogue to render its dropdown; the list itself
-    // doesn't need it for the row label since the chat-shell carries
-    // the lookup. Failure on either is non-fatal: empty models list
-    // hides the dropdown, empty coworker list shows the empty state.
-    const [cwResult, mdResult] = await Promise.allSettled([
-      this.api.listCoworkers(),
-      this.api.listModels(),
-    ]);
-    if (cwResult.status === 'fulfilled') {
-      this.rows = cwResult.value;
-    } else {
-      const err = cwResult.reason;
+    try {
+      this.rows = await this.api.listCoworkers();
+    } catch (err) {
       this.rows = [];
       this.error =
         err instanceof ApiError
           ? `${err.status} — ${err.message}`
           : (err as Error).message ?? 'unknown error';
+    } finally {
+      this.loading = false;
     }
-    this.models = mdResult.status === 'fulfilled' ? mdResult.value : [];
-    this.loading = false;
   }
 
   private openEdit(c: Coworker): void {
+    // Edit reuses the create wizard — same 6 steps, pre-filled. The
+    // wizard self-fetches the coworker's MCP / skill bindings on open
+    // (see seedFromEditing).
     this.editTarget = c;
-    this.editDialogOpen = true;
+    this.wizardOpen = true;
   }
 
   private async confirmDelete(c: Coworker): Promise<void> {
@@ -162,11 +154,14 @@ export class CoworkersPage extends LitElement {
         </div>
         <rm-coworker-wizard
           ?open=${this.wizardOpen}
+          .editing=${this.editTarget}
           @close=${() => {
             this.wizardOpen = false;
+            this.editTarget = null;
             // Refresh once the wizard closes — a successful create
             // also navigates away via location.href, but a partial-
-            // commit close should still surface the new coworker.
+            // commit close (or successful edit) should still surface
+            // the row state change.
             void this.refresh();
           }}
           @request-credential=${(e: CustomEvent<{ provider: ModelProvider }>) => {
@@ -192,16 +187,6 @@ export class CoworkersPage extends LitElement {
             void this.wizardEl?.refreshMCPServers();
           }}
         ></rm-mcp-server-dialog>
-        <rm-coworker-edit-dialog
-          ?open=${this.editDialogOpen}
-          .coworker=${this.editTarget}
-          .models=${this.models}
-          @close=${() => {
-            this.editDialogOpen = false;
-            this.editTarget = null;
-          }}
-          @coworker-saved=${() => { void this.refresh(); }}
-        ></rm-coworker-edit-dialog>
       </div>
     `;
   }

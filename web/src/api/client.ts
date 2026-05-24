@@ -162,6 +162,33 @@ export class ApiClient {
     return (await resp.json()) as CoworkerMCPBindingResponse;
   }
 
+  /** List MCP-server bindings for a coworker. Used by the wizard's
+   *  edit mode to seed the Tools step with the already-bound servers. */
+  async listCoworkerMCPServers(
+    coworkerId: string,
+  ): Promise<CoworkerMCPBindingResponse[]> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(coworkerId)}/mcp-servers`,
+      { method: 'GET', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as CoworkerMCPBindingResponse[];
+  }
+
+  /** Remove a single MCP-server binding (path takes the MCP SERVER id,
+   *  not a separate binding id — the junction is keyed by the pair). */
+  async unbindCoworkerMCPServer(
+    coworkerId: string,
+    mcpServerId: string,
+  ): Promise<void> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(coworkerId)}` +
+        `/mcp-servers/${encodeURIComponent(mcpServerId)}`,
+      { method: 'DELETE', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+  }
+
   async listCoworkers(): Promise<Coworker[]> {
     const resp = await fetch(`${this.baseUrl}/api/v1/coworkers`, {
       method: 'GET',

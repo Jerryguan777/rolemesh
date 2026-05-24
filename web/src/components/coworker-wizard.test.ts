@@ -536,4 +536,113 @@ describe('<rm-coworker-wizard>', () => {
     expect(el.textContent).toMatch(/binding[s]? failed/i);
     expect(el.textContent).toContain('mmmmmmmm');
   });
+
+  it('edit mode: seeds from `editing`, slug shown immutable, submit PATCHes', async () => {
+    // Re-install fetch with PATCH + binding endpoints exercised.
+    fetchStub?.restore();
+    const patchCalls: { url: string; body: unknown }[] = [];
+    const mcpUnbindCalls: string[] = [];
+    fetchStub = installFetch([
+      { match: (u) => u.endsWith('/api/v1/backends'), respond: () => jsonResp(BACKENDS) },
+      { match: (u) => u.startsWith('/api/v1/models'), respond: () => jsonResp(MODELS) },
+      { match: (u) => u === '/api/v1/tenant/credentials', respond: () => jsonResp(CREDS_ANT) },
+      { match: (u) => u === '/api/v1/mcp-servers', respond: () => jsonResp([]) },
+      { match: (u) => u === '/api/v1/skills', respond: () => jsonResp([]) },
+      // Existing MCP bindings: seed the wizard with one already-bound
+      // server so we can verify it ends up in originalMcpServerIds.
+      {
+        match: (u, i) =>
+          /\/api\/v1\/coworkers\/[\w-]+\/mcp-servers$/.test(u) &&
+          (i?.method ?? 'GET') === 'GET',
+        respond: () =>
+          jsonResp([{ mcp_server_id: 'old-mcp-1', enabled_tools: null }]),
+      },
+      // Existing skill bindings — empty for this test.
+      {
+        match: (u, i) =>
+          /\/api\/v1\/coworkers\/[\w-]+\/skills$/.test(u) &&
+          (i?.method ?? 'GET') === 'GET',
+        respond: () => jsonResp([]),
+      },
+      // PATCH the coworker.
+      {
+        match: (u, i) =>
+          /\/api\/v1\/coworkers\/[\w-]+$/.test(u) && i?.method === 'PATCH',
+        respond: (_u, i) => {
+          patchCalls.push({
+            url: _u,
+            body: i?.body ? JSON.parse(i.body as string) : null,
+          });
+          return jsonResp(CREATED_COWORKER, 200);
+        },
+      },
+      // Unbind the removed MCP server.
+      {
+        match: (u, i) =>
+          /\/api\/v1\/coworkers\/[\w-]+\/mcp-servers\/old-mcp-1$/.test(u) &&
+          i?.method === 'DELETE',
+        respond: (u) => {
+          mcpUnbindCalls.push(u);
+          return new Response(null, { status: 204 });
+        },
+      },
+    ]);
+
+    const existing: Coworker = {
+      ...CREATED_COWORKER,
+      id: 'eeeeeeee-0000-0000-0000-000000000001',
+      name: 'Marketing legacy',
+      folder: 'marketing-legacy',
+    };
+    const el = mount();
+    (el as unknown as { editing: Coworker }).editing = existing;
+    el.open = true;
+    await settle(el);
+
+    // Title reads "Edit coworker: …" — the wizard primitive renders
+    // the title in its shadow root header.
+    const wiz = el.querySelector('rm-wizard')!;
+    const titleText = wiz.shadowRoot?.textContent ?? '';
+    expect(titleText).toContain('Edit coworker');
+    expect(titleText).toContain('Marketing legacy');
+
+    // Slug shows immutable hint (no override input rendered).
+    const slugHint = el.textContent ?? '';
+    expect(slugHint).toContain('marketing-legacy');
+    expect(slugHint).toMatch(/immutable/i);
+
+    // Mutate the draft + jump to the Review step (5) so the wizard
+    // shows the "Save changes" submit button. Reaching in via cast
+    // keeps the test focused on the submit contract — driving the
+    // 6-step click flow per case is what the partial-commit case
+    // already covers for create mode.
+    (el as unknown as { draft: Record<string, unknown>; currentStep: number }).draft = {
+      ...(el as unknown as { draft: Record<string, unknown> }).draft,
+      name: 'Marketing renamed',
+      mcpServerIds: [], // remove old-mcp-1
+    } as never;
+    (el as unknown as { currentStep: number }).currentStep = 5;
+    await settle(el);
+
+    // Submit button reads "Save changes" in edit mode at the Review
+    // step (vs "Create coworker" in create mode).
+    const submitBtn = wiz.shadowRoot!.querySelector<HTMLButtonElement>(
+      '.foot .btn.primary',
+    )!;
+    expect(submitBtn.textContent?.trim()).toContain('Save changes');
+
+    submitBtn.click();
+    await settle(el);
+
+    // PATCH fired with the renamed `name`. Body shape mirrors
+    // CoworkerUpdate; we ONLY assert the field we changed to keep
+    // the test independent of which fields the wizard chooses to
+    // send (it may pass-through unchanged ones too).
+    expect(patchCalls).toHaveLength(1);
+    expect((patchCalls[0].body as { name?: string }).name).toBe(
+      'Marketing renamed',
+    );
+    // Binding diff: removed MCP got unbound.
+    expect(mcpUnbindCalls).toHaveLength(1);
+  });
 });
