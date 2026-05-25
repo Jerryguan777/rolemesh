@@ -873,8 +873,15 @@ export class SkillDialog extends LitElement {
               </div>`}
         </div>
 
+        ${renderSkillFolderSnapshot(this.extraFiles)}
+
         <div class="mb-3">
-          <label class="block text-[12.5px] font-medium mb-1">Instructions</label>
+          <label class="block text-[12.5px] font-medium mb-1">
+            Instructions
+            <span class="font-normal text-ink-3 dark:text-d-ink-3">
+              — saved as <code class="font-mono text-[12px]">SKILL.md</code>
+            </span>
+          </label>
           <textarea
             rows="8"
             class="w-full text-[13px] px-3 py-2 rounded-md border border-surface-3
@@ -902,7 +909,7 @@ export class SkillDialog extends LitElement {
             class="text-[12.5px] font-medium cursor-pointer select-none
               text-ink-2 dark:text-d-ink-2 hover:text-ink-0 dark:hover:text-d-ink-0"
             data-testid="skill-dialog-advanced-toggle"
-          >Additional files</summary>
+          >Add files to this skill folder</summary>
           <div class="mt-2">
             <div
               class=${`border-2 border-dashed rounded-md px-4 py-5 text-center transition-colors
@@ -1023,6 +1030,82 @@ export class SkillDialog extends LitElement {
       </rm-dialog>
     `;
   }
+}
+
+/** "Your skill folder" snapshot — read-only orientation that
+ *  unifies the user's mental model. SKILL.md (the Instructions
+ *  textarea) and any uploaded extras live in the SAME folder once
+ *  the skill ships to the coworker; rendering both here together
+ *  makes that obvious BEFORE the user starts typing.
+ *
+ *  Read-only on purpose: the editable controls (textarea, upload
+ *  zone, per-file rename / delete) live in their respective sections
+ *  below. Duplicating the file list as a passive snapshot here is
+ *  cheap and removes the "wait, where do these files end up?"
+ *  question. */
+function renderSkillFolderSnapshot(extraFiles: ExtraFile[]) {
+  // Group extras by top-level folder, same grouping rule as
+  // renderFileTree below — so the snapshot's shape matches what
+  // the user sees in the Additional files section.
+  const groups = new Map<string, ExtraFile[]>();
+  for (const f of extraFiles) {
+    const slash = f.path.indexOf('/');
+    const key = slash === -1 ? '' : f.path.slice(0, slash);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(f);
+  }
+  const ordered = [...groups.entries()].sort(([a], [b]) => {
+    if (a === '') return -1;
+    if (b === '') return 1;
+    return a.localeCompare(b);
+  });
+  return html`
+    <div
+      class="mb-3 px-3 py-2.5 rounded-md bg-surface-2 dark:bg-d-surface-2
+        border border-surface-3 dark:border-d-surface-3"
+      data-testid="skill-dialog-folder-snapshot"
+    >
+      <div class="text-[11.5px] uppercase tracking-wide font-medium text-ink-3 dark:text-d-ink-3 mb-1.5">
+        Your skill folder
+      </div>
+      <div class="flex flex-col gap-0.5 font-mono text-[12.5px]">
+        <div class="flex items-center gap-2 text-ink-0 dark:text-d-ink-0">
+          <span aria-hidden="true">📄</span>
+          <span>SKILL.md</span>
+          <span class="font-sans text-[11.5px] text-ink-3 dark:text-d-ink-3">
+            ← edited in Instructions below
+          </span>
+        </div>
+        ${extraFiles.length === 0
+          ? html`<div class="flex items-center gap-2 text-ink-3 dark:text-d-ink-3">
+              <span aria-hidden="true">📁</span>
+              <span class="font-sans text-[11.5px]">
+                additional files appear here when you upload them
+              </span>
+            </div>`
+          : ordered.map(([folder, files]) => folder === ''
+              ? files.map((f) => html`
+                  <div class="flex items-center gap-2 text-ink-0 dark:text-d-ink-0">
+                    <span aria-hidden="true">📄</span>
+                    <span>${f.path}</span>
+                  </div>
+                `)
+              : html`
+                  <div class="flex items-center gap-2 text-ink-1 dark:text-d-ink-1">
+                    <span aria-hidden="true">📁</span>
+                    <span>${folder}/</span>
+                  </div>
+                  ${files.map((f) => html`
+                    <div class="flex items-center gap-2 text-ink-0 dark:text-d-ink-0 pl-5">
+                      <span aria-hidden="true">📄</span>
+                      <span>${f.path.slice(folder.length + 1)}</span>
+                    </div>
+                  `)}
+                `,
+          )}
+      </div>
+    </div>
+  `;
 }
 
 /** Render the extras as a folder-grouped list. Files at the catalog

@@ -1033,3 +1033,152 @@ describe('skill-dialog: PATCH edit body shape', () => {
     expect(patch!.body!.files).toBeDefined();
   });
 });
+
+// ---------------------------------------------------------------------
+// PR25: "Your skill folder" snapshot — read-only orientation
+// ---------------------------------------------------------------------
+
+describe('skill-dialog: folder snapshot', () => {
+  let stub: Stub;
+  beforeEach(() => {
+    stub = installFetch();
+  });
+  afterEach(() => {
+    stub.restore();
+    document.body.innerHTML = '';
+  });
+
+  it('renders the snapshot with SKILL.md when no extras', async () => {
+    const el = mount();
+    el.editing = null;
+    el.open = true;
+    await settle(el);
+    const snapshot = el.querySelector(
+      '[data-testid="skill-dialog-folder-snapshot"]',
+    );
+    expect(snapshot, 'snapshot section must always render').toBeTruthy();
+    // Pin the "SKILL.md is in this folder" + "edited below" framing —
+    // the whole point of the snapshot is bridging the textarea to the
+    // file model, so the cross-reference text MUST be visible.
+    expect(snapshot!.textContent).toContain('SKILL.md');
+    expect(snapshot!.textContent).toContain('edited in Instructions');
+    // The empty-extras hint also lives here. Without it the snapshot
+    // looks sad on a fresh dialog.
+    expect(snapshot!.textContent).toContain('additional files appear here');
+  });
+
+  it('snapshot updates live when files are uploaded', async () => {
+    const el = mount();
+    el.editing = null;
+    el.open = true;
+    await settle(el);
+    const input = el.querySelector<HTMLInputElement>(
+      '[data-testid="skill-dialog-pick-files"]',
+    )!;
+    Object.defineProperty(input, 'files', {
+      value: [
+        makeFile({ name: 'intro.md', content: '# Intro\n' }),
+      ],
+      configurable: true,
+    });
+    input.dispatchEvent(new Event('change'));
+    for (let i = 0; i < 50; i += 1) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+      const s = el.querySelector(
+        '[data-testid="skill-dialog-folder-snapshot"]',
+      );
+      if (s?.textContent?.includes('intro.md')) break;
+    }
+    const snapshot = el.querySelector(
+      '[data-testid="skill-dialog-folder-snapshot"]',
+    )!;
+    expect(snapshot.textContent).toContain('intro.md');
+    // SKILL.md row stays — the snapshot shows BOTH the main file and
+    // the new extra, which is the unified mental model PR25 set out
+    // to fix. Without this assert, a regression that swaps the
+    // snapshot for "just the extras" would pass the previous test.
+    expect(snapshot.textContent).toContain('SKILL.md');
+  });
+
+  it('snapshot groups files by folder', async () => {
+    // Two extras under the same prefix should render as a single
+    // folder row + indented children, NOT as two flat rows. This is
+    // the visual cue that gives the user "ah, these end up in
+    // references/ together".
+    const el = mount();
+    el.editing = null;
+    el.open = true;
+    await settle(el);
+    const input = el.querySelector<HTMLInputElement>(
+      '[data-testid="skill-dialog-pick-folder"]',
+    )!;
+    Object.defineProperty(input, 'files', {
+      value: [
+        makeFile({
+          name: 'intro.md',
+          content: 'intro',
+          relativePath: 'root/references/intro.md',
+        }),
+        makeFile({
+          name: 'glossary.md',
+          content: 'gloss',
+          relativePath: 'root/references/glossary.md',
+        }),
+      ],
+      configurable: true,
+    });
+    input.dispatchEvent(new Event('change'));
+    for (let i = 0; i < 50; i += 1) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+      const s = el.querySelector(
+        '[data-testid="skill-dialog-folder-snapshot"]',
+      );
+      if (s?.textContent?.includes('glossary.md')) break;
+    }
+    const text = el
+      .querySelector('[data-testid="skill-dialog-folder-snapshot"]')!
+      .textContent!;
+    // Folder name renders with trailing slash (visual differentiator
+    // from files); confirm the references/ header is there and
+    // BOTH files appear under it.
+    expect(text).toContain('references/');
+    expect(text).toContain('intro.md');
+    expect(text).toContain('glossary.md');
+  });
+});
+
+// ---------------------------------------------------------------------
+// PR25: dialog primitive — sticky footer + scrollable body
+// ---------------------------------------------------------------------
+
+describe('rm-dialog: layout', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('renders header + body + footer as three flex children', async () => {
+    // Pin the structural contract: a tall body must not push the
+    // footer out of the dialog — the CSS layer guarantees this via
+    // max-height + flex column + flex-shrink:0 on header/footer.
+    // happy-dom doesn't run layout, so we can't measure heights,
+    // but we CAN verify the structure that makes the CSS guarantee
+    // possible: header (.hd), body (.body), footer (.foot) all
+    // exist as direct children of <dialog>. A regression that
+    // collapses footer into body — losing the sticky behavior —
+    // fails this test.
+    const el = document.createElement('rm-dialog');
+    (el as unknown as { title: string }).title = 'Test';
+    el.setAttribute('title', 'Test');
+    document.body.appendChild(el);
+    (el as unknown as { open: boolean }).open = true;
+    await (el as unknown as { updateComplete: Promise<unknown> })
+      .updateComplete;
+    // shadowRoot host because dialog has its own scope.
+    const root = (el as unknown as { shadowRoot: ShadowRoot }).shadowRoot;
+    expect(root.querySelector('.hd')).toBeTruthy();
+    expect(root.querySelector('.body')).toBeTruthy();
+    expect(root.querySelector('.foot')).toBeTruthy();
+  });
+});

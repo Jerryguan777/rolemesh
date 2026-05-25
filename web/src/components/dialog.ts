@@ -50,6 +50,17 @@ export class RmDialog extends LitElement {
     dialog {
       width: 100%;
       max-width: var(--rm-dialog-width, 440px);
+      /* Bound the modal vertically so a tall body (e.g. the skill
+       * dialog's Instructions textarea + Additional files tree)
+       * can't push the footer Cancel / Confirm buttons off-screen.
+       * 85vh leaves breathing room above and below the modal even on
+       * short laptop screens (~720px). */
+      max-height: 85vh;
+      /* Flex column lets the body grow / shrink while the header
+       * and footer stay pinned at the top/bottom. The body itself
+       * owns the overflow (see .body rule below). */
+      display: flex;
+      flex-direction: column;
       padding: 0;
       border: 1px solid var(--rm-border-2);
       border-radius: var(--rm-r-lg, 16px);
@@ -57,6 +68,8 @@ export class RmDialog extends LitElement {
       color: var(--rm-ink);
       box-shadow: var(--rm-shadow-lg);
       font-family: var(--rm-font-body);
+      /* Keep overflow hidden so the rounded corners aren't escaped
+       * by the inner body's scroll content. */
       overflow: hidden;
     }
     dialog::backdrop {
@@ -71,6 +84,9 @@ export class RmDialog extends LitElement {
       align-items: center;
       padding: 16px 22px;
       border-bottom: 1px solid var(--rm-border);
+      /* Pinned to top — flex-column would otherwise compress the
+       * header when the body fills the available height. */
+      flex-shrink: 0;
     }
     .hd h3 {
       font-size: 16.5px;
@@ -97,6 +113,15 @@ export class RmDialog extends LitElement {
     }
     .body {
       padding: 20px 22px 8px;
+      /* Grow to fill remaining height; scroll when content exceeds
+       * it. 'min-height: 0' is the standard flex-child fix — without
+       * it the body refuses to shrink below its content's intrinsic
+       * height and the overflow rule never engages. Backticks would
+       * terminate the outer css template literal — quote with
+       * single quotes inside this comment. */
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
     }
     .foot {
       display: flex;
@@ -104,6 +129,11 @@ export class RmDialog extends LitElement {
       justify-content: flex-end;
       padding: 14px 22px;
       border-top: 1px solid var(--rm-border);
+      /* Pinned to bottom — same rationale as .hd. The dialog's
+       * fixed max-height + this flex-shrink:0 together guarantee
+       * the Cancel / Confirm buttons stay reachable regardless of
+       * how tall the body content grows. */
+      flex-shrink: 0;
     }
     .foot:empty {
       display: none;
