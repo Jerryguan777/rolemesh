@@ -1015,3 +1015,110 @@ WsClientFrameModel = (
     | WsClientFrameRequestCancel
     | WsClientFrameRequestApproval
 )
+
+
+# ---------------------------------------------------------------------------
+# Scheduled tasks (PR24). Read-only surface over the existing
+# ``scheduled_tasks`` table — the orchestrator owns creation /
+# mutation (cron-style triggers fire from inside the agent process);
+# the UI just needs to render "what's scheduled".
+# ---------------------------------------------------------------------------
+
+
+ScheduleType = Literal["cron", "interval", "once"]
+ScheduleStatus = Literal["active", "paused", "completed"]
+ScheduleContextMode = Literal["group", "isolated"]
+
+
+class ScheduledTask(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    tenant_id: str
+    coworker_id: str
+    conversation_id: str | None = None
+    prompt: str
+    schedule_type: ScheduleType
+    schedule_value: str
+    context_mode: ScheduleContextMode
+    next_run: str | None = None
+    last_run: str | None = None
+    last_result: str | None = None
+    status: ScheduleStatus
+    created_at: str
+
+
+# ---------------------------------------------------------------------------
+# Channel bindings (PR24). Migrated from /api/admin/agents/{id}/bindings
+# to /api/v1/coworkers/{id}/bindings — the underlying DB table +
+# helpers already exist in rolemesh.db.chat.
+# ---------------------------------------------------------------------------
+
+
+ChannelTypeName = Literal["slack", "telegram", "web"]
+
+
+class ChannelBinding(BaseModel):
+    """Wire projection of a ``channel_bindings`` row.
+
+    ``credentials`` is intentionally NOT exposed on the GET path —
+    they're write-only from the wire (PUT/POST/PATCH only). The
+    response shape mirrors what's safe to ship back: identity +
+    display name + status, never the tokens.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    coworker_id: str
+    tenant_id: str
+    channel_type: ChannelTypeName
+    bot_display_name: str | None = None
+    status: str
+    created_at: str | None = None
+
+
+class ChannelBindingCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    channel_type: ChannelTypeName
+    credentials: dict[str, str]
+    bot_display_name: str | None = None
+
+
+class ChannelBindingUpdate(BaseModel):
+    """Partial update. Omit any field to leave it unchanged.
+
+    ``credentials`` semantics: when present (even as ``{}``) it
+    REPLACES the entire credentials map. Merge-by-key would let a
+    typo'd key silently coexist with a stale value.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    credentials: dict[str, str] | None = None
+    bot_display_name: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Admin model writes (PR24). The /api/v1/models GET path stays
+# tenant-readable; the /api/v1/admin/models writes require role check
+# at the handler layer.
+# ---------------------------------------------------------------------------
+
+
+class ModelCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: ModelProvider
+    model_id: str = Field(min_length=1, max_length=200)
+    model_family: ModelFamily
+    display_name: str = Field(min_length=1, max_length=200)
+    is_active: bool = True
+
+
+class ModelUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = Field(default=None, min_length=1, max_length=200)
+    is_active: bool | None = None

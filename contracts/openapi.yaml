@@ -1426,6 +1426,271 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /api/v1/schedules:
+    get:
+      tags: [Schedules]
+      operationId: schedulesList
+      summary: List scheduled tasks for the tenant
+      description: |
+        Read-only listing of the `scheduled_tasks` table for the
+        caller's tenant. The orchestrator owns task creation and
+        mutation (cron-style triggers fired from inside the agent
+        process); this endpoint exists so the UI can show "what's
+        scheduled" without round-tripping through the orchestrator
+        IPC. A coworker filter is exposed for the per-coworker view.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: coworker_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+          description: When set, only tasks bound to this coworker.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ScheduledTask' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/schedules/{id}:
+    get:
+      tags: [Schedules]
+      operationId: schedulesGet
+      summary: Fetch one scheduled task
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/IdInPath' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScheduledTask' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/coworkers/{id}/bindings:
+    get:
+      tags: [Coworkers]
+      operationId: bindingsList
+      summary: List channel bindings for a coworker
+      description: |
+        A binding represents the credentials + bot identity used to
+        connect a coworker to one channel type (Slack workspace,
+        Telegram bot, etc.). The corresponding gateway picks the
+        binding up on next reload — see `src/rolemesh/channels/`.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/IdInPath' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ChannelBinding' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [Coworkers]
+      operationId: bindingsCreate
+      summary: Bind a coworker to a channel
+      description: |
+        Creates the binding row and reloads the matching gateway so
+        the new connection comes up without a process restart.
+        `(coworker_id, channel_type)` is unique — re-creating a
+        binding for the same channel type returns 409.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/IdInPath' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChannelBindingCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChannelBinding' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
+  /api/v1/coworkers/{id}/bindings/{binding_id}:
+    get:
+      tags: [Coworkers]
+      operationId: bindingsGet
+      summary: Fetch one channel binding
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/IdInPath' }
+        - name: binding_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChannelBinding' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Coworkers]
+      operationId: bindingsUpdate
+      summary: Update a channel binding's credentials or display name
+      description: |
+        Partial update. Fields not present in the body are left
+        untouched. `credentials` replaces the whole map when
+        provided (it's an opaque per-channel-type bag and merging
+        keys client-side hides the wrong-key case from the user).
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/IdInPath' }
+        - name: binding_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChannelBindingUpdate' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChannelBinding' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+    delete:
+      tags: [Coworkers]
+      operationId: bindingsDelete
+      summary: Remove a channel binding
+      description: |
+        Cascades through the channel gateway: the matching bot
+        connection is torn down on next reload. Conversations
+        anchored to this binding stay in the DB (they're history,
+        not state) but stop receiving new messages.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/IdInPath' }
+        - name: binding_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/admin/models:
+    post:
+      tags: [Admin]
+      operationId: adminModelsCreate
+      summary: Register a new platform model (admin only)
+      description: |
+        The `models` catalog is platform-managed — tenants pick from
+        it but only operators add rows. POST/PATCH/DELETE require
+        the `owner` role (design §13 role check).
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ModelCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Model' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
+  /api/v1/admin/models/{id}:
+    patch:
+      tags: [Admin]
+      operationId: adminModelsUpdate
+      summary: Update a platform model (admin only)
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/IdInPath' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ModelUpdate' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Model' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+    delete:
+      tags: [Admin]
+      operationId: adminModelsDelete
+      summary: Retire a platform model (admin only)
+      description: |
+        Soft delete — sets `active = false` rather than dropping the
+        row so existing coworkers that point at the model keep
+        rendering. Returns 409 if any coworker is still bound.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/IdInPath' }
+      responses:
+        '204':
+          description: Deleted (soft)
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
 components:
   securitySchemes:
     bearerAuth:
@@ -2585,6 +2850,171 @@ components:
           additionalProperties: true
           nullable: true
         created_at: { type: string, format: date-time }
+
+    # -----------------------------------------------------------------
+    # PR24 — gap-closing schemas (schedules, channel bindings, admin
+    # models). All three already existed on the backend (DB tables +
+    # helpers, or — for bindings — full admin REST); PR24 exposes them
+    # on /api/v1 with typed schemas so the SPA can drop them.
+    # -----------------------------------------------------------------
+
+    ScheduleType:
+      type: string
+      enum: [cron, interval, once]
+      description: |
+        How `schedule_value` is interpreted. `cron` uses crontab
+        syntax; `interval` is a duration string ("5m", "1h");
+        `once` is a single ISO-8601 timestamp.
+
+    ScheduleStatus:
+      type: string
+      enum: [active, paused, completed]
+      description: |
+        `completed` is the terminal state for `once` schedules after
+        they've fired. `paused` is a manual halt — the row stays but
+        the orchestrator skips it.
+
+    ScheduleContextMode:
+      type: string
+      enum: [group, isolated]
+      description: |
+        `isolated` — each fire spawns a fresh agent without prior
+        context. `group` — reuses the bound conversation so memory
+        carries across firings.
+
+    ScheduledTask:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - coworker_id
+        - prompt
+        - schedule_type
+        - schedule_value
+        - context_mode
+        - status
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        coworker_id: { type: string, format: uuid }
+        conversation_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            Required when `context_mode == group`; null when
+            `isolated`. Null `group` rows are a data-model bug — the
+            orchestrator drops them with a warning.
+        prompt: { type: string }
+        schedule_type: { $ref: '#/components/schemas/ScheduleType' }
+        schedule_value: { type: string }
+        context_mode: { $ref: '#/components/schemas/ScheduleContextMode' }
+        next_run:
+          type: string
+          format: date-time
+          nullable: true
+        last_run:
+          type: string
+          format: date-time
+          nullable: true
+        last_result:
+          type: string
+          nullable: true
+        status: { $ref: '#/components/schemas/ScheduleStatus' }
+        created_at: { type: string, format: date-time }
+
+    ChannelBinding:
+      type: object
+      required:
+        - id
+        - coworker_id
+        - tenant_id
+        - channel_type
+        - status
+      properties:
+        id: { type: string, format: uuid }
+        coworker_id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        channel_type: { $ref: '#/components/schemas/ChannelType' }
+        bot_display_name:
+          type: string
+          nullable: true
+        status:
+          type: string
+          description: |
+            Free-form status string set by the gateway (e.g.
+            `active`, `error: bot_token rejected`). The UI renders it
+            verbatim; no enum because gateways may surface
+            channel-specific error states.
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    ChannelBindingCreate:
+      type: object
+      required: [channel_type, credentials]
+      properties:
+        channel_type: { $ref: '#/components/schemas/ChannelType' }
+        credentials:
+          type: object
+          additionalProperties: { type: string }
+          description: |
+            Channel-specific credential map. Shape is per gateway:
+            Slack expects `bot_token` + `app_token`; Telegram expects
+            `bot_token`; `web` accepts an empty map. The values are
+            stored encrypted at rest (envelope encryption — same
+            machinery as /credentials).
+        bot_display_name:
+          type: string
+          nullable: true
+
+    ChannelBindingUpdate:
+      type: object
+      properties:
+        credentials:
+          type: object
+          additionalProperties: { type: string }
+          nullable: true
+          description: |
+            When provided, replaces the entire credentials map (not
+            a merge). Omit to leave credentials untouched.
+        bot_display_name:
+          type: string
+          nullable: true
+
+    ModelCreate:
+      type: object
+      required: [provider, model_id, model_family, display_name]
+      properties:
+        provider: { $ref: '#/components/schemas/ModelProvider' }
+        model_id:
+          type: string
+          minLength: 1
+          maxLength: 200
+        model_family: { $ref: '#/components/schemas/ModelFamily' }
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        is_active:
+          type: boolean
+          default: true
+
+    ModelUpdate:
+      type: object
+      description: |
+        All fields optional. `is_active: false` here is preferred
+        over DELETE for already-bound models (DELETE returns 409 on
+        in-use rows; this lets an operator hide a deprecated model
+        from new bindings without dropping the row).
+      properties:
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        is_active:
+          type: boolean
 
     # -----------------------------------------------------------------
     # WebSocket frame schemas (PR23).
