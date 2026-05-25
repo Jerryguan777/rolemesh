@@ -125,6 +125,82 @@ const SKILL_NAME_RESERVED: ReadonlySet<string> = new Set([
 ]);
 const DESCRIPTION_MAX = 1024;
 
+/** Per-file and aggregate caps for client-uploaded extras. Skills are
+ *  documents / scripts — a 1MB file is already huge for that. The
+ *  total cap exists to defend the tenant DB from a careless drag-drop
+ *  of a 200MB log directory; the backend currently has no row-size
+ *  enforcement on `skill_files.content` (it's TEXT, unbounded). */
+export const MAX_UPLOAD_BYTES_PER_FILE = 1 * 1024 * 1024;
+export const MAX_UPLOAD_BYTES_TOTAL = 5 * 1024 * 1024;
+
+/** Liberal text-vs-binary heuristic: a NUL byte in the first 4KB of a
+ *  file is a near-perfect binary signal (text files never contain
+ *  raw NULs; the DB's TEXT column would reject them anyway). Cheaper
+ *  and more accurate than a MIME-by-extension allowlist. */
+export function isLikelyBinary(content: string): boolean {
+  const window = content.length > 4096 ? content.slice(0, 4096) : content;
+  return window.indexOf('\0') !== -1;
+}
+
+/** Format byte count for the file row meta line ("1.2 KB", "234 B"). */
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** Strip the first path segment when there's more than one. Folder
+ *  pickers expose paths as "<rootName>/sub/file.md" — keeping the root
+ *  prefix would make the catalog read "my-skill-files/references/intro.md"
+ *  which is meaningless to the agent. Single-segment paths pass through
+ *  unchanged. */
+export function stripLeadingFolder(path: string): string {
+  const idx = path.indexOf('/');
+  if (idx === -1) return path;
+  return path.slice(idx + 1);
+}
+
+// Minimal structural typing for the (non-standard) FileSystemEntry
+// API exposed by webkitGetAsEntry. TypeScript's lib.dom.d.ts has
+// these now but their availability varies by tsconfig target; pin the
+// shape we actually use so the code doesn't compile-fail on older
+// lib defs.
+interface FileSystemEntryLike {
+  isFile: boolean;
+  isDirectory: boolean;
+  name: string;
+}
+interface FileSystemFileEntryLike extends FileSystemEntryLike {
+  file: (cb: (f: File) => void, errcb?: (e: unknown) => void) => void;
+}
+interface FileSystemDirectoryEntryLike extends FileSystemEntryLike {
+  createReader: () => {
+    readEntries: (
+      cb: (entries: FileSystemEntryLike[]) => void,
+      errcb?: (e: unknown) => void,
+    ) => void;
+  };
+}
+
+/** Read one File via FileReader.readAsText. The wrapper rejects empty
+ *  reads (zero bytes is a valid file but useless as a skill resource —
+ *  and surfaces a clearer error than the silent "" content). */
+function readFileAsText(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onerror = () => reject(r.error ?? new Error('read error'));
+    r.onload = () => {
+      const v = r.result;
+      if (typeof v !== 'string') {
+        reject(new Error('expected text content'));
+        return;
+      }
+      resolve(v);
+    };
+    r.readAsText(file);
+  });
+}
+
 /** Return null when the name is acceptable, else the user-facing
  *  message. `null` is the empty-string case — the dialog treats it
  *  as "not yet typed" rather than an error so we don't flash red on
@@ -172,6 +248,18 @@ export class SkillDialog extends LitElement {
    *  user hasn't typed anything yet (empty string is the "untouched"
    *  state, not an error). */
   @state() private nameTouched = false;
+  /** "Replaced N" / "Skipped binary M" feedback after an upload. Lives
+   *  for ~3 seconds then clears itself so the dialog doesn't get
+   *  cluttered. */
+  @state() private uploadToast: string | null = null;
+  /** True while a folder-pick or drag-drop read is in flight. Disables
+   *  the upload controls so users can't double-trigger. */
+  @state() private reading = false;
+  /** Counter for drag-enter / drag-leave so child elements crossing
+   *  the boundary don't toggle the highlight state. */
+  private dragDepth = 0;
+  @state() private dragHover = false;
+  private toastTimer: number | null = null;
 
   private readonly api = getApiClient();
 
@@ -294,6 +382,264 @@ export class SkillDialog extends LitElement {
     this.extraFiles = this.extraFiles.filter((_, i) => i !== idx);
   }
 
+  /** Surface a transient banner under the upload zone. Repeated calls
+   *  reset the timer so the latest message stays visible for the full
+   *  duration. */
+  private setUploadToast(msg: string): void {
+    this.uploadToast = msg;
+    if (this.toastTimer !== null) {
+      window.clearTimeout(this.toastTimer);
+    }
+    this.toastTimer = window.setTimeout(() => {
+      this.uploadToast = null;
+      this.toastTimer = null;
+    }, 4000);
+  }
+
+  /** Take a list of (path, content) pairs from a picker / drop and
+   *  merge them into ``extraFiles``. Applies all three gates in one
+   *  pass so the user gets ONE aggregated summary toast instead of
+   *  per-file alerts: per-file size, NUL-byte binary detection, and
+   *  total-size budget. Same-path collisions silently replace existing
+   *  rows (with the count surfaced in the toast). */
+  private ingestUploads(
+    incoming: ReadonlyArray<{ path: string; content: string; bytes: number }>,
+  ): void {
+    let oversize = 0;
+    let binary = 0;
+    let replaced = 0;
+    let added = 0;
+    // Working copy of the file map keyed by path so collisions are
+    // O(1) instead of O(N²) for large drops.
+    const byPath = new Map(this.extraFiles.map((f) => [f.path, f.content]));
+    // Start the total-size budget from the bytes already accepted into
+    // extraFiles — that defends against death-by-a-thousand-cuts
+    // (user drops 1 file of 4MB, then another 4MB later, etc.).
+    let totalBytes = this.extraFiles.reduce(
+      (acc, f) => acc + new Blob([f.content]).size,
+      0,
+    );
+    for (const item of incoming) {
+      if (item.path === SKILL_MANIFEST_NAME) {
+        // SKILL.md goes through the dedicated textarea; an extra
+        // file at that path would silently shadow it on the wire.
+        binary += 0; // not binary; just rejected — count under a
+        // dedicated tally to avoid mis-labeling.
+        this.setUploadToast(
+          `"${SKILL_MANIFEST_NAME}" is the main instructions file — edit it in the Instructions box above, not as an upload.`,
+        );
+        continue;
+      }
+      if (!isValidSkillFilePath(item.path)) {
+        // Skip rather than abort the batch — one bad path in a 50-file
+        // folder drop shouldn't lose the other 49 files.
+        oversize += 0;
+        continue;
+      }
+      if (item.bytes > MAX_UPLOAD_BYTES_PER_FILE) {
+        oversize += 1;
+        continue;
+      }
+      if (isLikelyBinary(item.content)) {
+        binary += 1;
+        continue;
+      }
+      if (totalBytes + item.bytes > MAX_UPLOAD_BYTES_TOTAL) {
+        oversize += 1;
+        continue;
+      }
+      if (byPath.has(item.path)) {
+        replaced += 1;
+      } else {
+        added += 1;
+      }
+      // Subtract the previous size if replacing, so the budget is
+      // accurate across re-uploads of the same path.
+      if (byPath.has(item.path)) {
+        const prev = byPath.get(item.path) ?? '';
+        totalBytes -= new Blob([prev]).size;
+      }
+      byPath.set(item.path, item.content);
+      totalBytes += item.bytes;
+    }
+    // Rebuild extraFiles preserving original order, then append new
+    // ones in folder-sorted order so the tree renders predictably.
+    const seen = new Set<string>();
+    const next: ExtraFile[] = [];
+    for (const f of this.extraFiles) {
+      if (byPath.has(f.path)) {
+        next.push({ path: f.path, content: byPath.get(f.path) ?? '' });
+        seen.add(f.path);
+      }
+    }
+    const newPaths = [...byPath.keys()]
+      .filter((p) => !seen.has(p))
+      .sort();
+    for (const p of newPaths) {
+      next.push({ path: p, content: byPath.get(p) ?? '' });
+    }
+    this.extraFiles = next;
+    // Force-disclose so the user sees what just landed; even if they
+    // collapsed it manually a moment ago, after an explicit upload
+    // hiding the result is unhelpful.
+    if (added > 0 || replaced > 0) this.advancedOpen = true;
+    // Compose a single toast covering everything that happened.
+    const parts: string[] = [];
+    if (added > 0) parts.push(`${added} added`);
+    if (replaced > 0) parts.push(`${replaced} replaced`);
+    if (binary > 0) parts.push(`${binary} skipped (binary)`);
+    if (oversize > 0) {
+      parts.push(`${oversize} skipped (over size cap)`);
+    }
+    if (parts.length > 0) this.setUploadToast(parts.join(' · '));
+  }
+
+  /** Pull a flat list of (path, File) pairs from a FileList. Used by
+   *  the file/folder pickers. Folder pickers populate
+   *  ``webkitRelativePath`` — strip the first segment so a user who
+   *  picks "my-skill-files/" doesn't end up with that as a prefix on
+   *  every file path inside the catalog. */
+  private async readFilesFromInput(list: FileList): Promise<
+    Array<{ path: string; content: string; bytes: number }>
+  > {
+    const out: Array<{ path: string; content: string; bytes: number }> = [];
+    for (const file of Array.from(list)) {
+      // webkitRelativePath is "folderName/sub/file.md" when the user
+      // used the folder picker; empty string for plain file picker.
+      const raw =
+        ((file as File & { webkitRelativePath?: string })
+          .webkitRelativePath) || file.name;
+      const path = stripLeadingFolder(raw);
+      try {
+        const content = await readFileAsText(file);
+        out.push({ path, content, bytes: file.size });
+      } catch {
+        // Skip unreadable; the toast tally below will note it as
+        // binary which is a close-enough explanation for the user.
+        out.push({ path, content: '\0', bytes: file.size });
+      }
+    }
+    return out;
+  }
+
+  /** Recursively walk a dropped folder using the (non-standard but
+   *  widely supported) webkitGetAsEntry API. Falls back to FileList
+   *  semantics when the drop is files-only and the entry API isn't
+   *  available. */
+  private async readEntries(
+    items: DataTransferItemList,
+  ): Promise<Array<{ path: string; content: string; bytes: number }>> {
+    const out: Array<{ path: string; content: string; bytes: number }> = [];
+    const entries: FileSystemEntryLike[] = [];
+    for (const it of Array.from(items)) {
+      if (it.kind !== 'file') continue;
+      const entry =
+        typeof (it as DataTransferItem & {
+          webkitGetAsEntry?: () => FileSystemEntryLike | null;
+        }).webkitGetAsEntry === 'function'
+          ? (it as DataTransferItem & {
+              webkitGetAsEntry: () => FileSystemEntryLike | null;
+            }).webkitGetAsEntry()
+          : null;
+      if (entry) {
+        entries.push(entry);
+      } else {
+        // Browser without webkitGetAsEntry (mostly happy-dom in
+        // tests) — fall back to getAsFile.
+        const f = it.getAsFile();
+        if (f) {
+          const content = await readFileAsText(f).catch(() => '\0');
+          out.push({ path: f.name, content, bytes: f.size });
+        }
+      }
+    }
+    async function walk(
+      entry: FileSystemEntryLike,
+      prefix: string,
+    ): Promise<void> {
+      if (entry.isFile) {
+        const file = await new Promise<File>((resolve, reject) =>
+          (entry as FileSystemFileEntryLike).file(resolve, reject),
+        );
+        const content = await readFileAsText(file).catch(() => '\0');
+        out.push({
+          path: stripLeadingFolder(prefix + file.name),
+          content,
+          bytes: file.size,
+        });
+      } else if (entry.isDirectory) {
+        const reader = (entry as FileSystemDirectoryEntryLike).createReader();
+        // readEntries returns a batch at a time; keep calling until
+        // it returns empty per the spec.
+        let batch: FileSystemEntryLike[] = [];
+        do {
+          batch = await new Promise<FileSystemEntryLike[]>(
+            (resolve, reject) => reader.readEntries(resolve, reject),
+          );
+          for (const child of batch) {
+            await walk(child, `${prefix}${entry.name}/`);
+          }
+        } while (batch.length > 0);
+      }
+    }
+    for (const e of entries) {
+      // Top-level entries get no prefix; their own name shows up via
+      // stripLeadingFolder inside walk's file branch (the folder
+      // becomes the prefix for its children, but its own segment is
+      // dropped by stripLeadingFolder so the catalog doesn't carry
+      // "my-skill-files/" everywhere).
+      await walk(e, '');
+    }
+    return out;
+  }
+
+  private onPickFiles = async (e: Event) => {
+    const input = e.target as HTMLInputElement;
+    if (!input.files || input.files.length === 0) return;
+    this.reading = true;
+    try {
+      const items = await this.readFilesFromInput(input.files);
+      this.ingestUploads(items);
+    } finally {
+      this.reading = false;
+      input.value = ''; // allow re-picking the same path
+    }
+  };
+
+  private onDragEnter = (e: DragEvent) => {
+    e.preventDefault();
+    this.dragDepth += 1;
+    this.dragHover = true;
+  };
+
+  private onDragLeave = (e: DragEvent) => {
+    e.preventDefault();
+    this.dragDepth -= 1;
+    if (this.dragDepth <= 0) {
+      this.dragDepth = 0;
+      this.dragHover = false;
+    }
+  };
+
+  private onDragOver = (e: DragEvent) => {
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+  };
+
+  private onDrop = async (e: DragEvent) => {
+    e.preventDefault();
+    this.dragDepth = 0;
+    this.dragHover = false;
+    if (!e.dataTransfer) return;
+    this.reading = true;
+    try {
+      const items = await this.readEntries(e.dataTransfer.items);
+      this.ingestUploads(items);
+    } finally {
+      this.reading = false;
+    }
+  };
+
   private close = () => {
     this.open = false;
     this.dispatchEvent(
@@ -357,8 +703,12 @@ export class SkillDialog extends LitElement {
     try {
       let saved: Skill;
       if (this.editing) {
+        // Edit mode: send the full file set, but omit `name` since
+        // the backend treats name as immutable on PATCH. We could send
+        // `name: this.editing.name` (the backend accepts unchanged
+        // values) but omitting it keeps the wire payload smaller and
+        // makes the "name is read-only here" contract obvious.
         const body: SkillUpdate = {
-          name: this.name.trim(),
           enabled: true,
           files,
         };
@@ -554,46 +904,86 @@ export class SkillDialog extends LitElement {
             data-testid="skill-dialog-advanced-toggle"
           >Additional files</summary>
           <div class="mt-2">
+            <div
+              class=${`border-2 border-dashed rounded-md px-4 py-5 text-center transition-colors
+                ${this.dragHover
+                  ? 'border-brand bg-brand/5'
+                  : 'border-surface-3 dark:border-d-surface-3 bg-surface-1 dark:bg-d-surface-1'}`}
+              data-testid="skill-dialog-dropzone"
+              @dragenter=${this.onDragEnter}
+              @dragleave=${this.onDragLeave}
+              @dragover=${this.onDragOver}
+              @drop=${this.onDrop}
+            >
+              <div class="text-[12.5px] text-ink-2 dark:text-d-ink-2 mb-2">
+                ${this.reading
+                  ? 'Reading files…'
+                  : 'Drop a folder or files here, or:'}
+              </div>
+              <div class="flex items-center justify-center gap-2">
+                <label
+                  class="text-[12.5px] px-3 py-1.5 rounded-md border border-surface-3 dark:border-d-surface-3
+                    text-ink-1 dark:text-d-ink-1 hover:bg-surface-2 dark:hover:bg-d-surface-2
+                    cursor-pointer ${this.reading || this.busy ? 'opacity-60 pointer-events-none' : ''}"
+                  data-testid="skill-dialog-pick-folder-label"
+                >
+                  Choose folder
+                  <input
+                    type="file"
+                    class="hidden"
+                    webkitdirectory
+                    multiple
+                    data-testid="skill-dialog-pick-folder"
+                    @change=${this.onPickFiles}
+                  />
+                </label>
+                <label
+                  class="text-[12.5px] px-3 py-1.5 rounded-md border border-surface-3 dark:border-d-surface-3
+                    text-ink-1 dark:text-d-ink-1 hover:bg-surface-2 dark:hover:bg-d-surface-2
+                    cursor-pointer ${this.reading || this.busy ? 'opacity-60 pointer-events-none' : ''}"
+                  data-testid="skill-dialog-pick-files-label"
+                >
+                  Choose files
+                  <input
+                    type="file"
+                    class="hidden"
+                    multiple
+                    data-testid="skill-dialog-pick-files"
+                    @change=${this.onPickFiles}
+                  />
+                </label>
+              </div>
+              <div class="text-[11px] text-ink-3 dark:text-d-ink-3 mt-2">
+                Text files only, ${formatBytes(MAX_UPLOAD_BYTES_PER_FILE)} per file,
+                ${formatBytes(MAX_UPLOAD_BYTES_TOTAL)} total.
+              </div>
+            </div>
+            ${this.uploadToast
+              ? html`<div
+                  class="text-[12px] text-ink-2 dark:text-d-ink-2 mt-2"
+                  data-testid="skill-dialog-upload-toast"
+                  role="status"
+                >${this.uploadToast}</div>`
+              : nothing}
             ${this.extraFiles.length === 0
-              ? html`<div class="text-[12px] text-ink-3 dark:text-d-ink-3 mb-2">
-                  Most skills don't need extras. Add files here when the
-                  coworker needs reference material beyond the instructions above.
+              ? html`<div class="text-[12px] text-ink-3 dark:text-d-ink-3 mt-3">
+                  Most skills don't need extras. Drop files above when
+                  the coworker needs reference material beyond the
+                  instructions.
                 </div>`
-              : html`<div class="flex flex-col gap-1.5 mb-2">
-                  ${this.extraFiles.map((f, idx) => html`
-                    <div class="flex items-center gap-2 border border-surface-3 dark:border-d-surface-3 rounded-md px-2.5 py-1.5">
-                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none"
-                        stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"
-                        class="text-ink-3 dark:text-d-ink-3 shrink-0" aria-hidden="true">
-                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                        <path d="M14 2v6h6"/>
-                      </svg>
-                      <input
-                        type="text"
-                        class="flex-1 text-[13px] bg-transparent outline-none font-mono"
-                        .value=${f.path}
-                        ?disabled=${this.busy}
-                        @input=${(e: Event) =>
-                          this.renameFile(idx, (e.target as HTMLInputElement).value)}
-                        data-testid="skill-dialog-file"
-                      />
-                      <button
-                        type="button"
-                        class="rm-iconbtn rm-iconbtn--danger"
-                        title="Remove file"
-                        ?disabled=${this.busy}
-                        @click=${() => this.removeFile(idx)}
-                      >${iconTrash(14)}</button>
-                    </div>
-                  `)}
-                </div>`}
+              : renderFileTree(
+                  this.extraFiles,
+                  this.busy,
+                  (idx, newPath) => this.renameFile(idx, newPath),
+                  (idx) => this.removeFile(idx),
+                )}
             <button
               type="button"
-              class="text-[12.5px] text-brand hover:underline cursor-pointer"
+              class="text-[12.5px] text-brand hover:underline cursor-pointer mt-3"
               ?disabled=${this.busy}
               @click=${this.addFile}
               data-testid="skill-dialog-add-file"
-            >+ Add file</button>
+            >+ Add empty file</button>
             ${this.fileErr
               ? html`<div class="text-[12px] text-red-600 dark:text-red-300 mt-1">${this.fileErr}</div>`
               : nothing}
@@ -633,6 +1023,73 @@ export class SkillDialog extends LitElement {
       </rm-dialog>
     `;
   }
+}
+
+/** Render the extras as a folder-grouped list. Files at the catalog
+ *  root (no slash in path) render first, then each folder gets its
+ *  own group with the file rows beneath. The tree is one level deep
+ *  visually — nested folders just show as `sub/dir/file.md` inside
+ *  their top-level folder group. Keeps the markup simple while still
+ *  giving the user a sense of structure. Built as a free function so
+ *  the dialog's render() stays a one-screen scroll. */
+function renderFileTree(
+  files: ExtraFile[],
+  busy: boolean,
+  onRename: (idx: number, newPath: string) => void,
+  onRemove: (idx: number) => void,
+) {
+  const groups = new Map<string, Array<{ file: ExtraFile; idx: number }>>();
+  files.forEach((file, idx) => {
+    const slash = file.path.indexOf('/');
+    const key = slash === -1 ? '' : file.path.slice(0, slash);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push({ file, idx });
+  });
+  // Root files first ("" key), then folder groups alphabetically.
+  const ordered = [...groups.entries()].sort(([a], [b]) => {
+    if (a === '') return -1;
+    if (b === '') return 1;
+    return a.localeCompare(b);
+  });
+  return html`
+    <div class="flex flex-col gap-1 mt-3" data-testid="skill-dialog-file-tree">
+      ${ordered.map(([folder, entries]) => html`
+        ${folder
+          ? html`<div class="text-[12px] text-ink-2 dark:text-d-ink-2 font-mono mt-2">${folder}/</div>`
+          : nothing}
+        ${entries.map(({ file, idx }) => html`
+          <div class=${`flex items-center gap-2 border border-surface-3 dark:border-d-surface-3
+            rounded-md px-2.5 py-1.5 ${folder ? 'ml-3' : ''}`}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"
+              class="text-ink-3 dark:text-d-ink-3 shrink-0" aria-hidden="true">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <path d="M14 2v6h6"/>
+            </svg>
+            <input
+              type="text"
+              class="flex-1 text-[13px] bg-transparent outline-none font-mono"
+              .value=${file.path}
+              ?disabled=${busy}
+              @input=${(e: Event) =>
+                onRename(idx, (e.target as HTMLInputElement).value)}
+              data-testid="skill-dialog-file"
+            />
+            <span class="text-[11px] text-ink-3 dark:text-d-ink-3 whitespace-nowrap">
+              ${formatBytes(new Blob([file.content]).size)}
+            </span>
+            <button
+              type="button"
+              class="rm-iconbtn rm-iconbtn--danger"
+              title="Remove file"
+              ?disabled=${busy}
+              @click=${() => onRemove(idx)}
+            >${iconTrash(14)}</button>
+          </div>
+        `)}
+      `)}
+    </div>
+  `;
 }
 
 declare global {

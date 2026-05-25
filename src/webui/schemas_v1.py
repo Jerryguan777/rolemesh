@@ -554,16 +554,30 @@ class SkillCreate(BaseModel):
 class SkillUpdate(BaseModel):
     """``PATCH /api/v1/skills/{id}`` body.
 
-    Metadata-only — file content edits route through the per-file
-    endpoints. ``model_fields_set`` discriminates "field omitted"
-    from "field explicitly set to None" so ``frontmatter_backend: {}``
-    clears the dict rather than silently leaving the existing one
-    in place.
+    Two modes:
+    * Metadata-only — set ``enabled`` or one of the frontmatter dicts.
+    * Full file-set replacement — set ``files`` and the handler swaps
+      the entire ``skill_files`` map atomically (matching the create
+      path's semantics). Useful for the dialog's edit flow where the
+      user has edited SKILL.md body + added / removed extras and the
+      one-shot replace is simpler than diffing client-side.
+
+    ``model_fields_set`` discriminates "field omitted" from "field
+    explicitly set to None" so ``frontmatter_backend: {}`` clears the
+    dict rather than silently leaving the existing one in place.
+
+    ``name`` is intentionally NOT updatable: it's also a filesystem
+    directory on the agent side and the catalog UNIQUE (tenant_id,
+    name) constraint would make rename a multi-step migration. The
+    edit dialog disables the input; if a caller sends ``name``
+    anyway, the handler rejects unless it matches the existing value.
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    name: str | None = None
     enabled: bool | None = None
+    files: dict[str, SkillCreateFile] | None = None
     frontmatter_common: dict[str, object] | None = None
     frontmatter_backend: dict[str, dict[str, object]] | None = None
 

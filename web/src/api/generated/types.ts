@@ -1299,11 +1299,29 @@ export interface components {
             } | null;
         };
         /**
-         * @description Metadata-only update. Use the per-file endpoints to change
-         *     file content; this path leaves `skill_files` untouched.
+         * @description Two modes. Set `enabled` / `frontmatter_common` /
+         *     `frontmatter_backend` for a metadata-only edit, OR set `files`
+         *     to swap the entire `skill_files` map atomically (matches the
+         *     create path's semantics, useful for the edit dialog that
+         *     already has the full file set in memory). `name` is read-only
+         *     on PATCH — sending a value that matches the existing skill is
+         *     accepted; a differing value 400s.
          */
         SkillUpdate: {
+            /**
+             * @description Optional; must match the existing skill's name when
+             *     present. Rejected with 400 if it differs.
+             */
+            name?: string;
             enabled?: boolean;
+            /**
+             * @description Full file-set replacement when present. `SKILL.md` is
+             *     required; its frontmatter re-populates
+             *     `frontmatter_common` / `frontmatter_backend`.
+             */
+            files?: {
+                [key: string]: string | components["schemas"]["SkillFileUpsert"];
+            } | null;
             frontmatter_common?: {
                 [key: string]: unknown;
             } | null;

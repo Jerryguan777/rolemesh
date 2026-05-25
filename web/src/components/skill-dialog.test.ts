@@ -13,8 +13,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import './skill-dialog.js';
 import {
+  MAX_UPLOAD_BYTES_PER_FILE,
+  isLikelyBinary,
   parseSkillMd,
   serializeSkillMd,
+  stripLeadingFolder,
   validateSkillName,
   type SkillDialog,
 } from './skill-dialog.js';
@@ -175,7 +178,7 @@ function installFetch(): Stub {
 
 async function settle(el: SkillDialog): Promise<void> {
   for (let i = 0; i < 25; i += 1) {
-    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
     await el.updateComplete;
   }
 }
@@ -652,5 +655,381 @@ describe('validateSkillName', () => {
     // this contract so a future "stricter validation" doesn't flash
     // red the moment the dialog opens.
     expect(validateSkillName('')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------
+// PR21: pure helpers — isLikelyBinary, stripLeadingFolder
+// ---------------------------------------------------------------------
+
+describe('isLikelyBinary', () => {
+  it('returns false for pure text', () => {
+    expect(isLikelyBinary('hello world\nmore lines\n')).toBe(false);
+  });
+
+  it('returns true when a NUL byte appears in the first 4KB', () => {
+    expect(isLikelyBinary('abc\0def')).toBe(true);
+  });
+
+  it('returns true even when the NUL is at the boundary', () => {
+    // Exactly at index 0 — catches the off-by-one in any future
+    // "skip first byte" optimization.
+    expect(isLikelyBinary('\0rest')).toBe(true);
+  });
+
+  it('does not scan past the 4KB window', () => {
+    // Pin the perf contract: a 10MB string with a NUL at the very
+    // end must NOT be flagged binary (we only look at first 4KB).
+    // The test exists to catch a future refactor that drops the
+    // window optimization and starts O(n) scanning huge texts.
+    const big = 'a'.repeat(5_000_000) + '\0' + 'b'.repeat(5_000_000);
+    expect(isLikelyBinary(big)).toBe(false);
+  });
+});
+
+describe('stripLeadingFolder', () => {
+  it('drops the first path segment when there are multiple', () => {
+    expect(stripLeadingFolder('rootName/references/intro.md')).toBe(
+      'references/intro.md',
+    );
+  });
+
+  it('passes single-segment paths through unchanged', () => {
+    expect(stripLeadingFolder('SKILL.md')).toBe('SKILL.md');
+  });
+
+  it('handles a trailing-slash-only top folder', () => {
+    // Edge: "folder/" with no file under it. After strip we get
+    // empty string. Caller (ingestUploads) skips empties via the
+    // isValidSkillFilePath gate.
+    expect(stripLeadingFolder('folder/')).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------
+// PR21: upload UX (drag-drop, pickers, size + binary gates, conflict
+// silent-replace + toast)
+// ---------------------------------------------------------------------
+
+interface FakeFileOptions {
+  name: string;
+  content: string;
+  /** Mimics the folder picker's path metadata (`folder/sub/file.md`). */
+  relativePath?: string;
+  /** Override the size separately from the content length (for
+   *  oversize tests where the synthetic content is short but we
+   *  want to trip the cap). */
+  size?: number;
+}
+
+function makeFile(opts: FakeFileOptions): File {
+  // happy-dom's File constructor honors `name` and exposes `size`
+  // from the blob parts. We monkey-patch webkitRelativePath after
+  // construction because the constructor doesn't accept it.
+  const f = new File([opts.content], opts.name, {
+    type: 'text/plain',
+  });
+  if (opts.size !== undefined) {
+    Object.defineProperty(f, 'size', { value: opts.size, configurable: true });
+  }
+  if (opts.relativePath !== undefined) {
+    Object.defineProperty(f, 'webkitRelativePath', {
+      value: opts.relativePath,
+      configurable: true,
+    });
+  }
+  return f;
+}
+
+/** Build a FileList-like wrapper that the pickers' onChange accepts.
+ *  happy-dom doesn't expose a FileList constructor, but the dialog
+ *  reads input.files via Array.from(list) which only needs a
+ *  Symbol.iterator + numeric indices. A plain array already has
+ *  both; we just cast through unknown to satisfy TS. */
+function asFileList(files: File[]): FileList {
+  return files.slice() as unknown as FileList;
+}
+
+describe('skill-dialog: upload via file picker', () => {
+  let stub: Stub;
+  beforeEach(() => {
+    stub = installFetch();
+  });
+  afterEach(() => {
+    stub.restore();
+    document.body.innerHTML = '';
+  });
+
+  it('reads file content, normalizes path, and shows the row in the tree', async () => {
+    const el = mount();
+    el.editing = null;
+    el.open = true;
+    await settle(el);
+    const input = el.querySelector<HTMLInputElement>(
+      '[data-testid="skill-dialog-pick-files"]',
+    )!;
+    const file = makeFile({ name: 'note.md', content: '# hello\n' });
+    Object.defineProperty(input, 'files', {
+      value: asFileList([file]),
+      configurable: true,
+    });
+    input.dispatchEvent(new Event('change'));
+    // FileReader uses a macrotask in happy-dom; flush via setTimeout
+    // because awaiting `Promise.resolve()` only drains microtasks.
+    for (let i = 0; i < 50; i += 1) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+      if (el.querySelector('[data-testid="skill-dialog-file"]')) break;
+    }
+    const rows = el.querySelectorAll<HTMLInputElement>(
+      '[data-testid="skill-dialog-file"]',
+    );
+    expect(rows.length).toBe(1);
+    expect(rows[0].value).toBe('note.md');
+  });
+
+  it('preserves folder structure from the folder picker via webkitRelativePath', async () => {
+    const el = mount();
+    el.editing = null;
+    el.open = true;
+    await settle(el);
+    const input = el.querySelector<HTMLInputElement>(
+      '[data-testid="skill-dialog-pick-folder"]',
+    )!;
+    // Folder picker exposes "rootName/sub/file.md" — the first
+    // segment is the user's chosen root and gets stripped.
+    const files = [
+      makeFile({
+        name: 'intro.md',
+        content: '# intro\n',
+        relativePath: 'my-skill/references/intro.md',
+      }),
+      makeFile({
+        name: 'helper.py',
+        content: "print('hi')\n",
+        relativePath: 'my-skill/scripts/helper.py',
+      }),
+    ];
+    Object.defineProperty(input, 'files', {
+      value: asFileList(files),
+      configurable: true,
+    });
+    input.dispatchEvent(new Event('change'));
+    for (let i = 0; i < 50; i += 1) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+      if (
+        el.querySelectorAll('[data-testid="skill-dialog-file"]').length >= 2
+      ) break;
+    }
+    const paths = [
+      ...el.querySelectorAll<HTMLInputElement>(
+        '[data-testid="skill-dialog-file"]',
+      ),
+    ].map((i) => i.value);
+    // First segment ("my-skill") is stripped; folder structure
+    // ("references/", "scripts/") survives.
+    expect(paths.sort()).toEqual([
+      'references/intro.md',
+      'scripts/helper.py',
+    ]);
+  });
+
+  it('rejects a binary file (NUL byte) and emits a toast tally', async () => {
+    const el = mount();
+    el.editing = null;
+    el.open = true;
+    await settle(el);
+    const input = el.querySelector<HTMLInputElement>(
+      '[data-testid="skill-dialog-pick-files"]',
+    )!;
+    const file = makeFile({ name: 'image.bin', content: 'abc\0def' });
+    Object.defineProperty(input, 'files', {
+      value: asFileList([file]),
+      configurable: true,
+    });
+    input.dispatchEvent(new Event('change'));
+    for (let i = 0; i < 50; i += 1) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+      if (
+        el.querySelector('[data-testid="skill-dialog-upload-toast"]')
+      ) break;
+    }
+    expect(
+      el.querySelectorAll('[data-testid="skill-dialog-file"]').length,
+      'binary file must not appear in the tree',
+    ).toBe(0);
+    const toast = el.querySelector('[data-testid="skill-dialog-upload-toast"]');
+    expect(toast?.textContent).toContain('binary');
+  });
+
+  it('rejects a file over the per-file size cap and tallies in toast', async () => {
+    const el = mount();
+    el.editing = null;
+    el.open = true;
+    await settle(el);
+    const input = el.querySelector<HTMLInputElement>(
+      '[data-testid="skill-dialog-pick-files"]',
+    )!;
+    // Small synthetic content but size monkey-patched to exceed the
+    // cap; reader will succeed but ingest gate rejects.
+    const file = makeFile({
+      name: 'huge.log',
+      content: 'short',
+      size: MAX_UPLOAD_BYTES_PER_FILE + 1,
+    });
+    Object.defineProperty(input, 'files', {
+      value: asFileList([file]),
+      configurable: true,
+    });
+    input.dispatchEvent(new Event('change'));
+    for (let i = 0; i < 50; i += 1) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+      if (
+        el.querySelector('[data-testid="skill-dialog-upload-toast"]')
+      ) break;
+    }
+    expect(
+      el.querySelectorAll('[data-testid="skill-dialog-file"]').length,
+    ).toBe(0);
+    const toast = el.querySelector('[data-testid="skill-dialog-upload-toast"]');
+    expect(toast?.textContent).toContain('size cap');
+  });
+
+  it('silently replaces an existing path on conflict and tallies "replaced" in toast', async () => {
+    const el = mount();
+    el.editing = null;
+    el.open = true;
+    await settle(el);
+    // First upload — establishes the row.
+    const input = el.querySelector<HTMLInputElement>(
+      '[data-testid="skill-dialog-pick-files"]',
+    )!;
+    Object.defineProperty(input, 'files', {
+      value: asFileList([
+        makeFile({ name: 'note.md', content: 'v1\n' }),
+      ]),
+      configurable: true,
+    });
+    input.dispatchEvent(new Event('change'));
+    for (let i = 0; i < 50; i += 1) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+      if (el.querySelector('[data-testid="skill-dialog-file"]')) break;
+    }
+    // Second upload at the same path with new content.
+    Object.defineProperty(input, 'files', {
+      value: asFileList([
+        makeFile({ name: 'note.md', content: 'v2 (replaced)\n' }),
+      ]),
+      configurable: true,
+    });
+    input.dispatchEvent(new Event('change'));
+    for (let i = 0; i < 50; i += 1) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+      const t = el.querySelector('[data-testid="skill-dialog-upload-toast"]');
+      if (t?.textContent?.includes('replaced')) break;
+    }
+    const rows = el.querySelectorAll<HTMLInputElement>(
+      '[data-testid="skill-dialog-file"]',
+    );
+    // Still ONE row; content was replaced in place, not duplicated.
+    expect(rows.length).toBe(1);
+    const toast = el.querySelector('[data-testid="skill-dialog-upload-toast"]');
+    expect(toast?.textContent).toContain('replaced');
+  });
+
+  it('rejects an upload at the reserved SKILL.md path with a clear toast', async () => {
+    const el = mount();
+    el.editing = null;
+    el.open = true;
+    await settle(el);
+    const input = el.querySelector<HTMLInputElement>(
+      '[data-testid="skill-dialog-pick-files"]',
+    )!;
+    Object.defineProperty(input, 'files', {
+      value: asFileList([
+        makeFile({ name: 'SKILL.md', content: '# Smuggled\n' }),
+      ]),
+      configurable: true,
+    });
+    input.dispatchEvent(new Event('change'));
+    for (let i = 0; i < 50; i += 1) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+      const t = el.querySelector('[data-testid="skill-dialog-upload-toast"]');
+      if (t) break;
+    }
+    expect(
+      el.querySelectorAll('[data-testid="skill-dialog-file"]').length,
+      'SKILL.md must not be added as an extra file (would shadow main)',
+    ).toBe(0);
+    const toast = el.querySelector('[data-testid="skill-dialog-upload-toast"]');
+    expect(toast?.textContent).toContain('SKILL.md');
+  });
+});
+
+describe('skill-dialog: PATCH edit body shape', () => {
+  let stub: Stub;
+  beforeEach(() => {
+    stub = installFetch();
+  });
+  afterEach(() => {
+    stub.restore();
+    document.body.innerHTML = '';
+  });
+
+  it('omits `name` from the PATCH body (backend treats name as immutable)', async () => {
+    // Pre-PR21 the dialog sent {name, enabled, files} which would now
+    // produce a no-op match against the existing name (legal but
+    // verbose). The new contract is to omit name entirely so a future
+    // backend tightening that rejects ANY name in PATCH still works.
+    const existing: SkillSummary = {
+      id: 's-noname',
+      tenant_id: 't',
+      name: 'pre-existing',
+      description: 'd',
+      enabled: true,
+      bound_coworker_count: 0,
+      created_at: '',
+      updated_at: '',
+    } as SkillSummary;
+    stub.skillDetail = {
+      id: 's-noname',
+      tenant_id: 't',
+      name: 'pre-existing',
+      enabled: true,
+      frontmatter_common: {},
+      frontmatter_backend: {},
+      files: {
+        'SKILL.md': {
+          path: 'SKILL.md',
+          content: '---\nname: pre-existing\ndescription: d\n---\nbody\n',
+          mime_type: 'text/markdown',
+          updated_at: '',
+        },
+      } as unknown as Skill['files'],
+      created_at: '',
+      updated_at: '',
+    } as Skill;
+    const el = mount();
+    el.editing = existing;
+    el.open = true;
+    await settle(el);
+    const saveBtn = el.querySelector<HTMLButtonElement>(
+      '[data-testid="skill-dialog-save"]',
+    )!;
+    saveBtn.click();
+    await settle(el);
+    const patch = stub.calls.find((c) => c.method === 'PATCH');
+    expect(patch, 'PATCH must fire').toBeTruthy();
+    expect(
+      'name' in (patch!.body ?? {}),
+      'name must NOT be in the PATCH body',
+    ).toBe(false);
+    expect(patch!.body!.files).toBeDefined();
   });
 });
