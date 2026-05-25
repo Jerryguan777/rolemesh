@@ -970,7 +970,7 @@ INV-7  Wire enum 与 engine enum 在 handler 边界翻译
 
 1. **整体方向**：hash router + `/api/v1` 与 `/api/admin` 并存 6 个月 + skill/MCP 三阶段渐进迁移 -> CONFIRMED
 2. **从 Phase 0 起步**：先建表 + 不变量基建 + `GET /api/v1/backends` + L9 container cleanup 审计（**P0**） + bootstrap multi-user 扩展 -> CONFIRMED
-3. **OpenAPI 先行**：先写 `web/openapi.yaml`，FastAPI 用 `response_model` 校验匹配；codegen 出 TS client -> CONFIRMED
+3. **OpenAPI 先行**：先写 `contracts/openapi.yaml`，FastAPI 用 `response_model` 校验匹配；codegen 出 TS client -> CONFIRMED
 4. **Dark mode**：现有 CSS 有 `--color-d-*` token 但无 toggle。Phase 1 跟系统 `prefers-color-scheme`（toggle 推迟）-> PROPOSED
 5. **抽 `<rm-app-shell>`**：chat 也接入新 shell，统一布局收敛 -> CONFIRMED
 6. **多 user smoke 方案**：方案 A（`BOOTSTRAP_USERS` env 多 user map，alice/bob 真落 users 表）-> CONFIRMED
@@ -989,7 +989,7 @@ INV-7  Wire enum 与 engine enum 在 handler 边界翻译
 6. **`BOOTSTRAP_USERS` env 解析 + `authenticate_ws()` 多 user 分支 + 首次见到时 upsert users 表 + pinned test**
 7. Migration：新表（models / tenant_model_credentials / mcp_servers / coworker_mcp_servers / coworker_skills / runs） + RLS policy
 8. Migration：`coworkers.model_id` / `coworkers.created_by_user_id`（NULLABLE）/ `skills.created_by_user_id`（NULLABLE）/ `messages.run_id`
-9. `web/openapi.yaml` 初稿 + codegen pipeline
+9. `contracts/openapi.yaml` 初稿 + codegen pipeline
 10. `<rm-app-shell>` 抽出 + chat 接入 + sidebar 占位入口（其它页跳 "coming soon"）
 11. Bootstrap smoke 脚本（仅 fast-path 路径），含多 user 扩展验证
 

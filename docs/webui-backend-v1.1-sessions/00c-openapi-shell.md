@@ -22,9 +22,9 @@
 
 ## Scope — PR breakdown
 
-### PR 1 — `web/openapi.yaml` 初稿 + codegen pipeline
+### PR 1 — `contracts/openapi.yaml` 初稿 + codegen pipeline
 
-**契约文件位置**：`web/openapi.yaml`（设计 §1 写"web/src/api/generated/" 是 codegen 输出位置，**契约源文件**放 `web/openapi.yaml`）。
+**契约文件位置**：`contracts/openapi.yaml`（设计 §1 写"web/src/api/generated/" 是 codegen 输出位置，**契约源文件**放 `contracts/openapi.yaml`）。
 
 **包含范围**：
 
@@ -96,7 +96,7 @@
 
 ## Acceptance criteria（session 级）
 
-- [ ] `web/openapi.yaml` 覆盖 Phase 1 + `/api/v1/backends` 的全部 endpoints（哪怕实现还没有）
+- [ ] `contracts/openapi.yaml` 覆盖 Phase 1 + `/api/v1/backends` 的全部 endpoints（哪怕实现还没有）
 - [ ] `npm run openapi:gen` 跑通，types.ts 生成
 - [ ] codegen freshness check 绿（yaml 改不更新 ts 时 CI 红）
 - [ ] `<rm-app-shell>` + chat 接入完成；现有 chat 行为不退化

@@ -55,7 +55,9 @@ from webui.schemas_v1 import (
     SkillSummary,
 )
 
-OPENAPI_PATH = Path(__file__).resolve().parent.parent / "web" / "openapi.yaml"
+OPENAPI_PATH = (
+    Path(__file__).resolve().parent.parent / "contracts" / "openapi.yaml"
+)
 
 
 def _load_spec() -> dict[str, object]:

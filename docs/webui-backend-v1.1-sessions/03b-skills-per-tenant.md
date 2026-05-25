@@ -112,7 +112,7 @@ grep -rn "skills.*coworker_id\|skill\.coworker_id\|Skill.coworker_id" src/ tests
 - `src/rolemesh/db/skill.py` `_record_to_skill` mapper：`created_by=` → `created_by_user_id=`（PR 1 改 Skill dataclass 时一起改也行，但单独 PR 更易 review）
 - `src/webui/schemas.py` (admin) + `src/webui/schemas_v1.py` (v1) skills 相关 response model：字段同步改
 - `src/webui/admin.py`：response_model 引用 + 任何 alias 处理
-- `web/openapi.yaml`：skills schema 字段名同步（codegen 自动出 TS）
+- `contracts/openapi.yaml`：skills schema 字段名同步（codegen 自动出 TS）
 - 前端任何手写 `created_by` 在 skills 相关代码 —— `grep -rn "created_by[^_]" web/src/` 看具体范围
 
 **注意排除项**：

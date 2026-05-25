@@ -3,7 +3,7 @@
 Kept separate from ``webui.schemas`` (which serves the legacy
 ``/api/admin`` surface) so the two contracts evolve independently.
 
-The shapes here MUST stay in sync with ``web/openapi.yaml``. The
+The shapes here MUST stay in sync with ``contracts/openapi.yaml``. The
 freshness CI (``tests/test_openapi_codegen_freshness.py``) catches
 yaml/ts drift; ``tests/test_openapi_contract.py`` catches drift
 between this Python contract and the yaml.
@@ -33,7 +33,7 @@ UserRole = Literal["owner", "admin", "member"]
 class ErrorResponse(BaseModel):
     """Design §13 — uniform error envelope.
 
-    The shape is anchored against ``web/openapi.yaml`` by
+    The shape is anchored against ``contracts/openapi.yaml`` by
     :func:`tests.test_openapi_contract.test_error_response_shape_matches_pydantic_model`.
     """
 

@@ -19,7 +19,7 @@
 3. **01b Findings § "chore A: orchestrator-side cancel subscriber"** —— Stop vs Cancel UX 约束的来源
 4. `web/src/` 现有 chat-panel 组件 + ws client（特别看现有 Stop 按钮调的是 `{type:"stop"}` → NATS `agent.{job_id}.interrupt`）
 5. 00c 落下的 `<rm-app-shell>` 和 `web/src/api/generated/types.ts`
-6. `web/openapi.yaml` —— 拿 typed client
+6. `contracts/openapi.yaml` —— 拿 typed client
 
 ## Scope — PR breakdown
 

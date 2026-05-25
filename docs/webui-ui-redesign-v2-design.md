@@ -5,7 +5,7 @@
 >
 > **两份 source of truth,各管各的。**
 > - **数据以 OpenAPI 契约为准** —— 实体名、字段、枚举、端点。在 `feat/ui` 分支上,契约本体是
->   `web/openapi.yaml`(规范)+ `web/src/api/generated/types.ts`(生成的 TS 类型)+
+>   `contracts/openapi.yaml`(规范)+ `web/src/api/generated/types.ts`(生成的 TS 类型)+
 >   `src/webui/schemas_v1.py`(Pydantic)。*(本分支上**没有**叫 `contract/` 的顶层目录——这三个文件
 >   就是契约。若你本地路径不同,请指给我。)*
 > - **样式与交互以 HTML 原型为准** —— 布局、流程、文案、那套 "studio" 视觉语言。
@@ -243,7 +243,7 @@ v4 + Shadow DOM 摩擦)。每个画面用 Playwright 截图循环对着原型对
 
 ## 10. 对照契约后的实现澄清项
 
-通读 `web/openapi.yaml` 后确认:设计在模型层面是一致的 —— 实体、credential → provider → model 的依赖链、
+通读 `contracts/openapi.yaml` 后确认:设计在模型层面是一致的 —— 实体、credential → provider → model 的依赖链、
 按 coworker 的绑定、以及治理对象的孪生关系都对得上。下面是浮现出来的缺口与待定项。**§10.1 是 blocking** ——
 做对应分片之前必须先解决;§10.2 是契约比原型更丰富、需要定范围的决策;§10.3 是向导的一个心智模型说明。
 
