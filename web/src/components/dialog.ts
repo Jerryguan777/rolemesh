@@ -47,20 +47,21 @@ export class RmDialog extends LitElement {
     :host {
       display: contents;
     }
+    /* Closed-state styling: leave display alone. The UA stylesheet's
+     * 'dialog:not([open]) { display: none }' is what hides the
+     * element — and crucially, author-origin CSS overrides UA-origin
+     * regardless of specificity (cascade origins beat specificity
+     * for the same property). A bare 'dialog { display: flex }' here
+     * would override the UA's display:none and make EVERY dialog
+     * visible on page load, even before the parent sets open=true.
+     * (Bug found in PR25 smoke test — all four management pages
+     * popped their create dialog the moment they mounted.)
+     *
+     * The non-display styling (width, border, etc.) is safe at this
+     * level because it doesn't affect visibility. */
     dialog {
       width: 100%;
       max-width: var(--rm-dialog-width, 440px);
-      /* Bound the modal vertically so a tall body (e.g. the skill
-       * dialog's Instructions textarea + Additional files tree)
-       * can't push the footer Cancel / Confirm buttons off-screen.
-       * 85vh leaves breathing room above and below the modal even on
-       * short laptop screens (~720px). */
-      max-height: 85vh;
-      /* Flex column lets the body grow / shrink while the header
-       * and footer stay pinned at the top/bottom. The body itself
-       * owns the overflow (see .body rule below). */
-      display: flex;
-      flex-direction: column;
       padding: 0;
       border: 1px solid var(--rm-border-2);
       border-radius: var(--rm-r-lg, 16px);
@@ -76,7 +77,14 @@ export class RmDialog extends LitElement {
       background: rgba(30, 27, 23, 0.5);
       backdrop-filter: blur(2px);
     }
+    /* Open-state layout: max-height + flex column live HERE, scoped
+     * to [open] so they only apply when the dialog is actually
+     * visible. This is what keeps the footer pinned + body scrolling
+     * (PR25 layout fix). */
     dialog[open] {
+      max-height: 85vh;
+      display: flex;
+      flex-direction: column;
       animation: rm-rise 0.2s ease both;
     }
     .hd {

@@ -1181,4 +1181,47 @@ describe('rm-dialog: layout', () => {
     expect(root.querySelector('.body')).toBeTruthy();
     expect(root.querySelector('.foot')).toBeTruthy();
   });
+
+  it('scopes the layout display:flex to [open] (regression: dialog appeared on page mount)', async () => {
+    // PR25 originally put `display: flex` on bare `dialog { ... }`.
+    // The author-origin rule overrode the UA's
+    // `dialog:not([open]) { display: none }` (cascade origin beats
+    // specificity for the same property) and every dialog rendered
+    // visible the moment its host page mounted — coworkers, MCP
+    // servers, skills, and credentials pages all popped their
+    // create dialog with no user action.
+    //
+    // The fix: layout properties (display, flex-direction, max-height)
+    // live under `dialog[open] { ... }` so they only apply when the
+    // dialog is actually meant to be visible. happy-dom doesn't
+    // implement the UA stylesheet faithfully enough for a "is it
+    // visible" assertion to catch this, so we instead read the
+    // raw styles text and pin the structural contract: the bare
+    // `dialog` rule MUST NOT carry display:flex.
+    //
+    // This is brittle by design — a future PR that "tidies up" by
+    // moving display:flex back to bare `dialog` should fail this
+    // test loudly.
+    const { RmDialog } = await import('./dialog.js');
+    const stylesText = String((RmDialog as { styles: unknown }).styles);
+    // Find the section between `dialog {` and the next `}`. The
+    // [^{}]* pattern catches the block contents; we then check
+    // 'display:' isn't in there.
+    const bareMatch = stylesText.match(
+      /(?:^|\n)\s*dialog\s*\{([^{}]*)\}/m,
+    );
+    expect(
+      bareMatch,
+      'expected to find a bare `dialog { ... }` rule for non-layout props',
+    ).toBeTruthy();
+    const bareBlock = (bareMatch![1] ?? '').toLowerCase();
+    expect(
+      bareBlock.includes('display:'),
+      'bare `dialog` rule must NOT set display — it overrides the UA ' +
+        'stylesheet and makes closed dialogs visible. Put display rules ' +
+        'inside `dialog[open] { ... }` instead.',
+    ).toBe(false);
+    // Positive check: layout DOES exist somewhere with [open] scope.
+    expect(stylesText).toMatch(/dialog\[open\]\s*\{[^{}]*display:\s*flex/);
+  });
 });
