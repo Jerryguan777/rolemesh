@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 BackendName = Literal["claude", "pi"]
 ModelProvider = Literal["anthropic", "bedrock", "openai", "google"]
@@ -435,7 +435,14 @@ class CoworkerMCPBindingUpdate(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-_SKILL_NAME_PATTERN_V1 = r"^[a-zA-Z][a-zA-Z0-9_-]{0,63}$"
+# Lowercase-kebab to match the DB CHECK and the runtime requirement
+# that skill names be safe to use as filesystem directory names on the
+# agent side.
+_SKILL_NAME_PATTERN_V1 = r"^[a-z0-9][a-z0-9-]{0,63}$"
+
+# Names the Claude runtime treats as built-in; surface as a Pydantic
+# error so the wire boundary rejects them before they hit the DB.
+_RESERVED_SKILL_NAMES_V1: frozenset[str] = frozenset({"anthropic", "claude"})
 
 
 class SkillFile(BaseModel):
@@ -533,6 +540,15 @@ class SkillCreate(BaseModel):
     files: dict[str, SkillCreateFile]
     frontmatter_common: dict[str, object] | None = None
     frontmatter_backend: dict[str, dict[str, object]] | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _check_not_reserved(cls, v: str) -> str:
+        if v in _RESERVED_SKILL_NAMES_V1:
+            raise ValueError(
+                f"skill name {v!r} is reserved by the Claude runtime"
+            )
+        return v
 
 
 class SkillUpdate(BaseModel):

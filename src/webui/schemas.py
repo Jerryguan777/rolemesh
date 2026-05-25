@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # ---------------------------------------------------------------------------
 # Tenant
@@ -341,7 +341,8 @@ class SafetyRuleUpdate(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-_SKILL_NAME_PATTERN = r"^[a-zA-Z][a-zA-Z0-9_-]{0,63}$"
+_SKILL_NAME_PATTERN = r"^[a-z0-9][a-z0-9-]{0,63}$"
+_RESERVED_SKILL_NAMES_ADMIN: frozenset[str] = frozenset({"anthropic", "claude"})
 
 
 class SkillFileInPayload(BaseModel):
@@ -392,6 +393,15 @@ class SkillCreate(BaseModel):
     # win over keys parsed from the inline SKILL.md frontmatter.
     frontmatter_common: dict[str, object] | None = None
     frontmatter_backend: dict[str, dict[str, object]] | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _check_not_reserved(cls, v: str) -> str:
+        if v in _RESERVED_SKILL_NAMES_ADMIN:
+            raise ValueError(
+                f"skill name {v!r} is reserved by the Claude runtime"
+            )
+        return v
 
 
 class SkillUpdate(BaseModel):

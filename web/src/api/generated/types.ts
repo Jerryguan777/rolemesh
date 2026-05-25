@@ -372,9 +372,11 @@ export interface paths {
          * Create a per-tenant catalog skill
          * @description The `files` map must include `SKILL.md` (frontmatter + body of
          *     the skill manifest). Path traversal in any key is rejected
-         *     with 422. Skill names must match `[a-zA-Z][a-zA-Z0-9_-]{0,63}`.
-         *     Returns 409 `RESOURCE_IN_USE` when a skill with this name
-         *     already exists in the tenant.
+         *     with 422. Skill names must match `^[a-z0-9][a-z0-9-]{0,63}$`
+         *     (lowercase, no leading hyphen) and must not be the reserved
+         *     values `anthropic` or `claude`. Returns
+         *     409 `RESOURCE_IN_USE` when a skill with this name already
+         *     exists in the tenant.
          */
         post: operations["createSkill"];
         delete?: never;
@@ -1268,6 +1270,14 @@ export interface components {
             updated_at: string;
         };
         SkillCreate: {
+            /**
+             * @description Lowercase letters, digits, hyphens. First character must
+             *     be alphanumeric (no leading hyphen — shells and CLI tools
+             *     misread leading-hyphen names as flags). Reserved names
+             *     `anthropic` and `claude` are rejected by an additional
+             *     server-side validator (Pydantic field_validator) since the
+             *     pattern alone cannot express the exclusion.
+             */
             name: string;
             /** @default true */
             enabled: boolean;

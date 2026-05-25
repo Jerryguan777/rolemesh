@@ -15,6 +15,7 @@ import './skill-dialog.js';
 import {
   parseSkillMd,
   serializeSkillMd,
+  validateSkillName,
   type SkillDialog,
 } from './skill-dialog.js';
 import type { Skill, SkillSummary } from '../api/client.js';
@@ -322,11 +323,19 @@ describe('<rm-skill-dialog>', () => {
     el.editing = null;
     el.open = true;
     await settle(el);
+    // Fill name + description so the new live-validation gates pass —
+    // the only remaining gate is the file path. Without these the test
+    // would pass for the wrong reason (description-empty also blocks).
     const nameInput = el.querySelector<HTMLInputElement>(
       '[data-testid="skill-dialog-name"]',
     )!;
     nameInput.value = 'demo';
     nameInput.dispatchEvent(new Event('input'));
+    const descInput = el.querySelector<HTMLInputElement>(
+      '[data-testid="skill-dialog-description"]',
+    )!;
+    descInput.value = 'demo description';
+    descInput.dispatchEvent(new Event('input'));
     // Add a file with a name that the SKILL_FILE_PATH_RE rejects.
     const addLink = el.querySelector<HTMLButtonElement>(
       '[data-testid="skill-dialog-add-file"]',
@@ -362,6 +371,11 @@ describe('<rm-skill-dialog>', () => {
     )!;
     nameInput.value = 'demo';
     nameInput.dispatchEvent(new Event('input'));
+    const descInput = el.querySelector<HTMLInputElement>(
+      '[data-testid="skill-dialog-description"]',
+    )!;
+    descInput.value = 'demo description';
+    descInput.dispatchEvent(new Event('input'));
     const addLink = el.querySelector<HTMLButtonElement>(
       '[data-testid="skill-dialog-add-file"]',
     )!;
@@ -383,5 +397,260 @@ describe('<rm-skill-dialog>', () => {
         (c) => c.method === 'POST' && c.url.endsWith('/api/v1/skills'),
       ),
     ).toBeUndefined();
+  });
+
+  // ---------------------------------------------------------------------
+  // PR20: live-validation gating + backend error routing
+  // ---------------------------------------------------------------------
+
+  it('disables Save when the name fails the kebab regex (live)', async () => {
+    const el = mount();
+    el.editing = null;
+    el.open = true;
+    await settle(el);
+    const nameInput = el.querySelector<HTMLInputElement>(
+      '[data-testid="skill-dialog-name"]',
+    )!;
+    nameInput.value = 'Has Upper';
+    nameInput.dispatchEvent(new Event('input'));
+    const descInput = el.querySelector<HTMLInputElement>(
+      '[data-testid="skill-dialog-description"]',
+    )!;
+    descInput.value = 'fine';
+    descInput.dispatchEvent(new Event('input'));
+    await settle(el);
+    const saveBtn = el.querySelector<HTMLButtonElement>(
+      '[data-testid="skill-dialog-save"]',
+    )!;
+    expect(saveBtn.disabled).toBe(true);
+    // The inline error appears in place of the helper hint.
+    const err = el.querySelector('[data-testid="skill-dialog-name-error"]');
+    expect(err).toBeTruthy();
+    expect(err!.textContent).toContain('Lowercase');
+    // And clicking it doesn't trigger a POST as a final safety check
+    // (keyboard-Enter could route around the disabled-button gate).
+    saveBtn.click();
+    await settle(el);
+    expect(
+      stub.calls.find((c) => c.method === 'POST'),
+      'POST must not fire when name validation fails',
+    ).toBeUndefined();
+  });
+
+  it('disables Save when the name matches a reserved word', async () => {
+    const el = mount();
+    el.editing = null;
+    el.open = true;
+    await settle(el);
+    const nameInput = el.querySelector<HTMLInputElement>(
+      '[data-testid="skill-dialog-name"]',
+    )!;
+    // Reserved by the Claude runtime; frontend rejects before backend
+    // sees the request so the user gets a fast, specific error rather
+    // than a 422 with no field-level mapping.
+    nameInput.value = 'anthropic';
+    nameInput.dispatchEvent(new Event('input'));
+    const descInput = el.querySelector<HTMLInputElement>(
+      '[data-testid="skill-dialog-description"]',
+    )!;
+    descInput.value = 'fine';
+    descInput.dispatchEvent(new Event('input'));
+    await settle(el);
+    const saveBtn = el.querySelector<HTMLButtonElement>(
+      '[data-testid="skill-dialog-save"]',
+    )!;
+    expect(saveBtn.disabled).toBe(true);
+    const err = el.querySelector('[data-testid="skill-dialog-name-error"]');
+    expect(err?.textContent).toContain('reserved');
+  });
+
+  it('disables Save when description is empty even with valid name', async () => {
+    const el = mount();
+    el.editing = null;
+    el.open = true;
+    await settle(el);
+    const nameInput = el.querySelector<HTMLInputElement>(
+      '[data-testid="skill-dialog-name"]',
+    )!;
+    nameInput.value = 'good-name';
+    nameInput.dispatchEvent(new Event('input'));
+    await settle(el);
+    const saveBtn = el.querySelector<HTMLButtonElement>(
+      '[data-testid="skill-dialog-save"]',
+    )!;
+    expect(saveBtn.disabled).toBe(true);
+  });
+
+  it('disables Save when description exceeds the 1024-char cap', async () => {
+    const el = mount();
+    el.editing = null;
+    el.open = true;
+    await settle(el);
+    const nameInput = el.querySelector<HTMLInputElement>(
+      '[data-testid="skill-dialog-name"]',
+    )!;
+    nameInput.value = 'good-name';
+    nameInput.dispatchEvent(new Event('input'));
+    const descInput = el.querySelector<HTMLInputElement>(
+      '[data-testid="skill-dialog-description"]',
+    )!;
+    descInput.value = 'x'.repeat(1025);
+    descInput.dispatchEvent(new Event('input'));
+    await settle(el);
+    const saveBtn = el.querySelector<HTMLButtonElement>(
+      '[data-testid="skill-dialog-save"]',
+    )!;
+    expect(saveBtn.disabled).toBe(true);
+    // Counter shows the overflow value (1025 / 1024) so the user can see
+    // why they're blocked.
+    const counter = el.querySelector(
+      '[data-testid="skill-dialog-desc-counter"]',
+    );
+    expect(counter?.textContent).toContain('1025');
+  });
+
+  it('routes a backend INVALID_NAME error to the name input', async () => {
+    const el = mount();
+    el.editing = null;
+    el.open = true;
+    await settle(el);
+    // Make the POST return a code-tagged 422. The dialog should paint
+    // the error next to the name input, not as a generic banner.
+    stub.shouldFail = { status: 422, message: 'bad name' };
+    // Override the response shape so the body includes the code field
+    // we route on.
+    const original = globalThis.fetch;
+    globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input.toString();
+      const method = init?.method ?? 'GET';
+      stub.calls.push({
+        url,
+        method,
+        body: init?.body != null ? JSON.parse(init.body as string) : null,
+      });
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({ code: 'INVALID_NAME', message: 'bad name' }),
+          { status: 422, headers: { 'Content-Type': 'application/json' } },
+        ),
+      );
+    }) as unknown as typeof fetch;
+    const nameInput = el.querySelector<HTMLInputElement>(
+      '[data-testid="skill-dialog-name"]',
+    )!;
+    nameInput.value = 'valid-name';
+    nameInput.dispatchEvent(new Event('input'));
+    const descInput = el.querySelector<HTMLInputElement>(
+      '[data-testid="skill-dialog-description"]',
+    )!;
+    descInput.value = 'fine';
+    descInput.dispatchEvent(new Event('input'));
+    await settle(el);
+    const saveBtn = el.querySelector<HTMLButtonElement>(
+      '[data-testid="skill-dialog-save"]',
+    )!;
+    saveBtn.click();
+    await settle(el);
+    globalThis.fetch = original;
+    const nameErr = el.querySelector(
+      '[data-testid="skill-dialog-name-error"]',
+    );
+    expect(nameErr?.textContent).toContain('bad name');
+  });
+
+  it('hides Additional files behind a collapsed disclosure on create', async () => {
+    const el = mount();
+    el.editing = null;
+    el.open = true;
+    await settle(el);
+    const details = el.querySelector('details');
+    expect(details).toBeTruthy();
+    // Create-mode default is collapsed — the easy-first path doesn't
+    // bother the user with multi-file scaffolding.
+    expect((details as HTMLDetailsElement).open).toBe(false);
+  });
+
+  it('opens the disclosure automatically on edit when the skill has extra files', async () => {
+    const existing: SkillSummary = {
+      id: 's-multi',
+      tenant_id: 't',
+      name: 'multi-file',
+      description: 'has refs',
+      enabled: true,
+      bound_coworker_count: 0,
+      created_at: '',
+      updated_at: '',
+    } as SkillSummary;
+    stub.skillDetail = {
+      id: 's-multi',
+      tenant_id: 't',
+      name: 'multi-file',
+      enabled: true,
+      frontmatter_common: {},
+      frontmatter_backend: {},
+      files: {
+        'SKILL.md': {
+          path: 'SKILL.md',
+          content: '---\nname: multi-file\ndescription: has refs\n---\nbody',
+          mime_type: 'text/markdown',
+          updated_at: '',
+        },
+        'reference.md': {
+          path: 'reference.md',
+          content: 'data',
+          mime_type: 'text/markdown',
+          updated_at: '',
+        },
+      } as unknown as Skill['files'],
+      created_at: '',
+      updated_at: '',
+    } as Skill;
+    const el = mount();
+    el.editing = existing;
+    el.open = true;
+    await settle(el);
+    const details = el.querySelector('details');
+    expect((details as HTMLDetailsElement).open).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------
+// PR20: validateSkillName unit boundary table
+// ---------------------------------------------------------------------
+
+describe('validateSkillName', () => {
+  // Accept table
+  it.each([
+    ['code-review', 'canonical kebab'],
+    ['a', 'single char'],
+    ['1st-skill', 'leading digit allowed'],
+    ['a'.repeat(64), 'exact upper bound'],
+  ])('accepts %s (%s)', (name) => {
+    expect(validateSkillName(name)).toBeNull();
+  });
+
+  // Reject table — each row pairs the input with the substring the
+  // returned error must contain. Pinning the substring catches a
+  // future refactor that merges all errors into a generic "invalid"
+  // (which would lose the per-case actionability).
+  it.each([
+    ['Has Upper', 'Lowercase'],
+    ['has_underscore', 'Lowercase'],
+    ['-leading-dash', 'leading hyphen'],
+    ['a'.repeat(65), 'Lowercase'],
+    ['name.with.dot', 'Lowercase'],
+    ['anthropic', 'reserved'],
+    ['claude', 'reserved'],
+  ])('rejects %s with hint containing %s', (name, hint) => {
+    const msg = validateSkillName(name);
+    expect(msg, `validateSkillName(${name}) returned null`).not.toBeNull();
+    expect(msg!.toLowerCase()).toContain(hint.toLowerCase());
+  });
+
+  it('treats the empty string as "not yet typed" (no error)', () => {
+    // The dialog suppresses live errors before first input — pinning
+    // this contract so a future "stricter validation" doesn't flash
+    // red the moment the dialog opens.
+    expect(validateSkillName('')).toBeNull();
   });
 });

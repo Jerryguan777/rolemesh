@@ -144,14 +144,18 @@ class TestCreateSkill:
 
     @pytest.mark.asyncio
     async def test_rejects_invalid_skill_name(self) -> None:
+        # PR20 tightened the regex to lowercase-kebab and forbade two
+        # reserved names. Use an uppercase name to exercise the regex
+        # — leading-digit (the previous "obviously invalid" stand-in)
+        # is now valid under the kebab grammar.
         tid, uid, aid = await _seed()
         app = _build_app(_authed_user(tid, uid))
         async with _client(app) as c:
             resp = await c.post(
                 f"/api/admin/agents/{aid}/skills",
                 json={
-                    "name": "1bad-leading-digit",
-                    "files": {"SKILL.md": _skill_md_text("1bad-leading-digit")},
+                    "name": "HasUpper",
+                    "files": {"SKILL.md": _skill_md_text("HasUpper")},
                 },
             )
         # Pydantic-level validation fires first with 422 because the
@@ -160,11 +164,34 @@ class TestCreateSkill:
         assert resp.status_code in (400, 422)
 
     @pytest.mark.asyncio
-    async def test_rejects_short_description(self) -> None:
+    async def test_rejects_reserved_skill_name(self) -> None:
+        # The two reserved names get a Pydantic field_validator error
+        # before the request even reaches the create handler. Pin this
+        # so a future schema refactor that loses the validator surfaces
+        # immediately rather than at runtime when Claude SDK silently
+        # ignores the skill.
+        tid, uid, aid = await _seed()
+        app = _build_app(_authed_user(tid, uid))
+        async with _client(app) as c:
+            resp = await c.post(
+                f"/api/admin/agents/{aid}/skills",
+                json={
+                    "name": "claude",
+                    "files": {"SKILL.md": _skill_md_text("claude")},
+                },
+            )
+        assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_rejects_empty_description(self) -> None:
+        # PR20 dropped the previous 20-char minimum (it surprised users
+        # with terse but valid descriptions) — but empty / whitespace-
+        # only descriptions still fail because they're useless to the
+        # skill index.
         tid, uid, aid = await _seed()
         app = _build_app(_authed_user(tid, uid))
         skill_md = (
-            "---\nname: x\ndescription: short\n---\nbody"
+            "---\nname: x\ndescription: ''\n---\nbody"
         )
         async with _client(app) as c:
             resp = await c.post(
@@ -172,7 +199,7 @@ class TestCreateSkill:
                 json={"name": "x", "files": {"SKILL.md": skill_md}},
             )
         assert resp.status_code == 400
-        assert "too short" in resp.json()["detail"]
+        assert "empty" in resp.json()["detail"]
 
     @pytest.mark.asyncio
     async def test_rejects_unknown_frontmatter_key(self) -> None:

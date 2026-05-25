@@ -74,6 +74,13 @@ describe('SkillsPage new-skill flow (via dialog)', () => {
     expect(nameInput).toBeTruthy();
     nameInput.value = 'demo';
     nameInput.dispatchEvent(new Event('input'));
+    // PR20: description is now required + live-validated; without it
+    // the Save button stays disabled and the click does nothing.
+    const descInput = page.querySelector(
+      '[data-testid="skill-dialog-description"]',
+    ) as HTMLInputElement;
+    descInput.value = 'demo description';
+    descInput.dispatchEvent(new Event('input'));
     await settle(page);
 
     createSkillSpy.mockResolvedValue({

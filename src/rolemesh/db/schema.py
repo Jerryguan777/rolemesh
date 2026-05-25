@@ -305,11 +305,20 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     # backend-specific (Claude SDK or Pi loader). See
     # docs/skills-architecture.md. Coworker association is via the
     # ``coworker_skills`` junction table.
+    # ``skills.name`` regex tightened to lowercase-kebab (see
+    # ``rolemesh.core.skills._SKILL_NAME_RE``) and forbids the two
+    # names the Claude runtime reserves (``anthropic``, ``claude``).
+    # On a fresh deploy the CREATE TABLE below already uses the new
+    # constraint; on an existing dev DB the ALTER block further down
+    # swaps the constraint in place.
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS skills (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-            name TEXT NOT NULL CHECK (name ~ '^[a-zA-Z][a-zA-Z0-9_-]{0,63}$'),
+            name TEXT NOT NULL CHECK (
+                name ~ '^[a-z0-9][a-z0-9-]{0,63}$'
+                AND name NOT IN ('anthropic', 'claude')
+            ),
             frontmatter_common JSONB NOT NULL DEFAULT '{}',
             frontmatter_backend JSONB NOT NULL DEFAULT '{}',
             enabled BOOLEAN NOT NULL DEFAULT TRUE,
@@ -317,6 +326,40 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
             created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL
         )
+    """)
+    # Idempotent constraint swap for pre-existing dev DBs. The old
+    # CHECK constraint had the auto-generated name ``skills_name_check``
+    # (Postgres derives this from ``CHECK`` without explicit naming).
+    # Drop it if present and add the tightened one. Both branches are
+    # guarded so a fresh DB (no old constraint) or an already-migrated
+    # DB (new constraint present) is a no-op.
+    await conn.execute("""
+        DO $$
+        BEGIN
+            -- Drop the old constraint if its definition still
+            -- references the legacy ``[a-zA-Z]`` lead-anchored class
+            -- (the only way to discriminate from the new one without
+            -- hard-coding constraint-text comparisons).
+            IF EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'skills_name_check'
+                  AND conrelid = 'skills'::regclass
+                  AND pg_get_constraintdef(oid) LIKE '%a-zA-Z%'
+            ) THEN
+                ALTER TABLE skills DROP CONSTRAINT skills_name_check;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'skills_name_check'
+                  AND conrelid = 'skills'::regclass
+            ) THEN
+                ALTER TABLE skills ADD CONSTRAINT skills_name_check
+                    CHECK (
+                        name ~ '^[a-z0-9][a-z0-9-]{0,63}$'
+                        AND name NOT IN ('anthropic', 'claude')
+                    );
+            END IF;
+        END $$
     """)
     # v1.1 §2.2: greenfield rename of ``created_by`` -> ``created_by_user_id``.
     # On a fresh testcontainer the CREATE TABLE above already uses the
