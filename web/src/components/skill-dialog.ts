@@ -149,17 +149,6 @@ function formatBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-/** Strip the first path segment when there's more than one. Folder
- *  pickers expose paths as "<rootName>/sub/file.md" — keeping the root
- *  prefix would make the catalog read "my-skill-files/references/intro.md"
- *  which is meaningless to the agent. Single-segment paths pass through
- *  unchanged. */
-export function stripLeadingFolder(path: string): string {
-  const idx = path.indexOf('/');
-  if (idx === -1) return path;
-  return path.slice(idx + 1);
-}
-
 // Minimal structural typing for the (non-standard) FileSystemEntry
 // API exposed by webkitGetAsEntry. TypeScript's lib.dom.d.ts has
 // these now but their availability varies by tsconfig target; pin the
@@ -473,10 +462,21 @@ export class SkillDialog extends LitElement {
   }
 
   /** Pull a flat list of (path, File) pairs from a FileList. Used by
-   *  the file/folder pickers. Folder pickers populate
-   *  ``webkitRelativePath`` — strip the first segment so a user who
-   *  picks "my-skill-files/" doesn't end up with that as a prefix on
-   *  every file path inside the catalog. */
+   *  the file/folder pickers.
+   *
+   *  Path policy (revised PR27 + smoke feedback): preserve whatever
+   *  webkitRelativePath the picker gives us. PR21 stripped the
+   *  top-level folder name on the assumption that the user picked
+   *  "the entire skill root folder", but in practice users pick
+   *  individual subfolders (e.g. `references/` containing some
+   *  reference files) and expect that name to survive. Treating the
+   *  picker output as "trust the user's pick" matches the drag-drop
+   *  behavior and makes both inputs predictable.
+   *
+   *  Side effect: if a user does pick a wrapper folder, they'll see
+   *  the wrapper name in the resulting paths. They can fix that by
+   *  picking the wrapper's children instead, which is the same way
+   *  drag-drop works. */
   private async readFilesFromInput(list: FileList): Promise<
     Array<{ path: string; content: string; bytes: number }>
   > {
@@ -484,10 +484,9 @@ export class SkillDialog extends LitElement {
     for (const file of Array.from(list)) {
       // webkitRelativePath is "folderName/sub/file.md" when the user
       // used the folder picker; empty string for plain file picker.
-      const raw =
+      const path =
         ((file as File & { webkitRelativePath?: string })
           .webkitRelativePath) || file.name;
-      const path = stripLeadingFolder(raw);
       try {
         const content = await readFileAsText(file);
         out.push({ path, content, bytes: file.size });
@@ -891,7 +890,7 @@ export class SkillDialog extends LitElement {
             class="text-[12.5px] font-medium cursor-pointer select-none
               text-ink-2 dark:text-d-ink-2 hover:text-ink-0 dark:hover:text-d-ink-0"
             data-testid="skill-dialog-advanced-toggle"
-          >Add files to this skill folder</summary>
+          >Add files or folders the coworker can read</summary>
           <div class="mt-2">
             <div
               class=${`border-2 border-dashed rounded-md px-4 py-5 text-center transition-colors
@@ -1000,10 +999,12 @@ export class SkillDialog extends LitElement {
   }
 }
 
-/** Inline "Files in this skill folder" preview — renders below the
- *  drop zone inside the Additional files disclosure. Replaces the
- *  earlier top-of-dialog card (PR25) and the separate per-extra
- *  bordered rows (renderFileTree).
+/** Inline "What this skill includes" preview — renders below the
+ *  drop zone inside the disclosure. Replaces the earlier
+ *  top-of-dialog card (PR25) and the separate per-extra bordered
+ *  rows (renderFileTree). Wording chosen so new users don't have
+ *  to know what a "skill folder" is and so it covers both files
+ *  AND folders (the upload zone accepts either).
  *
  *  Design intent (PR26 — user feedback):
  *  * Position: directly below the drop zone, so the user looking
@@ -1091,7 +1092,7 @@ function renderFolderTreeWithMain(
   return html`
     <div class="mt-4" data-testid="skill-dialog-folder-tree">
       <div class="text-[11.5px] uppercase tracking-wide font-medium text-ink-3 dark:text-d-ink-3 mb-1">
-        Files in this skill folder
+        What this skill includes
       </div>
       <div class="flex flex-col">
         ${skillMdRow}

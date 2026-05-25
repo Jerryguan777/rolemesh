@@ -17,7 +17,6 @@ import {
   isLikelyBinary,
   parseSkillMd,
   serializeSkillMd,
-  stripLeadingFolder,
   validateSkillName,
   type SkillDialog,
 } from './skill-dialog.js';
@@ -633,24 +632,13 @@ describe('isLikelyBinary', () => {
   });
 });
 
-describe('stripLeadingFolder', () => {
-  it('drops the first path segment when there are multiple', () => {
-    expect(stripLeadingFolder('rootName/references/intro.md')).toBe(
-      'references/intro.md',
-    );
-  });
-
-  it('passes single-segment paths through unchanged', () => {
-    expect(stripLeadingFolder('SKILL.md')).toBe('SKILL.md');
-  });
-
-  it('handles a trailing-slash-only top folder', () => {
-    // Edge: "folder/" with no file under it. After strip we get
-    // empty string. Caller (ingestUploads) skips empties via the
-    // isValidSkillFilePath gate.
-    expect(stripLeadingFolder('folder/')).toBe('');
-  });
-});
+// PR27 follow-up: stripLeadingFolder removed entirely. The folder
+// picker (PR21) used to strip the user-picked root folder name on the
+// assumption that pick = "the entire skill folder", but user feedback
+// showed the assumption was wrong — users typically pick individual
+// subfolders (`references/`, `scripts/`) and expect those names to
+// survive. Now both drag-drop and folder picker preserve every level
+// of the picked structure.
 
 // ---------------------------------------------------------------------
 // PR21: upload UX (drag-drop, pickers, size + binary gates, conflict
@@ -735,7 +723,12 @@ describe('skill-dialog: upload via file picker', () => {
     expect(rows[0].textContent?.trim()).toBe('note.md');
   });
 
-  it('preserves folder structure from the folder picker via webkitRelativePath', async () => {
+  it('preserves the picked folder name from the folder picker', async () => {
+    // PR27 follow-up: user picks `references/` containing files —
+    // expects the `references/` name to survive. Before this fix
+    // the code stripped the top-level pick on the assumption that
+    // the user was picking "the entire skill folder"; user feedback
+    // showed that assumption was wrong for the common case.
     const el = mount();
     el.editing = null;
     el.open = true;
@@ -743,18 +736,19 @@ describe('skill-dialog: upload via file picker', () => {
     const input = el.querySelector<HTMLInputElement>(
       '[data-testid="skill-dialog-pick-folder"]',
     )!;
-    // Folder picker exposes "rootName/sub/file.md" — the first
-    // segment is the user's chosen root and gets stripped.
+    // Folder picker exposes "<pickedFolder>/file.md" in
+    // webkitRelativePath. Path stored = the full relative path,
+    // unchanged.
     const files = [
       makeFile({
         name: 'intro.md',
         content: '# intro\n',
-        relativePath: 'my-skill/references/intro.md',
+        relativePath: 'references/intro.md',
       }),
       makeFile({
-        name: 'helper.py',
-        content: "print('hi')\n",
-        relativePath: 'my-skill/scripts/helper.py',
+        name: 'glossary.md',
+        content: 'gloss',
+        relativePath: 'references/glossary.md',
       }),
     ];
     Object.defineProperty(input, 'files', {
@@ -769,19 +763,18 @@ describe('skill-dialog: upload via file picker', () => {
         el.querySelectorAll('[data-testid="skill-dialog-file"]').length >= 2
       ) break;
     }
-    // PR27: per-file path renders as a <span>; basename only when
-    // the file lives inside a folder group. Read textContent now.
+    // Folder header must surface the picked folder name.
     const treeText = el
       .querySelector('[data-testid="skill-dialog-folder-tree"]')!
       .textContent ?? '';
     expect(treeText).toContain('references/');
-    expect(treeText).toContain('scripts/');
+    // File names render as basenames under the folder group.
     const fileTexts = [
       ...el.querySelectorAll<HTMLElement>(
         '[data-testid="skill-dialog-file"]',
       ),
     ].map((s) => s.textContent?.trim() ?? '');
-    expect(fileTexts.sort()).toEqual(['helper.py', 'intro.md']);
+    expect(fileTexts.sort()).toEqual(['glossary.md', 'intro.md']);
   });
 
   it('rejects a binary file (NUL byte) and emits a toast tally', async () => {
@@ -1081,11 +1074,11 @@ describe('skill-dialog: inline folder tree (PR26)', () => {
       value: [
         makeFile({
           name: 'intro.md', content: 'intro',
-          relativePath: 'root/references/intro.md',
+          relativePath: 'references/intro.md',
         }),
         makeFile({
           name: 'glossary.md', content: 'gloss',
-          relativePath: 'root/references/glossary.md',
+          relativePath: 'references/glossary.md',
         }),
       ],
       configurable: true,
