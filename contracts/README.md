@@ -43,3 +43,56 @@ Both run on every PR. A contract change is incomplete until both pass.
 A contract change that lands in a separate PR from its implementation
 will silently break one side until the other catches up. Keep them
 together.
+
+## Policy decisions
+
+Long-running design rules that aren't enforceable by a test. Each
+entry exists because following the rule's spirit, not just its
+letter, requires understanding the rationale — and the rationale
+won't fit in a test name.
+
+### Auth namespace: per-protocol, NOT unified
+
+**Decision** (2026-05-24): endpoints under `/api/v1/auth/*` are
+reserved for auth-mode-agnostic operations (the SPA calls them the
+same way regardless of how the user logged in). Mode-specific
+protocol mechanics live in their own top-level namespaces:
+
+| Namespace | Contains |
+|---|---|
+| `/api/v1/auth/*` | `config`, `ws-ticket`, future `logout`. Mode-agnostic. |
+| `/oidc/*` | OIDC protocol mechanics: `login`, `callback`, `refresh`. |
+| `/builtin/*` (future) | builtin username/password: `login`, `refresh`. |
+| `/api/v1/me` | Identity surface. Mode-agnostic. |
+
+**Why not unify everything under `/api/v1/auth/*`**:
+
+1. OIDC and builtin have **structurally different protocol shapes**
+   (browser redirect vs. POST→JSON). Forcing them under a single
+   `/auth/login` URL means an OpenAPI `oneOf` body schema — the
+   frontend has to branch on mode to construct the body anyway, so
+   no real consolidation.
+2. OIDC's `/oidc/callback` URL is **registered at the IdP** (Google,
+   Okta, Auth0). Moving it would force every production deployment
+   to update IdP configuration. The cost of breaking IdP configs
+   outweighs the aesthetic benefit of namespace uniformity.
+3. The principle is: **URL shape should follow protocol identity,
+   not be forced into a single namespace for aesthetic uniformity.**
+
+**Exception — `/api/v1/auth/logout` SHOULD be unified** (TODO,
+lands with builtin). The frontend doesn't care how the session was
+created, only that it gets killed; the handler dispatches internally
+to the matching protocol's revoke flow. This is the one `/auth/*`
+endpoint where mode-agnostic consolidation beats per-protocol
+separation, because the call site cost (frontend branching on mode
+just to log out) is real and the implementation cost (a small
+internal dispatch) is trivial.
+
+**Compared to Tropos**: Tropos's contract unifies all 5 auth
+operations under `/auth/*`. Their design works because they appear
+to have one auth mode; we have at least three (bootstrap / OIDC /
+future builtin), and the cost-benefit tilts the other way.
+
+A signpost comment lives at the top of the `paths:` block in
+`openapi.yaml` next to the `/api/v1/auth/*` endpoints — devs
+editing that section won't miss it.

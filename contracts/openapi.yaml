@@ -33,6 +33,34 @@ tags:
   - name: Skills
 
 paths:
+  # ===================================================================
+  # AUTH NAMESPACE POLICY (read before adding endpoints under /auth/*)
+  # ===================================================================
+  # Endpoints living here on /api/v1/auth/* MUST be auth-mode-agnostic
+  # — the SPA can call them regardless of how the user logged in
+  # (OIDC / builtin / bootstrap).
+  #
+  # Mode-specific protocol mechanics (OIDC redirect-callback dance,
+  # builtin username/password POST) live in their OWN top-level
+  # namespaces:
+  #   /oidc/login, /oidc/callback, /oidc/refresh  ← OIDC protocol
+  #   /builtin/login, /builtin/refresh            ← builtin (future)
+  #
+  # Reason: forcing them under /api/v1/auth/* would either (a) create
+  # an oneOf body schema where OIDC's empty body + 302 sits next to
+  # builtin's {username,password} → JSON token, which is ugly and the
+  # frontend still has to branch on mode to use it, OR (b) require
+  # changing the OIDC callback URL away from /oidc/callback, which
+  # breaks every IdP integration that already has it registered.
+  #
+  # EXCEPTION — logout: a future POST /api/v1/auth/logout SHOULD be
+  # unified. The frontend doesn't care how the session was created,
+  # only that it gets killed; the backend dispatches internally to
+  # the right protocol's revoke flow. This is the only `/auth/*`
+  # endpoint where unification beats per-protocol separation.
+  #
+  # See contracts/README.md "Policy decisions" for the full rationale.
+  # ===================================================================
   /api/v1/auth/config:
     get:
       tags: [Auth]
