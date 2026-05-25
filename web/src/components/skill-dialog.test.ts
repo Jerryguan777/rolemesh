@@ -297,19 +297,34 @@ describe('<rm-skill-dialog>', () => {
     ).toBeUndefined();
   });
 
-  it('extra files: + Add file appends a row; remove drops it', async () => {
+  it('upload then remove drops the file from the tree', async () => {
+    // PR26 removed the standalone "+ Add empty file" button; the only
+    // way into extraFiles is now via upload. Pin the upload → remove
+    // round-trip so a regression that breaks the remove icon (which
+    // moved into the new inline tree) is caught.
     const el = mount();
     el.editing = null;
     el.open = true;
     await settle(el);
-    const addLink = el.querySelector<HTMLButtonElement>(
-      '[data-testid="skill-dialog-add-file"]',
+    const input = el.querySelector<HTMLInputElement>(
+      '[data-testid="skill-dialog-pick-files"]',
     )!;
-    addLink.click();
-    addLink.click();
-    await settle(el);
-    const rows = el.querySelectorAll('[data-testid="skill-dialog-file"]');
-    expect(rows.length).toBe(2);
+    Object.defineProperty(input, 'files', {
+      value: [
+        makeFile({ name: 'a.md', content: 'a' }),
+        makeFile({ name: 'b.md', content: 'b' }),
+      ],
+      configurable: true,
+    });
+    input.dispatchEvent(new Event('change'));
+    for (let i = 0; i < 50; i += 1) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+      if (el.querySelectorAll('[data-testid="skill-dialog-file"]').length === 2) break;
+    }
+    expect(
+      el.querySelectorAll('[data-testid="skill-dialog-file"]').length,
+    ).toBe(2);
     // Click the first row's remove button.
     const removeBtn = el.querySelectorAll<HTMLButtonElement>(
       '.rm-iconbtn--danger',
@@ -321,14 +336,14 @@ describe('<rm-skill-dialog>', () => {
     ).toBe(1);
   });
 
-  it('blocks save with an invalid file path', async () => {
+  it('blocks save with an invalid file path (uploaded then renamed)', async () => {
+    // PR26: paths arrive via upload, not via the deleted + Add empty
+    // file button. Test re-routes through the picker, then mutates
+    // the rendered input to a path the validator rejects.
     const el = mount();
     el.editing = null;
     el.open = true;
     await settle(el);
-    // Fill name + description so the new live-validation gates pass —
-    // the only remaining gate is the file path. Without these the test
-    // would pass for the wrong reason (description-empty also blocks).
     const nameInput = el.querySelector<HTMLInputElement>(
       '[data-testid="skill-dialog-name"]',
     )!;
@@ -339,12 +354,22 @@ describe('<rm-skill-dialog>', () => {
     )!;
     descInput.value = 'demo description';
     descInput.dispatchEvent(new Event('input'));
-    // Add a file with a name that the SKILL_FILE_PATH_RE rejects.
-    const addLink = el.querySelector<HTMLButtonElement>(
-      '[data-testid="skill-dialog-add-file"]',
+    const picker = el.querySelector<HTMLInputElement>(
+      '[data-testid="skill-dialog-pick-files"]',
     )!;
-    addLink.click();
-    await settle(el);
+    Object.defineProperty(picker, 'files', {
+      value: [makeFile({ name: 'ok.md', content: 'fine' })],
+      configurable: true,
+    });
+    picker.dispatchEvent(new Event('change'));
+    for (let i = 0; i < 50; i += 1) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+      if (el.querySelector('[data-testid="skill-dialog-file"]')) break;
+    }
+    // Rename the uploaded file to a traversal path. The handler
+    // re-attaches the folder prefix on edit, but with no folder
+    // (root upload) the new path is just the raw input value.
     const fileInput = el.querySelector<HTMLInputElement>(
       '[data-testid="skill-dialog-file"]',
     )!;
@@ -365,6 +390,8 @@ describe('<rm-skill-dialog>', () => {
   });
 
   it('rejects SKILL.md as an extra filename (reserved)', async () => {
+    // Upload a normal file, then rename the rendered input to
+    // 'SKILL.md' — the reserved-path check should reject on save.
     const el = mount();
     el.editing = null;
     el.open = true;
@@ -379,11 +406,19 @@ describe('<rm-skill-dialog>', () => {
     )!;
     descInput.value = 'demo description';
     descInput.dispatchEvent(new Event('input'));
-    const addLink = el.querySelector<HTMLButtonElement>(
-      '[data-testid="skill-dialog-add-file"]',
+    const picker = el.querySelector<HTMLInputElement>(
+      '[data-testid="skill-dialog-pick-files"]',
     )!;
-    addLink.click();
-    await settle(el);
+    Object.defineProperty(picker, 'files', {
+      value: [makeFile({ name: 'ok.md', content: 'fine' })],
+      configurable: true,
+    });
+    picker.dispatchEvent(new Event('change'));
+    for (let i = 0; i < 50; i += 1) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+      if (el.querySelector('[data-testid="skill-dialog-file"]')) break;
+    }
     const fileInput = el.querySelector<HTMLInputElement>(
       '[data-testid="skill-dialog-file"]',
     )!;
@@ -822,17 +857,26 @@ describe('skill-dialog: upload via file picker', () => {
         el.querySelectorAll('[data-testid="skill-dialog-file"]').length >= 2
       ) break;
     }
-    const paths = [
+    // PR26: the per-file input now shows the NAME only (not the
+    // folder prefix) when the file lives inside a folder group —
+    // the folder header above it already names the parent dir.
+    // To verify the stored full path is correct, read the tree's
+    // rendered text instead of the input value: the folder header
+    // contains "references/" and "scripts/", and the input below
+    // it contains the name.
+    const treeText = el
+      .querySelector('[data-testid="skill-dialog-folder-tree"]')!
+      .textContent ?? '';
+    // Both folders appear as group headers.
+    expect(treeText).toContain('references/');
+    expect(treeText).toContain('scripts/');
+    // Both files appear as their basename inside.
+    const inputs = [
       ...el.querySelectorAll<HTMLInputElement>(
         '[data-testid="skill-dialog-file"]',
       ),
     ].map((i) => i.value);
-    // First segment ("my-skill") is stripped; folder structure
-    // ("references/", "scripts/") survives.
-    expect(paths.sort()).toEqual([
-      'references/intro.md',
-      'scripts/helper.py',
-    ]);
+    expect(inputs.sort()).toEqual(['helper.py', 'intro.md']);
   });
 
   it('rejects a binary file (NUL byte) and emits a toast tally', async () => {
@@ -1038,7 +1082,7 @@ describe('skill-dialog: PATCH edit body shape', () => {
 // PR25: "Your skill folder" snapshot — read-only orientation
 // ---------------------------------------------------------------------
 
-describe('skill-dialog: folder snapshot', () => {
+describe('skill-dialog: inline folder tree (PR26)', () => {
   let stub: Stub;
   beforeEach(() => {
     stub = installFetch();
@@ -1048,26 +1092,45 @@ describe('skill-dialog: folder snapshot', () => {
     document.body.innerHTML = '';
   });
 
-  it('renders the snapshot with SKILL.md when no extras', async () => {
+  it('renders SKILL.md row with annotation even before any upload', async () => {
+    // The inline tree replaces the PR25 top card. SKILL.md is ALWAYS
+    // present in the tree (read-only, muted) so the user knows where
+    // their Instructions textarea content lands relative to uploads.
     const el = mount();
     el.editing = null;
     el.open = true;
     await settle(el);
-    const snapshot = el.querySelector(
-      '[data-testid="skill-dialog-folder-snapshot"]',
+    const tree = el.querySelector(
+      '[data-testid="skill-dialog-folder-tree"]',
     );
-    expect(snapshot, 'snapshot section must always render').toBeTruthy();
-    // Pin the "SKILL.md is in this folder" + "edited below" framing —
-    // the whole point of the snapshot is bridging the textarea to the
-    // file model, so the cross-reference text MUST be visible.
-    expect(snapshot!.textContent).toContain('SKILL.md');
-    expect(snapshot!.textContent).toContain('edited in Instructions');
-    // The empty-extras hint also lives here. Without it the snapshot
-    // looks sad on a fresh dialog.
-    expect(snapshot!.textContent).toContain('additional files appear here');
+    expect(tree, 'inline tree must always render').toBeTruthy();
+    const skillRow = el.querySelector(
+      '[data-testid="skill-dialog-tree-skill-md"]',
+    );
+    expect(skillRow, 'SKILL.md row must always be present').toBeTruthy();
+    // The annotation explicitly cross-references the Instructions
+    // textarea above; without that text the row would look like a
+    // mysterious always-on file the user can't act on.
+    expect(skillRow!.textContent).toContain('from Instructions');
   });
 
-  it('snapshot updates live when files are uploaded', async () => {
+  it('top of dialog has no card-style folder snapshot (PR25 card removed)', async () => {
+    // PR25 had a bordered card at the very top of the dialog with
+    // testid 'skill-dialog-folder-snapshot'. PR26 removed it after
+    // user feedback that the card looked too much like an input.
+    // If a future PR reintroduces a top-positioned snapshot under
+    // any obvious name, this test should fail and force a rethink.
+    const el = mount();
+    el.editing = null;
+    el.open = true;
+    await settle(el);
+    expect(
+      el.querySelector('[data-testid="skill-dialog-folder-snapshot"]'),
+      'PR25 top card must stay deleted',
+    ).toBeNull();
+  });
+
+  it('inline tree updates live with the SKILL.md row preserved on upload', async () => {
     const el = mount();
     el.editing = null;
     el.open = true;
@@ -1076,36 +1139,31 @@ describe('skill-dialog: folder snapshot', () => {
       '[data-testid="skill-dialog-pick-files"]',
     )!;
     Object.defineProperty(input, 'files', {
-      value: [
-        makeFile({ name: 'intro.md', content: '# Intro\n' }),
-      ],
+      value: [makeFile({ name: 'intro.md', content: '# Intro\n' })],
       configurable: true,
     });
     input.dispatchEvent(new Event('change'));
     for (let i = 0; i < 50; i += 1) {
       await new Promise((r) => setTimeout(r, 0));
       await el.updateComplete;
-      const s = el.querySelector(
-        '[data-testid="skill-dialog-folder-snapshot"]',
-      );
-      if (s?.textContent?.includes('intro.md')) break;
+      if (el.querySelector('[data-testid="skill-dialog-file"]')) break;
     }
-    const snapshot = el.querySelector(
-      '[data-testid="skill-dialog-folder-snapshot"]',
+    const tree = el.querySelector(
+      '[data-testid="skill-dialog-folder-tree"]',
     )!;
-    expect(snapshot.textContent).toContain('intro.md');
-    // SKILL.md row stays — the snapshot shows BOTH the main file and
-    // the new extra, which is the unified mental model PR25 set out
-    // to fix. Without this assert, a regression that swaps the
-    // snapshot for "just the extras" would pass the previous test.
-    expect(snapshot.textContent).toContain('SKILL.md');
+    // SKILL.md is rendered as text inside the tree's skill-md row.
+    expect(tree.textContent).toContain('SKILL.md');
+    // Uploaded file names live in <input value="..."> — textContent
+    // doesn't capture input values, so read the inputs directly.
+    const filenames = [
+      ...tree.querySelectorAll<HTMLInputElement>(
+        '[data-testid="skill-dialog-file"]',
+      ),
+    ].map((i) => i.value);
+    expect(filenames).toContain('intro.md');
   });
 
-  it('snapshot groups files by folder', async () => {
-    // Two extras under the same prefix should render as a single
-    // folder row + indented children, NOT as two flat rows. This is
-    // the visual cue that gives the user "ah, these end up in
-    // references/ together".
+  it('inline tree groups uploads by folder', async () => {
     const el = mount();
     el.editing = null;
     el.open = true;
@@ -1116,13 +1174,11 @@ describe('skill-dialog: folder snapshot', () => {
     Object.defineProperty(input, 'files', {
       value: [
         makeFile({
-          name: 'intro.md',
-          content: 'intro',
+          name: 'intro.md', content: 'intro',
           relativePath: 'root/references/intro.md',
         }),
         makeFile({
-          name: 'glossary.md',
-          content: 'gloss',
+          name: 'glossary.md', content: 'gloss',
           relativePath: 'root/references/glossary.md',
         }),
       ],
@@ -1132,20 +1188,36 @@ describe('skill-dialog: folder snapshot', () => {
     for (let i = 0; i < 50; i += 1) {
       await new Promise((r) => setTimeout(r, 0));
       await el.updateComplete;
-      const s = el.querySelector(
-        '[data-testid="skill-dialog-folder-snapshot"]',
-      );
-      if (s?.textContent?.includes('glossary.md')) break;
+      if (el.querySelectorAll('[data-testid="skill-dialog-file"]').length >= 2) break;
     }
-    const text = el
-      .querySelector('[data-testid="skill-dialog-folder-snapshot"]')!
-      .textContent!;
-    // Folder name renders with trailing slash (visual differentiator
-    // from files); confirm the references/ header is there and
-    // BOTH files appear under it.
-    expect(text).toContain('references/');
-    expect(text).toContain('intro.md');
-    expect(text).toContain('glossary.md');
+    const tree = el.querySelector(
+      '[data-testid="skill-dialog-folder-tree"]',
+    )!;
+    // Folder header renders as text (a <div>references/</div>); the
+    // text content check works for it.
+    expect(tree.textContent).toContain('references/');
+    // File names live in <input value="...">; read them directly.
+    const filenames = [
+      ...tree.querySelectorAll<HTMLInputElement>(
+        '[data-testid="skill-dialog-file"]',
+      ),
+    ].map((i) => i.value);
+    expect(filenames).toContain('intro.md');
+    expect(filenames).toContain('glossary.md');
+  });
+
+  it('+ Add empty file button no longer exists (PR26 removed it)', async () => {
+    // Pin the deletion: future PR cycles that reintroduce a way to
+    // create empty placeholder files without uploading should fail
+    // here and prompt a UX rediscussion.
+    const el = mount();
+    el.editing = null;
+    el.open = true;
+    await settle(el);
+    expect(
+      el.querySelector('[data-testid="skill-dialog-add-file"]'),
+      '+ Add empty file button must stay removed',
+    ).toBeNull();
   });
 });
 

@@ -356,22 +356,6 @@ export class SkillDialog extends LitElement {
     return null;
   }
 
-  private addFile = () => {
-    // Pre-fill with a unique placeholder so the user can rename
-    // immediately. Backend rejects empty paths.
-    let i = this.extraFiles.length + 1;
-    let candidate = `file-${i}.md`;
-    const taken = new Set(this.extraFiles.map((f) => f.path));
-    while (taken.has(candidate)) {
-      i += 1;
-      candidate = `file-${i}.md`;
-    }
-    this.extraFiles = [
-      ...this.extraFiles,
-      { path: candidate, content: '' },
-    ];
-  };
-
   private renameFile(idx: number, newPath: string): void {
     this.extraFiles = this.extraFiles.map((f, i) =>
       i === idx ? { ...f, path: newPath } : f,
@@ -873,8 +857,6 @@ export class SkillDialog extends LitElement {
               </div>`}
         </div>
 
-        ${renderSkillFolderSnapshot(this.extraFiles)}
-
         <div class="mb-3">
           <label class="block text-[12.5px] font-medium mb-1">
             Instructions
@@ -972,25 +954,12 @@ export class SkillDialog extends LitElement {
                   role="status"
                 >${this.uploadToast}</div>`
               : nothing}
-            ${this.extraFiles.length === 0
-              ? html`<div class="text-[12px] text-ink-3 dark:text-d-ink-3 mt-3">
-                  Most skills don't need extras. Drop files above when
-                  the coworker needs reference material beyond the
-                  instructions.
-                </div>`
-              : renderFileTree(
-                  this.extraFiles,
-                  this.busy,
-                  (idx, newPath) => this.renameFile(idx, newPath),
-                  (idx) => this.removeFile(idx),
-                )}
-            <button
-              type="button"
-              class="text-[12.5px] text-brand hover:underline cursor-pointer mt-3"
-              ?disabled=${this.busy}
-              @click=${this.addFile}
-              data-testid="skill-dialog-add-file"
-            >+ Add empty file</button>
+            ${renderFolderTreeWithMain(
+              this.extraFiles,
+              this.busy,
+              (idx, newPath) => this.renameFile(idx, newPath),
+              (idx) => this.removeFile(idx),
+            )}
             ${this.fileErr
               ? html`<div class="text-[12px] text-red-600 dark:text-red-300 mt-1">${this.fileErr}</div>`
               : nothing}
@@ -1032,95 +1001,36 @@ export class SkillDialog extends LitElement {
   }
 }
 
-/** "Your skill folder" snapshot — read-only orientation that
- *  unifies the user's mental model. SKILL.md (the Instructions
- *  textarea) and any uploaded extras live in the SAME folder once
- *  the skill ships to the coworker; rendering both here together
- *  makes that obvious BEFORE the user starts typing.
+/** Inline "Files in this skill folder" preview — renders below the
+ *  drop zone inside the Additional files disclosure. Replaces the
+ *  earlier top-of-dialog card (PR25) and the separate per-extra
+ *  bordered rows (renderFileTree).
  *
- *  Read-only on purpose: the editable controls (textarea, upload
- *  zone, per-file rename / delete) live in their respective sections
- *  below. Duplicating the file list as a passive snapshot here is
- *  cheap and removes the "wait, where do these files end up?"
- *  question. */
-function renderSkillFolderSnapshot(extraFiles: ExtraFile[]) {
-  // Group extras by top-level folder, same grouping rule as
-  // renderFileTree below — so the snapshot's shape matches what
-  // the user sees in the Additional files section.
-  const groups = new Map<string, ExtraFile[]>();
-  for (const f of extraFiles) {
-    const slash = f.path.indexOf('/');
-    const key = slash === -1 ? '' : f.path.slice(0, slash);
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key)!.push(f);
-  }
-  const ordered = [...groups.entries()].sort(([a], [b]) => {
-    if (a === '') return -1;
-    if (b === '') return 1;
-    return a.localeCompare(b);
-  });
-  return html`
-    <div
-      class="mb-3 px-3 py-2.5 rounded-md bg-surface-2 dark:bg-d-surface-2
-        border border-surface-3 dark:border-d-surface-3"
-      data-testid="skill-dialog-folder-snapshot"
-    >
-      <div class="text-[11.5px] uppercase tracking-wide font-medium text-ink-3 dark:text-d-ink-3 mb-1.5">
-        Your skill folder
-      </div>
-      <div class="flex flex-col gap-0.5 font-mono text-[12.5px]">
-        <div class="flex items-center gap-2 text-ink-0 dark:text-d-ink-0">
-          <span aria-hidden="true">📄</span>
-          <span>SKILL.md</span>
-          <span class="font-sans text-[11.5px] text-ink-3 dark:text-d-ink-3">
-            ← edited in Instructions below
-          </span>
-        </div>
-        ${extraFiles.length === 0
-          ? html`<div class="flex items-center gap-2 text-ink-3 dark:text-d-ink-3">
-              <span aria-hidden="true">📁</span>
-              <span class="font-sans text-[11.5px]">
-                additional files appear here when you upload them
-              </span>
-            </div>`
-          : ordered.map(([folder, files]) => folder === ''
-              ? files.map((f) => html`
-                  <div class="flex items-center gap-2 text-ink-0 dark:text-d-ink-0">
-                    <span aria-hidden="true">📄</span>
-                    <span>${f.path}</span>
-                  </div>
-                `)
-              : html`
-                  <div class="flex items-center gap-2 text-ink-1 dark:text-d-ink-1">
-                    <span aria-hidden="true">📁</span>
-                    <span>${folder}/</span>
-                  </div>
-                  ${files.map((f) => html`
-                    <div class="flex items-center gap-2 text-ink-0 dark:text-d-ink-0 pl-5">
-                      <span aria-hidden="true">📄</span>
-                      <span>${f.path.slice(folder.length + 1)}</span>
-                    </div>
-                  `)}
-                `,
-          )}
-      </div>
-    </div>
-  `;
-}
-
-/** Render the extras as a folder-grouped list. Files at the catalog
- *  root (no slash in path) render first, then each folder gets its
- *  own group with the file rows beneath. The tree is one level deep
- *  visually — nested folders just show as `sub/dir/file.md` inside
- *  their top-level folder group. Keeps the markup simple while still
- *  giving the user a sense of structure. Built as a free function so
- *  the dialog's render() stays a one-screen scroll. */
-function renderFileTree(
+ *  Design intent (PR26 — user feedback):
+ *  * Position: directly below the drop zone, so the user looking
+ *    at "where do my drops land?" sees the answer in the next
+ *    glance down.
+ *  * Style: NO card / surface fill / border around the tree itself.
+ *    The previous card looked like an input field and competed with
+ *    the actual inputs for attention.
+ *  * SKILL.md always at top in muted style with the annotation
+ *    "(from Instructions above)". This makes the textarea-to-file
+ *    mapping explicit in the same place where the user is thinking
+ *    "what's in this folder?".
+ *  * Uploaded files keep their rename + delete affordances since
+ *    those are the only place the user can act on them.
+ *
+ *  Free function (vs. dialog method) so render() stays compact. */
+function renderFolderTreeWithMain(
   files: ExtraFile[],
   busy: boolean,
   onRename: (idx: number, newPath: string) => void,
   onRemove: (idx: number) => void,
 ) {
+  // Group extras by top-level folder so uploads under references/
+  // visually cluster together. Same grouping rule the previous
+  // renderFileTree used — folder labels render as a subtle row,
+  // children indent under them.
   const groups = new Map<string, Array<{ file: ExtraFile; idx: number }>>();
   files.forEach((file, idx) => {
     const slash = file.path.indexOf('/');
@@ -1128,34 +1038,56 @@ function renderFileTree(
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push({ file, idx });
   });
-  // Root files first ("" key), then folder groups alphabetically.
   const ordered = [...groups.entries()].sort(([a], [b]) => {
     if (a === '') return -1;
     if (b === '') return 1;
     return a.localeCompare(b);
   });
-  return html`
-    <div class="flex flex-col gap-1 mt-3" data-testid="skill-dialog-file-tree">
-      ${ordered.map(([folder, entries]) => html`
+
+  // SKILL.md row — read-only, muted, always present. Annotation
+  // tells the user where its content actually comes from.
+  const skillMdRow = html`
+    <div
+      class="flex items-center gap-2 py-1 text-ink-2 dark:text-d-ink-2 font-mono text-[12.5px]"
+      data-testid="skill-dialog-tree-skill-md"
+    >
+      <span aria-hidden="true" class="opacity-60">📄</span>
+      <span>SKILL.md</span>
+      <span class="font-sans text-[11px] text-ink-3 dark:text-d-ink-3 italic">
+        (from Instructions above)
+      </span>
+    </div>
+  `;
+
+  const uploadedRows = ordered.length === 0
+    ? nothing
+    : ordered.map(([folder, entries]) => html`
         ${folder
-          ? html`<div class="text-[12px] text-ink-2 dark:text-d-ink-2 font-mono mt-2">${folder}/</div>`
+          ? html`<div class="flex items-center gap-2 py-1 text-ink-1 dark:text-d-ink-1 font-mono text-[12.5px]">
+              <span aria-hidden="true" class="opacity-60">📁</span>
+              <span>${folder}/</span>
+            </div>`
           : nothing}
         ${entries.map(({ file, idx }) => html`
-          <div class=${`flex items-center gap-2 border border-surface-3 dark:border-d-surface-3
-            rounded-md px-2.5 py-1.5 ${folder ? 'ml-3' : ''}`}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-              stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"
-              class="text-ink-3 dark:text-d-ink-3 shrink-0" aria-hidden="true">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-              <path d="M14 2v6h6"/>
-            </svg>
+          <div class=${`group flex items-center gap-2 py-1 ${folder ? 'pl-6' : ''}`}>
+            <span aria-hidden="true" class="opacity-60 font-mono text-[12.5px]">📄</span>
             <input
               type="text"
-              class="flex-1 text-[13px] bg-transparent outline-none font-mono"
-              .value=${file.path}
+              class="flex-1 text-[12.5px] bg-transparent outline-none font-mono
+                px-1 py-0.5 rounded
+                hover:bg-surface-2 dark:hover:bg-d-surface-2
+                focus:bg-surface-2 dark:focus:bg-d-surface-2
+                focus:ring-1 focus:ring-brand"
+              .value=${folder ? file.path.slice(folder.length + 1) : file.path}
               ?disabled=${busy}
-              @input=${(e: Event) =>
-                onRename(idx, (e.target as HTMLInputElement).value)}
+              @input=${(e: Event) => {
+                // Re-attach folder prefix on edit so the user editing
+                // "intro.md" inside the references/ group doesn't
+                // accidentally flatten the path to the catalog root.
+                const newName = (e.target as HTMLInputElement).value;
+                const newPath = folder ? `${folder}/${newName}` : newName;
+                onRename(idx, newPath);
+              }}
               data-testid="skill-dialog-file"
             />
             <span class="text-[11px] text-ink-3 dark:text-d-ink-3 whitespace-nowrap">
@@ -1163,14 +1095,24 @@ function renderFileTree(
             </span>
             <button
               type="button"
-              class="rm-iconbtn rm-iconbtn--danger"
+              class="rm-iconbtn rm-iconbtn--danger opacity-60 group-hover:opacity-100 transition-opacity"
               title="Remove file"
               ?disabled=${busy}
               @click=${() => onRemove(idx)}
-            >${iconTrash(14)}</button>
+            >${iconTrash(13)}</button>
           </div>
         `)}
-      `)}
+      `);
+
+  return html`
+    <div class="mt-4" data-testid="skill-dialog-folder-tree">
+      <div class="text-[11.5px] uppercase tracking-wide font-medium text-ink-3 dark:text-d-ink-3 mb-1">
+        Files in this skill folder
+      </div>
+      <div class="flex flex-col">
+        ${skillMdRow}
+        ${uploadedRows}
+      </div>
     </div>
   `;
 }
