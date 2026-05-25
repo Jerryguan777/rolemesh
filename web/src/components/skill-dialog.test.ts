@@ -336,106 +336,17 @@ describe('<rm-skill-dialog>', () => {
     ).toBe(1);
   });
 
-  it('blocks save with an invalid file path (uploaded then renamed)', async () => {
-    // PR26: paths arrive via upload, not via the deleted + Add empty
-    // file button. Test re-routes through the picker, then mutates
-    // the rendered input to a path the validator rejects.
-    const el = mount();
-    el.editing = null;
-    el.open = true;
-    await settle(el);
-    const nameInput = el.querySelector<HTMLInputElement>(
-      '[data-testid="skill-dialog-name"]',
-    )!;
-    nameInput.value = 'demo';
-    nameInput.dispatchEvent(new Event('input'));
-    const descInput = el.querySelector<HTMLInputElement>(
-      '[data-testid="skill-dialog-description"]',
-    )!;
-    descInput.value = 'demo description';
-    descInput.dispatchEvent(new Event('input'));
-    const picker = el.querySelector<HTMLInputElement>(
-      '[data-testid="skill-dialog-pick-files"]',
-    )!;
-    Object.defineProperty(picker, 'files', {
-      value: [makeFile({ name: 'ok.md', content: 'fine' })],
-      configurable: true,
-    });
-    picker.dispatchEvent(new Event('change'));
-    for (let i = 0; i < 50; i += 1) {
-      await new Promise((r) => setTimeout(r, 0));
-      await el.updateComplete;
-      if (el.querySelector('[data-testid="skill-dialog-file"]')) break;
-    }
-    // Rename the uploaded file to a traversal path. The handler
-    // re-attaches the folder prefix on edit, but with no folder
-    // (root upload) the new path is just the raw input value.
-    const fileInput = el.querySelector<HTMLInputElement>(
-      '[data-testid="skill-dialog-file"]',
-    )!;
-    fileInput.value = '../escape.md';
-    fileInput.dispatchEvent(new Event('input'));
-    await settle(el);
-    const saveBtn = el.querySelector<HTMLButtonElement>(
-      '[data-testid="skill-dialog-save"]',
-    )!;
-    saveBtn.click();
-    await settle(el);
-    expect(
-      stub.calls.find(
-        (c) => c.method === 'POST' && c.url.endsWith('/api/v1/skills'),
-      ),
-      'POST must NOT fire when validation fails',
-    ).toBeUndefined();
-  });
-
-  it('rejects SKILL.md as an extra filename (reserved)', async () => {
-    // Upload a normal file, then rename the rendered input to
-    // 'SKILL.md' — the reserved-path check should reject on save.
-    const el = mount();
-    el.editing = null;
-    el.open = true;
-    await settle(el);
-    const nameInput = el.querySelector<HTMLInputElement>(
-      '[data-testid="skill-dialog-name"]',
-    )!;
-    nameInput.value = 'demo';
-    nameInput.dispatchEvent(new Event('input'));
-    const descInput = el.querySelector<HTMLInputElement>(
-      '[data-testid="skill-dialog-description"]',
-    )!;
-    descInput.value = 'demo description';
-    descInput.dispatchEvent(new Event('input'));
-    const picker = el.querySelector<HTMLInputElement>(
-      '[data-testid="skill-dialog-pick-files"]',
-    )!;
-    Object.defineProperty(picker, 'files', {
-      value: [makeFile({ name: 'ok.md', content: 'fine' })],
-      configurable: true,
-    });
-    picker.dispatchEvent(new Event('change'));
-    for (let i = 0; i < 50; i += 1) {
-      await new Promise((r) => setTimeout(r, 0));
-      await el.updateComplete;
-      if (el.querySelector('[data-testid="skill-dialog-file"]')) break;
-    }
-    const fileInput = el.querySelector<HTMLInputElement>(
-      '[data-testid="skill-dialog-file"]',
-    )!;
-    fileInput.value = 'SKILL.md';
-    fileInput.dispatchEvent(new Event('input'));
-    await settle(el);
-    const saveBtn = el.querySelector<HTMLButtonElement>(
-      '[data-testid="skill-dialog-save"]',
-    )!;
-    saveBtn.click();
-    await settle(el);
-    expect(
-      stub.calls.find(
-        (c) => c.method === 'POST' && c.url.endsWith('/api/v1/skills'),
-      ),
-    ).toBeUndefined();
-  });
+  // PR27 removed the per-file rename input — paths are now display-only
+  // text. The previous "blocks save with an invalid file path" and
+  // "rejects SKILL.md as an extra filename" tests exercised that
+  // input-driven path; with the input gone, the UI can no longer
+  // reach those code paths. The underlying defenses live elsewhere:
+  //   * ingestUploads gates incoming paths via isValidSkillFilePath
+  //     and a SKILL.md-shadow check (covered by the "rejects an upload
+  //     at the reserved SKILL.md path" + binary / size cap tests).
+  //   * save() still has belt-and-braces checks for both cases — they
+  //     fire if something mutates extraFiles bypassing the gates, but
+  //     that's no longer reachable via the UI.
 
   // ---------------------------------------------------------------------
   // PR20: live-validation gating + backend error routing
@@ -816,11 +727,12 @@ describe('skill-dialog: upload via file picker', () => {
       await el.updateComplete;
       if (el.querySelector('[data-testid="skill-dialog-file"]')) break;
     }
-    const rows = el.querySelectorAll<HTMLInputElement>(
+    // PR27: per-file path is now a <span> (read-only), not an input.
+    const rows = el.querySelectorAll<HTMLElement>(
       '[data-testid="skill-dialog-file"]',
     );
     expect(rows.length).toBe(1);
-    expect(rows[0].value).toBe('note.md');
+    expect(rows[0].textContent?.trim()).toBe('note.md');
   });
 
   it('preserves folder structure from the folder picker via webkitRelativePath', async () => {
@@ -857,26 +769,19 @@ describe('skill-dialog: upload via file picker', () => {
         el.querySelectorAll('[data-testid="skill-dialog-file"]').length >= 2
       ) break;
     }
-    // PR26: the per-file input now shows the NAME only (not the
-    // folder prefix) when the file lives inside a folder group —
-    // the folder header above it already names the parent dir.
-    // To verify the stored full path is correct, read the tree's
-    // rendered text instead of the input value: the folder header
-    // contains "references/" and "scripts/", and the input below
-    // it contains the name.
+    // PR27: per-file path renders as a <span>; basename only when
+    // the file lives inside a folder group. Read textContent now.
     const treeText = el
       .querySelector('[data-testid="skill-dialog-folder-tree"]')!
       .textContent ?? '';
-    // Both folders appear as group headers.
     expect(treeText).toContain('references/');
     expect(treeText).toContain('scripts/');
-    // Both files appear as their basename inside.
-    const inputs = [
-      ...el.querySelectorAll<HTMLInputElement>(
+    const fileTexts = [
+      ...el.querySelectorAll<HTMLElement>(
         '[data-testid="skill-dialog-file"]',
       ),
-    ].map((i) => i.value);
-    expect(inputs.sort()).toEqual(['helper.py', 'intro.md']);
+    ].map((s) => s.textContent?.trim() ?? '');
+    expect(fileTexts.sort()).toEqual(['helper.py', 'intro.md']);
   });
 
   it('rejects a binary file (NUL byte) and emits a toast tally', async () => {
@@ -977,7 +882,9 @@ describe('skill-dialog: upload via file picker', () => {
       const t = el.querySelector('[data-testid="skill-dialog-upload-toast"]');
       if (t?.textContent?.includes('replaced')) break;
     }
-    const rows = el.querySelectorAll<HTMLInputElement>(
+    // PR27: per-file path is a <span> now; count by element rather
+    // than typing as HTMLInputElement.
+    const rows = el.querySelectorAll<HTMLElement>(
       '[data-testid="skill-dialog-file"]',
     );
     // Still ONE row; content was replaced in place, not duplicated.
@@ -1153,13 +1060,12 @@ describe('skill-dialog: inline folder tree (PR26)', () => {
     )!;
     // SKILL.md is rendered as text inside the tree's skill-md row.
     expect(tree.textContent).toContain('SKILL.md');
-    // Uploaded file names live in <input value="..."> — textContent
-    // doesn't capture input values, so read the inputs directly.
+    // PR27: per-file path is now a <span>; read textContent.
     const filenames = [
-      ...tree.querySelectorAll<HTMLInputElement>(
+      ...tree.querySelectorAll<HTMLElement>(
         '[data-testid="skill-dialog-file"]',
       ),
-    ].map((i) => i.value);
+    ].map((s) => s.textContent?.trim() ?? '');
     expect(filenames).toContain('intro.md');
   });
 
@@ -1196,12 +1102,12 @@ describe('skill-dialog: inline folder tree (PR26)', () => {
     // Folder header renders as text (a <div>references/</div>); the
     // text content check works for it.
     expect(tree.textContent).toContain('references/');
-    // File names live in <input value="...">; read them directly.
+    // PR27: per-file path is now a <span>; read textContent.
     const filenames = [
-      ...tree.querySelectorAll<HTMLInputElement>(
+      ...tree.querySelectorAll<HTMLElement>(
         '[data-testid="skill-dialog-file"]',
       ),
-    ].map((i) => i.value);
+    ].map((s) => s.textContent?.trim() ?? '');
     expect(filenames).toContain('intro.md');
     expect(filenames).toContain('glossary.md');
   });
@@ -1218,6 +1124,203 @@ describe('skill-dialog: inline folder tree (PR26)', () => {
       el.querySelector('[data-testid="skill-dialog-add-file"]'),
       '+ Add empty file button must stay removed',
     ).toBeNull();
+  });
+
+  it('per-file path renders as read-only text, not an input (PR27)', async () => {
+    // PR27 removed the rename affordance — paths are display-only.
+    // Upload one file, then assert the row's path-bearing element is
+    // a <span>, not an <input>. A regression that re-introduces the
+    // input would let users rename files in the dialog AND would
+    // re-open the validation gap that the previous "blocks save"
+    // tests covered.
+    const el = mount();
+    el.editing = null;
+    el.open = true;
+    await settle(el);
+    const picker = el.querySelector<HTMLInputElement>(
+      '[data-testid="skill-dialog-pick-files"]',
+    )!;
+    Object.defineProperty(picker, 'files', {
+      value: [makeFile({ name: 'ok.md', content: 'fine' })],
+      configurable: true,
+    });
+    picker.dispatchEvent(new Event('change'));
+    for (let i = 0; i < 50; i += 1) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+      if (el.querySelector('[data-testid="skill-dialog-file"]')) break;
+    }
+    const row = el.querySelector('[data-testid="skill-dialog-file"]')!;
+    expect(
+      row.tagName.toLowerCase(),
+      'per-file path must be a <span>, not <input>',
+    ).toBe('span');
+  });
+});
+
+// ---------------------------------------------------------------------
+// PR27: drag-drop folder structure preservation
+// ---------------------------------------------------------------------
+
+describe('skill-dialog: drag-drop folder structure (PR27)', () => {
+  let stub: Stub;
+  beforeEach(() => {
+    stub = installFetch();
+  });
+  afterEach(() => {
+    stub.restore();
+    document.body.innerHTML = '';
+  });
+
+  // Build a fake FileSystemEntry tree for testing the drag-drop
+  // walk(). happy-dom doesn't ship webkitGetAsEntry, so we wire up
+  // the DataTransfer items by hand. Two helpers:
+  //   makeFakeFileEntry(name, content)
+  //   makeFakeDirEntry(name, children)
+  // Each conforms to the structural FileSystemEntryLike interface
+  // the dialog's readEntries expects.
+  interface FakeEntry {
+    isFile: boolean;
+    isDirectory: boolean;
+    name: string;
+    file?: (cb: (f: File) => void, errcb?: (e: unknown) => void) => void;
+    createReader?: () => {
+      readEntries: (
+        cb: (entries: FakeEntry[]) => void,
+        errcb?: (e: unknown) => void,
+      ) => void;
+    };
+  }
+
+  function makeFakeFileEntry(name: string, content: string): FakeEntry {
+    return {
+      isFile: true,
+      isDirectory: false,
+      name,
+      file: (cb) => {
+        cb(new File([content], name, { type: 'text/plain' }));
+      },
+    };
+  }
+
+  function makeFakeDirEntry(name: string, children: FakeEntry[]): FakeEntry {
+    return {
+      isFile: false,
+      isDirectory: true,
+      name,
+      createReader: () => {
+        let delivered = false;
+        return {
+          readEntries: (cb) => {
+            // Per spec, readEntries returns batches; eventually
+            // empty. We deliver everything once, then empty.
+            if (delivered) {
+              cb([]);
+              return;
+            }
+            delivered = true;
+            cb(children);
+          },
+        };
+      },
+    };
+  }
+
+  function fakeDataTransferItems(entries: FakeEntry[]): DataTransferItemList {
+    const items = entries.map((entry) => ({
+      kind: 'file' as const,
+      type: 'application/octet-stream',
+      getAsFile: () => null,
+      getAsString: () => undefined,
+      webkitGetAsEntry: () => entry,
+    }));
+    return items as unknown as DataTransferItemList;
+  }
+
+  it('drag-drop of a folder with files at root preserves the folder name', async () => {
+    // Bug PR27 fixed: walk() was calling stripLeadingFolder on the
+    // result path, which flattened the top-level folder. So a drop
+    // of `references/` containing `intro.md` ended up as `intro.md`
+    // at the catalog root rather than `references/intro.md`.
+    const el = mount();
+    el.editing = null;
+    el.open = true;
+    await settle(el);
+
+    const dropzone = el.querySelector('[data-testid="skill-dialog-dropzone"]')!;
+    const referencesDir = makeFakeDirEntry('references', [
+      makeFakeFileEntry('intro.md', '# intro\n'),
+    ]);
+    const ev = new DragEvent('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(ev, 'dataTransfer', {
+      value: {
+        items: fakeDataTransferItems([referencesDir]),
+      },
+      configurable: true,
+    });
+    dropzone.dispatchEvent(ev);
+
+    for (let i = 0; i < 80; i += 1) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+      const t = el.querySelector(
+        '[data-testid="skill-dialog-folder-tree"]',
+      );
+      if (t?.textContent?.includes('references/')) break;
+    }
+    const tree = el.querySelector(
+      '[data-testid="skill-dialog-folder-tree"]',
+    )!;
+    // Folder header must appear — pre-PR27 it didn't because the
+    // path was flat 'intro.md' so the grouping put it under the ''
+    // (root) key with no header rendered.
+    expect(tree.textContent).toContain('references/');
+    // File still shows up under it as basename.
+    const fileNames = [
+      ...tree.querySelectorAll<HTMLElement>(
+        '[data-testid="skill-dialog-file"]',
+      ),
+    ].map((s) => s.textContent?.trim());
+    expect(fileNames).toContain('intro.md');
+  });
+
+  it('drag-drop of nested folders preserves the full path', async () => {
+    // `parent/sub/deep.md` — multi-level structure.
+    const el = mount();
+    el.editing = null;
+    el.open = true;
+    await settle(el);
+    const dropzone = el.querySelector('[data-testid="skill-dialog-dropzone"]')!;
+    const parent = makeFakeDirEntry('parent', [
+      makeFakeDirEntry('sub', [makeFakeFileEntry('deep.md', 'hi')]),
+    ]);
+    const ev = new DragEvent('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(ev, 'dataTransfer', {
+      value: { items: fakeDataTransferItems([parent]) },
+      configurable: true,
+    });
+    dropzone.dispatchEvent(ev);
+    for (let i = 0; i < 80; i += 1) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+      const t = el.querySelector(
+        '[data-testid="skill-dialog-folder-tree"]',
+      );
+      if (t?.textContent?.includes('parent')) break;
+    }
+    const tree = el.querySelector(
+      '[data-testid="skill-dialog-folder-tree"]',
+    )!;
+    // The grouping is one level deep visually — files inside
+    // `parent/sub/` cluster under the `parent/` header with their
+    // relative-to-parent path as the basename ("sub/deep.md").
+    expect(tree.textContent).toContain('parent/');
+    const fileNames = [
+      ...tree.querySelectorAll<HTMLElement>(
+        '[data-testid="skill-dialog-file"]',
+      ),
+    ].map((s) => s.textContent?.trim());
+    expect(fileNames).toContain('sub/deep.md');
   });
 });
 

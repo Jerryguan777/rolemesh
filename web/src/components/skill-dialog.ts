@@ -356,12 +356,6 @@ export class SkillDialog extends LitElement {
     return null;
   }
 
-  private renameFile(idx: number, newPath: string): void {
-    this.extraFiles = this.extraFiles.map((f, i) =>
-      i === idx ? { ...f, path: newPath } : f,
-    );
-  }
-
   private removeFile(idx: number): void {
     this.extraFiles = this.extraFiles.filter((_, i) => i !== idx);
   }
@@ -546,8 +540,15 @@ export class SkillDialog extends LitElement {
           (entry as FileSystemFileEntryLike).file(resolve, reject),
         );
         const content = await readFileAsText(file).catch(() => '\0');
+        // Preserve the full structural prefix. Unlike the folder
+        // picker (where the user's chosen "skill root" folder name
+        // gets stripped because it's a wrapper), in drag-drop each
+        // dropped item IS what the user wants — if they drop
+        // `references/`, the resulting paths should keep that
+        // prefix. PR26 fix: was stripLeadingFolder() here, which
+        // flattened `references/intro.md` → `intro.md`.
         out.push({
-          path: stripLeadingFolder(prefix + file.name),
+          path: prefix + file.name,
           content,
           bytes: file.size,
         });
@@ -567,11 +568,10 @@ export class SkillDialog extends LitElement {
       }
     }
     for (const e of entries) {
-      // Top-level entries get no prefix; their own name shows up via
-      // stripLeadingFolder inside walk's file branch (the folder
-      // becomes the prefix for its children, but its own segment is
-      // dropped by stripLeadingFolder so the catalog doesn't carry
-      // "my-skill-files/" everywhere).
+      // Top-level entries get an empty prefix; if entry is a directory
+      // its own name becomes the prefix for its children (so
+      // `references/intro.md` survives the drop). If entry is a file
+      // its name lands at the root.
       await walk(e, '');
     }
     return out;
@@ -957,7 +957,6 @@ export class SkillDialog extends LitElement {
             ${renderFolderTreeWithMain(
               this.extraFiles,
               this.busy,
-              (idx, newPath) => this.renameFile(idx, newPath),
               (idx) => this.removeFile(idx),
             )}
             ${this.fileErr
@@ -1024,7 +1023,6 @@ export class SkillDialog extends LitElement {
 function renderFolderTreeWithMain(
   files: ExtraFile[],
   busy: boolean,
-  onRename: (idx: number, newPath: string) => void,
   onRemove: (idx: number) => void,
 ) {
   // Group extras by top-level folder so uploads under references/
@@ -1071,25 +1069,11 @@ function renderFolderTreeWithMain(
         ${entries.map(({ file, idx }) => html`
           <div class=${`group flex items-center gap-2 py-1 ${folder ? 'pl-6' : ''}`}>
             <span aria-hidden="true" class="opacity-60 font-mono text-[12.5px]">📄</span>
-            <input
-              type="text"
-              class="flex-1 text-[12.5px] bg-transparent outline-none font-mono
-                px-1 py-0.5 rounded
-                hover:bg-surface-2 dark:hover:bg-d-surface-2
-                focus:bg-surface-2 dark:focus:bg-d-surface-2
-                focus:ring-1 focus:ring-brand"
-              .value=${folder ? file.path.slice(folder.length + 1) : file.path}
-              ?disabled=${busy}
-              @input=${(e: Event) => {
-                // Re-attach folder prefix on edit so the user editing
-                // "intro.md" inside the references/ group doesn't
-                // accidentally flatten the path to the catalog root.
-                const newName = (e.target as HTMLInputElement).value;
-                const newPath = folder ? `${folder}/${newName}` : newName;
-                onRename(idx, newPath);
-              }}
+            <span
+              class="flex-1 text-[12.5px] font-mono text-ink-0 dark:text-d-ink-0 truncate"
+              title=${file.path}
               data-testid="skill-dialog-file"
-            />
+            >${folder ? file.path.slice(folder.length + 1) : file.path}</span>
             <span class="text-[11px] text-ink-3 dark:text-d-ink-3 whitespace-nowrap">
               ${formatBytes(new Blob([file.content]).size)}
             </span>
