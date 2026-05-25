@@ -426,23 +426,13 @@ export class ChatPanel extends LitElement {
         this.approvals = next;
         break;
       }
-      case 'event.run.requires_reauth': {
-        // Re-broadcast for `<rm-reauth-banner>` to pick up. The banner
-        // lives on `<rm-app-shell>` so we go through window event bus
-        // rather than tunnelling through chat-panel children.
-        const detail = {
-          reason: typeof (e as { reason?: unknown }).reason === 'string'
-            ? (e as { reason: string }).reason
-            : undefined,
-          runId: this.activeRunId ?? undefined,
-        };
-        window.dispatchEvent(
-          new CustomEvent('rm-reauth-required', { detail }),
-        );
-        break;
-      }
       default:
-        // Future event types — ignore for forward-compat.
+        // PR23 removed the `event.run.requires_reauth` case — the
+        // backend never emitted it (the user-mode MCP path that would
+        // produce it remains gated on the OIDC branch). The reauth
+        // banner is still listenable via window.__forceReauth for
+        // dev/QA and will be re-wired when the engine starts emitting
+        // the event. Forward-compat: unknown event types are ignored.
         break;
     }
   }

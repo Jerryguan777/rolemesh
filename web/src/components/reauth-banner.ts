@@ -1,20 +1,24 @@
 // `<rm-reauth-banner>` — design §6.3 J.
 //
-// Listens for `rm-reauth-required` events (dispatched by the v1 WS
-// client when an `event.run.requires_reauth` frame arrives) and
-// renders a top-of-shell banner with a "Re-login" affordance.
+// Listens for `rm-reauth-required` window events and renders a
+// top-of-shell banner with a "Re-login" affordance.
 //
-// In bootstrap-token / Phase 1 builds the backend never actually
-// emits the upstream event (the user-mode MCP flow that produces it
-// is gated on the OIDC branch — design §6.3 J + 01b Open Question 2).
-// The banner code ships now so the SPA is ready when the engine
-// path turns on; dev / debugging access is via the in-page console:
+// PR23 status: the engine path that would emit
+// `event.run.requires_reauth` is gated on the OIDC branch (design
+// §6.3 J + 01b Open Question 2) and hasn't shipped, so the banner
+// has no production trigger yet. The banner UI is preserved because
+// (a) the dev hook below makes it easy to QA and (b) when the OIDC
+// branch lands, the chat-panel WS handler just dispatches the
+// `rm-reauth-required` event and this banner picks it up — no
+// rewrite needed.
+//
+// Dev / debugging access (open browser console):
 //
 //   window.__forceReauth({ reason: 'refresh_token_expired' })
 //
-// which surfaces the same UI without needing a real backend
-// trigger. The dev hook is gated behind a `window` cast so it's
-// not surfaced in TypeScript autocomplete elsewhere.
+// surfaces the UI without a real backend trigger. The hook is gated
+// behind a `window` cast so it doesn't pollute TS autocomplete
+// elsewhere in the app.
 
 import { LitElement, html, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';

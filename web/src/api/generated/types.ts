@@ -1600,6 +1600,145 @@ export interface components {
             /** Format: date-time */
             created_at: string;
         };
+        WsServerEventRunStarted: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "event.run.started";
+            /** Format: uuid */
+            run_id: string;
+            /**
+             * @description True when the request.run carried an idempotency_key that
+             *     matched a still-active in-flight run; the server-side run
+             *     wasn't created twice and the client should observe the
+             *     existing run's tokens.
+             */
+            idempotent: boolean;
+        };
+        WsServerEventRunToken: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "event.run.token";
+            /** Format: uuid */
+            run_id: string;
+            /**
+             * @description Newly produced assistant text since the previous token
+             *     event. Always a (possibly empty) string — never a chunk
+             *     schema or structured content.
+             */
+            delta: string;
+        };
+        WsServerEventRunCompleted: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "event.run.completed";
+            /** Format: uuid */
+            run_id: string;
+        };
+        WsServerEventRunError: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "event.run.error";
+            /**
+             * Format: uuid
+             * @description Optional. Omitted for protocol-level errors that fire
+             *     before a run is created (e.g. PROTOCOL_BAD_JSON,
+             *     PROTOCOL_UNKNOWN_TYPE).
+             */
+            run_id?: string;
+            /**
+             * @description Stable error code. Known values include SAFETY_BLOCKED,
+             *     PROTOCOL_BAD_JSON, PROTOCOL_UNKNOWN_TYPE,
+             *     PROTOCOL_MISSING_RUN_ID, PROTOCOL_BAD_APPROVAL,
+             *     PROTOCOL_BAD_DECISION, APPROVAL_ENGINE_UNAVAILABLE,
+             *     FORBIDDEN, ALREADY_DECIDED, NOT_FOUND,
+             *     APPROVAL_DECIDE_FAILED.
+             */
+            code: string;
+            message: string;
+            details?: {
+                [key: string]: unknown;
+            } | null;
+        };
+        WsServerEventApprovalRequired: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "event.approval.required";
+            /** Format: uuid */
+            approval_id: string;
+            /** Format: uuid */
+            run_id?: string | null;
+            /**
+             * @description Free-form summary the engine produced. Common keys:
+             *     tool_name, mcp_server_name, args. The UI may render any
+             *     subset; unknown keys are tolerated for forward-compat.
+             */
+            summary: {
+                [key: string]: unknown;
+            };
+        };
+        WsServerEventApprovalResolved: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "event.approval.resolved";
+            /** Format: uuid */
+            approval_id: string;
+            /** @enum {string} */
+            decision: "approve" | "deny" | "expired" | "cancelled";
+            /** Format: uuid */
+            actor_user_id?: string | null;
+            note?: string | null;
+        };
+        WsServerEvent: components["schemas"]["WsServerEventRunStarted"] | components["schemas"]["WsServerEventRunToken"] | components["schemas"]["WsServerEventRunCompleted"] | components["schemas"]["WsServerEventRunError"] | components["schemas"]["WsServerEventApprovalRequired"] | components["schemas"]["WsServerEventApprovalResolved"];
+        WsClientFrameRequestRun: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "request.run";
+            /** @description User input text for this run. */
+            input: string;
+            /**
+             * @description Client-minted UUID. The server caches (conversation_id,
+             *     idempotency_key) → run_id for the lifetime of the run so
+             *     a reconnect that re-sends the same frame observes the
+             *     same run (idempotent: true on event.run.started).
+             */
+            idempotency_key: string;
+        };
+        WsClientFrameRequestCancel: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "request.cancel";
+            /** Format: uuid */
+            run_id: string;
+        };
+        WsClientFrameRequestApproval: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "request.approval";
+            /** Format: uuid */
+            approval_id: string;
+            /** @enum {string} */
+            decision: "approve" | "deny";
+            note?: string | null;
+        };
+        WsClientFrame: components["schemas"]["WsClientFrameRequestRun"] | components["schemas"]["WsClientFrameRequestCancel"] | components["schemas"]["WsClientFrameRequestApproval"];
     };
     responses: {
         /** @description Malformed request. */

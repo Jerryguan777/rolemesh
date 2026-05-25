@@ -654,3 +654,162 @@ def test_backends_endpoint_advertises_cache_control_header_in_yaml() -> None:
     op = spec["paths"]["/api/v1/backends"]["get"]  # type: ignore[index]
     headers = op["responses"]["200"]["headers"]
     assert "Cache-Control" in headers
+
+
+# ---------------------------------------------------------------------------
+# WS frame schemas (PR23 — see contracts/openapi.yaml WsServerEvent /
+# WsClientFrame and the matching Pydantic models in schemas_v1.py).
+# ---------------------------------------------------------------------------
+
+
+# Expected discriminator → schema name mapping for the server→client
+# event surface. Adding a new event type means: update the yaml,
+# update schemas_v1, AND extend this constant — the test fails on any
+# of the three by themselves, so they have to land together. Anti-
+# mirror: we hard-code the expected set rather than re-deriving from
+# the yaml, because the derive-then-compare pattern would happily
+# match an empty yaml against an empty Pydantic union.
+_EXPECTED_SERVER_EVENTS: dict[str, str] = {
+    "event.run.started": "WsServerEventRunStarted",
+    "event.run.token": "WsServerEventRunToken",
+    "event.run.completed": "WsServerEventRunCompleted",
+    "event.run.error": "WsServerEventRunError",
+    "event.approval.required": "WsServerEventApprovalRequired",
+    "event.approval.resolved": "WsServerEventApprovalResolved",
+}
+
+_EXPECTED_CLIENT_FRAMES: dict[str, str] = {
+    "request.run": "WsClientFrameRequestRun",
+    "request.cancel": "WsClientFrameRequestCancel",
+    "request.approval": "WsClientFrameRequestApproval",
+}
+
+
+def test_ws_server_event_discriminator_mapping_matches_expected() -> None:
+    """The yaml's discriminator mapping must list every event the SPA
+    can branch on. A missing key here means a future event was added
+    to the union but the discriminator wasn't updated — openapi-
+    typescript would happily generate the union but the SPA's
+    pattern-match on ``event.type`` couldn't narrow it.
+    """
+    spec = _load_spec()
+    schema = _schema(spec, "WsServerEvent")
+    mapping = schema["discriminator"]["mapping"]  # type: ignore[index]
+    keys = set(mapping.keys())
+    assert keys == set(_EXPECTED_SERVER_EVENTS.keys()), (
+        f"WsServerEvent discriminator drift: "
+        f"yaml={sorted(keys)} expected={sorted(_EXPECTED_SERVER_EVENTS)}"
+    )
+
+
+def test_ws_client_frame_discriminator_mapping_matches_expected() -> None:
+    spec = _load_spec()
+    schema = _schema(spec, "WsClientFrame")
+    mapping = schema["discriminator"]["mapping"]  # type: ignore[index]
+    keys = set(mapping.keys())
+    assert keys == set(_EXPECTED_CLIENT_FRAMES.keys()), (
+        f"WsClientFrame discriminator drift: "
+        f"yaml={sorted(keys)} expected={sorted(_EXPECTED_CLIENT_FRAMES)}"
+    )
+
+
+def test_ws_server_event_pydantic_models_match_yaml_required_fields() -> None:
+    """For each WsServerEvent member, the yaml's `required` set must
+    equal the Pydantic model's required-fields set. Catches the
+    common drift mode where a frontend dev adds an optional field to
+    the yaml without updating Pydantic (or vice versa).
+    """
+    import webui.schemas_v1 as v1_schemas
+
+    spec = _load_spec()
+    for event_name, schema_name in _EXPECTED_SERVER_EVENTS.items():
+        yaml_schema = _schema(spec, schema_name)
+        yaml_required = set(yaml_schema.get("required") or [])  # type: ignore[arg-type]
+        model = getattr(v1_schemas, schema_name)
+        py_required = {
+            name for name, f in model.model_fields.items() if f.is_required()
+        }
+        assert yaml_required == py_required, (
+            f"{schema_name} required drift "
+            f"(event {event_name!r}): yaml={sorted(yaml_required)} "
+            f"python={sorted(py_required)}"
+        )
+
+
+def test_ws_client_frame_pydantic_models_match_yaml_required_fields() -> None:
+    import webui.schemas_v1 as v1_schemas
+
+    spec = _load_spec()
+    for frame_name, schema_name in _EXPECTED_CLIENT_FRAMES.items():
+        yaml_schema = _schema(spec, schema_name)
+        yaml_required = set(yaml_schema.get("required") or [])  # type: ignore[arg-type]
+        model = getattr(v1_schemas, schema_name)
+        py_required = {
+            name for name, f in model.model_fields.items() if f.is_required()
+        }
+        assert yaml_required == py_required, (
+            f"{schema_name} required drift "
+            f"(frame {frame_name!r}): yaml={sorted(yaml_required)} "
+            f"python={sorted(py_required)}"
+        )
+
+
+def test_ws_server_event_pydantic_round_trips_each_member() -> None:
+    """For each event member, build a minimal valid instance and
+    serialize it, then re-parse via the discriminated union. Round-
+    tripping pins that the Pydantic discriminator routes on `type`
+    correctly — a refactor that renames the `type` field on any
+    member silently breaks deserialization without this test.
+    """
+    from typing import Annotated
+
+    from pydantic import Field as PField
+    from pydantic import TypeAdapter
+
+    from webui.schemas_v1 import (
+        WsServerEventApprovalRequired,
+        WsServerEventApprovalResolved,
+        WsServerEventRunCompleted,
+        WsServerEventRunError,
+        WsServerEventRunStarted,
+        WsServerEventRunToken,
+    )
+
+    union = Annotated[
+        WsServerEventRunStarted
+        | WsServerEventRunToken
+        | WsServerEventRunCompleted
+        | WsServerEventRunError
+        | WsServerEventApprovalRequired
+        | WsServerEventApprovalResolved,
+        PField(discriminator="type"),
+    ]
+    adapter = TypeAdapter(union)
+    samples = [
+        WsServerEventRunStarted(
+            type="event.run.started", run_id="r", idempotent=False,
+        ),
+        WsServerEventRunToken(
+            type="event.run.token", run_id="r", delta="hi",
+        ),
+        WsServerEventRunCompleted(
+            type="event.run.completed", run_id="r",
+        ),
+        WsServerEventRunError(
+            type="event.run.error", code="X", message="m",
+        ),
+        WsServerEventApprovalRequired(
+            type="event.approval.required",
+            approval_id="a", summary={"tool_name": "t"},
+        ),
+        WsServerEventApprovalResolved(
+            type="event.approval.resolved",
+            approval_id="a", decision="approve",
+        ),
+    ]
+    for sample in samples:
+        parsed = adapter.validate_python(sample.model_dump())
+        assert type(parsed) is type(sample), (
+            f"discriminator mis-routed: {type(sample).__name__} → "
+            f"{type(parsed).__name__}"
+        )

@@ -11,13 +11,11 @@
 //   goes through REST `POST /api/v1/runs/{id}/cancel`, not the WS),
 //   and reconnect-with-GET-truth.
 //
-// On the wire we speak the design §4 protocol:
-//   client → server: `request.run` { input, idempotency_key, run_id? }
-//                    `request.cancel` { run_id }
-//                    `request.approval` { approval_id, decision, note? }
-//   server → client: `event.run.started` / `event.run.token` /
-//                    `event.run.completed` / `event.run.error` /
-//                    `event.run.requires_reauth` (reserved, design §6.3 J).
+// On the wire we speak the design §4 protocol. The schemas live in
+// `contracts/openapi.yaml` (WsClientFrame / WsServerEvent — PR23) and
+// the discriminated-union types below are generated from there, so
+// adding a new event type requires editing the yaml first; the
+// freshness drift test catches forgetting to regenerate.
 //
 // Reconnect contract (design §4 "重连" flow + 01b Open Question 1):
 // every reconnect first does `GET /api/v1/runs/{id}` to learn the
@@ -34,78 +32,30 @@
 
 import type { components } from '../api/generated/types.js';
 
-// --- Wire types (mirror what `webui.v1.ws_stream` ships) ---
+// --- Wire types (generated from contracts/openapi.yaml) ---
 
 export type RunStatus = components['schemas']['RunStatus'];
 
-export interface ServerEventBase {
-  type: string;
-  run_id?: string;
-  [k: string]: unknown;
-}
+/** Server → client event. Discriminated union keyed by `type`; a
+ *  switch on `event.type` narrows to the matching member. */
+export type ServerEvent = components['schemas']['WsServerEvent'];
 
-export interface RunStartedEvent extends ServerEventBase {
-  type: 'event.run.started';
-  run_id: string;
-  idempotent: boolean;
-}
-export interface RunTokenEvent extends ServerEventBase {
-  type: 'event.run.token';
-  run_id: string;
-  delta: string;
-}
-export interface RunCompletedEvent extends ServerEventBase {
-  type: 'event.run.completed';
-  run_id: string;
-}
-export interface RunErrorEvent extends ServerEventBase {
-  type: 'event.run.error';
-  run_id?: string;
-  code: string;
-  message: string;
-  details?: Record<string, unknown>;
-}
-// `event.run.requires_reauth` is reserved for the user-mode MCP path
-// (architecturally present, end-to-end gated on the OIDC branch). The
-// reauth banner subscribes here today so the UI is ready when the
-// backend starts emitting it.
-export interface RunRequiresReauthEvent extends ServerEventBase {
-  type: 'event.run.requires_reauth';
-  run_id?: string;
-  reason?: string;
-}
-// Approval engine events forwarded by ws_stream.py (03a PR2). The
-// per-conversation stream carries .required/.resolved frames for the
-// active chat; the user-scoped stream (UserApprovalsClient) carries
-// the same shape across every conversation the caller approves on.
-export interface ApprovalRequiredEvent extends ServerEventBase {
-  type: 'event.approval.required';
-  approval_id: string;
-  run_id?: string;
-  summary: {
-    tool_name?: string;
-    mcp_server_name?: string;
-    args?: Record<string, unknown>;
-    [k: string]: unknown;
-  };
-}
-export interface ApprovalResolvedEvent extends ServerEventBase {
-  type: 'event.approval.resolved';
-  approval_id: string;
-  decision: 'approve' | 'deny' | 'expired' | 'cancelled';
-  actor_user_id?: string;
-  note?: string;
-}
-
-export type ServerEvent =
-  | RunStartedEvent
-  | RunTokenEvent
-  | RunCompletedEvent
-  | RunErrorEvent
-  | RunRequiresReauthEvent
-  | ApprovalRequiredEvent
-  | ApprovalResolvedEvent
-  | ServerEventBase;
+/** Re-exports of the individual members so existing call sites that
+ *  pattern-match against a specific shape (`RunTokenEvent`,
+ *  `RunErrorEvent`, etc.) keep compiling without each importing the
+ *  generated components map directly. */
+export type RunStartedEvent =
+  components['schemas']['WsServerEventRunStarted'];
+export type RunTokenEvent =
+  components['schemas']['WsServerEventRunToken'];
+export type RunCompletedEvent =
+  components['schemas']['WsServerEventRunCompleted'];
+export type RunErrorEvent =
+  components['schemas']['WsServerEventRunError'];
+export type ApprovalRequiredEvent =
+  components['schemas']['WsServerEventApprovalRequired'];
+export type ApprovalResolvedEvent =
+  components['schemas']['WsServerEventApprovalResolved'];
 
 export type ConnectionStatus =
   | 'idle'

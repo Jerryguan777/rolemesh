@@ -415,7 +415,13 @@ describe('V1WsClient — cancel + reauth banner hooks', () => {
     expect((resolved[0] as { decision: string }).decision).toBe('approve');
   });
 
-  it('routes event.run.requires_reauth to subscribers (reserved channel for the banner)', async () => {
+  it('forwards an unknown event.type to the * subscriber for forward-compat', async () => {
+    // PR23 removed `event.run.requires_reauth` from the contract
+    // (backend never emitted it). The client's behavior for unknown
+    // events is to drop them at the typed `onEvent('event.X', fn)`
+    // path but still deliver via the `*` subscriber so a future
+    // event introduced server-side can be observed and routed by
+    // the SPA without a coordinated frontend release.
     const { fn: fetchFn } = makeFetch({
       '/api/v1/auth/ws-ticket': () =>
         new Response(JSON.stringify({ ticket: 't', expires_in_s: 60 }), {
@@ -429,13 +435,16 @@ describe('V1WsClient — cancel + reauth banner hooks', () => {
     );
     await client.connect();
     const inst = openMock(WS);
-    const seen = vi.fn();
-    client.onEvent('event.run.requires_reauth', seen);
+    const wildcard = vi.fn();
+    client.onEvent('*', wildcard);
+    // Cast through `unknown` because the typed `ServerEvent` union now
+    // only includes the 6 contracted members — this test is precisely
+    // about a frame whose type is OUTSIDE that union, so we have to
+    // bypass the static check on the way into deliver().
     deliver(inst, {
-      type: 'event.run.requires_reauth',
+      type: 'event.future.unknown',
       run_id: 'r',
-      reason: 'refresh_token_expired',
-    });
-    expect(seen).toHaveBeenCalledOnce();
+    } as unknown as ServerEvent);
+    expect(wildcard).toHaveBeenCalledOnce();
   });
 });

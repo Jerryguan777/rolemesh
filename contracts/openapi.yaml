@@ -2585,3 +2585,184 @@ components:
           additionalProperties: true
           nullable: true
         created_at: { type: string, format: date-time }
+
+    # -----------------------------------------------------------------
+    # WebSocket frame schemas (PR23).
+    #
+    # OpenAPI 3 has no native channel/subscription model (that's
+    # AsyncAPI's job), but the JSON SHAPE of every frame in a ws
+    # message is plain JSON, so it fits cleanly under components/
+    # schemas. Each direction is a discriminated union on the `type`
+    # field; codegen produces a tagged union on the TS side and the
+    # backend uses Pydantic discriminated unions for symmetric
+    # validation (see `WsServerEventModel` in schemas_v1.py).
+    #
+    # Channel: WS /api/v1/conversations/{id}/stream
+    # (handshake authenticated via `?ticket=` query, minted by
+    # POST /auth/ws-ticket).
+    # -----------------------------------------------------------------
+
+    WsServerEventRunStarted:
+      type: object
+      required: [type, run_id, idempotent]
+      properties:
+        type: { type: string, enum: [event.run.started] }
+        run_id: { type: string, format: uuid }
+        idempotent:
+          type: boolean
+          description: |
+            True when the request.run carried an idempotency_key that
+            matched a still-active in-flight run; the server-side run
+            wasn't created twice and the client should observe the
+            existing run's tokens.
+
+    WsServerEventRunToken:
+      type: object
+      required: [type, run_id, delta]
+      properties:
+        type: { type: string, enum: [event.run.token] }
+        run_id: { type: string, format: uuid }
+        delta:
+          type: string
+          description: |
+            Newly produced assistant text since the previous token
+            event. Always a (possibly empty) string — never a chunk
+            schema or structured content.
+
+    WsServerEventRunCompleted:
+      type: object
+      required: [type, run_id]
+      properties:
+        type: { type: string, enum: [event.run.completed] }
+        run_id: { type: string, format: uuid }
+
+    WsServerEventRunError:
+      type: object
+      required: [type, code, message]
+      properties:
+        type: { type: string, enum: [event.run.error] }
+        run_id:
+          type: string
+          format: uuid
+          description: |
+            Optional. Omitted for protocol-level errors that fire
+            before a run is created (e.g. PROTOCOL_BAD_JSON,
+            PROTOCOL_UNKNOWN_TYPE).
+        code:
+          type: string
+          description: |
+            Stable error code. Known values include SAFETY_BLOCKED,
+            PROTOCOL_BAD_JSON, PROTOCOL_UNKNOWN_TYPE,
+            PROTOCOL_MISSING_RUN_ID, PROTOCOL_BAD_APPROVAL,
+            PROTOCOL_BAD_DECISION, APPROVAL_ENGINE_UNAVAILABLE,
+            FORBIDDEN, ALREADY_DECIDED, NOT_FOUND,
+            APPROVAL_DECIDE_FAILED.
+        message: { type: string }
+        details:
+          type: object
+          additionalProperties: true
+          nullable: true
+
+    WsServerEventApprovalRequired:
+      type: object
+      required: [type, approval_id, summary]
+      properties:
+        type: { type: string, enum: [event.approval.required] }
+        approval_id: { type: string, format: uuid }
+        run_id:
+          type: string
+          format: uuid
+          nullable: true
+        summary:
+          type: object
+          additionalProperties: true
+          description: |
+            Free-form summary the engine produced. Common keys:
+            tool_name, mcp_server_name, args. The UI may render any
+            subset; unknown keys are tolerated for forward-compat.
+
+    WsServerEventApprovalResolved:
+      type: object
+      required: [type, approval_id, decision]
+      properties:
+        type: { type: string, enum: [event.approval.resolved] }
+        approval_id: { type: string, format: uuid }
+        decision:
+          type: string
+          enum: [approve, deny, expired, cancelled]
+        actor_user_id:
+          type: string
+          format: uuid
+          nullable: true
+        note:
+          type: string
+          nullable: true
+
+    # Server → client. Discriminated on `type`; clients can pattern
+    # match on the literal and TS narrows to the matching member.
+    WsServerEvent:
+      oneOf:
+        - $ref: '#/components/schemas/WsServerEventRunStarted'
+        - $ref: '#/components/schemas/WsServerEventRunToken'
+        - $ref: '#/components/schemas/WsServerEventRunCompleted'
+        - $ref: '#/components/schemas/WsServerEventRunError'
+        - $ref: '#/components/schemas/WsServerEventApprovalRequired'
+        - $ref: '#/components/schemas/WsServerEventApprovalResolved'
+      discriminator:
+        propertyName: type
+        mapping:
+          event.run.started: '#/components/schemas/WsServerEventRunStarted'
+          event.run.token: '#/components/schemas/WsServerEventRunToken'
+          event.run.completed: '#/components/schemas/WsServerEventRunCompleted'
+          event.run.error: '#/components/schemas/WsServerEventRunError'
+          event.approval.required: '#/components/schemas/WsServerEventApprovalRequired'
+          event.approval.resolved: '#/components/schemas/WsServerEventApprovalResolved'
+
+    WsClientFrameRequestRun:
+      type: object
+      required: [type, input, idempotency_key]
+      properties:
+        type: { type: string, enum: [request.run] }
+        input:
+          type: string
+          description: User input text for this run.
+        idempotency_key:
+          type: string
+          description: |
+            Client-minted UUID. The server caches (conversation_id,
+            idempotency_key) → run_id for the lifetime of the run so
+            a reconnect that re-sends the same frame observes the
+            same run (idempotent: true on event.run.started).
+
+    WsClientFrameRequestCancel:
+      type: object
+      required: [type, run_id]
+      properties:
+        type: { type: string, enum: [request.cancel] }
+        run_id: { type: string, format: uuid }
+
+    WsClientFrameRequestApproval:
+      type: object
+      required: [type, approval_id, decision]
+      properties:
+        type: { type: string, enum: [request.approval] }
+        approval_id: { type: string, format: uuid }
+        decision:
+          type: string
+          enum: [approve, deny]
+        note:
+          type: string
+          nullable: true
+
+    # Client → server.
+    WsClientFrame:
+      oneOf:
+        - $ref: '#/components/schemas/WsClientFrameRequestRun'
+        - $ref: '#/components/schemas/WsClientFrameRequestCancel'
+        - $ref: '#/components/schemas/WsClientFrameRequestApproval'
+      discriminator:
+        propertyName: type
+        mapping:
+          request.run: '#/components/schemas/WsClientFrameRequestRun'
+          request.cancel: '#/components/schemas/WsClientFrameRequestCancel'
+          request.approval: '#/components/schemas/WsClientFrameRequestApproval'

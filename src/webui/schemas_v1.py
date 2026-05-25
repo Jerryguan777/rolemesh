@@ -909,3 +909,109 @@ class SafetyRuleAuditEntry(BaseModel):
     before_state: dict[str, object] | None = None
     after_state: dict[str, object] | None = None
     created_at: str
+
+
+# ---------------------------------------------------------------------------
+# WebSocket frame models (PR23 — contracts/openapi.yaml WsServerEvent /
+# WsClientFrame). Discriminated on the literal ``type`` field; Pydantic
+# narrows the union member from that one tag.
+#
+# These Pydantic models are NOT used to serialize outbound frames on
+# the hot path (``ws_stream.py`` still emits plain dicts because the
+# control flow is simpler that way). They exist for:
+#   1. Contract drift validation — the test suite parses the yaml,
+#      finds these models, and asserts the field shape matches.
+#   2. Documentation — the wire shape lives in one importable place
+#      that an unfamiliar contributor can grep for.
+#   3. Future hot-path use — when ws_stream.py grows enough that
+#      "construct frame as Pydantic, .model_dump_json()" beats the
+#      current dict-literal approach, the models are ready.
+# ---------------------------------------------------------------------------
+
+
+class WsServerEventRunStarted(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.run.started"]
+    run_id: str
+    idempotent: bool
+
+
+class WsServerEventRunToken(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.run.token"]
+    run_id: str
+    delta: str
+
+
+class WsServerEventRunCompleted(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.run.completed"]
+    run_id: str
+
+
+class WsServerEventRunError(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.run.error"]
+    run_id: str | None = None
+    code: str
+    message: str
+    details: dict[str, object] | None = None
+
+
+class WsServerEventApprovalRequired(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.approval.required"]
+    approval_id: str
+    run_id: str | None = None
+    summary: dict[str, object]
+
+
+class WsServerEventApprovalResolved(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.approval.resolved"]
+    approval_id: str
+    decision: Literal["approve", "deny", "expired", "cancelled"]
+    actor_user_id: str | None = None
+    note: str | None = None
+
+
+# Tagged union over ``type``. Pydantic v2's Field discriminator picks
+# the right member based on the literal value, giving validation
+# errors that name the offending field (rather than the generic
+# "doesn't match any variant" you'd get without it).
+WsServerEventModel = (
+    WsServerEventRunStarted
+    | WsServerEventRunToken
+    | WsServerEventRunCompleted
+    | WsServerEventRunError
+    | WsServerEventApprovalRequired
+    | WsServerEventApprovalResolved
+)
+
+
+class WsClientFrameRequestRun(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["request.run"]
+    input: str
+    idempotency_key: str
+
+
+class WsClientFrameRequestCancel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["request.cancel"]
+    run_id: str
+
+
+class WsClientFrameRequestApproval(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["request.approval"]
+    approval_id: str
+    decision: Literal["approve", "deny"]
+    note: str | None = None
+
+
+WsClientFrameModel = (
+    WsClientFrameRequestRun
+    | WsClientFrameRequestCancel
+    | WsClientFrameRequestApproval
+)
