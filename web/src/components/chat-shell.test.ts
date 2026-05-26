@@ -55,6 +55,7 @@ vi.mock('../api/client.js', async () => {
 });
 
 import { groupConversations, RmChatShell } from './chat-shell.js';
+import { connectionState } from '../ws/connection-state.js';
 import type {
   ApprovalRequest,
   Conversation,
@@ -950,6 +951,25 @@ describe('<rm-chat-shell>', () => {
     const row = el.querySelector('[data-testid="conversation-row"]');
     expect(row).not.toBeNull();
     expect(row?.textContent?.trim()).toBe('New chat');
+  });
+
+  it('tenant pill connection dot reflects ConnectionState directly (no agent-connection event needed)', async () => {
+    // Regression for H5: previously the dot only flipped when
+    // message-editor bubbled an `agent-connection` event. A single
+    // missed dispatch left it stuck. Now the shell subscribes to
+    // `ConnectionState`, so a WS client flipping its channel must
+    // drive the dot end-to-end without any event relay.
+    connectionState.reset();
+    const el = await mountShell();
+    const dot = () => el.querySelector('[data-testid="connection-dot"]');
+    expect(dot()?.getAttribute('data-connected')).toBe('false');
+    connectionState.set('v1:conv-a', true);
+    await settle(el);
+    expect(dot()?.getAttribute('data-connected')).toBe('true');
+    connectionState.set('v1:conv-a', false);
+    await settle(el);
+    expect(dot()?.getAttribute('data-connected')).toBe('false');
+    connectionState.reset();
   });
 
   it('tenant pill connection dot flips to "off" when an agent-connection event reports disconnected', async () => {

@@ -29,8 +29,18 @@
 // refresh loses the dict — that's intentional, because reconnect
 // already covers the reload window by GETting truth before opening
 // a new socket.
+//
+// Lifecycle plumbing (connect / disconnect / backoff reconnect /
+// generation guard) lives in `WsClientBase`. This subclass only owns
+// the v1-specific bits: the event bus, idempotency, the GET-truth
+// reconnect pre-flight, and the request frames.
 
 import type { components } from '../api/generated/types.js';
+import {
+  WsClientBase,
+  type WsClientBaseDeps,
+  type WsConnectionStatus,
+} from './ws-client-base.js';
 
 // --- Wire types (generated from contracts/openapi.yaml) ---
 
@@ -57,13 +67,7 @@ export type ApprovalRequiredEvent =
 export type ApprovalResolvedEvent =
   components['schemas']['WsServerEventApprovalResolved'];
 
-export type ConnectionStatus =
-  | 'idle'
-  | 'connecting'
-  | 'open'
-  | 'reconnecting'
-  | 'closed'
-  | 'terminal';
+export type ConnectionStatus = WsConnectionStatus;
 
 export type EventHandler = (event: ServerEvent) => void;
 export type StatusHandler = (status: ConnectionStatus) => void;
@@ -73,15 +77,9 @@ export type StatusHandler = (status: ConnectionStatus) => void;
 // Default fetch and WebSocket point to the browser globals; tests
 // pass in fakes so the suite never opens real sockets.
 
-export interface V1ClientDeps {
-  fetch?: typeof fetch;
-  WebSocket?: typeof WebSocket;
+export interface V1ClientDeps extends WsClientBaseDeps {
   /** UUID factory (overridable in tests). */
   uuid?: () => string;
-  /** Override the WS base URL (defaults to current origin). */
-  wsOrigin?: string;
-  /** Backoff for reconnect attempts in ms. */
-  reconnectDelayMs?: number;
 }
 
 export interface V1ClientOptions {
@@ -109,16 +107,11 @@ const TERMINAL_STATUSES: ReadonlySet<RunStatus> = new Set<RunStatus>([
  *  and {@link onStatus} for connection lifecycle. The client does
  *  not own UI state — chat-panel maps events to messages.
  */
-export class V1WsClient {
-  private readonly fetchFn: typeof fetch;
-  private readonly WebSocketCtor: typeof WebSocket;
+export class V1WsClient extends WsClientBase<ConnectionStatus> {
   private readonly uuid: () => string;
-  private readonly wsOrigin: string;
-  private readonly reconnectDelayMs: number;
   private readonly conversationId: string;
   private readonly getToken: () => string | null;
 
-  private ws: WebSocket | null = null;
   // Per-conversation in-memory idempotency map: input → key. A second
   // `send(text)` with the same `text` inside the same client lifetime
   // reuses the key so a WS redelivery on reconnect collapses to one
@@ -131,33 +124,12 @@ export class V1WsClient {
 
   private readonly eventHandlers = new Map<string, Set<EventHandler>>();
   private readonly wildcardHandlers = new Set<EventHandler>();
-  private readonly statusHandlers = new Set<StatusHandler>();
-
-  private status: ConnectionStatus = 'idle';
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private explicitlyClosed = false;
-  // Generation guard — incremented on every (re)connect attempt and
-  // disconnect so an async reconnect that lost the race can detect
-  // the situation and bail out instead of stamping over a fresh ws.
-  private generation = 0;
 
   constructor(opts: V1ClientOptions, deps: V1ClientDeps = {}) {
+    super('idle', deps, { connectionChannel: `v1:${opts.conversationId}` });
     this.conversationId = opts.conversationId;
     this.getToken = opts.getToken;
-    this.fetchFn = deps.fetch ?? globalThis.fetch.bind(globalThis);
-    this.WebSocketCtor = deps.WebSocket ?? globalThis.WebSocket;
     this.uuid = deps.uuid ?? (() => crypto.randomUUID());
-    this.wsOrigin =
-      deps.wsOrigin ??
-      (typeof location !== 'undefined'
-        ? `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`
-        : '');
-    this.reconnectDelayMs = deps.reconnectDelayMs ?? 3000;
-  }
-
-  /** Current connection status. Mostly for tests and the connection dot. */
-  get connectionStatus(): ConnectionStatus {
-    return this.status;
   }
 
   /** The run_id of the most recently started run, or null before the
@@ -187,17 +159,6 @@ export class V1WsClient {
     return () => bucket!.delete(handler);
   }
 
-  onStatus(handler: StatusHandler): () => void {
-    this.statusHandlers.add(handler);
-    return () => this.statusHandlers.delete(handler);
-  }
-
-  private setStatus(next: ConnectionStatus): void {
-    if (this.status === next) return;
-    this.status = next;
-    for (const h of this.statusHandlers) h(next);
-  }
-
   private dispatch(event: ServerEvent): void {
     if (event.type === 'event.run.started' && typeof event.run_id === 'string') {
       this.activeRunId = event.run_id;
@@ -205,6 +166,16 @@ export class V1WsClient {
     const bucket = this.eventHandlers.get(event.type);
     if (bucket) for (const h of bucket) h(event);
     for (const h of this.wildcardHandlers) h(event);
+  }
+
+  protected handleMessage(data: unknown): void {
+    if (
+      data &&
+      typeof data === 'object' &&
+      typeof (data as ServerEvent).type === 'string'
+    ) {
+      this.dispatch(data as ServerEvent);
+    }
   }
 
   // --- REST helpers ---
@@ -262,12 +233,24 @@ export class V1WsClient {
     return { ok: true, alreadyTerminal: false };
   }
 
+  // --- WsClientBase seams ---
+
+  protected fetchTicket(): Promise<string> {
+    return this.fetchWsTicket();
+  }
+
+  protected buildWsUrl(ticket: string): string {
+    return (
+      `${this.wsOrigin}/api/v1/conversations/${encodeURIComponent(this.conversationId)}` +
+      `/stream?ticket=${encodeURIComponent(ticket)}`
+    );
+  }
+
   // --- WebSocket lifecycle ---
 
-  /** Open the socket, or fetch run truth + open if we have an active
-   *  run id. Idempotent: a second call while already open is a no-op. */
+  /** Open the socket. Idempotent: a second call while already open is a no-op. */
   async connect(): Promise<void> {
-    if (this.status === 'open' || this.status === 'connecting') return;
+    if (this.connectionStatus === 'open' || this.connectionStatus === 'connecting') return;
     this.explicitlyClosed = false;
     await this.openSocket();
   }
@@ -312,81 +295,16 @@ export class V1WsClient {
     await this.openSocket();
   }
 
+  /** Backoff timer fires this. Routes through `reconnect()` so the
+   *  GET-truth pre-flight is honored on every retry. */
+  protected override async reconnectNow(): Promise<void> {
+    if (this.explicitlyClosed) return;
+    await this.reconnect();
+  }
+
   /** Cleanly close the socket and stop any pending reconnect. */
   disconnect(): void {
-    this.explicitlyClosed = true;
-    this.generation += 1;
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-    if (this.ws) {
-      // Detach handlers first — onclose firing after disconnect()
-      // shouldn't trigger another reconnect.
-      this.ws.onclose = null;
-      this.ws.onerror = null;
-      try {
-        this.ws.close();
-      } catch {
-        // ignore
-      }
-      this.ws = null;
-    }
-    this.setStatus('closed');
-  }
-
-  private async openSocket(): Promise<void> {
-    const gen = ++this.generation;
-    this.setStatus('connecting');
-    let ticket: string;
-    try {
-      ticket = await this.fetchWsTicket();
-    } catch {
-      this.setStatus('closed');
-      this.scheduleReconnect();
-      return;
-    }
-    if (gen !== this.generation) return; // raced with disconnect()
-    const url =
-      `${this.wsOrigin}/api/v1/conversations/${encodeURIComponent(this.conversationId)}` +
-      `/stream?ticket=${encodeURIComponent(ticket)}`;
-    const ws = new this.WebSocketCtor(url);
-    this.ws = ws;
-    ws.onopen = () => {
-      if (gen !== this.generation) return;
-      this.setStatus('open');
-    };
-    ws.onmessage = (evt: MessageEvent) => {
-      if (gen !== this.generation) return;
-      let data: unknown;
-      try {
-        data = JSON.parse(typeof evt.data === 'string' ? evt.data : '');
-      } catch {
-        return;
-      }
-      if (data && typeof data === 'object' && typeof (data as ServerEvent).type === 'string') {
-        this.dispatch(data as ServerEvent);
-      }
-    };
-    ws.onerror = () => {
-      // No-op: rely on onclose to drive reconnect.
-    };
-    ws.onclose = () => {
-      if (gen !== this.generation) return;
-      this.ws = null;
-      if (this.explicitlyClosed) return;
-      this.setStatus('reconnecting');
-      this.scheduleReconnect();
-    };
-  }
-
-  private scheduleReconnect(): void {
-    if (this.explicitlyClosed) return;
-    if (this.reconnectTimer) return;
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      void this.reconnect();
-    }, this.reconnectDelayMs);
+    this.closeAndTeardown();
   }
 
   // --- Client → server frames ---

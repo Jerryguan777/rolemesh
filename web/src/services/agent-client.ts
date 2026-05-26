@@ -20,6 +20,7 @@
 // is deferred to a later session (designed §4.1 + 01c Out of scope).
 
 import { refreshTokenSilent } from './oidc-auth.js';
+import { connectionState } from '../ws/connection-state.js';
 
 export type AgentStatus =
   | 'queued'
@@ -109,6 +110,12 @@ export class AgentClient {
 
     this.ws.onopen = () => {
       this._connected = true;
+      // Mirror to the shared ConnectionState so the top-bar dot
+      // reflects this socket without needing the message-editor
+      // CustomEvent relay. Channel id is per-agent so two AgentClient
+      // instances (rare, but possible during a coworker swap) don't
+      // collide.
+      connectionState.set(`stop:${this.agentId}`, true);
       // Flush any messages queued while connecting
       for (const msg of this.pendingMessages) {
         this.ws!.send(msg);
@@ -131,6 +138,7 @@ export class AgentClient {
     this.ws.onclose = (event) => {
       const wasConnected = this._connected;
       this._connected = false;
+      connectionState.set(`stop:${this.agentId}`, false);
       if (wasConnected) {
         this.notify({ type: 'error', message: 'Connection lost. Reconnecting...' });
       }
@@ -153,6 +161,7 @@ export class AgentClient {
 
     this.ws.onerror = () => {
       this._connected = false;
+      connectionState.set(`stop:${this.agentId}`, false);
     };
   }
 
@@ -231,6 +240,7 @@ export class AgentClient {
     this.ws?.close();
     this.ws = null;
     this._connected = false;
+    connectionState.remove(`stop:${this.agentId}`);
   }
 
   reconnect(chatId?: string): void {

@@ -53,6 +53,7 @@ import {
   modelsByIdMap,
 } from '../services/coworker-label.js';
 import { UserApprovalsClient, type UserApprovalsStatus } from '../ws/user_approvals_client.js';
+import { connectionState } from '../ws/connection-state.js';
 import './chat-panel.js';
 import './reauth-banner.js';
 import './approvals-popover.js';
@@ -170,10 +171,12 @@ export class RmChatShell extends LitElement {
    *  it to land on a connected page, and hiding it would leave the
    *  user inside an invisible row. */
   @state() private emptyConvIds = new Set<string>();
-  /** Mirror of `<rm-message-editor>.connected`, which itself mirrors
-   *  the legacy AgentClient socket state in chat-panel. We absorb
-   *  the `agent-connection` event so the tenant pill can render the
-   *  green/red dot the way chat-panel's top bar used to. */
+  /** Mirror of the aggregate `ConnectionState` — true iff any of the
+   *  registered WS clients (V1WsClient for the active conversation,
+   *  legacy AgentClient for Stop) currently report an open socket.
+   *  We also keep the legacy `agent-connection` event listener wired
+   *  as a belt-and-braces backup so a not-yet-migrated socket source
+   *  can still flip the dot. */
   @state() private agentConnected = false;
   /** Tenant model catalogue — used to render the "Backend · Model"
    *  subtitle for each coworker. Lookup map keyed by Model.id. A
@@ -209,6 +212,9 @@ export class RmChatShell extends LitElement {
   /** Unsubscribe handles from the approvals client. Set on mount,
    *  cleared on unmount so the WS doesn't leak past the shell. */
   private approvalsUnsubs: Array<() => void> = [];
+  /** Unsubscribe handle for the ConnectionState subscription so the
+   *  shell doesn't leak listeners across mount/unmount cycles. */
+  private connStateUnsub: (() => void) | null = null;
 
   protected override createRenderRoot() {
     // Light DOM so the chat-panel's contenteditable composer + the
@@ -253,6 +259,13 @@ export class RmChatShell extends LitElement {
     void this.bootstrap();
     document.addEventListener('click', this.onDocumentClick, true);
     this.addEventListener('agent-connection', this.onAgentConnection);
+    // Subscribe to the aggregate ConnectionState so any WS client
+    // flipping open/closed directly drives the top-bar dot — even if
+    // the message-editor's agent-connection relay misses an edge.
+    this.agentConnected = connectionState.connected;
+    this.connStateUnsub = connectionState.subscribe((c) => {
+      this.agentConnected = c;
+    });
     // Tests inject the client via setApprovalsClient() BEFORE attach;
     // production code path lazily mints one here so we don't churn the
     // unit-test stub.
@@ -270,6 +283,8 @@ export class RmChatShell extends LitElement {
     super.disconnectedCallback();
     document.removeEventListener('click', this.onDocumentClick, true);
     this.removeEventListener('agent-connection', this.onAgentConnection);
+    this.connStateUnsub?.();
+    this.connStateUnsub = null;
     this.teardownApprovals();
   }
 

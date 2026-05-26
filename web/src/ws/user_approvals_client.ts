@@ -24,16 +24,27 @@
 // to the caller; the popover renders a "stale, reconnecting…" hint and
 // REST polling continues from the popover's mount-time fetch. We do
 // NOT silently fail — connection state is observable via `onStatus`.
+//
+// Lifecycle plumbing (start/stop/backoff reconnect/generation guard)
+// lives in `WsClientBase`. This client does NOT participate in
+// `ConnectionState` — its socket reflects approval fanout health,
+// which is separate from chat connectivity (the top-bar dot tracks
+// the chat stream).
 
 import type {
   ApprovalRequiredEvent,
   ApprovalResolvedEvent,
 } from './v1_client.js';
+import { WsClientBase, type WsClientBaseDeps } from './ws-client-base.js';
 
 export type UserApprovalEvent =
   | ApprovalRequiredEvent
   | ApprovalResolvedEvent;
 
+// Approvals client is never "terminal" — that state is run-specific
+// in V1WsClient. Narrow the public status type to the subset this
+// client actually emits so consumers exhausting the union don't have
+// to handle a case the client cannot produce.
 export type UserApprovalsStatus =
   | 'idle'
   | 'connecting'
@@ -44,51 +55,27 @@ export type UserApprovalsStatus =
 export type UserApprovalsHandler = (event: UserApprovalEvent) => void;
 export type UserApprovalsStatusHandler = (status: UserApprovalsStatus) => void;
 
-export interface UserApprovalsDeps {
-  fetch?: typeof fetch;
-  WebSocket?: typeof WebSocket;
-  /** Override WS origin (defaults to current location). Tests pass `ws://test`. */
-  wsOrigin?: string;
-  /** Backoff between reconnects. Tests pass `0` to drive the loop. */
-  reconnectDelayMs?: number;
-}
+export type UserApprovalsDeps = WsClientBaseDeps;
 
 export interface UserApprovalsOptions {
   /** Bearer token supplier — same shape as V1WsClient. */
   getToken: () => string | null;
 }
 
-export class UserApprovalsClient {
-  private readonly fetchFn: typeof fetch;
-  private readonly WebSocketCtor: typeof WebSocket;
-  private readonly wsOrigin: string;
-  private readonly reconnectDelayMs: number;
+export class UserApprovalsClient extends WsClientBase<UserApprovalsStatus> {
   private readonly getToken: () => string | null;
-
-  private ws: WebSocket | null = null;
-  private status: UserApprovalsStatus = 'idle';
-  private explicitlyClosed = false;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private generation = 0;
 
   private readonly requiredHandlers = new Set<UserApprovalsHandler>();
   private readonly resolvedHandlers = new Set<UserApprovalsHandler>();
-  private readonly statusHandlers = new Set<UserApprovalsStatusHandler>();
 
   constructor(opts: UserApprovalsOptions, deps: UserApprovalsDeps = {}) {
+    super('idle', deps, {
+      // Intentionally undefined: the approvals socket health is
+      // distinct from chat connectivity; do not feed the top-bar
+      // dot.
+      connectionChannel: undefined,
+    });
     this.getToken = opts.getToken;
-    this.fetchFn = deps.fetch ?? globalThis.fetch.bind(globalThis);
-    this.WebSocketCtor = deps.WebSocket ?? globalThis.WebSocket;
-    this.wsOrigin =
-      deps.wsOrigin ??
-      (typeof location !== 'undefined'
-        ? `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`
-        : '');
-    this.reconnectDelayMs = deps.reconnectDelayMs ?? 3000;
-  }
-
-  get connectionStatus(): UserApprovalsStatus {
-    return this.status;
   }
 
   onRequired(handler: UserApprovalsHandler): () => void {
@@ -101,102 +88,29 @@ export class UserApprovalsClient {
     return () => this.resolvedHandlers.delete(handler);
   }
 
-  onStatus(handler: UserApprovalsStatusHandler): () => void {
-    this.statusHandlers.add(handler);
-    return () => this.statusHandlers.delete(handler);
-  }
-
   /** Open the user-scoped approvals stream. Idempotent — a second call
    *  while already connecting/open is a no-op. */
   async start(): Promise<void> {
-    if (this.status === 'open' || this.status === 'connecting') return;
+    if (this.connectionStatus === 'open' || this.connectionStatus === 'connecting') return;
     this.explicitlyClosed = false;
     await this.openSocket();
   }
 
   /** Stop the stream and cancel any pending reconnect. */
   stop(): void {
-    this.explicitlyClosed = true;
-    this.generation += 1;
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-    if (this.ws) {
-      this.ws.onclose = null;
-      this.ws.onerror = null;
-      try {
-        this.ws.close();
-      } catch {
-        // ignore
-      }
-      this.ws = null;
-    }
-    this.setStatus('closed');
+    this.closeAndTeardown();
   }
 
-  private setStatus(next: UserApprovalsStatus): void {
-    if (this.status === next) return;
-    this.status = next;
-    for (const h of this.statusHandlers) h(next);
-  }
+  // --- WsClientBase seams ---
 
-  private async openSocket(): Promise<void> {
-    const gen = ++this.generation;
-    this.setStatus('connecting');
-    let ticket: string;
-    try {
-      ticket = await this.fetchTicket();
-    } catch {
-      // Surface the failure as a closed/reconnecting state; callers
-      // render a degraded UI rather than tearing the app down.
-      this.setStatus('closed');
-      this.scheduleReconnect();
-      return;
-    }
-    if (gen !== this.generation) return;
-    const url =
+  protected buildWsUrl(ticket: string): string {
+    return (
       `${this.wsOrigin}/api/v1/users/me/approvals/stream` +
-      `?ticket=${encodeURIComponent(ticket)}`;
-    const ws = new this.WebSocketCtor(url);
-    this.ws = ws;
-    ws.onopen = () => {
-      if (gen !== this.generation) return;
-      this.setStatus('open');
-    };
-    ws.onmessage = (evt: MessageEvent) => {
-      if (gen !== this.generation) return;
-      let data: unknown;
-      try {
-        data = JSON.parse(typeof evt.data === 'string' ? evt.data : '');
-      } catch {
-        return;
-      }
-      if (!data || typeof data !== 'object') return;
-      const type = (data as { type?: unknown }).type;
-      if (type === 'event.approval.required') {
-        for (const h of this.requiredHandlers) {
-          h(data as ApprovalRequiredEvent);
-        }
-      } else if (type === 'event.approval.resolved') {
-        for (const h of this.resolvedHandlers) {
-          h(data as ApprovalResolvedEvent);
-        }
-      }
-    };
-    ws.onerror = () => {
-      // Rely on onclose to drive reconnect.
-    };
-    ws.onclose = () => {
-      if (gen !== this.generation) return;
-      this.ws = null;
-      if (this.explicitlyClosed) return;
-      this.setStatus('reconnecting');
-      this.scheduleReconnect();
-    };
+      `?ticket=${encodeURIComponent(ticket)}`
+    );
   }
 
-  private async fetchTicket(): Promise<string> {
+  protected async fetchTicket(): Promise<string> {
     const headers: Record<string, string> = {
       Accept: 'application/json',
       'Content-Type': 'application/json',
@@ -216,12 +130,17 @@ export class UserApprovalsClient {
     return body.ticket;
   }
 
-  private scheduleReconnect(): void {
-    if (this.explicitlyClosed) return;
-    if (this.reconnectTimer) return;
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectTimer = null;
-      void this.openSocket();
-    }, this.reconnectDelayMs);
+  protected handleMessage(data: unknown): void {
+    if (!data || typeof data !== 'object') return;
+    const type = (data as { type?: unknown }).type;
+    if (type === 'event.approval.required') {
+      for (const h of this.requiredHandlers) {
+        h(data as ApprovalRequiredEvent);
+      }
+    } else if (type === 'event.approval.resolved') {
+      for (const h of this.resolvedHandlers) {
+        h(data as ApprovalResolvedEvent);
+      }
+    }
   }
 }
