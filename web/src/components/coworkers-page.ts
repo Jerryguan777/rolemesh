@@ -22,6 +22,7 @@ import type { Coworker, ModelProvider } from '../api/client.js';
 import './coworker-wizard.js';
 import './credential-dialog.js';
 import './mcp-server-dialog.js';
+import './dialog.js';
 import type { CoworkerWizard } from './coworker-wizard.js';
 import { iconPencil, iconTrash } from './icons.js';
 
@@ -40,6 +41,13 @@ export class CoworkersPage extends LitElement {
   /** Per-row delete error, keyed by coworker id. Cleared on the next
    *  refresh so a successful retry returns the row to its normal state. */
   @state() private deleteError: Record<string, string> = {};
+  /** When non-null, the delete confirmation dialog is open with this
+   *  coworker as the target. Replaces the native `window.confirm`
+   *  which ignored the theme and broke the v2 visual language. */
+  @state() private deleteTarget: Coworker | null = null;
+  /** True while the delete API call is in flight — disables the
+   *  Confirm button so a double-click can't fire two DELETEs. */
+  @state() private deleteInFlight = false;
   @query('rm-coworker-wizard') private wizardEl?: CoworkerWizard;
   private readonly api = getApiClient();
 
@@ -77,16 +85,23 @@ export class CoworkersPage extends LitElement {
     this.wizardOpen = true;
   }
 
-  private async confirmDelete(c: Coworker): Promise<void> {
-    const ok = window.confirm(
-      `Delete coworker "${c.name}"?\n\n` +
-        'This also drops every conversation, run, and message the ' +
-        'coworker has on file (cascaded by the database). Cannot be undone.',
-    );
-    if (!ok) return;
+  private askDelete(c: Coworker): void {
+    this.deleteTarget = c;
+  }
+
+  private cancelDelete = (): void => {
+    if (this.deleteInFlight) return;
+    this.deleteTarget = null;
+  };
+
+  private async performDelete(): Promise<void> {
+    const c = this.deleteTarget;
+    if (!c || this.deleteInFlight) return;
+    this.deleteInFlight = true;
     this.deleteError = { ...this.deleteError, [c.id]: '' };
     try {
       await this.api.deleteCoworker(c.id);
+      this.deleteTarget = null;
       await this.refresh();
     } catch (err) {
       this.deleteError = {
@@ -96,6 +111,11 @@ export class CoworkersPage extends LitElement {
             ? `${err.status} — ${err.body?.message ?? err.message}`
             : (err as Error).message ?? 'delete failed',
       };
+      // Close on error too — the per-row banner surfaces the message,
+      // and leaving the modal up would trap the user under it.
+      this.deleteTarget = null;
+    } finally {
+      this.deleteInFlight = false;
     }
   }
 
@@ -173,7 +193,50 @@ export class CoworkersPage extends LitElement {
             void this.wizardEl?.refreshMCPServers();
           }}
         ></rm-mcp-server-dialog>
+        ${this.renderDeleteDialog()}
       </div>
+    `;
+  }
+
+  private renderDeleteDialog() {
+    const target = this.deleteTarget;
+    return html`
+      <rm-dialog
+        title="Delete coworker?"
+        ?open=${target !== null}
+        data-testid="confirm-delete-dialog"
+        @close=${this.cancelDelete}
+      >
+        ${target
+          ? html`
+              <p style="margin: 0 0 12px;">
+                Delete coworker <strong>${target.name}</strong>?
+              </p>
+              <p style="margin: 0; color: var(--rm-ink-2); font-size: var(--rm-text-sm);">
+                This also drops every conversation, run, and message
+                the coworker has on file (cascaded by the database).
+                Cannot be undone.
+              </p>
+            `
+          : nothing}
+        <div slot="footer" style="display: flex; gap: 8px; justify-content: flex-end;">
+          <button
+            type="button"
+            class="rm-add-secondary"
+            data-testid="confirm-delete-cancel"
+            ?disabled=${this.deleteInFlight}
+            @click=${this.cancelDelete}
+          >Cancel</button>
+          <button
+            type="button"
+            class="rm-add"
+            data-testid="confirm-delete-confirm"
+            ?disabled=${this.deleteInFlight}
+            @click=${() => void this.performDelete()}
+            style="background: var(--rm-bad); color: var(--rm-accent-ink);"
+          >${this.deleteInFlight ? 'Deleting…' : 'Delete'}</button>
+        </div>
+      </rm-dialog>
     `;
   }
 
@@ -231,7 +294,7 @@ export class CoworkersPage extends LitElement {
                 data-testid="coworker-delete"
                 @click=${(e: Event) => {
                   e.stopPropagation();
-                  void this.confirmDelete(c);
+                  this.askDelete(c);
                 }}
               >${iconTrash(15)}</button>
             </span>

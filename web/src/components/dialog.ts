@@ -74,7 +74,7 @@ export class RmDialog extends LitElement {
       overflow: hidden;
     }
     dialog::backdrop {
-      background: rgba(30, 27, 23, 0.5);
+      background: var(--rm-backdrop);
       backdrop-filter: blur(2px);
     }
     /* Open-state layout: max-height + flex column live HERE, scoped

@@ -98,6 +98,13 @@
 
   /* Transition */
   --rm-transition: 0.15s ease;
+
+  /* Modal / popover backdrop. Light-mode default is the ink colour
+   * at 50% alpha; the dark-mode override inside the @media block
+   * darkens the surrounding canvas so a focused dialog still pops.
+   * Without this token every backdrop hard-coded a near-black rgba
+   * that looked correct in light mode and grey-on-grey in dark. */
+  --rm-backdrop: rgba(30, 27, 23, 0.5);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -125,6 +132,10 @@
     --rm-warn-subtle: #352B18;
     --rm-bad: #E0938C;
     --rm-bad-subtle: #3A2220;
+
+    /* Dark-mode backdrop: deepen the canvas so the dialog still
+     * stands out against the already-dim surroundings. */
+    --rm-backdrop: rgba(0, 0, 0, 0.6);
   }
 }
 
