@@ -172,7 +172,7 @@ export class RmActivityShell extends LitElement {
           align-items: center;
           padding: 0 22px;
           border-bottom: 1px solid var(--rm-border);
-          gap: 12px;
+          gap: var(--rm-space-3);
         }
         rm-activity-shell .as-hd h2 {
           font-size: 16px;
@@ -191,7 +191,7 @@ export class RmActivityShell extends LitElement {
           background: none;
           border: none;
           padding: 11px 12px 10px;
-          font-size: 13px;
+          font-size: var(--rm-text-sm);
           font-family: inherit;
           color: var(--rm-ink-3);
           cursor: pointer;

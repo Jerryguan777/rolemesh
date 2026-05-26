@@ -38,12 +38,12 @@ export class AppearancePage extends LitElement {
     }
     h3 {
       margin: 0 0 4px;
-      font-size: 15px;
+      font-size: var(--rm-text-md);
       font-weight: 600;
     }
     p.sub {
       margin: 0 0 12px;
-      font-size: 13px;
+      font-size: var(--rm-text-sm);
       color: var(--rm-ink-3);
     }
     .row {
@@ -52,7 +52,7 @@ export class AppearancePage extends LitElement {
       gap: 10px;
       padding: 10px 12px;
       border: 1px solid var(--rm-border);
-      border-radius: 8px;
+      border-radius: var(--rm-radius-sm);
       background: var(--rm-surface-2);
     }
     .row b {

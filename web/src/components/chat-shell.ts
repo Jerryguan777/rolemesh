@@ -778,7 +778,7 @@ export class RmChatShell extends LitElement {
         rm-chat-shell .cav {
           width: 30px;
           height: 30px;
-          border-radius: 8px;
+          border-radius: var(--rm-radius-sm);
           display: grid;
           place-items: center;
           font-size: 11.5px;
@@ -793,7 +793,7 @@ export class RmChatShell extends LitElement {
           font-weight: 600;
         }
         rm-chat-shell .csw-txt span {
-          font-size: 11px;
+          font-size: var(--rm-text-xs);
           color: var(--rm-ink-3);
           display: block;
           overflow: hidden;
@@ -825,11 +825,11 @@ export class RmChatShell extends LitElement {
           margin: 0 12px 8px;
           display: flex;
           align-items: center;
-          gap: 8px;
+          gap: var(--rm-space-2);
           padding: 7px 10px;
           border-radius: var(--rm-r);
           color: var(--rm-ink-3);
-          font-size: 13px;
+          font-size: var(--rm-text-sm);
           background: none;
           border: none;
           font-family: inherit;
@@ -842,7 +842,7 @@ export class RmChatShell extends LitElement {
           margin: 0 12px 8px;
           display: flex;
           align-items: center;
-          gap: 8px;
+          gap: var(--rm-space-2);
           padding: 6px 8px 6px 10px;
           border-radius: var(--rm-r);
           background: var(--rm-surface);
@@ -877,10 +877,10 @@ export class RmChatShell extends LitElement {
         rm-chat-shell .histscroll {
           flex: 1;
           overflow-y: auto;
-          padding: 8px;
+          padding: var(--rm-space-2);
         }
         rm-chat-shell .grouplabel {
-          font-size: 11px;
+          font-size: var(--rm-text-xs);
           font-weight: 600;
           color: var(--rm-ink-3);
           letter-spacing: 0.04em;
@@ -964,7 +964,7 @@ export class RmChatShell extends LitElement {
         }
         rm-chat-shell .userbar .nm span {
           display: block;
-          font-size: 11px;
+          font-size: var(--rm-text-xs);
           color: var(--rm-ink-3);
           overflow: hidden;
           text-overflow: ellipsis;
@@ -1011,7 +1011,7 @@ export class RmChatShell extends LitElement {
           place-items: center;
           width: 32px;
           height: 32px;
-          border-radius: 8px;
+          border-radius: var(--rm-radius-sm);
           background: none;
           border: none;
           color: var(--rm-ink-2);
@@ -1073,7 +1073,7 @@ export class RmChatShell extends LitElement {
           display: grid;
           place-items: center;
           color: var(--rm-ink-3);
-          font-size: 13px;
+          font-size: var(--rm-text-sm);
         }
         /* v2-A polish backlog: the slotted v1.1 <rm-chat-panel>
          * renders its own <rm-sidebar> + brand+hamburger header.
@@ -1124,7 +1124,7 @@ export class RmChatShell extends LitElement {
           align-items: center;
           gap: 9px;
           padding: 8px 10px;
-          border-radius: 8px;
+          border-radius: var(--rm-radius-sm);
           font-size: 13.5px;
           background: none;
           border: none;
@@ -1149,7 +1149,7 @@ export class RmChatShell extends LitElement {
           white-space: nowrap;
         }
         rm-chat-shell .cs-menu .mlabel {
-          font-size: 11px;
+          font-size: var(--rm-text-xs);
           font-weight: 600;
           color: var(--rm-ink-3);
           text-transform: uppercase;
@@ -1193,7 +1193,7 @@ export class RmChatShell extends LitElement {
         rm-chat-shell .appr-hd {
           padding: 11px 14px;
           border-bottom: 1px solid var(--rm-border);
-          font-size: 13px;
+          font-size: var(--rm-text-sm);
           font-weight: 600;
           display: flex;
           align-items: center;
@@ -1210,7 +1210,7 @@ export class RmChatShell extends LitElement {
         rm-chat-shell .appr-rows {
           display: flex;
           flex-direction: column;
-          gap: 8px;
+          gap: var(--rm-space-2);
           padding: 10px;
         }
         rm-chat-shell .appr-row {
@@ -1221,7 +1221,7 @@ export class RmChatShell extends LitElement {
           display: flex;
           align-items: center;
           justify-content: space-between;
-          gap: 8px;
+          gap: var(--rm-space-2);
           padding: 9px 14px;
           border-top: 1px solid var(--rm-border);
           font-size: 12px;

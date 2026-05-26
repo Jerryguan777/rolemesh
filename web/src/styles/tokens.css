@@ -63,9 +63,33 @@
   --rm-font-logo:
     'Space Grotesk', 'Hanken Grotesk', system-ui, sans-serif;
 
-  /* Radius */
+  /* Radius. --rm-r (10px) and --rm-r-lg (16px) predate the smaller
+   * --rm-radius-sm (8px); kept as-is so already-migrated rules don't
+   * shift visually. */
   --rm-r: 10px;
   --rm-r-lg: 16px;
+  --rm-radius-sm: 8px;
+
+  /* Spacing scale — 4px grid. Use these for paddings, gaps, and
+   * margins that fall on the grid. Off-grid values (7px, 9px, 11px,
+   * 14px etc.) intentionally keep their literal so a future
+   * design-system pass can decide whether to round or to widen the
+   * scale; replacing them with the nearest token would shift pixels
+   * visibly today. */
+  --rm-space-1: 4px;
+  --rm-space-2: 8px;
+  --rm-space-3: 12px;
+  --rm-space-4: 16px;
+  --rm-space-5: 24px;
+  --rm-space-6: 32px;
+
+  /* Text size scale. Sized to match the v2 prototype's existing
+   * step set; intermediate half-pixel sizes (13.5px, 14.5px) keep
+   * their literals — they're deliberate optical tweaks. */
+  --rm-text-xs: 11px;
+  --rm-text-sm: 13px;
+  --rm-text-md: 15px;
+  --rm-text-lg: 18px;
 
   /* Shadow */
   --rm-shadow-sm: 0 1px 3px rgba(42, 38, 32, 0.04);

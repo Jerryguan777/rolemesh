@@ -47,6 +47,22 @@ describe('tokens.css', () => {
     expect(m![1]).toMatch(/system-ui|sans-serif/);
   });
 
+  it('declares the spacing / text / small-radius scale used by v2 stylesheets', () => {
+    // The scale tokens are consumed across chat-shell, settings-shell,
+    // activity-shell, appearance-page, wizard, and settings-pages.css.
+    // Deleting any of these would visibly shift the v2 surface to fall
+    // back to the unset-CSS-variable initial value (i.e. nothing).
+    expect(TOKENS).toMatch(/--rm-space-1:\s*4px/);
+    expect(TOKENS).toMatch(/--rm-space-2:\s*8px/);
+    expect(TOKENS).toMatch(/--rm-space-3:\s*12px/);
+    expect(TOKENS).toMatch(/--rm-space-4:\s*16px/);
+    expect(TOKENS).toMatch(/--rm-text-xs:\s*11px/);
+    expect(TOKENS).toMatch(/--rm-text-sm:\s*13px/);
+    expect(TOKENS).toMatch(/--rm-text-md:\s*15px/);
+    expect(TOKENS).toMatch(/--rm-text-lg:\s*18px/);
+    expect(TOKENS).toMatch(/--rm-radius-sm:\s*8px/);
+  });
+
   it('overrides surfaces and ink under prefers-color-scheme: dark', () => {
     const darkBlock = TOKENS.match(
       /@media\s*\(prefers-color-scheme:\s*dark\)\s*\{[\s\S]*?\}\s*\}/,

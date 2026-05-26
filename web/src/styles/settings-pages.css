@@ -36,7 +36,7 @@
   margin-bottom: 4px;
 }
 .rm-ch h2 {
-  font-size: 18px;
+  font-size: var(--rm-text-lg);
   font-weight: 600;
   margin: 0;
   color: var(--rm-ink);
@@ -49,8 +49,8 @@
   background: var(--rm-accent);
   color: var(--rm-accent-ink);
   padding: 7px 12px;
-  border-radius: 8px;
-  font-size: 13px;
+  border-radius: var(--rm-radius-sm);
+  font-size: var(--rm-text-sm);
   font-weight: 500;
   border: none;
   cursor: pointer;
@@ -71,12 +71,12 @@
   border: 1px solid var(--rm-border-2);
   color: var(--rm-ink-2);
   padding: 6px 11px;
-  border-radius: 8px;
+  border-radius: var(--rm-radius-sm);
   font-size: 12.5px;
   cursor: pointer;
   font-family: inherit;
   transition: var(--rm-transition);
-  margin-left: 8px;
+  margin-left: var(--rm-space-2);
 }
 .rm-ch .rm-add-secondary:hover {
   background: var(--rm-surface-2);
@@ -86,7 +86,7 @@
 /* Subtitle line below the header. */
 .rm-sub {
   color: var(--rm-ink-3);
-  font-size: 13px;
+  font-size: var(--rm-text-sm);
   margin: 0 0 18px;
 }
 
@@ -100,7 +100,7 @@
   padding: 13px 15px;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--rm-space-3);
   transition: var(--rm-transition);
   position: relative;
 }
@@ -120,7 +120,7 @@
   place-items: center;
   flex-shrink: 0;
   font-weight: 600;
-  font-size: 13px;
+  font-size: var(--rm-text-sm);
   background: var(--rm-accent-subtle);
   color: var(--rm-accent-2);
 }
@@ -224,12 +224,12 @@
   color: var(--rm-ink-3);
 }
 .rm-provhd b {
-  font-size: 13px;
+  font-size: var(--rm-text-sm);
   color: var(--rm-ink);
   font-weight: 600;
 }
 .rm-credstate {
-  font-size: 11px;
+  font-size: var(--rm-text-xs);
   padding: 2px 9px;
   border-radius: 99px;
   font-weight: 500;
@@ -269,7 +269,7 @@
   padding: 28px 18px;
   text-align: center;
   color: var(--rm-ink-3);
-  font-size: 13px;
+  font-size: var(--rm-text-sm);
 }
 .rm-empty .rm-empty-title {
   display: block;
@@ -283,13 +283,13 @@
   border: 1px solid var(--rm-bad-subtle);
   background: var(--rm-bad-subtle);
   color: var(--rm-bad);
-  font-size: 13px;
+  font-size: var(--rm-text-sm);
   padding: 10px 12px;
   border-radius: var(--rm-r);
 }
 .rm-banner-loading {
   color: var(--rm-ink-3);
-  font-size: 13px;
+  font-size: var(--rm-text-sm);
 }
 
 /* Hide the native <details> marker for any <summary> that uses

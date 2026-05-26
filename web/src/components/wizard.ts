@@ -103,8 +103,8 @@ export class RmWizard extends LitElement {
       align-items: center;
       gap: 10px;
       padding: 7px 9px;
-      border-radius: 8px;
-      font-size: 13px;
+      border-radius: var(--rm-radius-sm);
+      font-size: var(--rm-text-sm);
       color: var(--rm-ink-3);
       margin-bottom: 2px;
     }
@@ -115,7 +115,7 @@ export class RmWizard extends LitElement {
       border: 1.5px solid var(--rm-border-2);
       display: grid;
       place-items: center;
-      font-size: 11px;
+      font-size: var(--rm-text-xs);
       flex-shrink: 0;
     }
     .step.active {
@@ -147,7 +147,7 @@ export class RmWizard extends LitElement {
     .sp { flex: 1; }
     .btn {
       padding: 8px 16px;
-      border-radius: 8px;
+      border-radius: var(--rm-radius-sm);
       font-size: 13.5px;
       font-weight: 500;
       border: 1px solid var(--rm-border-2);

@@ -272,11 +272,11 @@ export class RmSettingsShell extends LitElement {
           padding: 0 8px 12px;
         }
         rm-settings-shell .ss-nav .sttl b {
-          font-size: 15px;
+          font-size: var(--rm-text-md);
           font-weight: 600;
         }
         rm-settings-shell .ss-nav .ng {
-          font-size: 11px;
+          font-size: var(--rm-text-xs);
           font-weight: 600;
           color: var(--rm-ink-3);
           text-transform: uppercase;
@@ -288,7 +288,7 @@ export class RmSettingsShell extends LitElement {
           align-items: center;
           gap: 9px;
           padding: 7px 9px;
-          border-radius: 8px;
+          border-radius: var(--rm-radius-sm);
           font-size: 13.5px;
           color: var(--rm-ink-2);
           cursor: pointer;
