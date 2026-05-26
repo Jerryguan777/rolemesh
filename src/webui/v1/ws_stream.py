@@ -589,10 +589,18 @@ async def _handle_request_run(
         sender_id = payload.user_id
         sender_name = "User"
         ts = datetime.now(UTC).isoformat()
+        # Single message_id used for BOTH the local store_message call
+        # below AND the NATS event below. The orchestrator's
+        # _handle_incoming subscriber also stores the message; with
+        # different UUIDs the store_message ON CONFLICT clause didn't
+        # fire and the user's input ended up duplicated in DB — UI
+        # rendered the same line twice. Reusing the id makes the
+        # second write a no-op upsert.
+        user_msg_id = str(uuid.uuid4())
         await store_message(
             tenant_id=payload.tenant_id,
             conversation_id=conv.id,
-            msg_id=str(uuid.uuid4()),
+            msg_id=user_msg_id,
             sender=sender_id,
             sender_name=sender_name,
             content=text,
@@ -607,7 +615,7 @@ async def _handle_request_run(
             sender_name=sender_name,
             text=text,
             timestamp=ts,
-            msg_id=str(uuid.uuid4()),
+            msg_id=user_msg_id,
         )
         try:
             await js.publish(

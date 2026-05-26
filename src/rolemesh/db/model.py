@@ -27,12 +27,16 @@ if TYPE_CHECKING:
 __all__ = [
     "CredentialRow",
     "ModelRow",
+    "count_coworkers_using_model",
+    "create_model",
     "delete_tenant_credential",
     "get_coworker_ids_for_tenant_provider",
     "get_model_by_id",
     "list_models",
     "list_tenant_credentials",
+    "soft_delete_model",
     "tenant_has_credential_for_provider",
+    "update_model",
     "upsert_tenant_credential",
 ]
 
@@ -134,6 +138,115 @@ async def list_models(
     async with admin_conn() as conn:
         rows = await conn.fetch(sql, *params)
     return [_record_to_model(r) for r in rows]
+
+
+async def create_model(
+    *,
+    provider: str,
+    model_id: str,
+    model_family: str,
+    display_name: str,
+    is_active: bool = True,
+) -> ModelRow:
+    """Insert a new ``models`` row and return the dataclass.
+
+    Admin-only write surface (PR24). Raises :class:`asyncpg.UniqueViolationError`
+    when the ``(provider, model_id)`` pair already exists; the route
+    layer translates that to a 409. The schema has no other write-time
+    constraints worth catching here — the Pydantic field validators on
+    the API layer enforce length / enum.
+    """
+    async with admin_conn() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO models "
+            "    (provider, model_id, model_family, display_name, is_active) "
+            "VALUES ($1, $2, $3, $4, $5) "
+            "RETURNING id, provider, model_id, model_family, "
+            "          display_name, is_active, created_at",
+            provider, model_id, model_family, display_name, is_active,
+        )
+    assert row is not None
+    return _record_to_model(row)
+
+
+async def update_model(
+    model_id: str,
+    *,
+    display_name: str | None = None,
+    is_active: bool | None = None,
+) -> ModelRow | None:
+    """Update mutable fields. Returns the updated row or None if absent.
+
+    Only ``display_name`` and ``is_active`` are mutable: provider /
+    model_id / model_family form the identity tuple — renaming any of
+    them would silently change which underlying provider model a
+    bound coworker resolves to (could swap a Claude config for an
+    OpenAI one mid-conversation). Identity changes belong in a fresh
+    row + migration of the bindings, not an UPDATE.
+    """
+    fields: list[str] = []
+    values: list[object] = []
+    if display_name is not None:
+        values.append(display_name)
+        fields.append(f"display_name = ${len(values)}")
+    if is_active is not None:
+        values.append(is_active)
+        fields.append(f"is_active = ${len(values)}")
+    if not fields:
+        # No-op update — return the existing row so the caller still
+        # gets a 200. Matches the SkillUpdate semantics where an
+        # empty body is legal.
+        return await get_model_by_id(model_id)
+    values.append(model_id)
+    async with admin_conn() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE models SET {', '.join(fields)} "
+            f"WHERE id = ${len(values)}::uuid "
+            "RETURNING id, provider, model_id, model_family, "
+            "          display_name, is_active, created_at",
+            *values,
+        )
+    if row is None:
+        return None
+    return _record_to_model(row)
+
+
+async def count_coworkers_using_model(model_id: str) -> int:
+    """Count coworkers (across all tenants) bound to ``model_id``.
+
+    Used by the soft-delete path to decide whether retiring the model
+    would orphan bindings. Goes through ``admin_conn`` because we
+    intentionally want the cross-tenant count: an operator deleting a
+    platform model needs to see total impact, not just their own
+    tenant's. Frontend never sees this count — it's a 409 gating
+    signal only.
+    """
+    async with admin_conn() as conn:
+        n = await conn.fetchval(
+            "SELECT COUNT(*) FROM coworkers WHERE model_id = $1::uuid",
+            model_id,
+        )
+    return int(n or 0)
+
+
+async def soft_delete_model(model_id: str) -> bool:
+    """Flip ``is_active`` to False. Returns True iff a row was updated.
+
+    Soft delete instead of DROP because:
+    * Existing coworkers bound to the model continue to render their
+      model name in lists; a true DELETE + FK cascade would silently
+      blank them out.
+    * The catalog historically grows append-only (every model the
+      platform has ever offered is in the table); operators need a
+      reversible deprecation, not a destructive remove.
+    """
+    async with admin_conn() as conn:
+        status = await conn.execute(
+            "UPDATE models SET is_active = FALSE "
+            "WHERE id = $1::uuid AND is_active = TRUE",
+            model_id,
+        )
+    return status.endswith(" 1")
 
 
 async def tenant_has_credential_for_provider(

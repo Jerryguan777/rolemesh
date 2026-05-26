@@ -21,8 +21,9 @@ import { LitElement, html } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { getApiClient, ApiError } from '../api/client.js';
-import type { Conversation, Me, Message } from '../api/client.js';
+import type { Conversation, Coworker, Me, Message } from '../api/client.js';
 import { AgentClient } from '../services/agent-client.js';
+import { getStoredToken } from '../services/oidc-auth.js';
 import { V1WsClient, type ServerEvent, type ConnectionStatus } from '../ws/v1_client.js';
 import type { InlineApprovalStatus } from './inline-approval.js';
 import './inline-approval.js';
@@ -77,6 +78,10 @@ export class ChatPanel extends LitElement {
     }
   > = new Map();
   @state() private me: Me | null = null;
+  /** Cached display name of the active coworker — used by the welcome
+   *  state ("What should the {name} work on?"). Lazy-fetched on mount;
+   *  null while loading or when no coworker is selected. */
+  @state() private activeCoworkerName: string | null = null;
   @state() conversations: Conversation[] = [];
   @state() activeConversationId: string | null = null;
   @state() activeCoworkerId: string | null = null;
@@ -166,9 +171,23 @@ export class ChatPanel extends LitElement {
       // entry (`?agent_id=...`) working unchanged.
       return;
     }
+    // Best-effort lookup for the welcome state's "What should the
+    // {coworker} work on?" copy. Cheap small call; failure leaves
+    // the welcome on a generic "your coworker" fallback.
+    void this.loadActiveCoworkerName(this.activeCoworkerId);
     await this.refreshConversations(this.activeCoworkerId);
     if (this.activeConversationId) {
       await this.openConversation(this.activeConversationId);
+    }
+  }
+
+  private async loadActiveCoworkerName(coworkerId: string): Promise<void> {
+    try {
+      const all: Coworker[] = await this.api.listCoworkers();
+      const match = all.find((c) => c.id === coworkerId);
+      this.activeCoworkerName = match?.name ?? null;
+    } catch {
+      this.activeCoworkerName = null;
     }
   }
 
@@ -211,7 +230,7 @@ export class ChatPanel extends LitElement {
     // v1 client owns streaming / cancel
     this.v1 = new V1WsClient({
       conversationId,
-      getToken: () => sessionStorage.getItem('rm_id_token'),
+      getToken: getStoredToken,
     });
     this.v1Unsubscribers.push(
       this.v1.onEvent('*', (e) => this.handleV1Event(e)),
@@ -219,9 +238,8 @@ export class ChatPanel extends LitElement {
     );
     void this.v1.connect();
 
-    // Legacy client only for Stop. Token re-read from sessionStorage.
-    const token = sessionStorage.getItem('rm_id_token') ?? '';
-    this.stopClient = new AgentClient(this.activeCoworkerId, token);
+    // Legacy client only for Stop. Token comes from oidc-auth storage.
+    this.stopClient = new AgentClient(this.activeCoworkerId, getStoredToken() ?? '');
     this.stopClient.connect(conversationId);
 
     await this.loadMessages(conversationId);
@@ -408,23 +426,13 @@ export class ChatPanel extends LitElement {
         this.approvals = next;
         break;
       }
-      case 'event.run.requires_reauth': {
-        // Re-broadcast for `<rm-reauth-banner>` to pick up. The banner
-        // lives on `<rm-app-shell>` so we go through window event bus
-        // rather than tunnelling through chat-panel children.
-        const detail = {
-          reason: typeof (e as { reason?: unknown }).reason === 'string'
-            ? (e as { reason: string }).reason
-            : undefined,
-          runId: this.activeRunId ?? undefined,
-        };
-        window.dispatchEvent(
-          new CustomEvent('rm-reauth-required', { detail }),
-        );
-        break;
-      }
       default:
-        // Future event types — ignore for forward-compat.
+        // PR23 removed the `event.run.requires_reauth` case — the
+        // backend never emitted it (the user-mode MCP path that would
+        // produce it remains gated on the OIDC branch). The reauth
+        // banner is still listenable via window.__forceReauth for
+        // dev/QA and will be re-wired when the engine starts emitting
+        // the event. Forward-compat: unknown event types are ignored.
         break;
     }
   }
@@ -730,8 +738,10 @@ export class ChatPanel extends LitElement {
               <rm-message-editor
                 .agentState=${stopDisabled && this.runState !== 'stopping' ? 'idle' : this.runState === 'stopping' ? 'stopping' : 'running'}
                 .connected=${this.connected}
+                .canCancel=${!cancelDisabled}
                 @send=${(e: CustomEvent) => void this.handleSend(e)}
                 @stop=${() => this.handleStop()}
+                @request-cancel=${() => void this.handleCancel()}
               ></rm-message-editor>
               <div class="text-center mt-2.5 text-[11px] text-ink-3 dark:text-d-ink-3 select-none">
                 AI responses may be inaccurate. Verify important information.
@@ -773,21 +783,133 @@ export class ChatPanel extends LitElement {
     `;
   }
 
+  /** Time-of-day greeting. Hours are user-local. */
+  private greetingPrefix(): string {
+    const h = new Date().getHours();
+    if (h < 12) return 'Good morning';
+    if (h < 18) return 'Good afternoon';
+    return 'Good evening';
+  }
+
+  /** First word of `me.name` (falls back to email's local-part, or
+   *  "there" so the greeting still reads like a sentence). */
+  private firstName(): string {
+    if (this.me?.name) {
+      const w = this.me.name.trim().split(/\s+/)[0];
+      if (w) return w;
+    }
+    if (this.me?.email) return this.me.email.split('@')[0];
+    return 'there';
+  }
+
+  /** Send a prefilled message — used by the welcome chips. Synthesizes
+   *  the same `send` CustomEvent the message-editor would dispatch. */
+  private sendChip(text: string): void {
+    void this.handleSend(
+      new CustomEvent<{ content: string }>('send', {
+        detail: { content: text },
+      }),
+    );
+  }
+
   private renderEmpty() {
+    // No coworker selected — keep the old onboarding hint rather than
+    // a half-personalized greeting that lies about state.
+    if (!this.activeCoworkerId) {
+      return html`
+        <div class="rm-chat-empty rm-chat-empty--noop">
+          <p>Pick a coworker from Settings → Coworkers to start chatting.</p>
+        </div>
+      `;
+    }
+    const coworker = this.activeCoworkerName ?? 'your coworker';
+    // Four sample tasks lifted from prototype lines 441-444. They're
+    // intentionally generic ad-ops/finance/marketing prompts; a v3
+    // chore could swap in coworker-specific suggestions by reading
+    // the coworker's system_prompt.
+    const chips = [
+      "Analyze last week's ad ROAS",
+      'Draft a restock plan',
+      'Reconcile Q1 ledger',
+      'Write 3 listing variants',
+    ];
     return html`
-      <div class="px-4 pt-[20vh] pb-10 anim-fade">
-        <div class="text-center">
-          <div class="inline-flex items-center justify-center w-14 h-14 rounded-[16px] bg-gradient-to-br from-brand-light to-brand mb-5 shadow-[0_8px_24px_-6px_rgba(99,102,241,0.35)]">
-            <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
-              <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
-            </svg>
-          </div>
-          <h1 class="text-[22px] font-bold text-ink-0 dark:text-d-ink-0 tracking-[-0.03em] mb-1.5">RoleMesh</h1>
-          <p class="text-[13.5px] text-ink-2 dark:text-d-ink-2 max-w-sm mx-auto leading-relaxed">
-            ${this.activeCoworkerId
-              ? 'Start a conversation with your AI coworker.'
-              : 'Pick a coworker from the Coworkers tab to start chatting.'}
-          </p>
+      <style>
+        .rm-chat-empty {
+          flex: 1;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          text-align: center;
+          padding: 24px;
+          animation: rm-fade 0.18s ease both;
+        }
+        .rm-chat-empty h1 {
+          font-family: var(--rm-font-display);
+          font-weight: 400;
+          font-size: 32px;
+          letter-spacing: -0.01em;
+          margin: 0 0 8px;
+          color: var(--rm-ink);
+        }
+        .rm-chat-empty h1 em {
+          font-style: italic;
+          color: var(--rm-accent);
+        }
+        .rm-chat-empty .rm-chat-empty-sub {
+          color: var(--rm-ink-3);
+          margin: 0 0 22px;
+          font-size: 14.5px;
+        }
+        .rm-chat-empty .rm-chat-empty-sub b {
+          color: var(--rm-ink-2);
+          font-weight: 500;
+        }
+        .rm-chat-chips {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+          justify-content: center;
+          max-width: 440px;
+        }
+        .rm-chat-chip {
+          border: 1px solid var(--rm-border);
+          background: var(--rm-surface);
+          padding: 7px 13px;
+          border-radius: 99px;
+          font-size: 13px;
+          color: var(--rm-ink-2);
+          font-family: inherit;
+          cursor: pointer;
+          transition: var(--rm-transition);
+        }
+        .rm-chat-chip:hover {
+          border-color: var(--rm-accent);
+          color: var(--rm-ink);
+          transform: translateY(-1px);
+        }
+        .rm-chat-empty--noop p {
+          color: var(--rm-ink-3);
+          font-size: 14px;
+          margin: 0;
+        }
+      </style>
+      <div class="rm-chat-empty">
+        <h1>${this.greetingPrefix()}, <em>${this.firstName()}</em>.</h1>
+        <p class="rm-chat-empty-sub">
+          What should <b>${coworker}</b> work on?
+        </p>
+        <div class="rm-chat-chips">
+          ${chips.map(
+            (t) => html`<button
+              type="button"
+              class="rm-chat-chip"
+              data-testid="welcome-chip"
+              @click=${() => this.sendChip(t)}
+              ?disabled=${!this.connected}
+            >${t}</button>`,
+          )}
         </div>
       </div>
     `;

@@ -398,6 +398,39 @@ async def subscribe_coworker_skills_changed(
             return
 
         if ok:
+            # PR29: also re-project the skill files into every active
+            # spawn dir for this coworker. Without this step, the
+            # in-memory state above stays correct but the bind-mounted
+            # files on disk keep their stale content — and the agent
+            # reads from disk, not from orchestrator memory. Best-
+            # effort: a failure here doesn't block the ack, since the
+            # in-memory state IS up-to-date and a future spawn will
+            # pick up the fresh files at its initial materialize call.
+            cached = state.coworkers.get(coworker_id)
+            if cached is not None:
+                with contextlib.suppress(Exception):
+                    # Lazy import — keeps the orchestration module's
+                    # core import surface free of the container layer
+                    # (skill_projection pulls in disk I/O + symlink
+                    # validation that's not relevant to other reload
+                    # subscribers).
+                    from rolemesh.container.skill_projection import (
+                        refresh_skills_for_coworker,
+                    )
+
+                    try:
+                        await refresh_skills_for_coworker(
+                            cached.config,
+                            backend=cached.config.agent_backend,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "skill files re-projection failed; "
+                            "in-memory state was refreshed but spawn "
+                            "dirs may be stale until next spawn",
+                            coworker_id=coworker_id,
+                            tenant_id=tenant_id,
+                        )
             logger.info(
                 "Coworker skills projection hot-reloaded",
                 coworker_id=coworker_id,

@@ -20,6 +20,7 @@ import {
 } from '../api/skill_constants.js';
 import { ApiError, getApiClient } from '../api/client.js';
 import type { Skill } from '../api/client.js';
+import './confirm-dialog.js';
 
 @customElement('rm-skill-detail-page')
 export class SkillDetailPage extends LitElement {
@@ -38,6 +39,19 @@ export class SkillDetailPage extends LitElement {
   @state() private newFileError: string | null = null;
   @state() private saveError: string | null = null;
   @state() private deleteError: string | null = null;
+  /** When true, the skill-level "Delete skill" confirmation is up. */
+  @state() private deleteSkillOpen = false;
+  /** Number of coworkers currently bound to this skill, or null
+   *  while the count is still being tallied (load() walks every
+   *  coworker's skill bindings to compute it). When > 0 the delete
+   *  confirm displays the "unbind first" copy and disables Confirm
+   *  — backend would 409 anyway, but pre-blocking saves the round
+   *  trip and matches the list-page behavior. */
+  @state() private boundCoworkerCount: number | null = null;
+  /** Per-file delete confirm. Holds the path of the file the user
+   *  asked to delete; null = no file-delete dialog open. */
+  @state() private deleteFilePath: string | null = null;
+  @state() private deleteFileBusy = false;
 
   private readonly api = getApiClient();
 
@@ -74,6 +88,7 @@ export class SkillDetailPage extends LitElement {
     this.detailError = null;
     this.fileEdits = {};
     this.activeFile = null;
+    this.boundCoworkerCount = null;
     try {
       this.detail = await this.api.getSkill(this.skillId);
       this.metaEnabled = this.detail.enabled;
@@ -90,6 +105,35 @@ export class SkillDetailPage extends LitElement {
     } finally {
       this.loading = false;
     }
+    // Tally bindings in the background — the page paints right away,
+    // count streams in. The Skill detail payload doesn't include
+    // bound_coworker_count (only SkillSummary does on the list view),
+    // so we walk every coworker's skill bindings here. Failures are
+    // swallowed: the delete dialog falls back to letting the backend
+    // 409 surface the same message.
+    void this.recountBindings();
+  }
+
+  private async recountBindings(): Promise<void> {
+    const skillId = this.skillId;
+    if (!skillId) return;
+    let coworkers: { id: string }[] = [];
+    try {
+      coworkers = await this.api.listCoworkers();
+    } catch {
+      return;
+    }
+    const results = await Promise.allSettled(
+      coworkers.map((c) => this.api.listCoworkerSkills(c.id)),
+    );
+    let count = 0;
+    for (const r of results) {
+      if (r.status !== 'fulfilled') continue;
+      if (r.value.some((b) => b.skill_id === skillId)) count += 1;
+    }
+    // Guard against late completion after the user navigated away.
+    if (this.skillId !== skillId) return;
+    this.boundCoworkerCount = count;
   }
 
   private contentForFile(path: string): string {
@@ -130,22 +174,27 @@ export class SkillDetailPage extends LitElement {
     }
   }
 
-  private async deleteSkill(): Promise<void> {
+  private askDeleteSkill = (): void => {
     if (!this.detail) return;
-    if (
-      !window.confirm(
-        `Delete skill "${this.detail.name}"? This cannot be undone.`,
-      )
-    ) {
-      return;
-    }
+    this.deleteSkillOpen = true;
+  };
+
+  private cancelDeleteSkill = (): void => {
+    if (this.busy) return;
+    this.deleteSkillOpen = false;
+  };
+
+  private async performDeleteSkill(): Promise<void> {
+    if (!this.detail || this.busy) return;
     this.busy = true;
     this.deleteError = null;
     try {
       await this.api.deleteSkill(this.detail.id);
-      location.hash = '#/skills';
+      this.deleteSkillOpen = false;
+      location.hash = '#/manage/skills';
     } catch (err) {
       this.deleteError = this.errMessage(err);
+      this.deleteSkillOpen = false;
     } finally {
       this.busy = false;
     }
@@ -178,10 +227,32 @@ export class SkillDetailPage extends LitElement {
     this.newFilePath = '';
   }
 
+  private askDeleteFile(path: string): void {
+    if (!this.detail) return;
+    if (path === SKILL_MANIFEST_NAME) return;
+    this.deleteFilePath = path;
+  }
+
+  private cancelDeleteFile = (): void => {
+    if (this.deleteFileBusy) return;
+    this.deleteFilePath = null;
+  };
+
+  private async performDeleteFile(): Promise<void> {
+    const path = this.deleteFilePath;
+    if (!path) return;
+    this.deleteFileBusy = true;
+    try {
+      await this.deleteFile(path);
+    } finally {
+      this.deleteFileBusy = false;
+      this.deleteFilePath = null;
+    }
+  }
+
   private async deleteFile(path: string): Promise<void> {
     if (!this.detail) return;
     if (path === SKILL_MANIFEST_NAME) return;
-    if (!window.confirm(`Delete file "${path}"?`)) return;
     const serverFiles = this.detail.files ?? {};
     if (!(path in serverFiles)) {
       const next = { ...this.fileEdits };
@@ -228,7 +299,59 @@ export class SkillDetailPage extends LitElement {
           ${this.renderFileTree(allPaths)}
           ${this.renderEditor()}
         </div>
+        ${this.renderConfirmDialogs(s)}
       </div>
+    `;
+  }
+
+  private renderConfirmDialogs(s: Skill) {
+    // `null` = recount still in flight; show a "Checking bindings…"
+    // hint and disable Confirm until we know. `0` = safe to delete.
+    // `> 0` = blocked, must unbind first.
+    const count = this.boundCoworkerCount;
+    const checking = count === null;
+    const blocked = (count ?? 0) > 0;
+    return html`
+      <rm-confirm-dialog
+        title=${`Delete skill "${s.name}"?`}
+        ?open=${this.deleteSkillOpen}
+        tone="danger"
+        confirm-label="Delete"
+        busy-label="Deleting…"
+        ?busy=${this.busy}
+        ?disable-confirm=${checking || blocked}
+        data-testid="confirm-delete-skill-dialog"
+        @cancel=${this.cancelDeleteSkill}
+        @confirm=${() => void this.performDeleteSkill()}
+      >
+        ${checking
+          ? html`<p style="margin: 0; color: var(--rm-ink-3);">
+              Checking bindings…
+            </p>`
+          : blocked
+            ? html`<p style="margin: 0;">
+                This skill is bound to ${count}
+                coworker${count === 1 ? '' : 's'}. Unbind it from
+                ${count === 1 ? 'that coworker' : 'each one'} before
+                deleting.
+              </p>`
+            : html`<p style="margin: 0;">This cannot be undone.</p>`}
+      </rm-confirm-dialog>
+      <rm-confirm-dialog
+        title=${this.deleteFilePath
+          ? `Delete file "${this.deleteFilePath}"?`
+          : 'Delete file?'}
+        ?open=${this.deleteFilePath !== null}
+        tone="danger"
+        confirm-label="Delete"
+        busy-label="Deleting…"
+        ?busy=${this.deleteFileBusy}
+        data-testid="confirm-delete-file-dialog"
+        @cancel=${this.cancelDeleteFile}
+        @confirm=${() => void this.performDeleteFile()}
+      >
+        <p style="margin: 0;">This cannot be undone.</p>
+      </rm-confirm-dialog>
     `;
   }
 
@@ -254,16 +377,15 @@ export class SkillDetailPage extends LitElement {
         </label>
         <button
           type="button"
-          class="text-[12px] px-3 py-1.5 rounded-md bg-brand text-white hover:bg-brand-dark
-            disabled:opacity-60 disabled:cursor-not-allowed"
+          class="rm-btn rm-btn--primary"
           ?disabled=${this.busy || !this.hasUnsavedEdits()}
           @click=${() => void this.saveAll()}
         >Save</button>
         <button
           type="button"
-          class="text-[12px] px-2.5 py-1.5 rounded-md border border-red-300 dark:border-red-700
-            text-red-700 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/20"
-          @click=${() => void this.deleteSkill()}
+          class="rm-btn rm-btn--danger"
+          ?disabled=${this.busy}
+          @click=${this.askDeleteSkill}
         >Delete</button>
       </div>
       ${this.saveError
@@ -301,7 +423,7 @@ export class SkillDetailPage extends LitElement {
                       : 'text-ink-3 hover:text-red-600 dark:text-d-ink-3 dark:hover:text-red-300 cursor-pointer'}`}
                   title=${isManifest ? `${SKILL_MANIFEST_NAME} is protected (server returns 409)` : 'Delete file'}
                   ?disabled=${isManifest}
-                  @click=${() => void this.deleteFile(p)}
+                  @click=${() => this.askDeleteFile(p)}
                 >×</button>
               </li>
             `;

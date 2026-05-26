@@ -520,3 +520,226 @@ async def test_put_file_publishes_skills_changed_per_bound_coworker(
     args = mock_pub.await_args_list[0].kwargs
     assert args["coworker_id"] == cw_id
     assert args["tenant_id"] == user.tenant_id
+
+
+# ---------------------------------------------------------------------------
+# PR21: PATCH /api/v1/skills/{id} with `files` — full-set replacement
+# ---------------------------------------------------------------------------
+#
+# Pre-PR21 the SkillUpdate schema dropped `files` entirely, so the
+# edit dialog's PATCH silently lost any body or extra-file changes. The
+# tests below pin the new behavior end-to-end (wire boundary, not the
+# DB helper) and would all fail against the pre-PR21 handler.
+
+
+async def test_patch_with_files_replaces_skill_md_body() -> None:
+    """Edit dialog's main case: user changed SKILL.md body, PATCH
+    replaces the on-disk content.
+
+    Pre-PR21 this was the silent-drop bug — PATCH returned 200 but the
+    GET still showed the old body.
+    """
+    user, _cw = await _make_user_and_coworker("pfb")
+    async with _client(_build_app(user)) as ac:
+        created = await ac.post(
+            "/api/v1/skills",
+            json={
+                "name": "edit-body",
+                "files": {"SKILL.md": _skill_md("edit-body")},
+            },
+            headers=_HDRS,
+        )
+        sid = created.json()["id"]
+        new_md = (
+            "---\n"
+            "name: edit-body\n"
+            f"description: {_GOOD_DESC}\n"
+            "---\n"
+            "# Updated body\nNew instructions live here.\n"
+        )
+        patch = await ac.patch(
+            f"/api/v1/skills/{sid}",
+            json={"files": {"SKILL.md": new_md}},
+            headers=_HDRS,
+        )
+        assert patch.status_code == 200, patch.text
+        got = await ac.get(f"/api/v1/skills/{sid}", headers=_HDRS)
+    assert got.status_code == 200
+    body = got.json()
+    md = body["files"]["SKILL.md"]["content"]
+    assert "# Updated body" in md
+    assert "Updated body" in md
+    # Frontmatter is stripped from on-disk SKILL.md — the create
+    # contract carries through to PATCH.
+    assert "name: edit-body" not in md
+
+
+async def test_patch_with_files_replaces_extras_atomically() -> None:
+    """Add `references/intro.md`, then PATCH with a different file map
+    that drops it and adds `scripts/helper.py`. The result must be
+    EXACTLY the new map — atomic replacement, not merge.
+
+    Without atomic-replace, a user removing a stale reference would
+    have to call DELETE explicitly; the dialog can just send the new
+    full snapshot.
+    """
+    user, _cw = await _make_user_and_coworker("pfe")
+    async with _client(_build_app(user)) as ac:
+        created = await ac.post(
+            "/api/v1/skills",
+            json={
+                "name": "extras",
+                "files": {
+                    "SKILL.md": _skill_md("extras"),
+                    "references/intro.md": "intro v1",
+                },
+            },
+            headers=_HDRS,
+        )
+        sid = created.json()["id"]
+        patch = await ac.patch(
+            f"/api/v1/skills/{sid}",
+            json={
+                "files": {
+                    "SKILL.md": _skill_md("extras"),
+                    "scripts/helper.py": "print('hi')\n",
+                },
+            },
+            headers=_HDRS,
+        )
+        assert patch.status_code == 200, patch.text
+        got = await ac.get(f"/api/v1/skills/{sid}", headers=_HDRS)
+    files = got.json()["files"]
+    # The new map wins entirely — references/intro.md is gone.
+    assert set(files.keys()) == {"SKILL.md", "scripts/helper.py"}
+    assert files["scripts/helper.py"]["content"] == "print('hi')\n"
+
+
+async def test_patch_files_rejects_invalid_path_with_422() -> None:
+    """Path traversal via PATCH must hit the same INVALID_PATH 422
+    that POST does — defense in depth: the API surface for paths is
+    uniform regardless of HTTP verb.
+    """
+    user, _cw = await _make_user_and_coworker("pfi")
+    async with _client(_build_app(user)) as ac:
+        created = await ac.post(
+            "/api/v1/skills",
+            json={
+                "name": "bp",
+                "files": {"SKILL.md": _skill_md("bp")},
+            },
+            headers=_HDRS,
+        )
+        sid = created.json()["id"]
+        patch = await ac.patch(
+            f"/api/v1/skills/{sid}",
+            json={
+                "files": {
+                    "SKILL.md": _skill_md("bp"),
+                    "../etc/passwd": "x",
+                },
+            },
+            headers=_HDRS,
+        )
+    assert patch.status_code == 422
+    assert patch.json()["code"] == "INVALID_PATH"
+
+
+async def test_patch_files_without_skill_md_returns_422() -> None:
+    """Same invariant as create: SKILL.md must always be present.
+    Without it the skill has no manifest and the projector breaks.
+    """
+    user, _cw = await _make_user_and_coworker("pfm")
+    async with _client(_build_app(user)) as ac:
+        created = await ac.post(
+            "/api/v1/skills",
+            json={"name": "nm", "files": {"SKILL.md": _skill_md("nm")}},
+            headers=_HDRS,
+        )
+        sid = created.json()["id"]
+        patch = await ac.patch(
+            f"/api/v1/skills/{sid}",
+            json={"files": {"only-extra.md": "x"}},
+            headers=_HDRS,
+        )
+    assert patch.status_code == 422
+    assert patch.json()["code"] == "SKILL_MANIFEST_REQUIRED"
+
+
+async def test_patch_name_matching_existing_is_accepted() -> None:
+    """The edit dialog sends a full snapshot including the unchanged
+    name; accepting a no-op name eliminates a special case in the
+    frontend's body construction.
+    """
+    user, _cw = await _make_user_and_coworker("pnm")
+    async with _client(_build_app(user)) as ac:
+        created = await ac.post(
+            "/api/v1/skills",
+            json={"name": "stable", "files": {"SKILL.md": _skill_md("stable")}},
+            headers=_HDRS,
+        )
+        sid = created.json()["id"]
+        patch = await ac.patch(
+            f"/api/v1/skills/{sid}",
+            json={"name": "stable", "enabled": False},
+            headers=_HDRS,
+        )
+    assert patch.status_code == 200, patch.text
+
+
+async def test_patch_name_change_rejected_with_400() -> None:
+    """Rename is multi-step (filesystem dir on the agent side,
+    UNIQUE (tenant_id, name) constraint, plus potential coworker
+    binding churn). Reject at the wire to keep the contract simple.
+    """
+    user, _cw = await _make_user_and_coworker("prn")
+    async with _client(_build_app(user)) as ac:
+        created = await ac.post(
+            "/api/v1/skills",
+            json={"name": "original", "files": {"SKILL.md": _skill_md("original")}},
+            headers=_HDRS,
+        )
+        sid = created.json()["id"]
+        patch = await ac.patch(
+            f"/api/v1/skills/{sid}",
+            json={"name": "renamed"},
+            headers=_HDRS,
+        )
+    assert patch.status_code == 400
+    assert patch.json()["code"] == "INVALID_PAYLOAD"
+    assert "immutable" in patch.json()["message"]
+
+
+async def test_patch_files_refreshes_frontmatter_description() -> None:
+    """If the user edits SKILL.md to change `description:`, the list
+    summary (which reads from `frontmatter_common.description`) must
+    reflect the new value. Without re-parsing on PATCH, the list
+    keeps showing the old description while GET on the skill shows
+    the new SKILL.md body — a silent staleness bug.
+    """
+    user, _cw = await _make_user_and_coworker("pfd")
+    new_desc = (
+        "After PR21 the dialog can edit the description by replacing "
+        "the whole SKILL.md and the list reflects it."
+    )
+    async with _client(_build_app(user)) as ac:
+        created = await ac.post(
+            "/api/v1/skills",
+            json={"name": "rdesc", "files": {"SKILL.md": _skill_md("rdesc")}},
+            headers=_HDRS,
+        )
+        sid = created.json()["id"]
+        new_md = (
+            "---\n"
+            "name: rdesc\n"
+            f"description: {new_desc}\n"
+            "---\n# body\n"
+        )
+        await ac.patch(
+            f"/api/v1/skills/{sid}",
+            json={"files": {"SKILL.md": new_md}},
+            headers=_HDRS,
+        )
+        listing = await ac.get("/api/v1/skills", headers=_HDRS)
+    summaries = {s["name"]: s for s in listing.json()}
+    assert summaries["rdesc"]["description"] == new_desc

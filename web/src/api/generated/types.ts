@@ -372,9 +372,11 @@ export interface paths {
          * Create a per-tenant catalog skill
          * @description The `files` map must include `SKILL.md` (frontmatter + body of
          *     the skill manifest). Path traversal in any key is rejected
-         *     with 422. Skill names must match `[a-zA-Z][a-zA-Z0-9_-]{0,63}`.
-         *     Returns 409 `RESOURCE_IN_USE` when a skill with this name
-         *     already exists in the tenant.
+         *     with 422. Skill names must match `^[a-z0-9][a-z0-9-]{0,63}$`
+         *     (lowercase, no leading hyphen) and must not be the reserved
+         *     values `anthropic` or `claude`. Returns
+         *     409 `RESOURCE_IN_USE` when a skill with this name already
+         *     exists in the tenant.
          */
         post: operations["createSkill"];
         delete?: never;
@@ -897,6 +899,154 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/schedules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List scheduled tasks for the tenant
+         * @description Read-only listing of the `scheduled_tasks` table for the
+         *     caller's tenant. The orchestrator owns task creation and
+         *     mutation (cron-style triggers fired from inside the agent
+         *     process); this endpoint exists so the UI can show "what's
+         *     scheduled" without round-tripping through the orchestrator
+         *     IPC. A coworker filter is exposed for the per-coworker view.
+         */
+        get: operations["schedulesList"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/schedules/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Fetch one scheduled task */
+        get: operations["schedulesGet"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/coworkers/{id}/bindings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List channel bindings for a coworker
+         * @description A binding represents the credentials + bot identity used to
+         *     connect a coworker to one channel type (Slack workspace,
+         *     Telegram bot, etc.). The corresponding gateway picks the
+         *     binding up on next reload — see `src/rolemesh/channels/`.
+         */
+        get: operations["bindingsList"];
+        put?: never;
+        /**
+         * Bind a coworker to a channel
+         * @description Creates the binding row and reloads the matching gateway so
+         *     the new connection comes up without a process restart.
+         *     `(coworker_id, channel_type)` is unique — re-creating a
+         *     binding for the same channel type returns 409.
+         */
+        post: operations["bindingsCreate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/coworkers/{id}/bindings/{binding_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Fetch one channel binding */
+        get: operations["bindingsGet"];
+        put?: never;
+        post?: never;
+        /**
+         * Remove a channel binding
+         * @description Cascades through the channel gateway: the matching bot
+         *     connection is torn down on next reload. Conversations
+         *     anchored to this binding stay in the DB (they're history,
+         *     not state) but stop receiving new messages.
+         */
+        delete: operations["bindingsDelete"];
+        options?: never;
+        head?: never;
+        /**
+         * Update a channel binding's credentials or display name
+         * @description Partial update. Fields not present in the body are left
+         *     untouched. `credentials` replaces the whole map when
+         *     provided (it's an opaque per-channel-type bag and merging
+         *     keys client-side hides the wrong-key case from the user).
+         */
+        patch: operations["bindingsUpdate"];
+        trace?: never;
+    };
+    "/api/v1/admin/models": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Register a new platform model (admin only)
+         * @description The `models` catalog is platform-managed — tenants pick from
+         *     it but only operators add rows. POST/PATCH/DELETE require
+         *     the `owner` role (design §13 role check).
+         */
+        post: operations["adminModelsCreate"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/admin/models/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Retire a platform model (admin only)
+         * @description Soft delete — sets `active = false` rather than dropping the
+         *     row so existing coworkers that point at the model keep
+         *     rendering. Returns 409 if any coworker is still bound.
+         */
+        delete: operations["adminModelsDelete"];
+        options?: never;
+        head?: never;
+        /** Update a platform model (admin only) */
+        patch: operations["adminModelsUpdate"];
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1268,6 +1418,14 @@ export interface components {
             updated_at: string;
         };
         SkillCreate: {
+            /**
+             * @description Lowercase letters, digits, hyphens. First character must
+             *     be alphanumeric (no leading hyphen — shells and CLI tools
+             *     misread leading-hyphen names as flags). Reserved names
+             *     `anthropic` and `claude` are rejected by an additional
+             *     server-side validator (Pydantic field_validator) since the
+             *     pattern alone cannot express the exclusion.
+             */
             name: string;
             /** @default true */
             enabled: boolean;
@@ -1289,11 +1447,29 @@ export interface components {
             } | null;
         };
         /**
-         * @description Metadata-only update. Use the per-file endpoints to change
-         *     file content; this path leaves `skill_files` untouched.
+         * @description Two modes. Set `enabled` / `frontmatter_common` /
+         *     `frontmatter_backend` for a metadata-only edit, OR set `files`
+         *     to swap the entire `skill_files` map atomically (matches the
+         *     create path's semantics, useful for the edit dialog that
+         *     already has the full file set in memory). `name` is read-only
+         *     on PATCH — sending a value that matches the existing skill is
+         *     accepted; a differing value 400s.
          */
         SkillUpdate: {
+            /**
+             * @description Optional; must match the existing skill's name when
+             *     present. Rejected with 400 if it differs.
+             */
+            name?: string;
             enabled?: boolean;
+            /**
+             * @description Full file-set replacement when present. `SKILL.md` is
+             *     required; its frontmatter re-populates
+             *     `frontmatter_common` / `frontmatter_backend`.
+             */
+            files?: {
+                [key: string]: string | components["schemas"]["SkillFileUpsert"];
+            } | null;
             frontmatter_common?: {
                 [key: string]: unknown;
             } | null;
@@ -1572,6 +1748,254 @@ export interface components {
             /** Format: date-time */
             created_at: string;
         };
+        /**
+         * @description How `schedule_value` is interpreted. `cron` uses crontab
+         *     syntax; `interval` is a duration string ("5m", "1h");
+         *     `once` is a single ISO-8601 timestamp.
+         * @enum {string}
+         */
+        ScheduleType: "cron" | "interval" | "once";
+        /**
+         * @description `completed` is the terminal state for `once` schedules after
+         *     they've fired. `paused` is a manual halt — the row stays but
+         *     the orchestrator skips it.
+         * @enum {string}
+         */
+        ScheduleStatus: "active" | "paused" | "completed";
+        /**
+         * @description `isolated` — each fire spawns a fresh agent without prior
+         *     context. `group` — reuses the bound conversation so memory
+         *     carries across firings.
+         * @enum {string}
+         */
+        ScheduleContextMode: "group" | "isolated";
+        ScheduledTask: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            tenant_id: string;
+            /** Format: uuid */
+            coworker_id: string;
+            /**
+             * Format: uuid
+             * @description Required when `context_mode == group`; null when
+             *     `isolated`. Null `group` rows are a data-model bug — the
+             *     orchestrator drops them with a warning.
+             */
+            conversation_id?: string | null;
+            prompt: string;
+            schedule_type: components["schemas"]["ScheduleType"];
+            schedule_value: string;
+            context_mode: components["schemas"]["ScheduleContextMode"];
+            /** Format: date-time */
+            next_run?: string | null;
+            /** Format: date-time */
+            last_run?: string | null;
+            last_result?: string | null;
+            status: components["schemas"]["ScheduleStatus"];
+            /** Format: date-time */
+            created_at?: string;
+        };
+        ChannelBinding: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            coworker_id: string;
+            /** Format: uuid */
+            tenant_id: string;
+            channel_type: components["schemas"]["ChannelType"];
+            bot_display_name?: string | null;
+            /**
+             * @description Free-form status string set by the gateway (e.g.
+             *     `active`, `error: bot_token rejected`). The UI renders it
+             *     verbatim; no enum because gateways may surface
+             *     channel-specific error states.
+             */
+            status: string;
+            /** Format: date-time */
+            created_at?: string | null;
+        };
+        ChannelBindingCreate: {
+            channel_type: components["schemas"]["ChannelType"];
+            /**
+             * @description Channel-specific credential map. Shape is per gateway:
+             *     Slack expects `bot_token` + `app_token`; Telegram expects
+             *     `bot_token`; `web` accepts an empty map. The values are
+             *     stored encrypted at rest (envelope encryption — same
+             *     machinery as /credentials).
+             */
+            credentials: {
+                [key: string]: string;
+            };
+            bot_display_name?: string | null;
+        };
+        ChannelBindingUpdate: {
+            /**
+             * @description When provided, replaces the entire credentials map (not
+             *     a merge). Omit to leave credentials untouched.
+             */
+            credentials?: {
+                [key: string]: string;
+            } | null;
+            bot_display_name?: string | null;
+        };
+        ModelCreate: {
+            provider: components["schemas"]["ModelProvider"];
+            model_id: string;
+            model_family: components["schemas"]["ModelFamily"];
+            display_name: string;
+            /** @default true */
+            is_active: boolean;
+        };
+        /**
+         * @description All fields optional. `is_active: false` here is preferred
+         *     over DELETE for already-bound models (DELETE returns 409 on
+         *     in-use rows; this lets an operator hide a deprecated model
+         *     from new bindings without dropping the row).
+         */
+        ModelUpdate: {
+            display_name?: string;
+            is_active?: boolean;
+        };
+        WsServerEventRunStarted: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "event.run.started";
+            /** Format: uuid */
+            run_id: string;
+            /**
+             * @description True when the request.run carried an idempotency_key that
+             *     matched a still-active in-flight run; the server-side run
+             *     wasn't created twice and the client should observe the
+             *     existing run's tokens.
+             */
+            idempotent: boolean;
+        };
+        WsServerEventRunToken: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "event.run.token";
+            /** Format: uuid */
+            run_id: string;
+            /**
+             * @description Newly produced assistant text since the previous token
+             *     event. Always a (possibly empty) string — never a chunk
+             *     schema or structured content.
+             */
+            delta: string;
+        };
+        WsServerEventRunCompleted: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "event.run.completed";
+            /** Format: uuid */
+            run_id: string;
+        };
+        WsServerEventRunError: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "event.run.error";
+            /**
+             * Format: uuid
+             * @description Optional. Omitted for protocol-level errors that fire
+             *     before a run is created (e.g. PROTOCOL_BAD_JSON,
+             *     PROTOCOL_UNKNOWN_TYPE).
+             */
+            run_id?: string;
+            /**
+             * @description Stable error code. Known values include SAFETY_BLOCKED,
+             *     PROTOCOL_BAD_JSON, PROTOCOL_UNKNOWN_TYPE,
+             *     PROTOCOL_MISSING_RUN_ID, PROTOCOL_BAD_APPROVAL,
+             *     PROTOCOL_BAD_DECISION, APPROVAL_ENGINE_UNAVAILABLE,
+             *     FORBIDDEN, ALREADY_DECIDED, NOT_FOUND,
+             *     APPROVAL_DECIDE_FAILED.
+             */
+            code: string;
+            message: string;
+            details?: {
+                [key: string]: unknown;
+            } | null;
+        };
+        WsServerEventApprovalRequired: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "event.approval.required";
+            /** Format: uuid */
+            approval_id: string;
+            /** Format: uuid */
+            run_id?: string | null;
+            /**
+             * @description Free-form summary the engine produced. Common keys:
+             *     tool_name, mcp_server_name, args. The UI may render any
+             *     subset; unknown keys are tolerated for forward-compat.
+             */
+            summary: {
+                [key: string]: unknown;
+            };
+        };
+        WsServerEventApprovalResolved: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "event.approval.resolved";
+            /** Format: uuid */
+            approval_id: string;
+            /** @enum {string} */
+            decision: "approve" | "deny" | "expired" | "cancelled";
+            /** Format: uuid */
+            actor_user_id?: string | null;
+            note?: string | null;
+        };
+        WsServerEvent: components["schemas"]["WsServerEventRunStarted"] | components["schemas"]["WsServerEventRunToken"] | components["schemas"]["WsServerEventRunCompleted"] | components["schemas"]["WsServerEventRunError"] | components["schemas"]["WsServerEventApprovalRequired"] | components["schemas"]["WsServerEventApprovalResolved"];
+        WsClientFrameRequestRun: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "request.run";
+            /** @description User input text for this run. */
+            input: string;
+            /**
+             * @description Client-minted UUID. The server caches (conversation_id,
+             *     idempotency_key) → run_id for the lifetime of the run so
+             *     a reconnect that re-sends the same frame observes the
+             *     same run (idempotent: true on event.run.started).
+             */
+            idempotency_key: string;
+        };
+        WsClientFrameRequestCancel: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "request.cancel";
+            /** Format: uuid */
+            run_id: string;
+        };
+        WsClientFrameRequestApproval: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "request.approval";
+            /** Format: uuid */
+            approval_id: string;
+            /** @enum {string} */
+            decision: "approve" | "deny";
+            note?: string | null;
+        };
+        WsClientFrame: components["schemas"]["WsClientFrameRequestRun"] | components["schemas"]["WsClientFrameRequestCancel"] | components["schemas"]["WsClientFrameRequestApproval"];
     };
     responses: {
         /** @description Malformed request. */
@@ -3167,6 +3591,268 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    schedulesList: {
+        parameters: {
+            query?: {
+                /** @description When set, only tasks bound to this coworker. */
+                coworker_id?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScheduledTask"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    schedulesGet: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScheduledTask"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    bindingsList: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelBinding"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    bindingsCreate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChannelBindingCreate"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelBinding"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+        };
+    };
+    bindingsGet: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+                binding_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelBinding"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    bindingsDelete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+                binding_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    bindingsUpdate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+                binding_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ChannelBindingUpdate"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelBinding"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["Unprocessable"];
+        };
+    };
+    adminModelsCreate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModelCreate"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Model"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+        };
+    };
+    adminModelsDelete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Deleted (soft) */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    adminModelsUpdate: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModelUpdate"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Model"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["Unprocessable"];
         };
     };
 }

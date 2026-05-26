@@ -11,6 +11,7 @@
 // `paths` so a yaml change shows up as a type error here.
 
 import type { components, paths } from './generated/types.js';
+import { getStoredToken } from '../services/oidc-auth.js';
 
 export type ApiPaths = paths;
 
@@ -24,6 +25,15 @@ type GetResponseBody<
   : never;
 
 export type BackendList = GetResponseBody<'/api/v1/backends', 'get'>;
+export type Backend = components['schemas']['Backend'];
+export type BackendName = components['schemas']['BackendName'];
+export type ModelFamily = components['schemas']['ModelFamily'];
+export type CoworkerCreate = components['schemas']['CoworkerCreate'];
+export type CoworkerUpdate = components['schemas']['CoworkerUpdate'];
+export type CoworkerMCPBindingCreate =
+  components['schemas']['CoworkerMCPBindingCreate'];
+export type CoworkerMCPBindingResponse =
+  components['schemas']['CoworkerMCPBindingResponse'];
 export type Coworker = components['schemas']['Coworker'];
 export type Conversation = components['schemas']['Conversation'];
 export type Message = components['schemas']['Message'];
@@ -127,6 +137,59 @@ export class ApiClient {
     return (await resp.json()) as Me;
   }
 
+  async createCoworker(body: CoworkerCreate): Promise<Coworker> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/coworkers`, {
+      method: 'POST',
+      headers: this.headers({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Coworker;
+  }
+
+  async bindCoworkerMCPServer(
+    coworkerId: string,
+    body: CoworkerMCPBindingCreate,
+  ): Promise<CoworkerMCPBindingResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(coworkerId)}/mcp-servers`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(body),
+      },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as CoworkerMCPBindingResponse;
+  }
+
+  /** List MCP-server bindings for a coworker. Used by the wizard's
+   *  edit mode to seed the Tools step with the already-bound servers. */
+  async listCoworkerMCPServers(
+    coworkerId: string,
+  ): Promise<CoworkerMCPBindingResponse[]> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(coworkerId)}/mcp-servers`,
+      { method: 'GET', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as CoworkerMCPBindingResponse[];
+  }
+
+  /** Remove a single MCP-server binding (path takes the MCP SERVER id,
+   *  not a separate binding id — the junction is keyed by the pair). */
+  async unbindCoworkerMCPServer(
+    coworkerId: string,
+    mcpServerId: string,
+  ): Promise<void> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(coworkerId)}` +
+        `/mcp-servers/${encodeURIComponent(mcpServerId)}`,
+      { method: 'DELETE', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+  }
+
   async listCoworkers(): Promise<Coworker[]> {
     const resp = await fetch(`${this.baseUrl}/api/v1/coworkers`, {
       method: 'GET',
@@ -134,6 +197,32 @@ export class ApiClient {
     });
     if (!resp.ok) throw await this.parseError(resp);
     return (await resp.json()) as Coworker[];
+  }
+
+  /** Patch selected fields on a coworker. Backend treats ABSENT keys
+   *  as "leave alone"; explicit nulls follow the per-field rules in
+   *  webui/schemas_v1.CoworkerUpdate. */
+  async updateCoworker(id: string, body: CoworkerUpdate): Promise<Coworker> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(id)}`,
+      {
+        method: 'PATCH',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(body),
+      },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Coworker;
+  }
+
+  /** Hard-delete a coworker. Backend uses DB ON DELETE CASCADE to drop
+   *  conversations / runs / messages — there is no soft-delete path. */
+  async deleteCoworker(id: string): Promise<void> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(id)}`,
+      { method: 'DELETE', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
   }
 
   async listCoworkerConversations(coworkerId: string): Promise<Conversation[]> {
@@ -557,7 +646,7 @@ export class ApiClient {
 let _shared: ApiClient | null = null;
 export function getApiClient(): ApiClient {
   if (!_shared) {
-    _shared = new ApiClient('', sessionStorage.getItem('rm_id_token'));
+    _shared = new ApiClient('', getStoredToken());
     // Keep the shared client in lock-step with the OIDC refresh path.
     window.addEventListener('rm-token-refreshed', (e: Event) => {
       const tok = (e as CustomEvent<string>).detail;

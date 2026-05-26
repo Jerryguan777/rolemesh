@@ -315,16 +315,84 @@ async def update_skill_endpoint(
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> Skill:
     existing = await _get_skill_or_404(skill_id, tenant_id=user.tenant_id)
+    set_fields = body.model_fields_set
 
+    # ``name`` is read-only on PATCH (see SkillUpdate docstring). Accept
+    # it when it matches the existing value so a frontend can submit a
+    # full snapshot without special-casing edit mode; reject when it
+    # actually differs.
+    if "name" in set_fields and body.name != existing.name:
+        raise ErrorResponseException(
+            status_code=400,
+            code="INVALID_PAYLOAD",
+            message=(
+                f"skill name is immutable on PATCH "
+                f"(got {body.name!r}, existing {existing.name!r})"
+            ),
+        )
+
+    # File-set replacement path. When ``files`` is set we treat it as
+    # the new full file map (same semantics as create) — the DB layer
+    # atomically swaps the skill_files rows so SKILL.md and extras land
+    # in one transaction.
+    files_for_db: dict[str, SkillFileDataclass] | None = None
     common: dict[str, object] | None = None
     backend: dict[str, dict[str, object]] | None = None
-    set_fields = body.model_fields_set
-    if "frontmatter_common" in set_fields or "frontmatter_backend" in set_fields:
+    if "files" in set_fields and body.files is not None:
+        files_for_db = _normalize_files(body.files)
+        if SKILL_MANIFEST_NAME not in files_for_db:
+            raise ErrorResponseException(
+                status_code=422,
+                code="SKILL_MANIFEST_REQUIRED",
+                message=f"'files' must include {SKILL_MANIFEST_NAME}.",
+            )
+        # Re-parse SKILL.md so the frontmatter dicts stay in sync with
+        # the new body. Mirror the create path's semantics: the inline
+        # frontmatter in the new SKILL.md is canonical, and only
+        # explicit body-level overrides win. Do NOT seed the override
+        # from ``existing.frontmatter_common`` here — that would
+        # clobber an edited inline description with the stale stored
+        # value (test_patch_files_refreshes_frontmatter_description
+        # pins this).
+        common_override = (
+            body.frontmatter_common
+            if body.frontmatter_common is not None
+            else None
+        )
+        backend_override = (
+            body.frontmatter_backend
+            if body.frontmatter_backend is not None
+            else None
+        )
+        try:
+            parsed_common, parsed_backend, body_text = parse_inbound_skill_md(
+                files_for_db[SKILL_MANIFEST_NAME].content,
+                frontmatter_common_override=common_override,
+                frontmatter_backend_override=backend_override,
+                expected_skill_name=existing.name,
+            )
+        except SkillValidationError as exc:
+            raise ErrorResponseException(
+                status_code=400,
+                code="INVALID_MANIFEST",
+                message=str(exc),
+            ) from exc
+        # Strip frontmatter from on-disk SKILL.md — it now lives in the
+        # JSONB columns. Same shape as create_skill_endpoint.
+        files_for_db[SKILL_MANIFEST_NAME] = SkillFileDataclass(
+            path=SKILL_MANIFEST_NAME,
+            content=body_text,
+            mime_type=(
+                files_for_db[SKILL_MANIFEST_NAME].mime_type or "text/markdown"
+            ),
+        )
+        common, backend = parsed_common, parsed_backend
+    elif "frontmatter_common" in set_fields or "frontmatter_backend" in set_fields:
+        # Metadata-only frontmatter edit: keep existing SKILL.md body,
+        # re-route through parse_inbound_skill_md so validation rules
+        # (allowlists, name match, description bounds) still fire.
         current_md = existing.files.get(SKILL_MANIFEST_NAME)
         current_body = current_md.content if current_md else ""
-        # ``is not None`` matches the admin layer: an explicit ``{}``
-        # clears the dict rather than silently keeping the existing
-        # one (the falsy-dict trap).
         common_override = (
             body.frontmatter_common
             if body.frontmatter_common is not None
@@ -360,6 +428,7 @@ async def update_skill_endpoint(
             frontmatter_common=common,
             frontmatter_backend=backend,
             enabled=body.enabled,
+            files=files_for_db,
         )
     except asyncpg.CheckViolationError as exc:
         raise ErrorResponseException(

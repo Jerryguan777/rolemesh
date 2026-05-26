@@ -63,19 +63,28 @@ export class MessageItem extends LitElement {
     return html`
       <div class="mb-5 anim-enter">
         <div class="flex items-start gap-3">
-          <div class="shrink-0 w-7 h-7 rounded-full bg-gradient-to-br from-brand-light to-brand flex items-center justify-center mt-0.5 shadow-[0_2px_8px_-2px_rgba(99,102,241,0.3)]">
+          <div
+            class="shrink-0 w-7 h-7 rounded-full flex items-center justify-center mt-0.5"
+            style="background: var(--rm-accent); box-shadow: var(--rm-shadow-sm);"
+          >
             <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" fill="none" stroke="white" stroke-width="2.5" viewBox="0 0 24 24">
               <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
             </svg>
           </div>
 
           <div class="min-w-0 flex-1 pt-0.5">
-            <div class="text-[11.5px] font-semibold text-brand uppercase tracking-wide mb-1">Assistant</div>
+            <div
+              class="text-[11.5px] font-semibold uppercase tracking-wide mb-1"
+              style="color: var(--rm-accent);"
+            >Assistant</div>
 
             ${hasContent ? html`
               <div class="md text-[13.5px] text-ink-1 dark:text-d-ink-1">
                 ${unsafeHTML(renderMarkdown(this.message.content))}
-                ${this.message.streaming ? html`<span class="inline-block w-[2.5px] h-[15px] bg-brand rounded-full ml-0.5 align-text-bottom" style="animation:blink 1s step-end infinite"></span>` : ''}
+                ${this.message.streaming ? html`<span
+                  class="inline-block w-[2.5px] h-[15px] rounded-full ml-0.5 align-text-bottom"
+                  style="background: var(--rm-accent); animation:blink 1s step-end infinite"
+                ></span>` : ''}
               </div>
             ` : ''}
 

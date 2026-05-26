@@ -29,26 +29,44 @@ from rolemesh.core.skills import (
 def test_skill_name_accepts_canonical() -> None:
     validate_skill_name("code-review")
     validate_skill_name("a")
-    validate_skill_name("Bug_Triage_42")
+    # Leading digit is fine under the kebab grammar — the previous
+    # regex banned it for no good reason. Pin the new behavior so a
+    # future tightening can't silently break user data.
+    validate_skill_name("1st-skill")
+    validate_skill_name("a" * 64)  # exact upper bound
 
 
 @pytest.mark.parametrize(
     "bad_name",
     [
         "",
-        "1starts-with-digit",
         "-leading-dash",
-        "_leading-underscore",
         "has space",
         "has/slash",
         "..",
-        "a" * 65,  # too long (regex caps at 64)
+        "a" * 65,  # one over the 64-char cap
         "name.with.dot",
+        # New regex rejects what the old one accepted — uppercase,
+        # underscores. These regressions catch a future loosening of
+        # the constraint (filesystem-path safety).
+        "Bug_Triage_42",
+        "HasUpper",
+        "has_underscore",
     ],
 )
 def test_skill_name_rejects_invalid(bad_name: str) -> None:
     with pytest.raises(SkillValidationError):
         validate_skill_name(bad_name)
+
+
+@pytest.mark.parametrize("reserved", ["anthropic", "claude"])
+def test_skill_name_rejects_reserved(reserved: str) -> None:
+    # Catches the trap where the regex passes but the Claude SDK
+    # silently swallows the skill because the name collides with
+    # built-in tooling. Without this check users get a phantom skill
+    # that never loads and no error to debug from.
+    with pytest.raises(SkillValidationError, match="reserved"):
+        validate_skill_name(reserved)
 
 
 # ---------------------------------------------------------------------------
@@ -209,10 +227,23 @@ def test_splitter_rejects_missing_description() -> None:
         parse_inbound_skill_md(skill_md, expected_skill_name="x")
 
 
-def test_splitter_rejects_short_description() -> None:
-    skill_md = "---\nname: x\ndescription: too short\n---\nbody"
-    with pytest.raises(SkillValidationError, match="too short"):
-        parse_inbound_skill_md(skill_md, expected_skill_name="x")
+def test_splitter_rejects_empty_description() -> None:
+    # MIN_LENGTH is now 1 (non-empty) — short descriptions like
+    # "tiny" should pass, but an empty string and pure whitespace
+    # must still fail.
+    for blank in ("", "   ", "\t\n"):
+        skill_md = f"---\nname: x\ndescription: '{blank}'\n---\nbody"
+        with pytest.raises(SkillValidationError, match="empty"):
+            parse_inbound_skill_md(skill_md, expected_skill_name="x")
+
+
+def test_splitter_accepts_short_description() -> None:
+    # Single-word description is allowed under the relaxed MIN=1.
+    # Prior behavior (MIN=20) rejected this — the test pins the new
+    # contract so a future tightening can't silently break ease-of-use.
+    skill_md = "---\nname: x\ndescription: Sorts.\n---\nbody"
+    common, _, _ = parse_inbound_skill_md(skill_md, expected_skill_name="x")
+    assert common["description"] == "Sorts."
 
 
 def test_splitter_rejects_long_description() -> None:

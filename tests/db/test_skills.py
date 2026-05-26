@@ -366,8 +366,27 @@ async def test_update_with_files_missing_skill_md_is_rejected() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_db_check_rejects_invalid_skill_name() -> None:
-    tenant_id, _ = await _make_tenant_with_coworker("nch")
+@pytest.mark.parametrize(
+    "bad_name",
+    [
+        "HasUpper",          # uppercase forbidden under lowercase-kebab regex
+        "has_underscore",    # underscore forbidden
+        "has space",         # whitespace forbidden
+        "a" * 65,            # over the 64-char cap
+        "anthropic",         # reserved (NOT IN clause)
+        "claude",            # reserved (NOT IN clause)
+    ],
+)
+async def test_db_check_rejects_invalid_skill_name(bad_name: str) -> None:
+    # DB-side defense-in-depth: even when callers bypass the
+    # application validator (validate_skill_name in core/skills.py)
+    # and Pydantic, the CHECK constraint must still reject. The
+    # parametrize covers both branches — the regex and the reserved
+    # NOT IN list — so a future schema migration that loses one of
+    # them gets caught.
+    tenant_id, _ = await _make_tenant_with_coworker(
+        "nch-" + str(abs(hash(bad_name)))[:6]
+    )
     pool = _get_pool()
     async with pool.acquire() as conn:
         with pytest.raises(asyncpg.CheckViolationError):
@@ -376,7 +395,7 @@ async def test_db_check_rejects_invalid_skill_name() -> None:
                 "frontmatter_common, frontmatter_backend) "
                 "VALUES ($1::uuid, $2, '{}'::jsonb, '{}'::jsonb)",
                 tenant_id,
-                "1bad-leading-digit",
+                bad_name,
             )
 
 

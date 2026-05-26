@@ -10,21 +10,32 @@ import { LitElement, html, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { ApiError, getApiClient } from '../api/client.js';
-import type { MCPServer, MCPServerCreate } from '../api/client.js';
-
-type MCPType = MCPServerCreate['type'];
-type AuthMode = MCPServerCreate['auth_mode'];
+import type { MCPServer } from '../api/client.js';
+import './mcp-server-dialog.js';
+import './confirm-dialog.js';
+import { iconPencil, iconTrash } from './icons.js';
 
 @customElement('rm-mcp-servers-page')
 export class MCPServersPage extends LitElement {
   @state() private rows: MCPServer[] = [];
   @state() private loading = true;
   @state() private listError: string | null = null;
-  @state() private formOpen = false;
-  @state() private form: MCPServerCreate = this.emptyForm();
-  @state() private formError: string | null = null;
-  @state() private busy = false;
   @state() private deleteError: Record<string, string> = {};
+  /** Per-MCP-server bound-coworker count. Backend doesn't surface
+   *  this on the MCPServer model (unlike Skill.bound_coworker_count),
+   *  so we compute it here by walking every coworker's bindings.
+   *  Map miss = "still loading" or "no bindings" — both render as 0. */
+  @state() private coworkerCounts: Map<string, number> = new Map();
+  /** Single dialog backs BOTH create AND edit. `editTarget` null =
+   *  create flow; non-null = edit flow (rm-mcp-server-dialog branches
+   *  on its `editing` prop). v2-C dropped the inline create form to
+   *  collapse the two surfaces into one. */
+  @state() private dialogOpen = false;
+  @state() private editTarget: MCPServer | null = null;
+  /** Active deletion target — opens the rm-confirm-dialog when set.
+   *  Cleared on confirm-success / cancel / error close. */
+  @state() private deleteTarget: MCPServer | null = null;
+  @state() private deleteInFlight = false;
   private readonly api = getApiClient();
 
   protected override createRenderRoot() {
@@ -34,16 +45,6 @@ export class MCPServersPage extends LitElement {
   override connectedCallback() {
     super.connectedCallback();
     void this.refresh();
-  }
-
-  private emptyForm(): MCPServerCreate {
-    return {
-      name: '',
-      type: 'http',
-      url: '',
-      auth_mode: 'service',
-      description: null,
-    };
   }
 
   private async refresh(): Promise<void> {
@@ -57,6 +58,37 @@ export class MCPServersPage extends LitElement {
     } finally {
       this.loading = false;
     }
+    // Kick off the coworker-count tally in the background — the list
+    // paints right away, counts stream in. We don't await: a delayed
+    // count is preferable to a blocked render.
+    void this.recountBindings();
+  }
+
+  /** Tally `coworker_count` per MCP server by walking every coworker's
+   *  bindings. Backend doesn't surface this on the MCPServer model
+   *  (Skill.bound_coworker_count is the analog there); doing it
+   *  client-side adds N small GETs (one per coworker, ~10-20 in a
+   *  typical tenant). All failures are swallowed — the row's "0
+   *  coworker(s)" hint is benign if the count never arrives. */
+  private async recountBindings(): Promise<void> {
+    let coworkers: { id: string }[] = [];
+    try {
+      coworkers = await this.api.listCoworkers();
+    } catch {
+      return;
+    }
+    const next = new Map<string, number>();
+    const results = await Promise.allSettled(
+      coworkers.map((c) => this.api.listCoworkerMCPServers(c.id)),
+    );
+    for (const r of results) {
+      if (r.status !== 'fulfilled') continue;
+      for (const binding of r.value) {
+        const id = binding.mcp_server_id;
+        next.set(id, (next.get(id) ?? 0) + 1);
+      }
+    }
+    this.coworkerCounts = next;
   }
 
   private errMessage(err: unknown): string {
@@ -72,263 +104,178 @@ export class MCPServersPage extends LitElement {
     return (err as Error).message;
   }
 
-  private async submit(): Promise<void> {
-    if (!this.form.name || !this.form.url) {
-      this.formError = 'Name and URL are required.';
-      return;
-    }
-    this.busy = true;
-    this.formError = null;
-    try {
-      await this.api.createMCPServer({ ...this.form });
-      this.formOpen = false;
-      this.form = this.emptyForm();
-      await this.refresh();
-    } catch (err) {
-      this.formError = this.errMessage(err);
-    } finally {
-      this.busy = false;
-    }
+  // Renamed from `remove` (v1.1) — `HTMLElement.prototype.remove`
+  // exists as a no-arg "detach this element from the DOM" method, and
+  // Lit's NodePart._$clear calls it during teardown. Overriding it
+  // with a 1-arg method (taking a row) made every Lit-driven unmount
+  // throw "Cannot read properties of undefined (reading 'id')" mid-
+  // clear, leaving the old <rm-mcp-servers-page> stranded in the DOM
+  // whenever the settings shell switched tabs.
+  private askDelete(row: MCPServer): void {
+    this.deleteTarget = row;
   }
 
-  private async remove(row: MCPServer): Promise<void> {
+  private cancelDelete = (): void => {
+    if (this.deleteInFlight) return;
+    this.deleteTarget = null;
+  };
+
+  private async performDelete(): Promise<void> {
+    const row = this.deleteTarget;
+    if (!row || this.deleteInFlight) return;
+    this.deleteInFlight = true;
     this.deleteError = { ...this.deleteError, [row.id]: '' };
     try {
       await this.api.deleteMCPServer(row.id);
+      this.deleteTarget = null;
       await this.refresh();
     } catch (err) {
       this.deleteError = {
         ...this.deleteError,
         [row.id]: this.errMessage(err),
       };
+      this.deleteTarget = null;
+    } finally {
+      this.deleteInFlight = false;
     }
+  }
+
+  private openEdit(row: MCPServer): void {
+    this.editTarget = row;
+    this.dialogOpen = true;
+  }
+
+  private openCreate(): void {
+    this.editTarget = null;
+    this.dialogOpen = true;
   }
 
   override render() {
     return html`
-      <div class="h-full w-full overflow-y-auto px-6 py-6">
-        <div class="max-w-3xl mx-auto">
-          <div class="flex items-baseline justify-between mb-4">
-            <div>
-              <h1 class="text-[20px] font-semibold text-ink-0 dark:text-d-ink-0">
-                MCP servers
-              </h1>
-              <p class="text-[13px] text-ink-3 dark:text-d-ink-3 mt-0.5">
-                Tenant-scoped registry. Changes hot-reload to the egress gateway.
-              </p>
-            </div>
-            <button
-              type="button"
-              class="text-[12px] px-3 py-1.5 rounded-md bg-brand text-white
-                hover:bg-brand-dark transition-colors cursor-pointer"
-              @click=${() => {
-                this.formOpen = !this.formOpen;
-                this.formError = null;
-              }}
-            >${this.formOpen ? 'Cancel' : '+ New MCP server'}</button>
-          </div>
-
-          ${this.formOpen ? this.renderForm() : nothing}
-
-          ${this.loading
-            ? html`<div class="text-[13px] text-ink-3 dark:text-d-ink-3">Loading…</div>`
-            : this.listError
-              ? html`<div
-                  class="border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20
-                    text-red-700 dark:text-red-300 text-[13px] px-3 py-2 rounded-lg"
-                >${this.listError}</div>`
-              : this.rows.length === 0
-                ? this.renderEmpty()
-                : this.renderList()}
+      <div class="rm-spane">
+        <div class="rm-ch">
+          <h2>MCP servers</h2>
+          <button
+            type="button"
+            class="rm-add"
+            @click=${this.openCreate}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M12 5v14M5 12h14"/>
+            </svg>
+            New MCP server
+          </button>
         </div>
+        <p class="rm-sub">
+          Tenant-scoped registry. Changes hot-reload to the egress gateway.
+        </p>
+
+        ${this.loading
+          ? html`<div class="rm-banner-loading">Loading…</div>`
+          : this.listError
+            ? html`<div class="rm-banner-err">${this.listError}</div>`
+            : this.rows.length === 0
+              ? this.renderEmpty()
+              : this.renderList()}
+
+        <rm-mcp-server-dialog
+          ?open=${this.dialogOpen}
+          .editing=${this.editTarget}
+          @close=${() => {
+            this.dialogOpen = false;
+            this.editTarget = null;
+          }}
+          @mcp-server-created=${() => { void this.refresh(); }}
+          @mcp-server-updated=${() => { void this.refresh(); }}
+        ></rm-mcp-server-dialog>
+        ${this.renderDeleteDialog()}
       </div>
-    `;
-  }
-
-  private renderForm() {
-    const f = this.form;
-    return html`
-      <section
-        class="border border-surface-3 dark:border-d-surface-3 rounded-xl px-4 py-3 mb-4 space-y-3"
-      >
-        <div class="grid grid-cols-2 gap-3">
-          <label class="text-[12px] text-ink-2 dark:text-d-ink-2">
-            <span class="block mb-1">Name</span>
-            <input
-              type="text"
-              class="w-full text-[13px] px-3 py-1.5 rounded-md border border-surface-3 dark:border-d-surface-3
-                bg-surface-1 dark:bg-d-surface-1"
-              .value=${f.name}
-              @input=${(e: Event) =>
-                (this.form = {
-                  ...this.form,
-                  name: (e.target as HTMLInputElement).value,
-                })}
-            />
-          </label>
-          <label class="text-[12px] text-ink-2 dark:text-d-ink-2">
-            <span class="block mb-1">URL</span>
-            <input
-              type="url"
-              class="w-full text-[13px] px-3 py-1.5 rounded-md border border-surface-3 dark:border-d-surface-3
-                bg-surface-1 dark:bg-d-surface-1"
-              placeholder="https://mcp.example.com"
-              .value=${f.url}
-              @input=${(e: Event) =>
-                (this.form = {
-                  ...this.form,
-                  url: (e.target as HTMLInputElement).value,
-                })}
-            />
-          </label>
-          <label class="text-[12px] text-ink-2 dark:text-d-ink-2">
-            <span class="block mb-1">Type</span>
-            <select
-              class="w-full text-[13px] px-3 py-1.5 rounded-md border border-surface-3 dark:border-d-surface-3
-                bg-surface-1 dark:bg-d-surface-1"
-              .value=${f.type}
-              @change=${(e: Event) =>
-                (this.form = {
-                  ...this.form,
-                  type: (e.target as HTMLSelectElement).value as MCPType,
-                })}
-            >
-              <option value="http">http</option>
-              <option value="sse">sse</option>
-            </select>
-          </label>
-          <label class="text-[12px] text-ink-2 dark:text-d-ink-2">
-            <span class="block mb-1">Auth mode</span>
-            <select
-              class="w-full text-[13px] px-3 py-1.5 rounded-md border border-surface-3 dark:border-d-surface-3
-                bg-surface-1 dark:bg-d-surface-1"
-              .value=${f.auth_mode}
-              @change=${(e: Event) =>
-                (this.form = {
-                  ...this.form,
-                  auth_mode: (e.target as HTMLSelectElement).value as AuthMode,
-                })}
-            >
-              <option value="service">service</option>
-              <option value="user">user</option>
-              <option value="both">both</option>
-            </select>
-          </label>
-        </div>
-        ${f.auth_mode === 'user' || f.auth_mode === 'both'
-          ? html`<div
-              class="text-[12px] text-amber-700 dark:text-amber-300
-                border border-amber-200 dark:border-amber-800
-                bg-amber-50 dark:bg-amber-900/20 rounded-md px-3 py-2"
-            >
-              <strong>Requires user session</strong> — end-to-end
-              verification pending until the OIDC branch lands.
-            </div>`
-          : null}
-        <label class="block text-[12px] text-ink-2 dark:text-d-ink-2">
-          <span class="block mb-1">Description (optional)</span>
-          <textarea
-            rows="2"
-            class="w-full text-[13px] px-3 py-1.5 rounded-md border border-surface-3 dark:border-d-surface-3
-              bg-surface-1 dark:bg-d-surface-1"
-            .value=${f.description ?? ''}
-            @input=${(e: Event) =>
-              (this.form = {
-                ...this.form,
-                description: (e.target as HTMLTextAreaElement).value || null,
-              })}
-          ></textarea>
-        </label>
-        ${this.formError
-          ? html`<div class="text-[12px] text-red-600 dark:text-red-300">${this.formError}</div>`
-          : null}
-        <div class="flex items-center justify-end gap-2">
-          <button
-            type="button"
-            class="text-[12px] px-3 py-1.5 rounded-md border border-surface-3 dark:border-d-surface-3
-              text-ink-2 dark:text-d-ink-2 cursor-pointer"
-            @click=${() => {
-              this.formOpen = false;
-              this.form = this.emptyForm();
-              this.formError = null;
-            }}
-            ?disabled=${this.busy}
-          >Cancel</button>
-          <button
-            type="button"
-            class="text-[12px] px-3 py-1.5 rounded-md bg-brand text-white hover:bg-brand-dark cursor-pointer
-              disabled:opacity-60 disabled:cursor-not-allowed"
-            ?disabled=${this.busy}
-            @click=${() => void this.submit()}
-          >Create</button>
-        </div>
-      </section>
     `;
   }
 
   private renderEmpty() {
     return html`
-      <div
-        class="border border-dashed border-surface-3 dark:border-d-surface-3
-          rounded-xl px-6 py-10 text-center text-[13px] text-ink-2 dark:text-d-ink-2"
-      >
-        <p class="mb-1.5 font-medium text-ink-1 dark:text-d-ink-1">
-          No MCP servers yet
-        </p>
-        <p class="leading-relaxed">
-          Click <strong>+ New MCP server</strong> to register one.
-        </p>
+      <div class="rm-empty">
+        <span class="rm-empty-title">No MCP servers yet</span>
+        Click <b>+ New MCP server</b> above to register one.
       </div>
     `;
   }
 
   private renderList() {
     return html`
-      <ul class="divide-y divide-surface-3 dark:divide-d-surface-3 border border-surface-3 dark:border-d-surface-3 rounded-xl overflow-hidden">
-        ${this.rows.map((r) => this.renderRow(r))}
-      </ul>
+      ${this.rows.map((r) => this.renderRow(r))}
     `;
   }
 
   private renderRow(r: MCPServer) {
     const delErr = this.deleteError[r.id] || '';
+    const count = this.coworkerCounts.get(r.id) ?? 0;
     return html`
-      <li class="px-4 py-3">
-        <div class="flex items-start gap-3">
-          <div class="min-w-0 flex-1">
-            <div class="text-[14px] font-medium text-ink-0 dark:text-d-ink-0 truncate">
-              ${r.name}
-            </div>
-            <div class="text-[11.5px] text-ink-3 dark:text-d-ink-3 flex flex-wrap items-center gap-2 mt-0.5">
-              <span>${r.type}</span>
-              <span class="text-ink-4">·</span>
-              <span>auth: ${r.auth_mode}</span>
-              ${r.auth_mode !== 'service'
-                ? html`<span class="text-amber-700 dark:text-amber-300">
-                    requires user session
-                  </span>`
-                : nothing}
-            </div>
-            <div class="text-[11.5px] text-ink-3 dark:text-d-ink-3 font-mono truncate mt-0.5">
-              ${r.url}
-            </div>
-            ${r.description
-              ? html`<div class="text-[12px] text-ink-2 dark:text-d-ink-2 mt-1">
-                  ${r.description}
-                </div>`
-              : nothing}
-          </div>
+      <div class="rm-card" data-mcp-id=${r.id}>
+        <span class="rm-ic">${(r.name?.[0] ?? '?').toUpperCase()}</span>
+        <span class="rm-mn">
+          <b>${r.name}</b>
+          <span>${r.type} · auth: ${r.auth_mode} · ${r.url}</span>
+        </span>
+        <span class="rm-meta">${count} coworker${count === 1 ? '' : 's'}</span>
+        <span class="rm-row-acts">
           <button
             type="button"
-            class="text-[12px] px-2.5 py-1 rounded-md border border-red-300 dark:border-red-700
-              text-red-700 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/20 cursor-pointer"
-            @click=${() => void this.remove(r)}
-          >Delete</button>
-        </div>
+            class="rm-iconbtn"
+            title="Edit MCP server"
+            data-testid="mcp-edit"
+            @click=${() => this.openEdit(r)}
+          >${iconPencil(15)}</button>
+          <button
+            type="button"
+            class="rm-iconbtn rm-iconbtn--danger"
+            title="Delete MCP server"
+            data-testid="mcp-delete"
+            @click=${() => this.askDelete(r)}
+          >${iconTrash(15)}</button>
+        </span>
         ${delErr
-          ? html`<div class="text-[12px] text-red-600 dark:text-red-300 mt-2">${delErr}</div>`
-          : null}
-      </li>
+          ? html`<div class="rm-row-error">${delErr}</div>`
+          : nothing}
+      </div>
+    `;
+  }
+
+  private renderDeleteDialog() {
+    const target = this.deleteTarget;
+    // coworkerCounts is populated asynchronously by recountBindings()
+    // (kicked off from refresh()). If a key is missing the server has
+    // zero references — Map deliberately omits zero entries. The
+    // unmeasured window (recount still in flight) is very short in
+    // practice; the backend's 409 RESOURCE_IN_USE check is the
+    // authoritative gate, so an early-click that slips through still
+    // can't cause data loss.
+    const bindCount = target ? this.coworkerCounts.get(target.id) ?? 0 : 0;
+    const blocked = bindCount > 0;
+    return html`
+      <rm-confirm-dialog
+        title=${target ? `Delete MCP server "${target.name}"?` : 'Delete MCP server?'}
+        ?open=${target !== null}
+        tone="danger"
+        confirm-label="Delete"
+        busy-label="Deleting…"
+        ?busy=${this.deleteInFlight}
+        ?disable-confirm=${blocked}
+        data-testid="confirm-delete-dialog"
+        @cancel=${this.cancelDelete}
+        @confirm=${() => void this.performDelete()}
+      >
+        ${blocked
+          ? html`<p style="margin: 0;">
+              This MCP server is bound to ${bindCount}
+              coworker${bindCount === 1 ? '' : 's'}. Unbind it from
+              ${bindCount === 1 ? 'that coworker' : 'each one'} before
+              deleting.
+            </p>`
+          : html`<p style="margin: 0;">This cannot be undone.</p>`}
+      </rm-confirm-dialog>
     `;
   }
 }

@@ -152,11 +152,11 @@ Create a `.env` file at the project root. The tables below list the most useful 
 
 ### Channels
 
-| Key                  | Required for     |
-|----------------------|------------------|
-| `TELEGRAM_BOT_TOKEN` | Telegram channel |
-| `SLACK_BOT_TOKEN`    | Slack channel    |
-| `SLACK_APP_TOKEN`    | Slack channel    |
+Channel credentials (Telegram / Slack / web) are **stored per coworker**
+in the `channel_bindings` DB table — they are not read from `.env`.
+Use the Settings → Coworker → Channels UI (or
+`POST /api/v1/coworkers/{id}/bindings`) to bind a coworker to a
+channel with its bot tokens.
 
 ### Storage
 
@@ -202,12 +202,12 @@ Details: `docs/switchable-agent-backend.md`.
 
 ## Channels
 
-| Channel  | Setup                                                                   |
-|----------|-------------------------------------------------------------------------|
-| WebUI    | `rolemesh-webui` (defaults to port 8080).                               |
-| Telegram | Set `TELEGRAM_BOT_TOKEN`; gateway starts automatically with the orchestrator. |
-| Slack    | Set `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN`.                              |
-| Teams    | Planned — <TODO: link to tracking issue>.                               |
+| Channel  | Setup                                                                                                |
+|----------|------------------------------------------------------------------------------------------------------|
+| WebUI    | `rolemesh-webui` (defaults to port 8080).                                                            |
+| Telegram | Bind a coworker via Settings → Channels with a Telegram bot token; the gateway hot-loads on bind.   |
+| Slack    | Bind a coworker via Settings → Channels with `bot_token` + `app_token`.                              |
+| Teams    | Planned — <TODO: link to tracking issue>.                                                            |
 
 ---
 

@@ -105,53 +105,67 @@ CLAUDE_CODE_BACKEND = AgentBackendConfig(
     extra_env={"AGENT_BACKEND": "claude"},
 )
 
-def _pi_extra_env() -> dict[str, str]:
-    """Build extra env for Pi backend — model selection + boto3
-    placeholders.
+# DB row provider → Pi PI_MODEL_ID format-string provider segment.
+# Pi inherits the vendor convention from upstream where Bedrock is
+# called "amazon-bedrock" (the boto3 service stem). The DB calls it
+# just "bedrock" because that's what users see in the UI's provider
+# picker. Map at the boundary.
+_DB_TO_PI_PROVIDER: dict[str, str] = {
+    "bedrock": "amazon-bedrock",
+}
+
+
+def pi_format_model_id(provider: str, model_id: str) -> str:
+    """Format a DB (provider, model_id) pair into Pi's PI_MODEL_ID string.
+
+    Pi expects ``<provider>/<model_id>``. Most DB providers are 1:1
+    with Pi (``openai``/``anthropic``/``google``); only ``bedrock``
+    gets renamed to ``amazon-bedrock``.
+    """
+    pi_provider = _DB_TO_PI_PROVIDER.get(provider, provider)
+    return f"{pi_provider}/{model_id}"
+
+
+def pi_env_for_model_id(model_id: str) -> dict[str, str]:
+    """Build the env keys Pi backend needs for a given PI_MODEL_ID.
+
+    Pure function — same input yields same output (modulo os.environ
+    fallback for AWS_REGION). Used in two paths:
+
+    1. Module-load default (``_pi_extra_env()`` below) — reads
+       ``PI_MODEL_ID`` from the host's .env so spawns without a
+       coworker (e.g. evaluation CLI) still get a working default.
+    2. Per-spawn override (PR30 wiring) — the container executor
+       resolves ``coworker.model_id`` against the ``models`` table
+       and calls this with the resulting Pi-formatted string so the
+       per-coworker model selection actually reaches the container.
+
+    Returns just the model-related env (PI_MODEL_ID + optional
+    Bedrock boto3 placeholders). The caller composes it with
+    ``AGENT_BACKEND`` and other static keys.
 
     API keys are NOT injected here; all LLM requests go through the
     credential proxy which injects real keys at the HTTP level. For
-    Bedrock specifically, we inject a placeholder
-    ``AWS_BEARER_TOKEN_BEDROCK`` (so boto3 doesn't raise
-    ``NoCredentialsError`` before it even sends) and an
-    ``AWS_REGION`` so boto3's model-ARN resolution lines up with
-    the upstream URL the credential proxy bound (single-source via
-    ``BEDROCK_DEFAULT_REGION``).
+    Bedrock we inject placeholder ``AWS_BEARER_TOKEN_BEDROCK`` so
+    boto3 doesn't raise ``NoCredentialsError`` before sending; the
+    proxy is the real credential gate. ``AWS_REGION`` makes boto3's
+    model-ARN resolution line up with the upstream URL the proxy
+    bound (single-source via ``BEDROCK_DEFAULT_REGION``).
 
     ``BEDROCK_BASE_URL`` is intentionally NOT set here — it lives
-    in ``rolemesh.container.runner.build_container_spec`` alongside
-    ``ANTHROPIC_BASE_URL`` / ``OPENAI_BASE_URL`` because it depends
-    on per-spawn ``proxy_base`` (egress-gateway under EC-2,
-    host.docker.internal under rollback). Computing it here would
-    bake module-load-time hosting into a per-spawn decision.
+    in ``rolemesh.container.runner.build_container_spec`` because it
+    depends on per-spawn proxy routing decisions.
     """
     import os
 
     from rolemesh.core.config import BEDROCK_DEFAULT_REGION
 
-    # .env loading is handled at process entry by
-    # ``rolemesh.bootstrap``; reading from os.environ here works
-    # for shell exports, systemd EnvironmentFile, docker --env-file,
-    # and the auto-loaded .env alike.
-    env: dict[str, str] = {"AGENT_BACKEND": "pi"}
-    model_id = os.environ.get("PI_MODEL_ID", "")
-    if model_id:
-        env["PI_MODEL_ID"] = model_id
+    env: dict[str, str] = {}
+    if not model_id:
+        return env
+    env["PI_MODEL_ID"] = model_id
 
-    # Bedrock wiring — only meaningful when the host has the bearer
-    # token configured AND the model id targets Bedrock. We still
-    # inject the placeholder unconditionally on the Bedrock path so
-    # boto3 client init doesn't raise; the proxy is the real
-    # credential gate.
     if model_id.startswith("amazon-bedrock/"):
-        # Diagnostic guard: if the host doesn't actually have the
-        # bearer token set, the credential proxy will not register a
-        # ``bedrock`` provider entry and every container request will
-        # surface as a 404 from the proxy, with no obvious link back
-        # to "you forgot to set AWS_BEARER_TOKEN_BEDROCK in .env".
-        # Warn at container-spec build time so the misconfiguration
-        # is visible in the orchestrator log instead of as an
-        # opaque mid-turn error.
         if not os.environ.get("AWS_BEARER_TOKEN_BEDROCK"):
             logger.warning(
                 "Pi backend uses a Bedrock model id but host has no "
@@ -161,15 +175,26 @@ def _pi_extra_env() -> dict[str, str]:
                 "AWS_BEARER_TOKEN_BEDROCK in .env to fix.",
                 model_id=model_id,
             )
-
         env["AWS_BEARER_TOKEN_BEDROCK"] = "placeholder-proxy-replaces-this"
-        # Region picks the model's region context inside boto3 (model
-        # ARNs are region-scoped). Single source of truth in
-        # ``rolemesh.core.config.BEDROCK_DEFAULT_REGION``; the
-        # credential proxy uses the same fallback so endpoint URL
-        # and model ARN resolution stay in the same region.
-        env["AWS_REGION"] = os.environ.get("AWS_REGION", "") or BEDROCK_DEFAULT_REGION
+        env["AWS_REGION"] = (
+            os.environ.get("AWS_REGION", "") or BEDROCK_DEFAULT_REGION
+        )
 
+    return env
+
+
+def _pi_extra_env() -> dict[str, str]:
+    """Build the static Pi-backend env from .env defaults.
+
+    Used as the load-time default when no per-coworker model_id is
+    resolved at spawn time (evaluation CLI, ad-hoc tooling). The
+    container executor's per-spawn path (see container_executor.py)
+    overrides PI_MODEL_ID with the coworker's choice when available.
+    """
+    import os
+
+    env: dict[str, str] = {"AGENT_BACKEND": "pi"}
+    env.update(pi_env_for_model_id(os.environ.get("PI_MODEL_ID", "")))
     return env
 
 

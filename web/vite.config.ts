@@ -20,8 +20,15 @@ export default defineConfig({
         target: 'http://localhost:8080',
         ws: true,
       },
+      // v1 WS endpoint lives under /api (e.g.
+      // /api/v1/conversations/{id}/stream — see ws/v1_client.ts).
+      // Production serves SPA + WS on the same origin so the upgrade
+      // works automatically; in dev the vite proxy needs `ws: true`
+      // or the Upgrade handshake fails silently and the chat panel
+      // shows "Disconnected" forever.
       '/api': {
         target: 'http://localhost:8080',
+        ws: true,
       },
     },
   },

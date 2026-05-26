@@ -10,11 +10,13 @@
 import { LitElement, html, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import { SKILL_MANIFEST_NAME } from '../api/skill_constants.js';
 import { ApiError, getApiClient } from '../api/client.js';
-import type { SkillCreate, SkillSummary } from '../api/client.js';
+import type { SkillSummary } from '../api/client.js';
 
 import './skill-detail-page.js';
+import './skill-dialog.js';
+import './confirm-dialog.js';
+import { iconPencil, iconTrash } from './icons.js';
 
 type Mode = 'list' | 'new' | 'detail';
 
@@ -24,11 +26,21 @@ interface ParsedHash {
 }
 
 function parseHash(hash: string): ParsedHash {
-  if (hash === '#/skills' || hash === '#/skills/') {
+  // Accept both v1.1 flat (`#/skills/...`) and v2 nested
+  // (`#/manage/skills/...`) shapes. The router.ts redirect handler
+  // normalizes the flat form to the nested one on hashchange, but
+  // (a) editSkill / submitNew may write the v2 form directly to skip
+  // the redirect bounce, and (b) the in-flight flat URL exists for
+  // one tick before redirect — both should resolve to the same
+  // mode here.
+  const normalized = hash.startsWith('#/manage/skills')
+    ? '#/skills' + hash.slice('#/manage/skills'.length)
+    : hash;
+  if (normalized === '#/skills' || normalized === '#/skills/') {
     return { mode: 'list', skillId: null };
   }
-  if (hash === '#/skills/new') return { mode: 'new', skillId: null };
-  const match = hash.match(/^#\/skills\/([^/]+)$/);
+  if (normalized === '#/skills/new') return { mode: 'new', skillId: null };
+  const match = normalized.match(/^#\/skills\/([^/]+)$/);
   if (match) return { mode: 'detail', skillId: decodeURIComponent(match[1]) };
   return { mode: 'list', skillId: null };
 }
@@ -44,10 +56,16 @@ export class SkillsPage extends LitElement {
   @state() private rows: SkillSummary[] = [];
   @state() private loading = false;
   @state() private listError: string | null = null;
-  @state() private busy = false;
-
-  @state() private form = this.emptyForm();
-  @state() private formError: string | null = null;
+  /** Per-row delete error. Cleared on refresh. */
+  @state() private deleteError: Record<string, string> = {};
+  /** Dialog state. `editTarget` null = create flow; non-null = edit
+   *  flow. v2-C replaced the route-based create page (`#/skills/new`)
+   *  with this dialog to match the prototype layout. */
+  @state() private dialogOpen = false;
+  @state() private editTarget: SkillSummary | null = null;
+  /** Active deletion target — drives the rm-confirm-dialog open state. */
+  @state() private deleteTarget: SkillSummary | null = null;
+  @state() private deleteInFlight = false;
 
   private readonly api = getApiClient();
   private readonly onHashChange = (): void => this.syncFromHash();
@@ -67,32 +85,34 @@ export class SkillsPage extends LitElement {
     window.removeEventListener('hashchange', this.onHashChange);
   }
 
-  private emptyForm(): { name: string; skillMd: string } {
-    return {
-      name: '',
-      skillMd:
-        '---\n' +
-        'name: \n' +
-        'description: \n' +
-        '---\n' +
-        '# Workflow\n',
-    };
-  }
-
   private syncFromHash(): void {
     const { mode, skillId } = parseHash(location.hash);
     const switched =
       !this.synced || this.mode !== mode || this.skillId !== skillId;
     this.synced = true;
+    // mode='new' from the URL is a legacy path — bounce it to the
+    // list and open the dialog instead. Keeps bookmarked `#/skills/new`
+    // links functional without a renderNew() page.
+    if (mode === 'new') {
+      this.mode = 'list';
+      this.skillId = null;
+      try {
+        history.replaceState(null, '', `${location.pathname}${location.search}#/manage/skills`);
+      } catch {
+        // happy-dom or sandboxes can refuse cross-path replaceState;
+        // the dialog still opens, just with a stale URL.
+      }
+      this.dialogOpen = true;
+      this.editTarget = null;
+      void this.refreshList();
+      return;
+    }
     this.mode = mode;
     this.skillId = skillId;
     if (!switched) return;
     this.listError = null;
-    this.formError = null;
     if (mode === 'list') {
       void this.refreshList();
-    } else if (mode === 'new') {
-      this.form = this.emptyForm();
     }
   }
 
@@ -104,6 +124,7 @@ export class SkillsPage extends LitElement {
   private async refreshList(): Promise<void> {
     this.loading = true;
     this.listError = null;
+    this.deleteError = {};
     try {
       this.rows = await this.api.listSkills();
     } catch (err) {
@@ -114,27 +135,46 @@ export class SkillsPage extends LitElement {
     }
   }
 
-  private async submitNew(): Promise<void> {
-    const { name, skillMd } = this.form;
-    if (!name.trim()) {
-      this.formError = 'Name is required.';
-      return;
-    }
-    this.busy = true;
-    this.formError = null;
-    const body: SkillCreate = {
-      name: name.trim(),
-      // openapi-typescript marks fields with a `default` as required.
-      enabled: true,
-      files: { [SKILL_MANIFEST_NAME]: skillMd },
-    };
+  private editSkill(row: SkillSummary): void {
+    // Edit reuses the unified <rm-skill-dialog>. The dialog fetches
+    // the full Skill (with file contents) on open via api.getSkill.
+    // Legacy bookmark links to `#/manage/skills/<id>` still resolve
+    // to <rm-skill-detail-page> (advanced multi-file editor).
+    this.editTarget = row;
+    this.dialogOpen = true;
+  }
+
+  private openCreateDialog(): void {
+    this.editTarget = null;
+    this.dialogOpen = true;
+  }
+
+  private askDelete(row: SkillSummary): void {
+    this.deleteTarget = row;
+  }
+
+  private cancelDelete = (): void => {
+    if (this.deleteInFlight) return;
+    this.deleteTarget = null;
+  };
+
+  private async performDelete(): Promise<void> {
+    const row = this.deleteTarget;
+    if (!row || this.deleteInFlight) return;
+    this.deleteInFlight = true;
+    this.deleteError = { ...this.deleteError, [row.id]: '' };
     try {
-      const created = await this.api.createSkill(body);
-      location.hash = `#/skills/${created.id}`;
+      await this.api.deleteSkill(row.id);
+      this.deleteTarget = null;
+      await this.refreshList();
     } catch (err) {
-      this.formError = this.errMessage(err);
+      this.deleteError = {
+        ...this.deleteError,
+        [row.id]: this.errMessage(err),
+      };
+      this.deleteTarget = null;
     } finally {
-      this.busy = false;
+      this.deleteInFlight = false;
     }
   }
 
@@ -142,172 +182,145 @@ export class SkillsPage extends LitElement {
     if (this.mode === 'detail' && this.skillId) {
       return html`<rm-skill-detail-page skill-id=${this.skillId}></rm-skill-detail-page>`;
     }
-    if (this.mode === 'new') return this.renderNew();
     return this.renderList();
   }
 
   private renderList() {
     return html`
-      <div class="h-full w-full overflow-y-auto px-6 py-6">
-        <div class="max-w-3xl mx-auto">
-          <div class="flex items-baseline justify-between mb-4">
-            <div>
-              <h1 class="text-[20px] font-semibold text-ink-0 dark:text-d-ink-0">
-                Skills
-              </h1>
-              <p class="text-[13px] text-ink-3 dark:text-d-ink-3 mt-0.5">
-                Tenant-wide catalog. Bind a skill to a coworker on the
-                coworker detail page.
-              </p>
-            </div>
-            <a
-              href="#/skills/new"
-              class="text-[12px] px-3 py-1.5 rounded-md bg-brand text-white
-                hover:bg-brand-dark transition-colors"
-            >+ New skill</a>
-          </div>
-
-          ${this.loading
-            ? html`<div class="text-[13px] text-ink-3 dark:text-d-ink-3">Loading…</div>`
-            : this.listError
-              ? html`<div
-                  class="border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20
-                    text-red-700 dark:text-red-300 text-[13px] px-3 py-2 rounded-lg"
-                >${this.listError}</div>`
-              : this.rows.length === 0
-                ? this.renderListEmpty()
-                : this.renderRows()}
+      <div class="rm-spane">
+        <div class="rm-ch">
+          <h2>Skills</h2>
+          <button
+            type="button"
+            class="rm-add"
+            @click=${this.openCreateDialog}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M12 5v14M5 12h14"/>
+            </svg>
+            New skill
+          </button>
         </div>
+        <p class="rm-sub">
+          Tenant-wide catalog. Bind a skill to a coworker on the
+          coworker detail page.
+        </p>
+
+        ${this.loading
+          ? html`<div class="rm-banner-loading">Loading…</div>`
+          : this.listError
+            ? html`<div class="rm-banner-err">${this.listError}</div>`
+            : this.rows.length === 0
+              ? this.renderListEmpty()
+              : this.renderRows()}
+
+        <rm-skill-dialog
+          ?open=${this.dialogOpen}
+          .editing=${this.editTarget}
+          @close=${() => {
+            this.dialogOpen = false;
+            this.editTarget = null;
+          }}
+          @skill-created=${() => { void this.refreshList(); }}
+          @skill-updated=${() => { void this.refreshList(); }}
+        ></rm-skill-dialog>
+        ${this.renderDeleteDialog()}
       </div>
+    `;
+  }
+
+  private renderDeleteDialog() {
+    const target = this.deleteTarget;
+    const bindCount = target?.bound_coworker_count ?? 0;
+    const blocked = bindCount > 0;
+    return html`
+      <rm-confirm-dialog
+        title=${target ? `Delete skill "${target.name}"?` : 'Delete skill?'}
+        ?open=${target !== null}
+        tone="danger"
+        confirm-label="Delete"
+        busy-label="Deleting…"
+        ?busy=${this.deleteInFlight}
+        ?disable-confirm=${blocked}
+        data-testid="confirm-delete-dialog"
+        @cancel=${this.cancelDelete}
+        @confirm=${() => void this.performDelete()}
+      >
+        ${blocked
+          ? html`<p style="margin: 0;">
+              This skill is bound to ${bindCount}
+              coworker${bindCount === 1 ? '' : 's'}. Unbind it from
+              ${bindCount === 1 ? 'that coworker' : 'each one'} before
+              deleting.
+            </p>`
+          : html`<p style="margin: 0;">This cannot be undone.</p>`}
+      </rm-confirm-dialog>
     `;
   }
 
   private renderListEmpty() {
     return html`
-      <div
-        class="border border-dashed border-surface-3 dark:border-d-surface-3
-          rounded-xl px-6 py-10 text-center text-[13px] text-ink-2 dark:text-d-ink-2"
-      >
-        <p class="mb-1.5 font-medium text-ink-1 dark:text-d-ink-1">
-          No skills yet
-        </p>
-        <p class="leading-relaxed">
-          Click <strong>+ New skill</strong> to create your first one.
-        </p>
+      <div class="rm-empty">
+        <span class="rm-empty-title">No skills yet</span>
+        Click <b>+ New skill</b> above to create your first one.
       </div>
     `;
   }
 
   private renderRows() {
     return html`
-      <ul class="divide-y divide-surface-3 dark:divide-d-surface-3 border border-surface-3 dark:border-d-surface-3 rounded-xl overflow-hidden">
-        ${this.rows.map((r) => html`
-          <li>
-            <a
-              href=${`#/skills/${encodeURIComponent(r.id)}`}
-              class="block px-4 py-3 hover:bg-surface-2 dark:hover:bg-d-surface-2"
-            >
-              <div class="flex items-baseline gap-2">
-                <div class="text-[14px] font-medium text-ink-0 dark:text-d-ink-0 truncate">
-                  ${r.name}
-                </div>
-                ${r.enabled
-                  ? nothing
-                  : html`<span class="text-[10.5px] uppercase tracking-wide
-                      px-1.5 py-0.5 rounded bg-surface-3 dark:bg-d-surface-3
-                      text-ink-3 dark:text-d-ink-3">disabled</span>`}
-                <span class="text-[11.5px] text-ink-3 dark:text-d-ink-3 ml-auto">
-                  ${r.bound_coworker_count} coworker(s)
-                </span>
-              </div>
-              ${r.description
-                ? html`<div class="text-[12px] text-ink-2 dark:text-d-ink-2 mt-0.5 truncate">
-                    ${r.description}
-                  </div>`
-                : nothing}
-            </a>
-          </li>
-        `)}
-      </ul>
+      ${this.rows.map((r) => {
+        const delErr = this.deleteError[r.id] || '';
+        const initial = (r.name?.[0] ?? '?').toUpperCase();
+        return html`
+          <div
+            class="rm-card"
+            data-skill-id=${r.id}
+            style="cursor: pointer;"
+            role="link"
+            tabindex="0"
+            @click=${() => this.editSkill(r)}
+          >
+            <span class="rm-ic">${initial}</span>
+            <span class="rm-mn">
+              <b>${r.name}</b>
+              <span>${r.description ?? '—'}</span>
+            </span>
+            <span class="rm-meta"
+              >${r.bound_coworker_count} coworker${r.bound_coworker_count === 1 ? '' : 's'}</span>
+            ${r.enabled
+              ? nothing
+              : html`<span class="rm-pill rm-pill-off">disabled</span>`}
+            <span class="rm-row-acts">
+              <button
+                type="button"
+                class="rm-iconbtn"
+                title="Edit skill"
+                data-testid="skill-edit"
+                @click=${(e: Event) => {
+                  e.stopPropagation();
+                  this.editSkill(r);
+                }}
+              >${iconPencil(15)}</button>
+              <button
+                type="button"
+                class="rm-iconbtn rm-iconbtn--danger"
+                title="Delete skill"
+                data-testid="skill-delete"
+                @click=${(e: Event) => {
+                  e.stopPropagation();
+                  this.askDelete(r);
+                }}
+              >${iconTrash(15)}</button>
+            </span>
+            ${delErr
+              ? html`<div class="rm-row-error">${delErr}</div>`
+              : nothing}
+          </div>
+        `;
+      })}
     `;
   }
 
-  private renderNew() {
-    return html`
-      <div class="h-full w-full overflow-y-auto px-6 py-6">
-        <div class="max-w-2xl mx-auto">
-          <div class="flex items-baseline justify-between mb-4">
-            <h1 class="text-[20px] font-semibold text-ink-0 dark:text-d-ink-0">
-              New skill
-            </h1>
-            <a
-              href="#/skills"
-              class="text-[12px] text-ink-3 dark:text-d-ink-3 hover:underline"
-            >Cancel</a>
-          </div>
-
-          <label class="block text-[12px] text-ink-2 dark:text-d-ink-2 mb-3">
-            <span class="block mb-1">Name</span>
-            <input
-              type="text"
-              class="w-full text-[13px] px-3 py-1.5 rounded-md border border-surface-3 dark:border-d-surface-3
-                bg-surface-1 dark:bg-d-surface-1"
-              placeholder="e.g. code-review"
-              .value=${this.form.name}
-              @input=${(e: Event) =>
-                (this.form = {
-                  ...this.form,
-                  name: (e.target as HTMLInputElement).value,
-                })}
-            />
-            <span class="text-[11px] text-ink-3 dark:text-d-ink-3 block mt-1">
-              Letters / digits / underscore / hyphen; must start with a
-              letter; up to 64 characters.
-            </span>
-          </label>
-
-          <label class="block text-[12px] text-ink-2 dark:text-d-ink-2 mb-3">
-            <span class="block mb-1">${SKILL_MANIFEST_NAME}</span>
-            <textarea
-              rows="18"
-              spellcheck="false"
-              class="w-full text-[12.5px] px-3 py-2 rounded-md border border-surface-3 dark:border-d-surface-3
-                bg-surface-1 dark:bg-d-surface-1 font-mono leading-relaxed"
-              .value=${this.form.skillMd}
-              @input=${(e: Event) =>
-                (this.form = {
-                  ...this.form,
-                  skillMd: (e.target as HTMLTextAreaElement).value,
-                })}
-            ></textarea>
-            <span class="text-[11px] text-ink-3 dark:text-d-ink-3 block mt-1">
-              YAML frontmatter required. <strong>description</strong>
-              must be at least 16 characters. Quote any value that
-              looks like a YAML boolean (e.g.
-              <code>name: "on"</code>).
-            </span>
-          </label>
-
-          ${this.formError
-            ? html`<div class="text-[12px] text-red-600 dark:text-red-300 mb-2">${this.formError}</div>`
-            : nothing}
-
-          <div class="flex items-center justify-end gap-2">
-            <a
-              href="#/skills"
-              class="text-[12px] px-3 py-1.5 rounded-md border border-surface-3 dark:border-d-surface-3
-                text-ink-2 dark:text-d-ink-2"
-            >Cancel</a>
-            <button
-              type="button"
-              class="text-[12px] px-3 py-1.5 rounded-md bg-brand text-white hover:bg-brand-dark
-                disabled:opacity-60 disabled:cursor-not-allowed"
-              ?disabled=${this.busy}
-              @click=${() => void this.submitNew()}
-            >Create</button>
-          </div>
-        </div>
-      </div>
-    `;
-  }
 }

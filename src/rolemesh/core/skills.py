@@ -62,11 +62,28 @@ _BACKEND_KEYS_BY_NAME: dict[str, frozenset[str]] = {
     "pi": PI_FRONTMATTER_KEYS,
 }
 
-DESCRIPTION_MIN_LENGTH = 20
+# Description length bounds. Lower bound of 1 (non-empty) intentionally
+# permissive: the Anthropic Skills spec doesn't impose a minimum, and a
+# strict 20-char floor would surprise users with terse but valid
+# descriptions. The upper bound matches the runtime constraint Claude
+# SDK enforces when injecting the skill index into the system prompt.
+DESCRIPTION_MIN_LENGTH = 1
 DESCRIPTION_MAX_LENGTH = 1024
 
-# Skill name regex matches the DB CHECK in pg.py — keep them in sync.
-_SKILL_NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,63}$")
+# Skill name regex matches the DB CHECK in schema.py — keep them in sync.
+# Tightened from ``^[a-zA-Z][a-zA-Z0-9_-]{0,63}$`` to lowercase-kebab only
+# because the name is used as a filesystem directory name on the agent
+# side; mixed-case names cause cross-platform path conflicts (macOS vs
+# Linux) and underscores diverge from the Anthropic Skills convention.
+# First char must be alphanumeric: a leading hyphen would let shell
+# tooling misread the directory name as an option flag.
+_SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+
+# Names Claude SDK reserves for itself; agent runtime treats a skill
+# named ``anthropic`` or ``claude`` as a collision with built-in
+# tooling and silently ignores it. Reject at write time so users see a
+# clear error instead of a phantom skill that never loads.
+_RESERVED_SKILL_NAMES: frozenset[str] = frozenset({"anthropic", "claude"})
 
 # Skill file path: positive whitelist. Each path segment must start
 # with [A-Za-z0-9_] and only contain [A-Za-z0-9_.\-]. The DB enforces
@@ -108,7 +125,13 @@ def validate_skill_name(name: str) -> None:
     if not isinstance(name, str) or not _SKILL_NAME_RE.match(name):
         raise SkillValidationError(
             f"invalid skill name {name!r}: must match "
-            r"^[a-zA-Z][a-zA-Z0-9_-]{0,63}$"
+            r"^[a-z0-9][a-z0-9-]{0,63}$ "
+            "(lowercase letters, digits, hyphens; no leading hyphen)"
+        )
+    if name in _RESERVED_SKILL_NAMES:
+        raise SkillValidationError(
+            f"skill name {name!r} is reserved by the Claude runtime; "
+            f"reserved names: {sorted(_RESERVED_SKILL_NAMES)}"
         )
 
 
@@ -129,10 +152,11 @@ def validate_skill_file_path(path: str) -> None:
 def _validate_description(value: object) -> str:
     if not isinstance(value, str):
         raise SkillValidationError("frontmatter 'description' must be a string")
-    if len(value) < DESCRIPTION_MIN_LENGTH:
+    # Non-empty after trim — pure whitespace is meaningless to the
+    # skill index and would surface as a blank tooltip in the UI.
+    if len(value.strip()) < DESCRIPTION_MIN_LENGTH:
         raise SkillValidationError(
-            f"frontmatter 'description' too short ({len(value)} chars); "
-            f"minimum is {DESCRIPTION_MIN_LENGTH}"
+            "frontmatter 'description' must not be empty"
         )
     if len(value) > DESCRIPTION_MAX_LENGTH:
         raise SkillValidationError(

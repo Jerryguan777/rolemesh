@@ -325,6 +325,162 @@ def cleanup_spawn_skills(job_id: str) -> None:
         )
 
 
+async def refresh_skills_for_coworker(
+    coworker: Coworker,
+    *,
+    backend: str,
+) -> int:
+    """Re-materialize the coworker's skills into every active spawn dir.
+
+    Called from the hot-reload subscriber after a ``web.coworker.
+    skills_changed`` event. Without this step, ``materialize_skills_
+    for_spawn`` runs only at container spawn time and any later edit
+    to SKILL.md (or the catalog) leaves stale bytes behind the bind
+    mount — the orchestrator's in-memory state refreshes but the
+    container reads the old file off disk.
+
+    Returns the number of spawn dirs touched. Best-effort: per-dir
+    failures are logged and the loop continues so one broken spawn
+    doesn't starve the others.
+
+    Atomicity: the call delegates to ``_materialize_one_skill`` which
+    builds in a ``.partial/`` subtree and then renames over the live
+    ``<skill_name>/`` dir. Linux rename is atomic, and any file
+    descriptor an agent already holds keeps pointing at the old inode
+    until it closes — so a read in flight sees consistent old content
+    while subsequent opens see new content. Skills that no longer
+    exist in DB get rmtree'd at the end.
+
+    Spawn dir discovery: spawn IDs are formatted ``<coworker.folder>-
+    <uuid_suffix>`` (see container_executor.py). Scanning by prefix
+    is cheap and avoids threading a "live job IDs" registry through
+    the hot-reload path; orphan spawn dirs (container died but dir
+    survived a crash) get redundantly refreshed too but the orphan
+    cleaner sweeps them on the next pass anyway.
+    """
+    if not coworker.folder:
+        return 0
+    if backend not in CONTAINER_TARGETS:
+        raise SkillValidationError(
+            f"unknown backend {backend!r}; "
+            f"must be one of {sorted(CONTAINER_TARGETS)}"
+        )
+    if not SPAWN_ROOT.exists():
+        return 0
+
+    # Fetch DB truth once; all spawn dirs get the same projection.
+    skills = await list_skills_for_coworker(
+        coworker.id,
+        tenant_id=coworker.tenant_id,
+        enabled_only=True,
+        with_files=True,
+    )
+    desired_names = {s.name for s in skills}
+
+    folder_prefix = f"{coworker.folder}-"
+    matching_spawns = [
+        entry for entry in SPAWN_ROOT.iterdir()
+        if entry.is_dir() and entry.name.startswith(folder_prefix)
+    ]
+    updated = 0
+    for spawn_dir in matching_spawns:
+        build_dir = spawn_dir / "skills"
+        if not build_dir.exists():
+            # Spawn dir exists but no skills subtree was projected
+            # (coworker had no skills at spawn time). Materializing
+            # now would require the directory to exist for the bind
+            # mount — but the container's already running with the
+            # old (no-skills) mount, so adding a new skill mid-run
+            # won't help. Skip to avoid creating a phantom dir the
+            # container isn't seeing.
+            continue
+        try:
+            _refresh_skills_in_dir(
+                build_dir=build_dir,
+                skills=skills,
+                desired_names=desired_names,
+                backend=backend,
+            )
+            updated += 1
+        except Exception:
+            logger.exception(
+                "Failed to refresh skills in spawn dir",
+                spawn=str(spawn_dir),
+                coworker_id=coworker.id,
+            )
+    if updated:
+        logger.info(
+            "Skills hot-reloaded to spawn dirs",
+            coworker_id=coworker.id,
+            updated_spawns=updated,
+            skill_count=len(skills),
+        )
+    return updated
+
+
+def _refresh_skills_in_dir(
+    *,
+    build_dir: Path,
+    skills: list[Skill],
+    desired_names: set[str],
+    backend: str,
+) -> None:
+    """Refresh one spawn's skills subtree in place.
+
+    Pattern mirrors ``materialize_skills_for_spawn`` but skips the
+    initial ``shutil.rmtree(build_dir)`` so the bind-mounted target
+    inode is preserved; we only mutate contents within it.
+    """
+    partial_root = build_dir / ".partial"
+    # A leftover .partial from a previous aborted refresh would
+    # collide with _materialize_one_skill's exist_ok=False mkdir;
+    # clean it before starting.
+    if partial_root.exists():
+        shutil.rmtree(partial_root)
+    partial_root.mkdir(parents=True)
+    for skill in skills:
+        _materialize_one_skill(skill, backend, partial_root, build_dir)
+    # Drop the partial scratch dir; it should be empty after all
+    # skill renames succeeded.
+    try:
+        partial_root.rmdir()
+    except OSError:
+        logger.warning(
+            "refresh: .partial dir not empty after projection",
+            build_dir=str(build_dir),
+        )
+
+    # Sweep skills that are on disk but no longer in DB. Without
+    # this, deleting a skill from the catalog (or disabling it for
+    # the coworker) leaves it readable by the running agent — and
+    # the agent might still include it in its action plan because
+    # the file exists.
+    for entry in list(build_dir.iterdir()):
+        if entry.name == ".partial":
+            continue
+        if entry.name in desired_names:
+            continue
+        if entry.is_symlink():
+            # Same defensive posture as elsewhere — never auto-follow
+            # or auto-unlink a symlink in the spawn tree.
+            logger.warning(
+                "refresh: refusing to remove symlink entry",
+                path=str(entry),
+            )
+            continue
+        try:
+            if entry.is_dir():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+        except OSError as exc:
+            logger.warning(
+                "refresh: failed to remove stale skill entry",
+                path=str(entry),
+                error=str(exc),
+            )
+
+
 def cleanup_orphan_spawns(active_job_ids: set[str]) -> int:
     """Sweep build dirs whose job_id is not in ``active_job_ids``.
 

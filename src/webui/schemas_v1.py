@@ -3,7 +3,7 @@
 Kept separate from ``webui.schemas`` (which serves the legacy
 ``/api/admin`` surface) so the two contracts evolve independently.
 
-The shapes here MUST stay in sync with ``web/openapi.yaml``. The
+The shapes here MUST stay in sync with ``contracts/openapi.yaml``. The
 freshness CI (``tests/test_openapi_codegen_freshness.py``) catches
 yaml/ts drift; ``tests/test_openapi_contract.py`` catches drift
 between this Python contract and the yaml.
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 BackendName = Literal["claude", "pi"]
 ModelProvider = Literal["anthropic", "bedrock", "openai", "google"]
@@ -33,7 +33,7 @@ UserRole = Literal["owner", "admin", "member"]
 class ErrorResponse(BaseModel):
     """Design §13 — uniform error envelope.
 
-    The shape is anchored against ``web/openapi.yaml`` by
+    The shape is anchored against ``contracts/openapi.yaml`` by
     :func:`tests.test_openapi_contract.test_error_response_shape_matches_pydantic_model`.
     """
 
@@ -435,7 +435,14 @@ class CoworkerMCPBindingUpdate(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-_SKILL_NAME_PATTERN_V1 = r"^[a-zA-Z][a-zA-Z0-9_-]{0,63}$"
+# Lowercase-kebab to match the DB CHECK and the runtime requirement
+# that skill names be safe to use as filesystem directory names on the
+# agent side.
+_SKILL_NAME_PATTERN_V1 = r"^[a-z0-9][a-z0-9-]{0,63}$"
+
+# Names the Claude runtime treats as built-in; surface as a Pydantic
+# error so the wire boundary rejects them before they hit the DB.
+_RESERVED_SKILL_NAMES_V1: frozenset[str] = frozenset({"anthropic", "claude"})
 
 
 class SkillFile(BaseModel):
@@ -534,20 +541,43 @@ class SkillCreate(BaseModel):
     frontmatter_common: dict[str, object] | None = None
     frontmatter_backend: dict[str, dict[str, object]] | None = None
 
+    @field_validator("name")
+    @classmethod
+    def _check_not_reserved(cls, v: str) -> str:
+        if v in _RESERVED_SKILL_NAMES_V1:
+            raise ValueError(
+                f"skill name {v!r} is reserved by the Claude runtime"
+            )
+        return v
+
 
 class SkillUpdate(BaseModel):
     """``PATCH /api/v1/skills/{id}`` body.
 
-    Metadata-only — file content edits route through the per-file
-    endpoints. ``model_fields_set`` discriminates "field omitted"
-    from "field explicitly set to None" so ``frontmatter_backend: {}``
-    clears the dict rather than silently leaving the existing one
-    in place.
+    Two modes:
+    * Metadata-only — set ``enabled`` or one of the frontmatter dicts.
+    * Full file-set replacement — set ``files`` and the handler swaps
+      the entire ``skill_files`` map atomically (matching the create
+      path's semantics). Useful for the dialog's edit flow where the
+      user has edited SKILL.md body + added / removed extras and the
+      one-shot replace is simpler than diffing client-side.
+
+    ``model_fields_set`` discriminates "field omitted" from "field
+    explicitly set to None" so ``frontmatter_backend: {}`` clears the
+    dict rather than silently leaving the existing one in place.
+
+    ``name`` is intentionally NOT updatable: it's also a filesystem
+    directory on the agent side and the catalog UNIQUE (tenant_id,
+    name) constraint would make rename a multi-step migration. The
+    edit dialog disables the input; if a caller sends ``name``
+    anyway, the handler rejects unless it matches the existing value.
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    name: str | None = None
     enabled: bool | None = None
+    files: dict[str, SkillCreateFile] | None = None
     frontmatter_common: dict[str, object] | None = None
     frontmatter_backend: dict[str, dict[str, object]] | None = None
 
@@ -879,3 +909,216 @@ class SafetyRuleAuditEntry(BaseModel):
     before_state: dict[str, object] | None = None
     after_state: dict[str, object] | None = None
     created_at: str
+
+
+# ---------------------------------------------------------------------------
+# WebSocket frame models (PR23 — contracts/openapi.yaml WsServerEvent /
+# WsClientFrame). Discriminated on the literal ``type`` field; Pydantic
+# narrows the union member from that one tag.
+#
+# These Pydantic models are NOT used to serialize outbound frames on
+# the hot path (``ws_stream.py`` still emits plain dicts because the
+# control flow is simpler that way). They exist for:
+#   1. Contract drift validation — the test suite parses the yaml,
+#      finds these models, and asserts the field shape matches.
+#   2. Documentation — the wire shape lives in one importable place
+#      that an unfamiliar contributor can grep for.
+#   3. Future hot-path use — when ws_stream.py grows enough that
+#      "construct frame as Pydantic, .model_dump_json()" beats the
+#      current dict-literal approach, the models are ready.
+# ---------------------------------------------------------------------------
+
+
+class WsServerEventRunStarted(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.run.started"]
+    run_id: str
+    idempotent: bool
+
+
+class WsServerEventRunToken(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.run.token"]
+    run_id: str
+    delta: str
+
+
+class WsServerEventRunCompleted(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.run.completed"]
+    run_id: str
+
+
+class WsServerEventRunError(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.run.error"]
+    run_id: str | None = None
+    code: str
+    message: str
+    details: dict[str, object] | None = None
+
+
+class WsServerEventApprovalRequired(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.approval.required"]
+    approval_id: str
+    run_id: str | None = None
+    summary: dict[str, object]
+
+
+class WsServerEventApprovalResolved(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.approval.resolved"]
+    approval_id: str
+    decision: Literal["approve", "deny", "expired", "cancelled"]
+    actor_user_id: str | None = None
+    note: str | None = None
+
+
+# Tagged union over ``type``. Pydantic v2's Field discriminator picks
+# the right member based on the literal value, giving validation
+# errors that name the offending field (rather than the generic
+# "doesn't match any variant" you'd get without it).
+WsServerEventModel = (
+    WsServerEventRunStarted
+    | WsServerEventRunToken
+    | WsServerEventRunCompleted
+    | WsServerEventRunError
+    | WsServerEventApprovalRequired
+    | WsServerEventApprovalResolved
+)
+
+
+class WsClientFrameRequestRun(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["request.run"]
+    input: str
+    idempotency_key: str
+
+
+class WsClientFrameRequestCancel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["request.cancel"]
+    run_id: str
+
+
+class WsClientFrameRequestApproval(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["request.approval"]
+    approval_id: str
+    decision: Literal["approve", "deny"]
+    note: str | None = None
+
+
+WsClientFrameModel = (
+    WsClientFrameRequestRun
+    | WsClientFrameRequestCancel
+    | WsClientFrameRequestApproval
+)
+
+
+# ---------------------------------------------------------------------------
+# Scheduled tasks (PR24). Read-only surface over the existing
+# ``scheduled_tasks`` table — the orchestrator owns creation /
+# mutation (cron-style triggers fire from inside the agent process);
+# the UI just needs to render "what's scheduled".
+# ---------------------------------------------------------------------------
+
+
+ScheduleType = Literal["cron", "interval", "once"]
+ScheduleStatus = Literal["active", "paused", "completed"]
+ScheduleContextMode = Literal["group", "isolated"]
+
+
+class ScheduledTask(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    tenant_id: str
+    coworker_id: str
+    conversation_id: str | None = None
+    prompt: str
+    schedule_type: ScheduleType
+    schedule_value: str
+    context_mode: ScheduleContextMode
+    next_run: str | None = None
+    last_run: str | None = None
+    last_result: str | None = None
+    status: ScheduleStatus
+    created_at: str
+
+
+# ---------------------------------------------------------------------------
+# Channel bindings (PR24). Migrated from /api/admin/agents/{id}/bindings
+# to /api/v1/coworkers/{id}/bindings — the underlying DB table +
+# helpers already exist in rolemesh.db.chat.
+# ---------------------------------------------------------------------------
+
+
+ChannelTypeName = Literal["slack", "telegram", "web"]
+
+
+class ChannelBinding(BaseModel):
+    """Wire projection of a ``channel_bindings`` row.
+
+    ``credentials`` is intentionally NOT exposed on the GET path —
+    they're write-only from the wire (PUT/POST/PATCH only). The
+    response shape mirrors what's safe to ship back: identity +
+    display name + status, never the tokens.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    coworker_id: str
+    tenant_id: str
+    channel_type: ChannelTypeName
+    bot_display_name: str | None = None
+    status: str
+    created_at: str | None = None
+
+
+class ChannelBindingCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    channel_type: ChannelTypeName
+    credentials: dict[str, str]
+    bot_display_name: str | None = None
+
+
+class ChannelBindingUpdate(BaseModel):
+    """Partial update. Omit any field to leave it unchanged.
+
+    ``credentials`` semantics: when present (even as ``{}``) it
+    REPLACES the entire credentials map. Merge-by-key would let a
+    typo'd key silently coexist with a stale value.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    credentials: dict[str, str] | None = None
+    bot_display_name: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Admin model writes (PR24). The /api/v1/models GET path stays
+# tenant-readable; the /api/v1/admin/models writes require role check
+# at the handler layer.
+# ---------------------------------------------------------------------------
+
+
+class ModelCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: ModelProvider
+    model_id: str = Field(min_length=1, max_length=200)
+    model_family: ModelFamily
+    display_name: str = Field(min_length=1, max_length=200)
+    is_active: bool = True
+
+
+class ModelUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    display_name: str | None = Field(default=None, min_length=1, max_length=200)
+    is_active: bool | None = None
