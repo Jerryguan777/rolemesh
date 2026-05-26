@@ -247,7 +247,7 @@ export class MCPServersPage extends LitElement {
     const target = this.deleteTarget;
     return html`
       <rm-confirm-dialog
-        title="Delete MCP server?"
+        title=${target ? `Delete MCP server "${target.name}"?` : 'Delete MCP server?'}
         ?open=${target !== null}
         tone="danger"
         confirm-label="Delete"
@@ -257,17 +257,10 @@ export class MCPServersPage extends LitElement {
         @cancel=${this.cancelDelete}
         @confirm=${() => void this.performDelete()}
       >
-        ${target
-          ? html`
-              <p style="margin: 0 0 12px;">
-                Delete MCP server <strong>${target.name}</strong>?
-              </p>
-              <p style="margin: 0; color: var(--rm-ink-2); font-size: var(--rm-text-sm);">
-                Coworkers bound to this server will lose access to
-                its tools. Cannot be undone.
-              </p>
-            `
-          : nothing}
+        <p style="margin: 0;">
+          Coworkers bound to this server will lose access to its
+          tools. Cannot be undone.
+        </p>
       </rm-confirm-dialog>
     `;
   }

@@ -235,7 +235,7 @@ export class SkillsPage extends LitElement {
     const bindCount = target?.bound_coworker_count ?? 0;
     return html`
       <rm-confirm-dialog
-        title="Delete skill?"
+        title=${target ? `Delete skill "${target.name}"?` : 'Delete skill?'}
         ?open=${target !== null}
         tone="danger"
         confirm-label="Delete"
@@ -245,19 +245,12 @@ export class SkillsPage extends LitElement {
         @cancel=${this.cancelDelete}
         @confirm=${() => void this.performDelete()}
       >
-        ${target
-          ? html`
-              <p style="margin: 0 0 12px;">
-                Delete skill <strong>${target.name}</strong>?
-              </p>
-              <p style="margin: 0; color: var(--rm-ink-2); font-size: var(--rm-text-sm);">
-                ${bindCount > 0
-                  ? html`${bindCount} coworker(s) currently bind this
-                    skill and will lose access. `
-                  : nothing}Cannot be undone.
-              </p>
-            `
-          : nothing}
+        <p style="margin: 0;">
+          ${bindCount > 0
+            ? html`${bindCount} coworker(s) currently bind this skill
+              and will lose access. `
+            : nothing}Cannot be undone.
+        </p>
       </rm-confirm-dialog>
     `;
   }

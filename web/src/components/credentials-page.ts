@@ -180,9 +180,16 @@ export class CredentialsPage extends LitElement {
 
   private renderDeleteDialog() {
     const target = this.deleteTarget;
+    // Provider strings are lowercased enums ("anthropic", "openai"…).
+    // Capitalize for the title so it reads as a proper noun.
+    const providerLabel = target
+      ? target.charAt(0).toUpperCase() + target.slice(1)
+      : '';
     return html`
       <rm-confirm-dialog
-        title="Delete credential?"
+        title=${target
+          ? `Delete ${providerLabel} credential?`
+          : 'Delete credential?'}
         ?open=${target !== null}
         tone="danger"
         confirm-label="Delete"
@@ -192,19 +199,10 @@ export class CredentialsPage extends LitElement {
         @cancel=${this.cancelDelete}
         @confirm=${() => void this.performDelete()}
       >
-        ${target
-          ? html`
-              <p style="margin: 0 0 12px;">
-                Delete the
-                <strong style="text-transform: capitalize;">${target}</strong>
-                credential?
-              </p>
-              <p style="margin: 0; color: var(--rm-ink-2); font-size: var(--rm-text-sm);">
-                Models from this provider will stop running for every
-                coworker until a new credential is set. Cannot be undone.
-              </p>
-            `
-          : nothing}
+        <p style="margin: 0;">
+          Models from this provider will stop running for every
+          coworker until a new credential is set. Cannot be undone.
+        </p>
       </rm-confirm-dialog>
     `;
   }

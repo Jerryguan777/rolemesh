@@ -270,7 +270,7 @@ export class SkillDetailPage extends LitElement {
   private renderConfirmDialogs(s: Skill) {
     return html`
       <rm-confirm-dialog
-        title="Delete skill?"
+        title=${`Delete skill "${s.name}"?`}
         ?open=${this.deleteSkillOpen}
         tone="danger"
         confirm-label="Delete"
@@ -280,15 +280,12 @@ export class SkillDetailPage extends LitElement {
         @cancel=${this.cancelDeleteSkill}
         @confirm=${() => void this.performDeleteSkill()}
       >
-        <p style="margin: 0 0 12px;">
-          Delete skill <strong>${s.name}</strong>?
-        </p>
-        <p style="margin: 0; color: var(--rm-ink-2); font-size: var(--rm-text-sm);">
-          This cannot be undone.
-        </p>
+        <p style="margin: 0;">This cannot be undone.</p>
       </rm-confirm-dialog>
       <rm-confirm-dialog
-        title="Delete file?"
+        title=${this.deleteFilePath
+          ? `Delete file "${this.deleteFilePath}"?`
+          : 'Delete file?'}
         ?open=${this.deleteFilePath !== null}
         tone="danger"
         confirm-label="Delete"
@@ -298,14 +295,7 @@ export class SkillDetailPage extends LitElement {
         @cancel=${this.cancelDeleteFile}
         @confirm=${() => void this.performDeleteFile()}
       >
-        ${this.deleteFilePath
-          ? html`
-              <p style="margin: 0;">
-                Delete file
-                <strong>${this.deleteFilePath}</strong>?
-              </p>
-            `
-          : nothing}
+        <p style="margin: 0;">This cannot be undone.</p>
       </rm-confirm-dialog>
     `;
   }

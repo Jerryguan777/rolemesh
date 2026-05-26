@@ -202,7 +202,7 @@ export class CoworkersPage extends LitElement {
     const target = this.deleteTarget;
     return html`
       <rm-confirm-dialog
-        title="Delete coworker?"
+        title=${target ? `Delete coworker "${target.name}"?` : 'Delete coworker?'}
         ?open=${target !== null}
         tone="danger"
         confirm-label="Delete"
@@ -212,18 +212,11 @@ export class CoworkersPage extends LitElement {
         @cancel=${this.cancelDelete}
         @confirm=${() => void this.performDelete()}
       >
-        ${target
-          ? html`
-              <p style="margin: 0 0 12px;">
-                Delete coworker <strong>${target.name}</strong>?
-              </p>
-              <p style="margin: 0; color: var(--rm-ink-2); font-size: var(--rm-text-sm);">
-                This also drops every conversation, run, and message
-                the coworker has on file (cascaded by the database).
-                Cannot be undone.
-              </p>
-            `
-          : nothing}
+        <p style="margin: 0;">
+          This also drops every conversation, run, and message the
+          coworker has on file (cascaded by the database). Cannot be
+          undone.
+        </p>
       </rm-confirm-dialog>
     `;
   }
