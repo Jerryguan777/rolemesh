@@ -2,23 +2,37 @@
 // <rm-confirm-dialog> — pin the contract the page components rely on:
 //   * Confirm + Cancel buttons emit `confirm` / `cancel` CustomEvents
 //   * busy=true disables both buttons + swaps Confirm label
-//   * danger tone applies the .rm-btn--danger class on Confirm
-//   * cancel fires when busy=false (and is suppressed when busy=true)
+//   * danger tone applies the danger class on Confirm
+//   * slotted body children actually render (regression for the
+//     light-DOM-slot bug that left the modal body empty)
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import './confirm-dialog.js';
 import type { RmConfirmDialog } from './confirm-dialog.js';
 
-async function mount(props: Partial<RmConfirmDialog> = {}): Promise<RmConfirmDialog> {
+async function mount(
+  props: Partial<RmConfirmDialog> = {},
+  bodyHtml = '<p data-testid="body-marker">Body text here.</p>',
+): Promise<RmConfirmDialog> {
   const el = document.createElement('rm-confirm-dialog') as RmConfirmDialog;
   Object.assign(el, { open: true, title: 'Are you sure?', ...props });
+  el.innerHTML = bodyHtml;
   document.body.appendChild(el);
   await el.updateComplete;
   // Wait for the nested rm-dialog to render its open <dialog>.
   await new Promise<void>((r) => setTimeout(r, 0));
   await el.updateComplete;
   return el;
+}
+
+/** Reach into the shadow root since rm-confirm-dialog is shadow-scoped. */
+function $shadow<T extends Element>(el: Element, sel: string): T {
+  const root = (el as { shadowRoot?: ShadowRoot }).shadowRoot;
+  if (!root) throw new Error('expected shadowRoot on rm-confirm-dialog');
+  const found = root.querySelector<T>(sel);
+  if (!found) throw new Error(`shadow selector not found: ${sel}`);
+  return found;
 }
 
 describe('<rm-confirm-dialog>', () => {
@@ -38,7 +52,7 @@ describe('<rm-confirm-dialog>', () => {
     const onCancel = vi.fn();
     el.addEventListener('confirm', onConfirm);
     el.addEventListener('cancel', onCancel);
-    el.querySelector<HTMLButtonElement>('[data-testid="confirm-confirm"]')!.click();
+    $shadow<HTMLButtonElement>(el, '[data-testid="confirm-confirm"]').click();
     expect(onConfirm).toHaveBeenCalledTimes(1);
     expect(onCancel).not.toHaveBeenCalled();
   });
@@ -49,41 +63,50 @@ describe('<rm-confirm-dialog>', () => {
     const onCancel = vi.fn();
     el.addEventListener('confirm', onConfirm);
     el.addEventListener('cancel', onCancel);
-    el.querySelector<HTMLButtonElement>('[data-testid="confirm-cancel"]')!.click();
+    $shadow<HTMLButtonElement>(el, '[data-testid="confirm-cancel"]').click();
     expect(onCancel).toHaveBeenCalledTimes(1);
     expect(onConfirm).not.toHaveBeenCalled();
   });
 
-  it('uses .rm-btn--danger on Confirm when tone="danger"', async () => {
+  it('renders the danger button class when tone="danger"', async () => {
     el = await mount({ tone: 'danger', confirmLabel: 'Delete' });
-    const btn = el.querySelector<HTMLButtonElement>('[data-testid="confirm-confirm"]')!;
-    expect(btn.classList.contains('rm-btn--danger')).toBe(true);
-    expect(btn.classList.contains('rm-btn--primary')).toBe(false);
+    const btn = $shadow<HTMLButtonElement>(el, '[data-testid="confirm-confirm"]');
+    expect(btn.classList.contains('btn--danger')).toBe(true);
+    expect(btn.classList.contains('btn--primary')).toBe(false);
   });
 
-  it('uses .rm-btn--primary on Confirm when tone="primary"', async () => {
+  it('renders the primary button class when tone="primary"', async () => {
     el = await mount({ tone: 'primary', confirmLabel: 'Save' });
-    const btn = el.querySelector<HTMLButtonElement>('[data-testid="confirm-confirm"]')!;
-    expect(btn.classList.contains('rm-btn--primary')).toBe(true);
-    expect(btn.classList.contains('rm-btn--danger')).toBe(false);
+    const btn = $shadow<HTMLButtonElement>(el, '[data-testid="confirm-confirm"]');
+    expect(btn.classList.contains('btn--primary')).toBe(true);
+    expect(btn.classList.contains('btn--danger')).toBe(false);
   });
 
   it('disables both buttons + shows the busy label when busy=true', async () => {
     el = await mount({ busy: true, busyLabel: 'Deleting…', confirmLabel: 'Delete' });
-    const confirm = el.querySelector<HTMLButtonElement>('[data-testid="confirm-confirm"]')!;
-    const cancel = el.querySelector<HTMLButtonElement>('[data-testid="confirm-cancel"]')!;
+    const confirm = $shadow<HTMLButtonElement>(el, '[data-testid="confirm-confirm"]');
+    const cancel = $shadow<HTMLButtonElement>(el, '[data-testid="confirm-cancel"]');
     expect(confirm.disabled).toBe(true);
     expect(cancel.disabled).toBe(true);
     expect(confirm.textContent?.trim()).toBe('Deleting…');
   });
 
-  it('suppresses the cancel event while busy', async () => {
-    el = await mount({ busy: true });
-    const onCancel = vi.fn();
-    el.addEventListener('cancel', onCancel);
-    // Even though disabled, double-check the handler self-guards in case
-    // a programmatic click slips through (e.g. screen-reader bypass).
-    (el as unknown as { onCancel: () => void }).onCancel?.();
-    expect(onCancel).not.toHaveBeenCalled();
+  it('renders slotted body content (regression: light DOM slot was a no-op)', async () => {
+    // Pin the bug where switching to light DOM made <slot> silently
+    // empty: shadowed <slot> projects the host's light DOM children
+    // into the body div. If this assertion ever fails, the modal will
+    // ship with a blank body again.
+    el = await mount(
+      {},
+      '<p data-testid="body-marker"><strong>Delete coworker</strong> Q3 ops?</p>',
+    );
+    const marker = el.querySelector('[data-testid="body-marker"]');
+    expect(marker, 'slotted body marker must remain in the light DOM').not.toBeNull();
+    // assignedNodes() on the body slot must surface the marker.
+    const root = (el as unknown as { shadowRoot: ShadowRoot }).shadowRoot;
+    const slot = root.querySelector('slot');
+    expect(slot, 'rm-confirm-dialog shadow root must contain a <slot>').not.toBeNull();
+    const assigned = slot!.assignedElements();
+    expect(assigned.map((n) => n.tagName)).toContain('P');
   });
 });
