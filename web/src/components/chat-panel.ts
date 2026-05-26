@@ -23,6 +23,7 @@ import { customElement, state } from 'lit/decorators.js';
 import { getApiClient, ApiError } from '../api/client.js';
 import type { Conversation, Coworker, Me, Message } from '../api/client.js';
 import { AgentClient } from '../services/agent-client.js';
+import { getStoredToken } from '../services/oidc-auth.js';
 import { V1WsClient, type ServerEvent, type ConnectionStatus } from '../ws/v1_client.js';
 import type { InlineApprovalStatus } from './inline-approval.js';
 import './inline-approval.js';
@@ -229,7 +230,7 @@ export class ChatPanel extends LitElement {
     // v1 client owns streaming / cancel
     this.v1 = new V1WsClient({
       conversationId,
-      getToken: () => sessionStorage.getItem('rm_id_token'),
+      getToken: getStoredToken,
     });
     this.v1Unsubscribers.push(
       this.v1.onEvent('*', (e) => this.handleV1Event(e)),
@@ -237,9 +238,8 @@ export class ChatPanel extends LitElement {
     );
     void this.v1.connect();
 
-    // Legacy client only for Stop. Token re-read from sessionStorage.
-    const token = sessionStorage.getItem('rm_id_token') ?? '';
-    this.stopClient = new AgentClient(this.activeCoworkerId, token);
+    // Legacy client only for Stop. Token comes from oidc-auth storage.
+    this.stopClient = new AgentClient(this.activeCoworkerId, getStoredToken() ?? '');
     this.stopClient.connect(conversationId);
 
     await this.loadMessages(conversationId);

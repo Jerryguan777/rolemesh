@@ -11,6 +11,7 @@
 // `paths` so a yaml change shows up as a type error here.
 
 import type { components, paths } from './generated/types.js';
+import { getStoredToken } from '../services/oidc-auth.js';
 
 export type ApiPaths = paths;
 
@@ -645,7 +646,7 @@ export class ApiClient {
 let _shared: ApiClient | null = null;
 export function getApiClient(): ApiClient {
   if (!_shared) {
-    _shared = new ApiClient('', sessionStorage.getItem('rm_id_token'));
+    _shared = new ApiClient('', getStoredToken());
     // Keep the shared client in lock-step with the OIDC refresh path.
     window.addEventListener('rm-token-refreshed', (e: Event) => {
       const tok = (e as CustomEvent<string>).detail;

@@ -54,6 +54,7 @@ import {
 } from '../services/coworker-label.js';
 import { UserApprovalsClient, type UserApprovalsStatus } from '../ws/user_approvals_client.js';
 import { connectionState } from '../ws/connection-state.js';
+import { clearToken, getStoredToken } from '../services/oidc-auth.js';
 import './chat-panel.js';
 import './reauth-banner.js';
 import './approvals-popover.js';
@@ -271,9 +272,7 @@ export class RmChatShell extends LitElement {
     // unit-test stub.
     if (!this.approvalsClient) {
       this.approvalsClient = new UserApprovalsClient({
-        getToken: () =>
-          sessionStorage.getItem('rm_id_token') ??
-          localStorage.getItem('rm_id_token'),
+        getToken: getStoredToken,
       });
       this.wireApprovalsClient();
     }
@@ -637,8 +636,7 @@ export class RmChatShell extends LitElement {
   };
 
   private logout = () => {
-    sessionStorage.removeItem('rm_id_token');
-    localStorage.removeItem('rm_id_token');
+    clearToken();
     // Hand the auth state machine back the wheel.
     window.dispatchEvent(new CustomEvent('rm-auth-failed'));
   };
