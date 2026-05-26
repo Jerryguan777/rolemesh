@@ -1048,6 +1048,79 @@ export class CoworkerWizard extends LitElement {
     this.draft = { ...this.draft, skillIds: [...set] };
   }
 
+  /** Build a "N bound ▾" expandable row for the Review step's
+   *  Tools and Skills lines. Closed state is identical to the old
+   *  plain text; opening reveals the selected items as a scrollable
+   *  monospace list.
+   *
+   *  - ``selectedIds``: ids the user has checked in the prior step
+   *  - ``available``: full catalog rows (id + display label + optional
+   *    sub-label). The order here drives render order in the open
+   *    state so the visual matches the prior step's check order.
+   *  - ``kind``: 'tool' | 'skill' — drives the leading icon glyph.
+   *
+   *  Zero-bound rows stay as plain text — there's nothing to expand
+   *  and a closed disclosure with an empty body would just be noise. */
+  private renderBoundList(
+    selectedIds: string[],
+    available: Array<{ id: string; label: string; sublabel?: string }>,
+    kind: 'tool' | 'skill',
+  ): unknown {
+    const count = selectedIds.length;
+    if (count === 0) {
+      return html`<span class="text-ink-3 dark:text-d-ink-3">None</span>`;
+    }
+    const selectedSet = new Set(selectedIds);
+    const items = available.filter((a) => selectedSet.has(a.id));
+    const glyph = kind === 'tool' ? '🔧' : '📄';
+    return html`
+      <details
+        class="group"
+        data-testid=${`wizard-review-${kind}s`}
+      >
+        <summary
+          class="flex items-center gap-1.5 cursor-pointer select-none
+            text-ink-0 dark:text-d-ink-0 hover:text-brand
+            transition-colors list-none"
+        >
+          <span class="font-medium">${count}</span>
+          <span class="text-ink-3 dark:text-d-ink-3">
+            ${kind === 'tool' ? (count === 1 ? 'tool' : 'tools') : count === 1 ? 'skill' : 'skills'}
+            bound
+          </span>
+          <svg
+            class="w-3.5 h-3.5 text-ink-3 dark:text-d-ink-3
+              transition-transform group-open:rotate-90"
+            viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"
+          >
+            <path d="M7 5l6 5-6 5V5z"/>
+          </svg>
+        </summary>
+        <div
+          class="mt-1.5 ml-1 max-h-44 overflow-y-auto
+            border border-surface-3 dark:border-d-surface-3 rounded-md
+            bg-surface-1 dark:bg-d-surface-1"
+        >
+          <ul class="divide-y divide-surface-3 dark:divide-d-surface-3">
+            ${items.map(
+              (item) => html`
+                <li class="flex items-start gap-2 px-2.5 py-1.5 text-[12.5px]">
+                  <span class="shrink-0 opacity-70" aria-hidden="true">${glyph}</span>
+                  <div class="min-w-0 flex-1">
+                    <div class="font-mono text-ink-0 dark:text-d-ink-0 truncate">${item.label}</div>
+                    ${item.sublabel
+                      ? html`<div class="text-[11.5px] text-ink-3 dark:text-d-ink-3 truncate font-sans">${item.sublabel}</div>`
+                      : nothing}
+                  </div>
+                </li>
+              `,
+            )}
+          </ul>
+        </div>
+      </details>
+    `;
+  }
+
   private renderReview() {
     const backend = this.selectedBackend;
     const model = this.selectedModel;
@@ -1069,8 +1142,26 @@ export class CoworkerWizard extends LitElement {
                 </span>`
             : '—',
         )}
-        ${row('Tools', `${this.draft.mcpServerIds.length} bound`)}
-        ${row('Skills', `${this.draft.skillIds.length} bound`)}
+        ${row(
+          'Tools',
+          this.renderBoundList(
+            this.draft.mcpServerIds,
+            this.mcpServers.map((s) => ({ id: s.id, label: s.name })),
+            'tool',
+          ),
+        )}
+        ${row(
+          'Skills',
+          this.renderBoundList(
+            this.draft.skillIds,
+            this.skills.map((s) => ({
+              id: s.id,
+              label: s.name,
+              sublabel: s.description || undefined,
+            })),
+            'skill',
+          ),
+        )}
         ${row(
           'Instructions',
           this.draft.instructions.trim() === ''

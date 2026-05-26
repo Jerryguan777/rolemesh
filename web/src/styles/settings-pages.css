@@ -291,3 +291,12 @@
   color: var(--rm-ink-3);
   font-size: 13px;
 }
+
+/* Hide the native <details> marker for any <summary> that uses
+ * .list-none (Tailwind's marker-removal utility doesn't reach the
+ * browser-specific pseudo-elements). The coworker wizard's review
+ * step and the skill dialog's Additional-files disclosure both
+ * carry their own chevron via SVG; without these rules the user
+ * sees the SVG plus the native ▶ glyph stacked together. */
+summary.list-none::-webkit-details-marker { display: none; }
+summary.list-none::marker { content: ''; }

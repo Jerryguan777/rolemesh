@@ -645,4 +645,150 @@ describe('<rm-coworker-wizard>', () => {
     // Binding diff: removed MCP got unbound.
     expect(mcpUnbindCalls).toHaveLength(1);
   });
+
+  // -------------------------------------------------------------------
+  // PR33: Review step — expandable Tools / Skills rows
+  // -------------------------------------------------------------------
+
+  it('Review row collapses to "None" when nothing is bound', async () => {
+    fetchStub = installFetch([
+      { match: (u) => u.endsWith('/api/v1/backends'), respond: () => jsonResp(BACKENDS) },
+      { match: (u) => u.startsWith('/api/v1/models'), respond: () => jsonResp(MODELS) },
+      { match: (u) => u === '/api/v1/tenant/credentials', respond: () => jsonResp(CREDS_ANT) },
+      { match: (u) => u === '/api/v1/mcp-servers', respond: () => jsonResp([]) },
+      { match: (u) => u === '/api/v1/skills', respond: () => jsonResp([]) },
+    ]);
+    const el = mount();
+    el.open = true;
+    await settle(el);
+    (el as unknown as { currentStep: number }).currentStep = 5;
+    await settle(el);
+    const wiz = el.querySelector('rm-wizard')!;
+    // Zero-bound rows render as plain "None" — no <details> to expand.
+    expect(wiz.querySelector('[data-testid="wizard-review-tools"]')).toBeNull();
+    expect(wiz.querySelector('[data-testid="wizard-review-skills"]')).toBeNull();
+    // The Review pane still has the row labels.
+    expect(wiz.textContent).toContain('Tools');
+    expect(wiz.textContent).toContain('Skills');
+  });
+
+  it('Review row shows count + reveals selected names when expanded', async () => {
+    const MCP_LIST = [
+      { id: 'mcp-1', name: 'github-mcp', tenant_id: 't', config: {}, created_at: '', updated_at: '' },
+      { id: 'mcp-2', name: 'jira-mcp', tenant_id: 't', config: {}, created_at: '', updated_at: '' },
+      { id: 'mcp-3', name: 'unused-mcp', tenant_id: 't', config: {}, created_at: '', updated_at: '' },
+    ];
+    const SKILL_LIST = [
+      {
+        id: 'sk-1', tenant_id: 't', name: 'code-review',
+        description: 'Reviews diffs', enabled: true,
+        bound_coworker_count: 0, created_at: '', updated_at: '',
+      },
+      {
+        id: 'sk-2', tenant_id: 't', name: 'sql-debug',
+        description: 'Debugs SQL', enabled: true,
+        bound_coworker_count: 0, created_at: '', updated_at: '',
+      },
+    ];
+    fetchStub = installFetch([
+      { match: (u) => u.endsWith('/api/v1/backends'), respond: () => jsonResp(BACKENDS) },
+      { match: (u) => u.startsWith('/api/v1/models'), respond: () => jsonResp(MODELS) },
+      { match: (u) => u === '/api/v1/tenant/credentials', respond: () => jsonResp(CREDS_ANT) },
+      { match: (u) => u === '/api/v1/mcp-servers', respond: () => jsonResp(MCP_LIST) },
+      { match: (u) => u === '/api/v1/skills', respond: () => jsonResp(SKILL_LIST) },
+    ]);
+    const el = mount();
+    el.open = true;
+    await settle(el);
+
+    // Pre-select 2 of 3 MCPs and 1 of 2 skills via draft poke
+    // (driving the full 6-step click flow is what other tests cover).
+    (el as unknown as { draft: Record<string, unknown> }).draft = {
+      ...(el as unknown as { draft: Record<string, unknown> }).draft,
+      mcpServerIds: ['mcp-1', 'mcp-2'],
+      skillIds: ['sk-1'],
+    } as never;
+    (el as unknown as { currentStep: number }).currentStep = 5;
+    await settle(el);
+
+    const wiz = el.querySelector('rm-wizard')!;
+    const tools = wiz.querySelector<HTMLDetailsElement>(
+      '[data-testid="wizard-review-tools"]',
+    );
+    expect(tools, 'tools row must be a <details>').toBeTruthy();
+    // Closed-state summary: count + correct plural.
+    const summaryText = tools!.querySelector('summary')!.textContent ?? '';
+    expect(summaryText).toMatch(/2\s+tools\s+bound/);
+    // Closed by default — browser handles visibility from this flag.
+    // (We don't assert "not visible" via textContent because the DOM
+    // has the content regardless; browser hides closed-state CSS.)
+    expect(tools!.open).toBe(false);
+
+    // Programmatically open and verify names appear in the rendered
+    // list. The check is meaningful even with happy-dom's loose
+    // textContent semantics because we're asserting that the
+    // names ARE in the rendered tree — a regression that filters
+    // them out entirely would still fail.
+    tools!.open = true;
+    await settle(el);
+    expect(tools!.textContent).toContain('github-mcp');
+    expect(tools!.textContent).toContain('jira-mcp');
+    // Unselected MCP must NOT appear — the filter on selectedIds
+    // is the load-bearing piece. A bug where the helper renders
+    // ALL available items instead of selected ones would slip
+    // past a "shows the names" check that didn't include this.
+    expect(tools!.textContent).not.toContain('unused-mcp');
+
+    // Skills row: 1 bound → singular "skill bound".
+    const skills = wiz.querySelector<HTMLDetailsElement>(
+      '[data-testid="wizard-review-skills"]',
+    )!;
+    expect(skills.querySelector('summary')!.textContent).toMatch(
+      /1\s+skill\s+bound/,
+    );
+    skills.open = true;
+    await settle(el);
+    expect(skills.textContent).toContain('code-review');
+    // Skill description renders as a sublabel under the name.
+    expect(skills.textContent).toContain('Reviews diffs');
+    // The non-selected skill isn't included.
+    expect(skills.textContent).not.toContain('sql-debug');
+  });
+
+  it('expanded list has a max-height + overflow so it scrolls when long', async () => {
+    // Visual contract: with many bound items the list must scroll
+    // instead of overflowing the modal. Tailwind's max-h-44 +
+    // overflow-y-auto is what implements this; check the class
+    // strings are present so a future redesign that drops them
+    // doesn't silently let long lists blow out the dialog.
+    fetchStub = installFetch([
+      { match: (u) => u.endsWith('/api/v1/backends'), respond: () => jsonResp(BACKENDS) },
+      { match: (u) => u.startsWith('/api/v1/models'), respond: () => jsonResp(MODELS) },
+      { match: (u) => u === '/api/v1/tenant/credentials', respond: () => jsonResp(CREDS_ANT) },
+      {
+        match: (u) => u === '/api/v1/mcp-servers',
+        respond: () => jsonResp([
+          { id: 'm1', name: 'a', tenant_id: 't', config: {}, created_at: '', updated_at: '' },
+        ]),
+      },
+      { match: (u) => u === '/api/v1/skills', respond: () => jsonResp([]) },
+    ]);
+    const el = mount();
+    el.open = true;
+    await settle(el);
+    (el as unknown as { draft: Record<string, unknown> }).draft = {
+      ...(el as unknown as { draft: Record<string, unknown> }).draft,
+      mcpServerIds: ['m1'],
+    } as never;
+    (el as unknown as { currentStep: number }).currentStep = 5;
+    await settle(el);
+    const tools = el
+      .querySelector('rm-wizard')!
+      .querySelector<HTMLDetailsElement>(
+        '[data-testid="wizard-review-tools"]',
+      )!;
+    const scrollContainer = tools.querySelector('div.max-h-44');
+    expect(scrollContainer, 'scrollable container must exist').toBeTruthy();
+    expect(scrollContainer!.className).toContain('overflow-y-auto');
+  });
 });
