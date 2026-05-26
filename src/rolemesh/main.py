@@ -198,7 +198,14 @@ def _extract_usage(metadata: dict[str, object] | None) -> _UsageFields:
 
 
 def _coworker_from_state(cw_state: CoworkerState) -> Coworker:
-    """Build a full Coworker dataclass from runtime CoworkerState."""
+    """Build a full Coworker dataclass from runtime CoworkerState.
+
+    Must carry every field downstream consumers depend on. The
+    executor's PR30 model-resolution path reads ``model_id`` to look
+    up the coworker's model row and override PI_MODEL_ID at spawn
+    time — dropping it here silently routed back to the host .env
+    default, which is the bug Adam-on-gpt-4o-mini surfaced.
+    """
     c = cw_state.config
     return Coworker(
         id=c.id,
@@ -207,7 +214,14 @@ def _coworker_from_state(cw_state: CoworkerState) -> Coworker:
         folder=c.folder,
         agent_backend=c.agent_backend,
         system_prompt=c.system_prompt,
+        container_config=c.container_config,
         max_concurrent=c.max_concurrent,
+        status=c.status,
+        created_at=c.created_at,
+        agent_role=c.agent_role,
+        permissions=c.permissions,
+        model_id=c.model_id,
+        created_by_user_id=c.created_by_user_id,
     )
 
 
