@@ -681,6 +681,163 @@ describe('<rm-chat-shell>', () => {
     expect(loc.hrefAssignments[0]).toContain('agent_id=cw-a');
   });
 
+  describe('sidebar search', () => {
+    // Set up 3 named rows so we can prove the filter narrows by name.
+    function mockSearchableConversations(): void {
+      listConvsSpy.mockResolvedValue([
+        conv('cv-finance', 'Finance review Q3', new Date('2026-05-23T10:00:00Z')),
+        conv('cv-ops', 'Ops postmortem', new Date('2026-05-23T09:00:00Z')),
+        conv('cv-design', 'Design sprint kickoff', new Date('2026-05-23T08:00:00Z')),
+      ]);
+    }
+
+    it('clicking the search button swaps it for an input', async () => {
+      mockSearchableConversations();
+      const el = await mountShell();
+      expect(el.querySelector('[data-testid="search-input"]')).toBeNull();
+      el.querySelector<HTMLButtonElement>(
+        '[data-testid="search-conversations"]',
+      )!.click();
+      await settle(el);
+      expect(el.querySelector('[data-testid="search-conversations"]')).toBeNull();
+      expect(el.querySelector('[data-testid="search-input"]')).not.toBeNull();
+    });
+
+    it('filters conversation rows by case-insensitive name substring', async () => {
+      // Pin active to cv-ops so the implicit "always keep active row"
+      // rule does not also keep cv-finance (the first row, which the
+      // shell would otherwise auto-pick as active).
+      loc.restore();
+      loc = stubLocation('#/', '?agent_id=cw-a&chat_id=cv-ops');
+      mockSearchableConversations();
+      const el = await mountShell();
+      el.querySelector<HTMLButtonElement>(
+        '[data-testid="search-conversations"]',
+      )!.click();
+      await settle(el);
+      const input = el.querySelector<HTMLInputElement>(
+        '[data-testid="search-input"]',
+      )!;
+      input.value = 'OPS';
+      input.dispatchEvent(new Event('input'));
+      await settle(el);
+      const rows = el.querySelectorAll('[data-testid="conversation-row"]');
+      const ids = Array.from(rows).map((r) => r.getAttribute('data-conv-id'));
+      // Only the Ops row should match a case-insensitive "OPS" search.
+      expect(ids).toContain('cv-ops');
+      expect(ids).not.toContain('cv-finance');
+      expect(ids).not.toContain('cv-design');
+    });
+
+    it('filters by preview text when the row has no Conversation.name', async () => {
+      listConvsSpy.mockResolvedValue([
+        conv('cv-x', null as unknown as string, new Date('2026-05-23T10:00:00Z')),
+        conv('cv-y', null as unknown as string, new Date('2026-05-23T09:00:00Z')),
+      ]);
+      // listMessages is called per-conversation; route by id so the
+      // two rows get distinct preview text.
+      listMessagesSpy.mockImplementation((id: string) =>
+        Promise.resolve([
+          {
+            id: 'm-' + id,
+            role: 'user',
+            content:
+              id === 'cv-x' ? 'Ship the migration tonight' : 'Hire a backend lead',
+            timestamp: '2026-05-23T00:00:00Z',
+          },
+        ]),
+      );
+      const el = await mountShell();
+      el.querySelector<HTMLButtonElement>(
+        '[data-testid="search-conversations"]',
+      )!.click();
+      await settle(el);
+      const input = el.querySelector<HTMLInputElement>(
+        '[data-testid="search-input"]',
+      )!;
+      input.value = 'migration';
+      input.dispatchEvent(new Event('input'));
+      await settle(el);
+      const rows = el.querySelectorAll('[data-testid="conversation-row"]');
+      const ids = Array.from(rows).map((r) => r.getAttribute('data-conv-id'));
+      expect(ids).toContain('cv-x');
+      expect(ids).not.toContain('cv-y');
+    });
+
+    it('clearing the input restores the full list', async () => {
+      mockSearchableConversations();
+      const el = await mountShell();
+      el.querySelector<HTMLButtonElement>(
+        '[data-testid="search-conversations"]',
+      )!.click();
+      await settle(el);
+      const input = el.querySelector<HTMLInputElement>(
+        '[data-testid="search-input"]',
+      )!;
+      input.value = 'finance';
+      input.dispatchEvent(new Event('input'));
+      await settle(el);
+      expect(el.querySelectorAll('[data-testid="conversation-row"]').length).toBe(1);
+      input.value = '';
+      input.dispatchEvent(new Event('input'));
+      await settle(el);
+      expect(el.querySelectorAll('[data-testid="conversation-row"]').length).toBe(3);
+    });
+
+    it('close button restores the button + drops the filter', async () => {
+      mockSearchableConversations();
+      const el = await mountShell();
+      el.querySelector<HTMLButtonElement>(
+        '[data-testid="search-conversations"]',
+      )!.click();
+      await settle(el);
+      const input = el.querySelector<HTMLInputElement>(
+        '[data-testid="search-input"]',
+      )!;
+      input.value = 'finance';
+      input.dispatchEvent(new Event('input'));
+      await settle(el);
+      expect(el.querySelectorAll('[data-testid="conversation-row"]').length).toBe(1);
+      el.querySelector<HTMLButtonElement>(
+        '[data-testid="search-close"]',
+      )!.click();
+      await settle(el);
+      expect(el.querySelector('[data-testid="search-input"]')).toBeNull();
+      expect(
+        el.querySelector('[data-testid="search-conversations"]'),
+      ).not.toBeNull();
+      // Filter cleared, full list restored.
+      expect(el.querySelectorAll('[data-testid="conversation-row"]').length).toBe(3);
+    });
+
+    it('keeps the active conversation visible even if it does not match', async () => {
+      loc.restore();
+      loc = stubLocation('#/', '?agent_id=cw-a&chat_id=cv-active');
+      listConvsSpy.mockResolvedValue([
+        conv('cv-active', 'Active thread', new Date('2026-05-23T10:00:00Z')),
+        conv('cv-other', 'Other thread', new Date('2026-05-23T09:00:00Z')),
+      ]);
+      const el = await mountShell();
+      el.querySelector<HTMLButtonElement>(
+        '[data-testid="search-conversations"]',
+      )!.click();
+      await settle(el);
+      const input = el.querySelector<HTMLInputElement>(
+        '[data-testid="search-input"]',
+      )!;
+      // "zzz" matches nothing. Active row must still render so the
+      // user cannot lose the page they're currently on by typing.
+      input.value = 'zzz';
+      input.dispatchEvent(new Event('input'));
+      await settle(el);
+      const ids = Array.from(
+        el.querySelectorAll('[data-testid="conversation-row"]'),
+      ).map((r) => r.getAttribute('data-conv-id'));
+      expect(ids).toContain('cv-active');
+      expect(ids).not.toContain('cv-other');
+    });
+  });
+
   it('uses Conversation.name as the row label when one is set', async () => {
     listConvsSpy.mockResolvedValue([conv('cv-9', 'My chat', new Date())]);
     const el = await mountShell();
@@ -902,7 +1059,27 @@ describe('<rm-chat-shell>', () => {
     // The first 12 chars of the tenant id are shown so the pill
     // does not overflow; full tenant slug is a v3 deliverable.
     expect(pill.textContent).toContain('tenant-acme');
-    expect(pill.textContent).toContain('prod');
+    // No env suffix in test mode (VITE_RM_ENV unset). The old build
+    // hard-coded "· prod" here; that was a stale literal, not real
+    // environment metadata — we now refuse to invent a label.
+    expect(pill.textContent).not.toContain('prod');
+    expect(pill.textContent).not.toContain(' · ');
+  });
+
+  it('renders an env suffix on the tenant pill when VITE_RM_ENV is set', async () => {
+    // Vite exposes import.meta.env as a plain object at runtime; we
+    // mutate it for the duration of the test and roll back in finally
+    // so other tests still see the default (unset) value.
+    const meta = (import.meta as unknown as { env: Record<string, string | undefined> });
+    const prev = meta.env.VITE_RM_ENV;
+    meta.env.VITE_RM_ENV = 'staging';
+    try {
+      const el = await mountShell();
+      const pill = el.querySelector('[data-testid="tenant-pill"]')!;
+      expect(pill.textContent).toContain('staging');
+    } finally {
+      meta.env.VITE_RM_ENV = prev;
+    }
   });
 
   it('does not crash when listCoworkers fails', async () => {

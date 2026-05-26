@@ -31,9 +31,10 @@
 //   - URL-owned: active coworker id, active conversation id
 //   - panel-owned: messages, runs, approvals, WebSocket lifecycle
 //
-// Approvals badge is hard-coded to 0 here; v2-C wires it to the
-// `/api/v1/approvals` count so we do not ship a placeholder + real
-// implementation side by side.
+// Approvals badge reflects `pendingApprovals.length` — initially
+// seeded from `/api/v1/approvals?scope=mine&status=pending`, then
+// kept live by `UserApprovalsClient` WS deltas (required → refetch,
+// resolved → drop locally). See `wireApprovalsClient()` below.
 
 import { LitElement, html, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
@@ -59,6 +60,7 @@ import {
   iconActivity,
   iconApprovals,
   iconChevronDown,
+  iconClose,
   iconLogout,
   iconPlus,
   iconSearch,
@@ -195,6 +197,12 @@ export class RmChatShell extends LitElement {
   /** Most recent UserApprovalsClient connection status — surfaced to
    *  the popover so it can render a "stale" hint when WS is down. */
   @state() private approvalsConn: UserApprovalsStatus = 'idle';
+  /** Sidebar conversation-list search. Toggled by the "Search
+   *  conversations" button; clearing or closing restores the full
+   *  list. Filtering is purely client-side over the already-fetched
+   *  conversations + previews. */
+  @state() private searchOpen = false;
+  @state() private searchQuery = '';
 
   private readonly api = getApiClient();
   private approvalsClient: UserApprovalsClient | null = null;
@@ -625,6 +633,27 @@ export class RmChatShell extends LitElement {
     location.hash = '#/manage/coworkers';
   };
 
+  private openSearch = async () => {
+    this.searchOpen = true;
+    await this.updateComplete;
+    this.querySelector<HTMLInputElement>('[data-testid="search-input"]')?.focus();
+  };
+
+  private closeSearch = () => {
+    this.searchOpen = false;
+    this.searchQuery = '';
+  };
+
+  private onSearchInput = (e: Event) => {
+    this.searchQuery = (e.target as HTMLInputElement).value;
+  };
+
+  private onSearchKeydown = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      this.closeSearch();
+    }
+  };
+
   override render(): TemplateResult {
     const active = this.activeCoworker;
     // Hide empty-and-unnamed conversation rows from the history list.
@@ -637,10 +666,30 @@ export class RmChatShell extends LitElement {
       if (c.name && c.name.trim()) return true;
       return !this.emptyConvIds.has(c.id);
     });
-    const groups = groupConversations(visibleConversations);
+    // Case-insensitive substring match on the row's displayed label
+    // (name → preview → "New chat"). Active conversation is kept so
+    // the user can never lose the page they're currently on by typing
+    // a filter; the empty-history line then explains "no matches".
+    const q = this.searchQuery.trim().toLowerCase();
+    const filteredConversations = q
+      ? visibleConversations.filter((c) => {
+          if (c.id === this.activeConversationId) return true;
+          const label = (c.name && c.name.trim())
+            ? c.name
+            : (this.convPreviews.get(c.id) ?? 'New chat');
+          return label.toLowerCase().includes(q);
+        })
+      : visibleConversations;
+    const groups = groupConversations(filteredConversations);
+    // Environment suffix is build-time configurable via `VITE_RM_ENV`
+    // (e.g. `prod`, `staging`, `dev`). When unset we render the
+    // tenant id alone — better than inventing a wrong label.
+    const env = (import.meta.env.VITE_RM_ENV ?? '').toString().trim();
     const tenantLabel = this.me?.tenant_id
-      ? `${this.me.tenant_id.slice(0, 12)} · prod`
-      : 'workspace · prod';
+      ? (env
+          ? `${this.me.tenant_id.slice(0, 12)} · ${env}`
+          : this.me.tenant_id.slice(0, 12))
+      : (env ? `workspace · ${env}` : 'workspace');
     return html`
       <style>
         /* Scoped via parent attribute selector so these rules only
@@ -776,6 +825,42 @@ export class RmChatShell extends LitElement {
           width: calc(100% - 24px);
         }
         rm-chat-shell .cs-search:hover { background: var(--rm-surface); }
+        rm-chat-shell .cs-search-input {
+          margin: 0 12px 8px;
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          padding: 6px 8px 6px 10px;
+          border-radius: var(--rm-r);
+          background: var(--rm-surface);
+          border: 1px solid var(--rm-border);
+          color: var(--rm-ink);
+        }
+        rm-chat-shell .cs-search-input input {
+          flex: 1;
+          min-width: 0;
+          border: none;
+          outline: none;
+          background: transparent;
+          font: inherit;
+          color: inherit;
+          padding: 0;
+        }
+        rm-chat-shell .cs-search-close {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          padding: 2px;
+          background: none;
+          border: none;
+          color: var(--rm-ink-3);
+          cursor: pointer;
+          border-radius: 6px;
+        }
+        rm-chat-shell .cs-search-close:hover {
+          color: var(--rm-ink);
+          background: var(--rm-bg);
+        }
         rm-chat-shell .histscroll {
           flex: 1;
           overflow-y: auto;
@@ -1191,10 +1276,36 @@ export class RmChatShell extends LitElement {
           ${iconPlus(16)}
           New chat
         </button>
-        <button class="cs-search" data-testid="search-conversations">
-          ${iconSearch(15)}
-          Search conversations
-        </button>
+        ${this.searchOpen
+          ? html`
+              <div class="cs-search-input" data-testid="search-input-wrap">
+                ${iconSearch(15)}
+                <input
+                  type="text"
+                  data-testid="search-input"
+                  placeholder="Search conversations"
+                  .value=${this.searchQuery}
+                  @input=${this.onSearchInput}
+                  @keydown=${this.onSearchKeydown}
+                />
+                <button
+                  class="cs-search-close"
+                  data-testid="search-close"
+                  aria-label="Close search"
+                  @click=${this.closeSearch}
+                >${iconClose(14)}</button>
+              </div>
+            `
+          : html`
+              <button
+                class="cs-search"
+                data-testid="search-conversations"
+                @click=${this.openSearch}
+              >
+                ${iconSearch(15)}
+                Search conversations
+              </button>
+            `}
 
         <div class="histscroll" data-testid="history-scroll">
           ${groups.length === 0
