@@ -749,8 +749,11 @@ describe('<rm-coworker-wizard>', () => {
     skills.open = true;
     await settle(el);
     expect(skills.textContent).toContain('code-review');
-    // Skill description renders as a sublabel under the name.
-    expect(skills.textContent).toContain('Reviews diffs');
+    // PR33 follow-up: description is intentionally NOT rendered as a
+    // sublabel — user requested name-only. Pin the absence so a
+    // future "let's add hover help" change doesn't accidentally
+    // reintroduce the visual clutter the user pushed back on.
+    expect(skills.textContent).not.toContain('Reviews diffs');
     // The non-selected skill isn't included.
     expect(skills.textContent).not.toContain('sql-debug');
   });

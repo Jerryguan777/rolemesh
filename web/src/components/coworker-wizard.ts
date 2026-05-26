@@ -1157,7 +1157,6 @@ export class CoworkerWizard extends LitElement {
             this.skills.map((s) => ({
               id: s.id,
               label: s.name,
-              sublabel: s.description || undefined,
             })),
             'skill',
           ),
