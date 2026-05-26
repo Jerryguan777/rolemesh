@@ -234,8 +234,49 @@ class ContainerAgentExecutor:
         safe_name = re.sub(r"[^a-zA-Z0-9-]", "-", inp.group_folder)
         container_name = f"rolemesh-{safe_name}-{start_epoch_ms}"
 
+        # PR30: resolve coworker.model_id → Pi-format string and pass
+        # to build_container_spec so the container actually uses the
+        # model the UI bound to this coworker. Falls back to host
+        # .env PI_MODEL_ID when:
+        #   * coworker has no model_id set (legacy state)
+        #   * the model_id points at a row not in the models table
+        #     (orphan reference — could happen if a model was deleted
+        #     while still bound)
+        #   * the DB lookup fails (network blip)
+        # All three fallback paths are best-effort: we log + degrade,
+        # never block the spawn.
+        pi_model_override: str | None = None
+        if self._config.name == "pi" and coworker.model_id:
+            try:
+                from rolemesh.agent.executor import pi_format_model_id
+                from rolemesh.db import get_model_by_id
+
+                model_row = await get_model_by_id(coworker.model_id)
+                if model_row is None:
+                    logger.warning(
+                        "Coworker model_id not found in models table; "
+                        "falling back to host PI_MODEL_ID",
+                        coworker_id=coworker.id,
+                        model_id=coworker.model_id,
+                    )
+                else:
+                    pi_model_override = pi_format_model_id(
+                        model_row.provider, model_row.model_id,
+                    )
+            except Exception:
+                logger.exception(
+                    "model_id resolution failed; falling back to "
+                    "host PI_MODEL_ID",
+                    coworker_id=coworker.id,
+                )
+
         spec = build_container_spec(
-            mounts, container_name, job_id, self._config, coworker=coworker,
+            mounts,
+            container_name,
+            job_id,
+            self._config,
+            coworker=coworker,
+            pi_model_id_override=pi_model_override,
         )
 
         logger.info(

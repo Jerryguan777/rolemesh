@@ -420,10 +420,21 @@ def build_container_spec(
     job_id: str,
     backend_config: AgentBackendConfig | None = None,
     coworker: Coworker | None = None,
+    pi_model_id_override: str | None = None,
 ) -> ContainerSpec:
     """Build a ContainerSpec from mounts and config.
 
     Merge order for resource limits: global default ← coworker override ← clamp to max.
+
+    ``pi_model_id_override`` (PR30): the Pi-format model string
+    (``<provider>/<model_id>``) the caller resolved from
+    ``coworker.model_id`` via the ``models`` table. When set, it
+    overrides whatever ``PI_MODEL_ID`` came from the host's .env at
+    module-load time. The override path also recomputes any Bedrock-
+    specific env (``AWS_BEARER_TOKEN_BEDROCK``, ``AWS_REGION``)
+    because switching providers means switching boto3 config too.
+    ``None`` keeps the legacy .env-default behavior for callers that
+    don't have a coworker context (evaluation CLI, etc.).
     """
     image = backend_config.image if backend_config else CONTAINER_IMAGE
 
@@ -509,6 +520,26 @@ def build_container_spec(
             backend_config.extra_env, source=f"backend_config:{backend_config.name}",
         )
         env.update(filtered_backend_env)
+
+    # PR30: per-coworker model override. backend_config.extra_env has
+    # the .env-derived default PI_MODEL_ID baked in at module-load
+    # time; this block recomputes it from the coworker's choice so the
+    # UI's model picker actually reaches the container instead of
+    # being silently ignored. Bedrock keys get recomputed too because
+    # switching providers (e.g. anthropic → bedrock) changes whether
+    # boto3 placeholders are needed at all.
+    if (
+        pi_model_id_override is not None
+        and backend_config
+        and backend_config.name == "pi"
+    ):
+        from rolemesh.agent.executor import pi_env_for_model_id
+
+        override_env = _filter_env_allowlist(
+            pi_env_for_model_id(pi_model_id_override),
+            source=f"coworker_model:{pi_model_id_override}",
+        )
+        env.update(override_env)
 
     # Resolve runtime UID/GID. The same pair drives both the `user` field
     # handed to Docker and the tmpfs owner in _default_tmpfs below; they
