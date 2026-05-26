@@ -15,6 +15,7 @@ import type { SkillSummary } from '../api/client.js';
 
 import './skill-detail-page.js';
 import './skill-dialog.js';
+import './confirm-dialog.js';
 import { iconPencil, iconTrash } from './icons.js';
 
 type Mode = 'list' | 'new' | 'detail';
@@ -62,6 +63,9 @@ export class SkillsPage extends LitElement {
    *  with this dialog to match the prototype layout. */
   @state() private dialogOpen = false;
   @state() private editTarget: SkillSummary | null = null;
+  /** Active deletion target — drives the rm-confirm-dialog open state. */
+  @state() private deleteTarget: SkillSummary | null = null;
+  @state() private deleteInFlight = false;
 
   private readonly api = getApiClient();
   private readonly onHashChange = (): void => this.syncFromHash();
@@ -145,25 +149,32 @@ export class SkillsPage extends LitElement {
     this.dialogOpen = true;
   }
 
-  private async deleteSkill(row: SkillSummary): Promise<void> {
-    const ok = window.confirm(
-      `Delete skill "${row.name}"?\n\n` +
-        (row.bound_coworker_count > 0
-          ? `${row.bound_coworker_count} coworker(s) currently bind this skill ` +
-            'and will lose access. '
-          : '') +
-        'Cannot be undone.',
-    );
-    if (!ok) return;
+  private askDelete(row: SkillSummary): void {
+    this.deleteTarget = row;
+  }
+
+  private cancelDelete = (): void => {
+    if (this.deleteInFlight) return;
+    this.deleteTarget = null;
+  };
+
+  private async performDelete(): Promise<void> {
+    const row = this.deleteTarget;
+    if (!row || this.deleteInFlight) return;
+    this.deleteInFlight = true;
     this.deleteError = { ...this.deleteError, [row.id]: '' };
     try {
       await this.api.deleteSkill(row.id);
+      this.deleteTarget = null;
       await this.refreshList();
     } catch (err) {
       this.deleteError = {
         ...this.deleteError,
         [row.id]: this.errMessage(err),
       };
+      this.deleteTarget = null;
+    } finally {
+      this.deleteInFlight = false;
     }
   }
 
@@ -214,7 +225,40 @@ export class SkillsPage extends LitElement {
           @skill-created=${() => { void this.refreshList(); }}
           @skill-updated=${() => { void this.refreshList(); }}
         ></rm-skill-dialog>
+        ${this.renderDeleteDialog()}
       </div>
+    `;
+  }
+
+  private renderDeleteDialog() {
+    const target = this.deleteTarget;
+    const bindCount = target?.bound_coworker_count ?? 0;
+    return html`
+      <rm-confirm-dialog
+        title="Delete skill?"
+        ?open=${target !== null}
+        tone="danger"
+        confirm-label="Delete"
+        busy-label="Deleting…"
+        ?busy=${this.deleteInFlight}
+        data-testid="confirm-delete-dialog"
+        @cancel=${this.cancelDelete}
+        @confirm=${() => void this.performDelete()}
+      >
+        ${target
+          ? html`
+              <p style="margin: 0 0 12px;">
+                Delete skill <strong>${target.name}</strong>?
+              </p>
+              <p style="margin: 0; color: var(--rm-ink-2); font-size: var(--rm-text-sm);">
+                ${bindCount > 0
+                  ? html`${bindCount} coworker(s) currently bind this
+                    skill and will lose access. `
+                  : nothing}Cannot be undone.
+              </p>
+            `
+          : nothing}
+      </rm-confirm-dialog>
     `;
   }
 
@@ -269,7 +313,7 @@ export class SkillsPage extends LitElement {
                 data-testid="skill-delete"
                 @click=${(e: Event) => {
                   e.stopPropagation();
-                  void this.deleteSkill(r);
+                  this.askDelete(r);
                 }}
               >${iconTrash(15)}</button>
             </span>

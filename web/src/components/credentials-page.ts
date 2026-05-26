@@ -15,6 +15,7 @@ import { customElement, state } from 'lit/decorators.js';
 import { ApiError, getApiClient } from '../api/client.js';
 import type { CredentialResponse, ModelProvider } from '../api/client.js';
 import './credential-dialog.js';
+import './confirm-dialog.js';
 import { iconPencil, iconTrash } from './icons.js';
 
 // Mirrors the OpenAPI ModelProvider enum.
@@ -41,6 +42,9 @@ export class CredentialsPage extends LitElement {
    *  provider when the user clicks Edit / Add on an existing row. */
   @state() private dialogOpen = false;
   @state() private dialogProvider: ModelProvider | null = null;
+  /** Active deletion target — drives the rm-confirm-dialog open state. */
+  @state() private deleteTarget: ModelProvider | null = null;
+  @state() private deleteInFlight = false;
   private readonly api = getApiClient();
 
   protected override createRenderRoot() {
@@ -82,25 +86,34 @@ export class CredentialsPage extends LitElement {
   // Renamed from `remove` to avoid overriding HTMLElement.prototype.remove;
   // see mcp-servers-page.ts for the matching diagnostic — Lit's NodePart
   // teardown calls element.remove() with zero args and would throw here.
-  private async removeCredential(provider: ModelProvider): Promise<void> {
-    const ok = window.confirm(
-      `Delete the ${provider} credential?\n\n` +
-        'Models from this provider will stop running for every coworker ' +
-        'until a new credential is set. Cannot be undone.',
-    );
-    if (!ok) return;
+  private askDelete(provider: ModelProvider): void {
+    this.deleteTarget = provider;
+  }
+
+  private cancelDelete = (): void => {
+    if (this.deleteInFlight) return;
+    this.deleteTarget = null;
+  };
+
+  private async performDelete(): Promise<void> {
+    const provider = this.deleteTarget;
+    if (!provider || this.deleteInFlight) return;
+    this.deleteInFlight = true;
     this.inFlight = { ...this.inFlight, [provider]: true };
     this.deleteError = { ...this.deleteError, [provider]: '' };
     try {
       await this.api.deleteCredential(provider);
+      this.deleteTarget = null;
       await this.refresh();
     } catch (err) {
       this.deleteError = {
         ...this.deleteError,
         [provider]: this.errMessage(err),
       };
+      this.deleteTarget = null;
     } finally {
       this.inFlight = { ...this.inFlight, [provider]: false };
+      this.deleteInFlight = false;
     }
   }
 
@@ -160,7 +173,39 @@ export class CredentialsPage extends LitElement {
           }}
           @credential-saved=${() => { void this.refresh(); }}
         ></rm-credential-dialog>
+        ${this.renderDeleteDialog()}
       </div>
+    `;
+  }
+
+  private renderDeleteDialog() {
+    const target = this.deleteTarget;
+    return html`
+      <rm-confirm-dialog
+        title="Delete credential?"
+        ?open=${target !== null}
+        tone="danger"
+        confirm-label="Delete"
+        busy-label="Deleting…"
+        ?busy=${this.deleteInFlight}
+        data-testid="confirm-delete-dialog"
+        @cancel=${this.cancelDelete}
+        @confirm=${() => void this.performDelete()}
+      >
+        ${target
+          ? html`
+              <p style="margin: 0 0 12px;">
+                Delete the
+                <strong style="text-transform: capitalize;">${target}</strong>
+                credential?
+              </p>
+              <p style="margin: 0; color: var(--rm-ink-2); font-size: var(--rm-text-sm);">
+                Models from this provider will stop running for every
+                coworker until a new credential is set. Cannot be undone.
+              </p>
+            `
+          : nothing}
+      </rm-confirm-dialog>
     `;
   }
 
@@ -194,7 +239,7 @@ export class CredentialsPage extends LitElement {
                 class="rm-iconbtn rm-iconbtn--danger"
                 title="Delete credential"
                 data-testid="credential-delete"
-                @click=${() => void this.removeCredential(provider)}
+                @click=${() => this.askDelete(provider)}
               >${iconTrash(15)}</button>`
             : nothing}
         </span>

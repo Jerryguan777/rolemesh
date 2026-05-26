@@ -20,6 +20,7 @@ import {
 } from '../api/skill_constants.js';
 import { ApiError, getApiClient } from '../api/client.js';
 import type { Skill } from '../api/client.js';
+import './confirm-dialog.js';
 
 @customElement('rm-skill-detail-page')
 export class SkillDetailPage extends LitElement {
@@ -38,6 +39,12 @@ export class SkillDetailPage extends LitElement {
   @state() private newFileError: string | null = null;
   @state() private saveError: string | null = null;
   @state() private deleteError: string | null = null;
+  /** When true, the skill-level "Delete skill" confirmation is up. */
+  @state() private deleteSkillOpen = false;
+  /** Per-file delete confirm. Holds the path of the file the user
+   *  asked to delete; null = no file-delete dialog open. */
+  @state() private deleteFilePath: string | null = null;
+  @state() private deleteFileBusy = false;
 
   private readonly api = getApiClient();
 
@@ -130,22 +137,27 @@ export class SkillDetailPage extends LitElement {
     }
   }
 
-  private async deleteSkill(): Promise<void> {
+  private askDeleteSkill = (): void => {
     if (!this.detail) return;
-    if (
-      !window.confirm(
-        `Delete skill "${this.detail.name}"? This cannot be undone.`,
-      )
-    ) {
-      return;
-    }
+    this.deleteSkillOpen = true;
+  };
+
+  private cancelDeleteSkill = (): void => {
+    if (this.busy) return;
+    this.deleteSkillOpen = false;
+  };
+
+  private async performDeleteSkill(): Promise<void> {
+    if (!this.detail || this.busy) return;
     this.busy = true;
     this.deleteError = null;
     try {
       await this.api.deleteSkill(this.detail.id);
+      this.deleteSkillOpen = false;
       location.hash = '#/manage/skills';
     } catch (err) {
       this.deleteError = this.errMessage(err);
+      this.deleteSkillOpen = false;
     } finally {
       this.busy = false;
     }
@@ -178,10 +190,32 @@ export class SkillDetailPage extends LitElement {
     this.newFilePath = '';
   }
 
+  private askDeleteFile(path: string): void {
+    if (!this.detail) return;
+    if (path === SKILL_MANIFEST_NAME) return;
+    this.deleteFilePath = path;
+  }
+
+  private cancelDeleteFile = (): void => {
+    if (this.deleteFileBusy) return;
+    this.deleteFilePath = null;
+  };
+
+  private async performDeleteFile(): Promise<void> {
+    const path = this.deleteFilePath;
+    if (!path) return;
+    this.deleteFileBusy = true;
+    try {
+      await this.deleteFile(path);
+    } finally {
+      this.deleteFileBusy = false;
+      this.deleteFilePath = null;
+    }
+  }
+
   private async deleteFile(path: string): Promise<void> {
     if (!this.detail) return;
     if (path === SKILL_MANIFEST_NAME) return;
-    if (!window.confirm(`Delete file "${path}"?`)) return;
     const serverFiles = this.detail.files ?? {};
     if (!(path in serverFiles)) {
       const next = { ...this.fileEdits };
@@ -228,7 +262,51 @@ export class SkillDetailPage extends LitElement {
           ${this.renderFileTree(allPaths)}
           ${this.renderEditor()}
         </div>
+        ${this.renderConfirmDialogs(s)}
       </div>
+    `;
+  }
+
+  private renderConfirmDialogs(s: Skill) {
+    return html`
+      <rm-confirm-dialog
+        title="Delete skill?"
+        ?open=${this.deleteSkillOpen}
+        tone="danger"
+        confirm-label="Delete"
+        busy-label="Deleting…"
+        ?busy=${this.busy}
+        data-testid="confirm-delete-skill-dialog"
+        @cancel=${this.cancelDeleteSkill}
+        @confirm=${() => void this.performDeleteSkill()}
+      >
+        <p style="margin: 0 0 12px;">
+          Delete skill <strong>${s.name}</strong>?
+        </p>
+        <p style="margin: 0; color: var(--rm-ink-2); font-size: var(--rm-text-sm);">
+          This cannot be undone.
+        </p>
+      </rm-confirm-dialog>
+      <rm-confirm-dialog
+        title="Delete file?"
+        ?open=${this.deleteFilePath !== null}
+        tone="danger"
+        confirm-label="Delete"
+        busy-label="Deleting…"
+        ?busy=${this.deleteFileBusy}
+        data-testid="confirm-delete-file-dialog"
+        @cancel=${this.cancelDeleteFile}
+        @confirm=${() => void this.performDeleteFile()}
+      >
+        ${this.deleteFilePath
+          ? html`
+              <p style="margin: 0;">
+                Delete file
+                <strong>${this.deleteFilePath}</strong>?
+              </p>
+            `
+          : nothing}
+      </rm-confirm-dialog>
     `;
   }
 
@@ -254,16 +332,15 @@ export class SkillDetailPage extends LitElement {
         </label>
         <button
           type="button"
-          class="text-[12px] px-3 py-1.5 rounded-md bg-brand text-white hover:bg-brand-dark
-            disabled:opacity-60 disabled:cursor-not-allowed"
+          class="rm-btn rm-btn--primary"
           ?disabled=${this.busy || !this.hasUnsavedEdits()}
           @click=${() => void this.saveAll()}
         >Save</button>
         <button
           type="button"
-          class="text-[12px] px-2.5 py-1.5 rounded-md border border-red-300 dark:border-red-700
-            text-red-700 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/20"
-          @click=${() => void this.deleteSkill()}
+          class="rm-btn rm-btn--danger"
+          ?disabled=${this.busy}
+          @click=${this.askDeleteSkill}
         >Delete</button>
       </div>
       ${this.saveError
@@ -301,7 +378,7 @@ export class SkillDetailPage extends LitElement {
                       : 'text-ink-3 hover:text-red-600 dark:text-d-ink-3 dark:hover:text-red-300 cursor-pointer'}`}
                   title=${isManifest ? `${SKILL_MANIFEST_NAME} is protected (server returns 409)` : 'Delete file'}
                   ?disabled=${isManifest}
-                  @click=${() => void this.deleteFile(p)}
+                  @click=${() => this.askDeleteFile(p)}
                 >×</button>
               </li>
             `;

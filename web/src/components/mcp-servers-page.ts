@@ -12,6 +12,7 @@ import { customElement, state } from 'lit/decorators.js';
 import { ApiError, getApiClient } from '../api/client.js';
 import type { MCPServer } from '../api/client.js';
 import './mcp-server-dialog.js';
+import './confirm-dialog.js';
 import { iconPencil, iconTrash } from './icons.js';
 
 @customElement('rm-mcp-servers-page')
@@ -31,6 +32,10 @@ export class MCPServersPage extends LitElement {
    *  collapse the two surfaces into one. */
   @state() private dialogOpen = false;
   @state() private editTarget: MCPServer | null = null;
+  /** Active deletion target — opens the rm-confirm-dialog when set.
+   *  Cleared on confirm-success / cancel / error close. */
+  @state() private deleteTarget: MCPServer | null = null;
+  @state() private deleteInFlight = false;
   private readonly api = getApiClient();
 
   protected override createRenderRoot() {
@@ -106,22 +111,32 @@ export class MCPServersPage extends LitElement {
   // throw "Cannot read properties of undefined (reading 'id')" mid-
   // clear, leaving the old <rm-mcp-servers-page> stranded in the DOM
   // whenever the settings shell switched tabs.
-  private async removeServer(row: MCPServer): Promise<void> {
-    const ok = window.confirm(
-      `Delete MCP server "${row.name}"?\n\n` +
-        'Coworkers bound to this server will lose access to its tools. ' +
-        'Cannot be undone.',
-    );
-    if (!ok) return;
+  private askDelete(row: MCPServer): void {
+    this.deleteTarget = row;
+  }
+
+  private cancelDelete = (): void => {
+    if (this.deleteInFlight) return;
+    this.deleteTarget = null;
+  };
+
+  private async performDelete(): Promise<void> {
+    const row = this.deleteTarget;
+    if (!row || this.deleteInFlight) return;
+    this.deleteInFlight = true;
     this.deleteError = { ...this.deleteError, [row.id]: '' };
     try {
       await this.api.deleteMCPServer(row.id);
+      this.deleteTarget = null;
       await this.refresh();
     } catch (err) {
       this.deleteError = {
         ...this.deleteError,
         [row.id]: this.errMessage(err),
       };
+      this.deleteTarget = null;
+    } finally {
+      this.deleteInFlight = false;
     }
   }
 
@@ -174,6 +189,7 @@ export class MCPServersPage extends LitElement {
           @mcp-server-created=${() => { void this.refresh(); }}
           @mcp-server-updated=${() => { void this.refresh(); }}
         ></rm-mcp-server-dialog>
+        ${this.renderDeleteDialog()}
       </div>
     `;
   }
@@ -217,13 +233,42 @@ export class MCPServersPage extends LitElement {
             class="rm-iconbtn rm-iconbtn--danger"
             title="Delete MCP server"
             data-testid="mcp-delete"
-            @click=${() => void this.removeServer(r)}
+            @click=${() => this.askDelete(r)}
           >${iconTrash(15)}</button>
         </span>
         ${delErr
           ? html`<div class="rm-row-error">${delErr}</div>`
           : nothing}
       </div>
+    `;
+  }
+
+  private renderDeleteDialog() {
+    const target = this.deleteTarget;
+    return html`
+      <rm-confirm-dialog
+        title="Delete MCP server?"
+        ?open=${target !== null}
+        tone="danger"
+        confirm-label="Delete"
+        busy-label="Deleting…"
+        ?busy=${this.deleteInFlight}
+        data-testid="confirm-delete-dialog"
+        @cancel=${this.cancelDelete}
+        @confirm=${() => void this.performDelete()}
+      >
+        ${target
+          ? html`
+              <p style="margin: 0 0 12px;">
+                Delete MCP server <strong>${target.name}</strong>?
+              </p>
+              <p style="margin: 0; color: var(--rm-ink-2); font-size: var(--rm-text-sm);">
+                Coworkers bound to this server will lose access to
+                its tools. Cannot be undone.
+              </p>
+            `
+          : nothing}
+      </rm-confirm-dialog>
     `;
   }
 }

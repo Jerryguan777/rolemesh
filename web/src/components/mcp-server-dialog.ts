@@ -199,20 +199,16 @@ export class MCPServerDialog extends LitElement {
             >${this.err}</div>`
           : nothing}
 
-        <div slot="footer" class="flex items-center gap-2">
+        <div slot="footer" style="display: flex; gap: 8px; justify-content: flex-end;">
           <button
             type="button"
-            class="text-[12.5px] px-3 py-1.5 rounded-md border border-surface-3 dark:border-d-surface-3
-              text-ink-2 dark:text-d-ink-2 hover:bg-surface-2 dark:hover:bg-d-surface-2 cursor-pointer
-              disabled:opacity-60"
+            class="rm-btn rm-btn--secondary"
             ?disabled=${this.busy}
             @click=${this.close}
           >Cancel</button>
           <button
             type="button"
-            class="text-[12.5px] px-3 py-1.5 rounded-md bg-brand text-white
-              hover:bg-brand-dark transition-colors cursor-pointer
-              disabled:opacity-60"
+            class="rm-btn rm-btn--primary"
             ?disabled=${this.busy}
             @click=${() => void this.save()}
           >${this.busy ? 'Saving…' : this.editing ? 'Save changes' : 'Add server'}</button>

@@ -895,8 +895,11 @@ export class SkillDialog extends LitElement {
             <div
               class=${`border-2 border-dashed rounded-md px-4 py-5 text-center transition-colors
                 ${this.dragHover
-                  ? 'border-brand bg-brand/5'
+                  ? 'border-surface-3 dark:border-d-surface-3 bg-surface-2 dark:bg-d-surface-2'
                   : 'border-surface-3 dark:border-d-surface-3 bg-surface-1 dark:bg-d-surface-1'}`}
+              style=${this.dragHover
+                ? 'border-color: var(--rm-accent); background: var(--rm-accent-subtle);'
+                : ''}
               data-testid="skill-dialog-dropzone"
               @dragenter=${this.onDragEnter}
               @dragleave=${this.onDragLeave}
@@ -974,17 +977,13 @@ export class SkillDialog extends LitElement {
         <div slot="footer" class="flex items-center gap-2">
           <button
             type="button"
-            class="text-[12.5px] px-3 py-1.5 rounded-md border border-surface-3 dark:border-d-surface-3
-              text-ink-2 dark:text-d-ink-2 hover:bg-surface-2 dark:hover:bg-d-surface-2 cursor-pointer
-              disabled:opacity-60"
+            class="rm-btn rm-btn--secondary"
             ?disabled=${this.busy}
             @click=${this.close}
           >Cancel</button>
           <button
             type="button"
-            class="text-[12.5px] px-3 py-1.5 rounded-md bg-brand text-white
-              hover:bg-brand-dark transition-colors cursor-pointer
-              disabled:opacity-60 disabled:cursor-not-allowed"
+            class="rm-btn rm-btn--primary"
             ?disabled=${!canSave}
             @click=${() => void this.save()}
             data-testid="skill-dialog-save"

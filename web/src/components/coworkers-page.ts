@@ -22,7 +22,7 @@ import type { Coworker, ModelProvider } from '../api/client.js';
 import './coworker-wizard.js';
 import './credential-dialog.js';
 import './mcp-server-dialog.js';
-import './dialog.js';
+import './confirm-dialog.js';
 import type { CoworkerWizard } from './coworker-wizard.js';
 import { iconPencil, iconTrash } from './icons.js';
 
@@ -201,11 +201,16 @@ export class CoworkersPage extends LitElement {
   private renderDeleteDialog() {
     const target = this.deleteTarget;
     return html`
-      <rm-dialog
+      <rm-confirm-dialog
         title="Delete coworker?"
         ?open=${target !== null}
+        tone="danger"
+        confirm-label="Delete"
+        busy-label="Deleting…"
+        ?busy=${this.deleteInFlight}
         data-testid="confirm-delete-dialog"
-        @close=${this.cancelDelete}
+        @cancel=${this.cancelDelete}
+        @confirm=${() => void this.performDelete()}
       >
         ${target
           ? html`
@@ -219,24 +224,7 @@ export class CoworkersPage extends LitElement {
               </p>
             `
           : nothing}
-        <div slot="footer" style="display: flex; gap: 8px; justify-content: flex-end;">
-          <button
-            type="button"
-            class="rm-add-secondary"
-            data-testid="confirm-delete-cancel"
-            ?disabled=${this.deleteInFlight}
-            @click=${this.cancelDelete}
-          >Cancel</button>
-          <button
-            type="button"
-            class="rm-add"
-            data-testid="confirm-delete-confirm"
-            ?disabled=${this.deleteInFlight}
-            @click=${() => void this.performDelete()}
-            style="background: var(--rm-bad); color: var(--rm-accent-ink);"
-          >${this.deleteInFlight ? 'Deleting…' : 'Delete'}</button>
-        </div>
-      </rm-dialog>
+      </rm-confirm-dialog>
     `;
   }
 
