@@ -1,13 +1,20 @@
-# Chore — credential_proxy DB migration (D1 + D4)
+# Chore — credential_proxy DB migration (D1 + D4)  `[REFRESHED 2026-05-25]`
 
 | field | value |
 |---|---|
 | Cycle | independent chore (与 v1.1 / v2 平级) |
 | Branch | 新分支 `chore/credential-proxy-db`（off main） |
-| Prerequisites | v2 cycle 合 main（如未合，可在 feat/ui-v2 上做但 PR 边界乱）|
-| Estimated PRs | 3-4 |
-| Estimated LOC | ~1500-1800（2x 系数；含 cache + tests） |
+| Prerequisites | v2 cycle 已合 main (PR #31)，可起 chore 新分支 |
+| Estimated PRs | 4 |
+| Estimated LOC | ~1800-2000（refresh 上调：header 注入是新工作，原估假设已存在） |
 | Status | not started |
+
+> **Refresh 2026-05-25 — 4 个 pre-session grep findings 锁定**：
+>
+> 1. **`X-RoleMesh-Conversation-Id` header 完全不存在**（grep 0 hits in src/）—— 不是"验证已就位"，是**新工作**。Pi backend + Claude SDK 出站 MCP/LLM 调用都要加注入点。原 PR 1 / 2 估算偏低；上调 ~200-300 LOC。
+> 2. **评估 CLI 不通过 credential_proxy**（`grep credential_proxy src/rolemesh/evaluation/` = 0）—— Open Q #4 锁定：不必给 CLI 加 bypass；CLI 自有 LLM key 路径与本 chore 解耦。
+> 3. **凭据 PUT 已 publish `web.coworker.restart`**（不是文档里假设的 `web.credential.changed.*`）—— CredentialResolver 直接 subscribe 这个现有 event 做 cache invalidate（粒度偏粗：一次 PUT invalidate 该 tenant 该 provider 的所有 entry——可接受），**不要**新加 NATS subject。
+> 4. **chore A `get_active_container_name(group_jid)`** 在 `src/rolemesh/container/scheduler.py:245`，已 wire 到 `src/rolemesh/main.py:1754`——直接复用做 spoofing 验证。
 
 > **Trigger**：`docs/config-drift-fix-plan.md` §3 D1（CRITICAL）+ D4。当前 multi-tenant LLM credential 隔离**完全不工作**——UI 上 user 配的 anthropic key 加密入 DB 后从未被 runtime 读取；agent 实际用 host process 的 `ANTHROPIC_API_KEY` env var，所有 tenant 共用一份。dev 单 tenant 凑巧能跑，prod 立刻爆。
 
@@ -225,13 +232,18 @@
 
 ## Open questions
 
-需 session 内决策：
+锁定（2026-05-25 refresh）：
 
-1. **`X-RoleMesh-Conversation-Id` header 真生成路径**：当前 agent 容器出站 MCP 调用是否带这个 header？grep `src/rolemesh/agent/` + `src/pi/` 验证。如果没带，本 chore 需要在 Pi / Claude SDK backend 各加注入点（与 02c retired prompt 同款工作）
-2. **Cache size limit**：1 分钟 TTL 但没行数 limit，dev OK；prod 大 tenant 数会爆内存——加 LRU 还是简单 dict？推荐简单 dict（dev 阶段）
-3. **CredentialResolver 是 singleton 还是 per-process**：推荐 module-level singleton（与 `CredentialVault` 同模式）
-4. **evaluation CLI 怎么用**：它没 conv_id 上下文。两选项：(a) CLI 显式带 `--tenant-id` 参数 + 走特殊 path bypass header 检查；(b) CLI 直接调 `CredentialVault.decrypt_json` 不经 proxy。推荐 (b)——CLI 是 ops tool 不该走用户 path
-5. **Bedrock region**：当前 host env `AWS_REGION` forward。本 chore 后 region 从 `tenant_model_credentials.credential_data` decrypted JSON 拿（02a 落地 bedrock extras 含 region）。验证 v2-B credential dialog 确实存了 region
+1. ~~`X-RoleMesh-Conversation-Id` header 真生成路径~~ → **新加注入点** Pi + Claude SDK 出站路径各一处；header 常量定义在 `src/rolemesh/egress/headers.py::ROLEMESH_CONVERSATION_ID_HEADER` 两 backend 共享 import（02c retired prompt 设计直接复用）
+2. ~~evaluation CLI 怎么用~~ → **不动 CLI**，它根本不经 credential_proxy
+3. ~~NATS event 名~~ → 复用现有 `web.coworker.restart`（webui/v1/credentials.py:66 已 publish），CredentialResolver subscribe 同 event 做 cache invalidate
+
+仍需 session 内决策：
+
+1. **Cache size limit**：1 分钟 TTL 但没行数 limit，dev OK；prod 大 tenant 数会爆内存——加 LRU 还是简单 dict？推荐简单 dict（dev 阶段；prod hardening 独立 chore）
+2. **CredentialResolver 是 singleton 还是 per-process**：推荐 module-level singleton（与 `CredentialVault` 同模式）
+3. **Bedrock region**：当前 host env `AWS_REGION` forward。本 chore 后 region 从 `tenant_model_credentials.credential_data` decrypted JSON 拿（v2-B credential dialog 已存 region 进 extras）。**session 内验证**：read v2-B credential-dialog 确认存了 region；如 schema 漏 region 字段，需要回头加 admin endpoint 让用户补
+4. **NATS event 粒度**：`web.coworker.restart` 是 coworker-scoped，不是 (tenant, provider)-scoped。CredentialResolver subscribe 后需要 invalidate 该 tenant 该 provider **所有 cache entry**——粒度偏粗但每分钟最多多 1 次 vault decrypt，可接受。如果嫌粗，session 内可决定新加 `web.credential.changed.{tenant_id}.{provider}` 作为更细粒度 event（与现有 event 并存，不互斥）
 
 ## Pitfalls
 
