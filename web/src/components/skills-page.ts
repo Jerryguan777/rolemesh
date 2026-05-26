@@ -233,6 +233,7 @@ export class SkillsPage extends LitElement {
   private renderDeleteDialog() {
     const target = this.deleteTarget;
     const bindCount = target?.bound_coworker_count ?? 0;
+    const blocked = bindCount > 0;
     return html`
       <rm-confirm-dialog
         title=${target ? `Delete skill "${target.name}"?` : 'Delete skill?'}
@@ -241,16 +242,19 @@ export class SkillsPage extends LitElement {
         confirm-label="Delete"
         busy-label="Deleting…"
         ?busy=${this.deleteInFlight}
+        ?disable-confirm=${blocked}
         data-testid="confirm-delete-dialog"
         @cancel=${this.cancelDelete}
         @confirm=${() => void this.performDelete()}
       >
-        <p style="margin: 0;">
-          ${bindCount > 0
-            ? html`${bindCount} coworker(s) currently bind this skill
-              and will lose access. `
-            : nothing}Cannot be undone.
-        </p>
+        ${blocked
+          ? html`<p style="margin: 0;">
+              This skill is bound to ${bindCount}
+              coworker${bindCount === 1 ? '' : 's'}. Unbind it from
+              ${bindCount === 1 ? 'that coworker' : 'each one'} before
+              deleting.
+            </p>`
+          : html`<p style="margin: 0;">This cannot be undone.</p>`}
       </rm-confirm-dialog>
     `;
   }

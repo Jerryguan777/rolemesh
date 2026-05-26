@@ -91,6 +91,20 @@ describe('<rm-confirm-dialog>', () => {
     expect(confirm.textContent?.trim()).toBe('Deleting…');
   });
 
+  it('disables Confirm but not Cancel when disable-confirm is set, and keeps the regular label', async () => {
+    // Policy block path: the parent has determined the action is
+    // not allowed (e.g. resource still bound) and wants the user to
+    // see the explanation in the body then dismiss with Cancel.
+    el = await mount({ disableConfirm: true, confirmLabel: 'Delete' });
+    const confirm = $shadow<HTMLButtonElement>(el, '[data-testid="confirm-confirm"]');
+    const cancel = $shadow<HTMLButtonElement>(el, '[data-testid="confirm-cancel"]');
+    expect(confirm.disabled).toBe(true);
+    expect(cancel.disabled).toBe(false);
+    // Label is the regular one — NOT swapped to busy-label, because
+    // this isn't an in-flight state.
+    expect(confirm.textContent?.trim()).toBe('Delete');
+  });
+
   it('renders slotted body content (regression: light DOM slot was a no-op)', async () => {
     // Pin the bug where switching to light DOM made <slot> silently
     // empty: shadowed <slot> projects the host's light DOM children

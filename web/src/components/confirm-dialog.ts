@@ -44,6 +44,14 @@ export class RmConfirmDialog extends LitElement {
    *  the underlying API call is in flight. */
   @property({ type: Boolean }) busy = false;
   @property({ attribute: 'busy-label' }) busyLabel = '';
+  /** Policy block — Confirm is disabled regardless of busy, label is
+   *  NOT swapped. Use this when the parent has determined the action
+   *  is currently not allowed (e.g. resource still bound) so the
+   *  user can read the explanation in the body and dismiss with
+   *  Cancel. Distinct from `busy` so an in-flight spinner doesn't
+   *  bleed into a permanent state. */
+  @property({ type: Boolean, attribute: 'disable-confirm' })
+  disableConfirm = false;
 
   static styles = css`
     :host {
@@ -144,7 +152,7 @@ export class RmConfirmDialog extends LitElement {
             type="button"
             class=${confirmClass}
             data-testid="confirm-confirm"
-            ?disabled=${this.busy}
+            ?disabled=${this.busy || this.disableConfirm}
             @click=${this.onConfirm}
           >${this.busy
               ? (this.busyLabel || 'Working…')

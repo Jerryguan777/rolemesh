@@ -245,6 +245,15 @@ export class MCPServersPage extends LitElement {
 
   private renderDeleteDialog() {
     const target = this.deleteTarget;
+    // coworkerCounts is populated asynchronously by recountBindings()
+    // (kicked off from refresh()). If a key is missing the server has
+    // zero references — Map deliberately omits zero entries. The
+    // unmeasured window (recount still in flight) is very short in
+    // practice; the backend's 409 RESOURCE_IN_USE check is the
+    // authoritative gate, so an early-click that slips through still
+    // can't cause data loss.
+    const bindCount = target ? this.coworkerCounts.get(target.id) ?? 0 : 0;
+    const blocked = bindCount > 0;
     return html`
       <rm-confirm-dialog
         title=${target ? `Delete MCP server "${target.name}"?` : 'Delete MCP server?'}
@@ -253,14 +262,19 @@ export class MCPServersPage extends LitElement {
         confirm-label="Delete"
         busy-label="Deleting…"
         ?busy=${this.deleteInFlight}
+        ?disable-confirm=${blocked}
         data-testid="confirm-delete-dialog"
         @cancel=${this.cancelDelete}
         @confirm=${() => void this.performDelete()}
       >
-        <p style="margin: 0;">
-          Coworkers bound to this server will lose access to its
-          tools. Cannot be undone.
-        </p>
+        ${blocked
+          ? html`<p style="margin: 0;">
+              This MCP server is bound to ${bindCount}
+              coworker${bindCount === 1 ? '' : 's'}. Unbind it from
+              ${bindCount === 1 ? 'that coworker' : 'each one'} before
+              deleting.
+            </p>`
+          : html`<p style="margin: 0;">This cannot be undone.</p>`}
       </rm-confirm-dialog>
     `;
   }

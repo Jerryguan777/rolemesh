@@ -41,6 +41,13 @@ export class SkillDetailPage extends LitElement {
   @state() private deleteError: string | null = null;
   /** When true, the skill-level "Delete skill" confirmation is up. */
   @state() private deleteSkillOpen = false;
+  /** Number of coworkers currently bound to this skill, or null
+   *  while the count is still being tallied (load() walks every
+   *  coworker's skill bindings to compute it). When > 0 the delete
+   *  confirm displays the "unbind first" copy and disables Confirm
+   *  — backend would 409 anyway, but pre-blocking saves the round
+   *  trip and matches the list-page behavior. */
+  @state() private boundCoworkerCount: number | null = null;
   /** Per-file delete confirm. Holds the path of the file the user
    *  asked to delete; null = no file-delete dialog open. */
   @state() private deleteFilePath: string | null = null;
@@ -81,6 +88,7 @@ export class SkillDetailPage extends LitElement {
     this.detailError = null;
     this.fileEdits = {};
     this.activeFile = null;
+    this.boundCoworkerCount = null;
     try {
       this.detail = await this.api.getSkill(this.skillId);
       this.metaEnabled = this.detail.enabled;
@@ -97,6 +105,35 @@ export class SkillDetailPage extends LitElement {
     } finally {
       this.loading = false;
     }
+    // Tally bindings in the background — the page paints right away,
+    // count streams in. The Skill detail payload doesn't include
+    // bound_coworker_count (only SkillSummary does on the list view),
+    // so we walk every coworker's skill bindings here. Failures are
+    // swallowed: the delete dialog falls back to letting the backend
+    // 409 surface the same message.
+    void this.recountBindings();
+  }
+
+  private async recountBindings(): Promise<void> {
+    const skillId = this.skillId;
+    if (!skillId) return;
+    let coworkers: { id: string }[] = [];
+    try {
+      coworkers = await this.api.listCoworkers();
+    } catch {
+      return;
+    }
+    const results = await Promise.allSettled(
+      coworkers.map((c) => this.api.listCoworkerSkills(c.id)),
+    );
+    let count = 0;
+    for (const r of results) {
+      if (r.status !== 'fulfilled') continue;
+      if (r.value.some((b) => b.skill_id === skillId)) count += 1;
+    }
+    // Guard against late completion after the user navigated away.
+    if (this.skillId !== skillId) return;
+    this.boundCoworkerCount = count;
   }
 
   private contentForFile(path: string): string {
@@ -268,6 +305,12 @@ export class SkillDetailPage extends LitElement {
   }
 
   private renderConfirmDialogs(s: Skill) {
+    // `null` = recount still in flight; show a "Checking bindings…"
+    // hint and disable Confirm until we know. `0` = safe to delete.
+    // `> 0` = blocked, must unbind first.
+    const count = this.boundCoworkerCount;
+    const checking = count === null;
+    const blocked = (count ?? 0) > 0;
     return html`
       <rm-confirm-dialog
         title=${`Delete skill "${s.name}"?`}
@@ -276,11 +319,23 @@ export class SkillDetailPage extends LitElement {
         confirm-label="Delete"
         busy-label="Deleting…"
         ?busy=${this.busy}
+        ?disable-confirm=${checking || blocked}
         data-testid="confirm-delete-skill-dialog"
         @cancel=${this.cancelDeleteSkill}
         @confirm=${() => void this.performDeleteSkill()}
       >
-        <p style="margin: 0;">This cannot be undone.</p>
+        ${checking
+          ? html`<p style="margin: 0; color: var(--rm-ink-3);">
+              Checking bindings…
+            </p>`
+          : blocked
+            ? html`<p style="margin: 0;">
+                This skill is bound to ${count}
+                coworker${count === 1 ? '' : 's'}. Unbind it from
+                ${count === 1 ? 'that coworker' : 'each one'} before
+                deleting.
+              </p>`
+            : html`<p style="margin: 0;">This cannot be undone.</p>`}
       </rm-confirm-dialog>
       <rm-confirm-dialog
         title=${this.deleteFilePath
