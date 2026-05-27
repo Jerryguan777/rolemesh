@@ -294,10 +294,16 @@ class TestScenarioGroupQueueConcurrency:
 class TestScenarioCredentialProxy:
     async def test_proxy_starts_and_serves(self, env: Path) -> None:
         import aiohttp
+        from cryptography.fernet import Fernet
 
+        from rolemesh.auth.credential_vault import CredentialVault
+        from rolemesh.egress.credentials import CredentialResolver
         from rolemesh.security.credential_proxy import start_credential_proxy
 
-        runner = await start_credential_proxy(port=0, host="127.0.0.1")
+        resolver = CredentialResolver(CredentialVault(Fernet.generate_key()))
+        runner = await start_credential_proxy(
+            port=0, host="127.0.0.1", credential_resolver=resolver,
+        )
 
         try:
             port = None

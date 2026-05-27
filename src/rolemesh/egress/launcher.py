@@ -247,51 +247,40 @@ class _ForwardSpec:
     requires: str | None = None
 
 
-# Forward-only allowlist. MUST mirror the keys
-# ``reverse_proxy.start_credential_proxy`` reads from os.environ — a
-# divergence shows up here in code review rather than at runtime.
-# Adding a new forwarder is one line; flipping ``is_url`` to True is
-# the only thing needed to wire the loopback rewrite for URLs.
+# Forward-only allowlist. LLM API keys are NOT on this list — credentials
+# are read from the per-tenant ``tenant_model_credentials`` table via
+# :class:`rolemesh.egress.credentials.CredentialResolver` inside the
+# gateway. Only deployment-level *_BASE_URL overrides (non-secret) and
+# infra knobs travel here.
+#
+# INV-CRED: anything matching ``*_API_KEY`` / ``*_AUTH_TOKEN`` /
+# ``*_OAUTH_TOKEN`` / ``*BEARER*`` MUST NOT be added back. The lint
+# script in PR 3 (``scripts/check_credential_routing.py``) fires on
+# any ``os.environ.get`` of those shapes inside ``src/rolemesh/egress/``,
+# but a regression here would not be caught — only an attentive review.
 _FORWARDABLE: tuple[_ForwardSpec, ...] = (
     _ForwardSpec("EGRESS_UPSTREAM_DNS"),
-    _ForwardSpec("ANTHROPIC_API_KEY"),
-    _ForwardSpec("CLAUDE_CODE_OAUTH_TOKEN"),
-    _ForwardSpec("ANTHROPIC_AUTH_TOKEN"),
     _ForwardSpec("ANTHROPIC_BASE_URL", is_url=True),
-    _ForwardSpec("PI_OPENAI_API_KEY"),
     _ForwardSpec("OPENAI_BASE_URL", is_url=True),
-    _ForwardSpec("PI_GOOGLE_API_KEY"),
     _ForwardSpec("GOOGLE_BASE_URL", is_url=True),
-    # Bedrock — both forward verbatim. The bearer token is a secret
-    # string (NEVER a URL — keep is_url=False so loopback rewrite
-    # cannot corrupt it). The region is also plain text
-    # ("us-east-1" etc.); the gateway reads it back in
-    # ``_build_provider_registry`` to pick the regional
-    # ``bedrock-runtime.{region}.amazonaws.com`` upstream. Without
-    # these two forwards, the gateway container's reverse proxy
-    # would never register a ``bedrock`` provider entry — every
-    # ``/proxy/bedrock/...`` request from agents would 404.
-    #
-    # ``AWS_REGION`` is gated on ``AWS_BEARER_TOKEN_BEDROCK`` so an
-    # operator who has ``AWS_REGION`` set for ``aws cli`` (or any
-    # other non-Bedrock AWS use) does NOT leak it into the gateway
-    # container's env unless they're actually running Bedrock.
-    _ForwardSpec("AWS_BEARER_TOKEN_BEDROCK"),
-    _ForwardSpec("AWS_REGION", requires="AWS_BEARER_TOKEN_BEDROCK"),
+    # Master key for the CredentialVault. Same value as the
+    # orchestrator/webui processes — Fernet symmetric, so the
+    # gateway needs it to decrypt rows the wizard wrote on the host.
+    # NOT a per-tenant secret: classification "App master secret" per
+    # docs/config-drift-fix-plan.md §2.1.
+    _ForwardSpec("CREDENTIAL_VAULT_KEY"),
 )
 
 
 def _gateway_env() -> list[str]:
     """Build the Env block for the gateway container.
 
-    The gateway reads NATS_URL for its NATS subscriptions, optionally
-    EGRESS_UPSTREAM_DNS for the authoritative resolver, and the
-    provider-secret env vars (ANTHROPIC_API_KEY, PI_OPENAI_API_KEY,
-    ...) for credential injection. The provider secrets are forwarded
-    explicitly rather than leaving them to inherit — that makes the
-    gateway's attack surface auditable, and documents which
-    environment variables the reverse-proxy path will actually
-    consume.
+    The gateway reads NATS_URL for its NATS subscriptions and the
+    deployment-level *_BASE_URL overrides forwarded here. LLM
+    credentials are NOT forwarded — they come from the per-tenant
+    ``tenant_model_credentials`` table via CredentialResolver inside
+    the gateway, so the gateway container's env is intentionally
+    secret-free for LLM providers.
 
     Forwarder spec lives in ``_FORWARDABLE`` (module-level) — single
     source of truth for both "which env vars cross the boundary" AND

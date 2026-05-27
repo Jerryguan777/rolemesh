@@ -69,6 +69,7 @@ from .policy_cache import (
     fetch_snapshot_via_nats,
     subscribe_rule_changes,
 )
+from .credentials import CredentialResolver
 from .remote_token_vault import RemoteTokenVault
 from .reverse_proxy import set_token_vault, start_credential_proxy
 from .safety_call import AuditPublisher, EgressSafetyCaller
@@ -237,10 +238,23 @@ async def main() -> None:
         set_token_vault(RemoteTokenVault(nats_client))
         logger.info("gateway: RemoteTokenVault wired")
 
+        # --- Credential vault + resolver -----------------------------
+        # Gateway needs the same vault as the orchestrator/webui so it
+        # can decrypt rows the wizard wrote. CREDENTIAL_VAULT_KEY is
+        # forwarded into this container by ``launcher._FORWARDABLE``.
+        from rolemesh.auth.credential_vault import (
+            create_credential_vault_from_env,
+            get_credential_vault,
+            set_credential_vault,
+        )
+        set_credential_vault(create_credential_vault_from_env())
+        credential_resolver = CredentialResolver(get_credential_vault())
+
         # --- Reverse proxy (port 3001) -------------------------------
         reverse_runner = await start_credential_proxy(
             port=CREDENTIAL_PROXY_PORT,
             host="0.0.0.0",
+            credential_resolver=credential_resolver,
             identity_resolver=identity,
             safety_caller=safety,
         )
