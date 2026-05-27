@@ -1,257 +1,373 @@
-# Chore — credential_proxy DB migration (D1 + D4)
+# Chore Session 2 — credential_proxy DB migration (D1 + D4) — Option A
 
 | field | value |
 |---|---|
-| Cycle | independent chore (与 v1.1 / v2 平级) |
-| Branch | 新分支 `chore/credential-proxy-db`（off main） |
-| Prerequisites | v2 cycle 合 main（如未合，可在 feat/ui-v2 上做但 PR 边界乱）|
-| Estimated PRs | 3-4 |
-| Estimated LOC | ~1500-1800（2x 系数；含 cache + tests） |
+| Branch | `chore/config-db-truth`（off main，session 1 已先在此分支跑过 D2+D3） |
+| Prerequisites | Session 1 done（D2 simplify + D3 fix 在同分支前两个 commit） |
+| Estimated PRs | 4 commits |
+| Estimated LOC | ~400-500（Option A：container labels；不做 header injection 省 ~300 LOC vs 原 Option C 设计）|
 | Status | not started |
 
 > **Trigger**：`docs/config-drift-fix-plan.md` §3 D1（CRITICAL）+ D4。当前 multi-tenant LLM credential 隔离**完全不工作**——UI 上 user 配的 anthropic key 加密入 DB 后从未被 runtime 读取；agent 实际用 host process 的 `ANTHROPIC_API_KEY` env var，所有 tenant 共用一份。dev 单 tenant 凑巧能跑，prod 立刻爆。
+>
+> **2026-05-26 架构 pivot**：从 Option C（agent 出站塞 `X-RoleMesh-Conversation-Id` header + proxy 反查 + 验证）改成 **Option A（container labels at spawn + proxy 通过 source IP 读 labels）**。理由：
+> - 身份是**结构性**的（container 物理上不能改自己的 labels / IP），不是**传输性**的（header 可伪造）
+> - **agent 端 0 改动** —— Pi / Claude SDK 都不用加 header 注入（省 ~300 LOC）
+> - **审计天然**——proxy 每请求自带 container_id
+> - **复合未来 OIDC**：user_id 加进现有 labels，user-mode 是 `+1 label + 1 if 分支`，不是重新设计
+> - 复用 chore A 已有的 Docker inspect 基础设施
 
 ## Goal
 
-把 `src/rolemesh/egress/` 子系统从 **v0 single-tenant host-env-based** 改造成 **multi-tenant DB-based** credential 注入：
+把 `src/rolemesh/egress/` 子系统从 **v0 single-tenant host-env-based** 改造成 **multi-tenant DB-based** credential 注入，通过 container labels 解析 tenant 身份：
 
-1. **D1**：`credential_proxy` per-request 查 `tenant_model_credentials.credential_data` BYTEA → `CredentialVault.decrypt_json()` → 注入真 key
-2. **D4**：service-mode MCP credentials 走同一路径——按 mcp server name 查 `mcp_servers.credential_ref` → 注入
-3. 加 in-memory cache（1 分钟 TTL，per (tenant_id, provider/mcp_name) key），避免每请求 vault decrypt
-4. 停止 `egress/launcher.py` 把 host env LLM keys forward 到 gateway 容器
-5. INV-CRED-1/2/3/4 pinned tests 防止退回
+1. **spawn 时给 container 加 3 个 labels**（`rolemesh.tenant_id` / `rolemesh.coworker_id` / `rolemesh.run_id`）
+2. **`IdentityResolver`**：proxy 收请求 → `request.client.host` → docker inspect → labels → `ContainerIdentity(tenant_id, coworker_id, run_id)`
+3. **`CredentialResolver`**：`(tenant_id, provider)` → DB → `CredentialVault.decrypt_json()` → 真 key；1 分钟 in-memory cache
+4. **`reverse_proxy.py` 改造**：所有 `os.environ.get("ANTHROPIC_API_KEY")` 等替换为 `resolver.resolve_llm(identity.tenant_id, provider)`
+5. **`egress/launcher.py` `_FORWARDABLE` 删 LLM 行**：保留 `EGRESS_UPSTREAM_DNS` 等 infra
+6. **MCP service-mode 同款路径**：按 `(tenant_id, mcp_server_name)` 查 `mcp_servers.credential_ref` → 注入
+7. **INV-CRED-1/2/3/4 pinned tests + lint script** 防回退
 
-**不在范围**：user-mode MCP（OIDC vault）—— 02c retired 的工作；本 chore 只 service-mode。当 OIDC 真接入时复用本 chore 的 cache + conversation_id header 设计模式。
+**不在范围**：user-mode MCP（OIDC vault）—— 02c retired 工作；Option A 让那条路径变成 future "+1 label + 1 if"，但仍是独立 chore。
 
 ## Required reading
 
-1. [`docs/config-drift-fix-plan.md`](./config-drift-fix-plan.md) §3-§6（drift evidence + 根因 + 修复设计）
+1. [`docs/config-drift-fix-plan.md`](./config-drift-fix-plan.md) §3 D1/D4 + §5.B（修复设计）
 2. [`docs/webui-backend-v1.1-design.md`](./webui-backend-v1.1-design.md) §8.1 envelope encryption
 3. **v1.1 02a Findings** § "CredentialVault" —— vault primitive 实际接口
-4. **v2-C Findings § "Backend WS forward — partial gap discovered"** —— forward-design 反应模式（chore-D1+D4 不复用，但参考"假设接口"的诚实姿态）
-5. **02c retired session** (`docs/webui-backend-v1.1-sessions/02c-credential-proxy-user-mode.md`) —— 历史推迟的 user-mode 工作；其中"conversation_id header 信任验证"安全要点本 chore **必须照搬**到 service-mode
+4. **2026-05-26 conversation 关于 Option A vs C** —— 架构选择理由（保留在 git blame 的 commit message）
+5. **chore A** (`src/rolemesh/orchestration/run_cancel_subscriber.py` + `src/rolemesh/container/scheduler.py:get_active_container_name`) —— Docker inspect 基础设施 + 容器映射 pattern
 6. 现状代码：
    - `src/rolemesh/egress/reverse_proxy.py` —— 当前直接 `os.environ.get(...)` 的 LLM key 注入点（grep `ANTHROPIC_API_KEY`）
    - `src/rolemesh/egress/launcher.py` —— `_FORWARDABLE` host env forward 名单
-   - `src/rolemesh/egress/gateway.py` —— gateway init
-   - `src/rolemesh/egress/credential_proxy.py` / `forward_proxy.py` / `mcp_cache.py` —— proxy 实现
+   - `src/rolemesh/container/runner.py` —— `build_container_spec` (spawn 时加 labels 处)
+   - `src/rolemesh/container/docker_runtime.py` —— Docker label 透传
    - `src/rolemesh/auth/credential_vault.py` —— `decrypt_json()` 方法
    - `src/rolemesh/db/model.py` —— `get_credential_data(tenant_id, provider)` 已存在
    - `src/rolemesh/db/mcp_server.py` —— `credential_ref` 字段查询
-   - `src/rolemesh/db/chat.py` —— `get_conversation_for_user` 用于反查 tenant_id
-   - chore A `src/rolemesh/orchestration/run_cancel_subscriber.py` —— `get_active_container_name` helper（信任验证用）
+   - 内部 bridge 网络配置（grep `agent-network` / `Internal=true`）—— 验证 per-container unique IP
 
-## 概念定位：service-mode 复用 02c 的设计原语
+## 概念定位：身份结构性而非传输性
 
-02c retired 推了**整条 user-mode 链路**（OIDC vault）；本 chore 只做 **service-mode**：
+| 方案 | 身份来源 | agent 是否需改 | 伪造可能 |
+|---|---|---|---|
+| **Option A**（本 chore）| container labels（orchestrator 烙）| 0 改动 | 物理上不可——container 无法改自己 labels |
+| Option C（已 cut）| HTTP header（agent 出站塞）| Pi + Claude SDK 各加注入点 | 可伪造，需 proxy 验证 |
 
-| 维度 | service mode（本 chore）| user mode（02c retired，未来 OIDC chore）|
-|---|---|---|
-| credential 来源 | `tenant_model_credentials`（platform-managed）/ `mcp_servers.credential_ref` | `oidc_user_tokens`（user-managed via OIDC）|
-| 反查路径 | conversation → coworker → tenant → DB | conversation → user → vault → decrypt |
-| 触发条件 | 任何 LLM 调用 / `auth_mode=service` MCP | 仅 `auth_mode=user` MCP |
-| 阻塞性 | **CRITICAL 当前真 bug** | OIDC 分支合入前无 caller |
+**核心 invariant**：proxy 永远不信任 application-level 数据来决定 tenant 身份；只信任 infrastructure-level metadata（labels via docker inspect）。
 
-两条路径共用：
-- `X-RoleMesh-Conversation-Id` header（02c retired 设计）
-- conversation_id header 信任验证（防容器伪造，比对 active container map）
-- in-memory cache + TTL pattern
+## 显式禁令（防 v2-A / D2 bloat 重演）
+
+- ❌ **不加 `X-RoleMesh-Conversation-Id` header** —— Option C 路径已 cut；agent 端 0 改动
+- ❌ **不抽 `CredentialPolicy` / `IdentityProvider` 抽象类** —— 单一来源直接 dict + function
+- ❌ **不写 spec-confirming tests** —— "anthropic 用 x-api-key header" 这类是 spec 验证不是 invariant 守护
+- ❌ **不引入 LRU / cache library** —— plain dict + TTL 够 dev 阶段
+- ❌ **不重构 `reverse_proxy.py` 的非 credential 部分**（routing / logging / response handling 等不动）
+- ❌ **不做 evaluation CLI 兼容** —— CLI 不走 proxy（已确认），无需特殊路径
+- ❌ **不做 user-mode OIDC vault** —— 02c retired 工作；Option A 让 future user-mode 是 trivial extension 不是本 session
+- ❌ **不做 channel_bindings 迁 vault** —— 独立技术债 chore
+- ❌ **不做 cache invalidation 复杂逻辑** —— 1 分钟 TTL 是简单粗暴的 invalidation；不订阅 NATS event。credential PUT 后用户体感"1 分钟内生效"可接受
+- ❌ **不允许 silent fallback host env** —— missing credential 必 401 `MISSING_CREDENTIAL`，不许 fallback
+- ❌ **不删 `ANTHROPIC_API_KEY` 等在 dev `.env`** —— dev 开发者本机可能仍 export（与 evaluation CLI 兼容）；只是 credential_proxy 不再消费
+- ❌ **不修 docker_runtime 接口** —— Docker labels 透传应该是 1 行参数（spec 已支持 labels）
+- ❌ **不加 dynamic label update**（mid-run 改 labels）—— container 一生不可变
 
 ## Scope — PR breakdown
 
-### PR 1 — `CredentialResolver` 新模块 + cache + reverse-lookup helpers
+### PR 1 (commit 1) — spawn 时给 container 加 labels (~30 LOC)
 
-**Goal**：把"拿 tenant_id + provider → 返真 key"逻辑封装成可测试的服务，与 reverse_proxy / forward_proxy 解耦。
+**Goal**：orchestrator 在 spawn 时给每个 agent container 烙 3 个 labels。
 
 子任务：
 
-1. **新建 `src/rolemesh/egress/credential_resolver.py`**：
+1. **`src/rolemesh/container/runner.py` `build_container_spec`**:
    ```python
+   labels = {
+       "rolemesh.tenant_id": str(coworker.tenant_id),
+       "rolemesh.coworker_id": str(coworker.id),
+       "rolemesh.run_id": run_id,
+   }
+   ```
+   加进 `ContainerSpec` 的 labels 字段（如果 spec 已有 labels 字段就 append；如果没有就加）
+
+2. **`docker_runtime.py` create_container**：传 `Labels` 参数给 Docker API
+   - aiodocker 的 ContainerConfig 接 `Labels: dict[str, str]`
+   - 验证一行透传即可（如果已有透传机制就不动）
+
+3. **1 test**（mutation-resistant）：
+   - `test_spawn_writes_rolemesh_labels` —— spawn 后 mock docker inspect 看到 3 个 labels 都存在 + 值正确
+
+**Commit message 模板**：
+
+```
+feat(spawn): label agent containers with tenant_id / coworker_id / run_id
+
+Prerequisite for Option A credential routing (next 3 commits):
+the egress proxy will read identity from container labels rather
+than from agent-injected headers. Labels are immutable from inside
+the container — physically impossible to spoof.
+
+build_container_spec emits three labels at spawn:
+- rolemesh.tenant_id
+- rolemesh.coworker_id
+- rolemesh.run_id
+
+Pinned by test_spawn_writes_rolemesh_labels (mutation-resistant:
+remove any label and the test fails). No behavior change in this
+commit — labels are dormant until PR 2 reads them.
+
+Part of docs/config-drift-fix-plan.md §3 D1/D4 fix via Option A.
+```
+
+### PR 2 (commit 2) — `IdentityResolver` from source IP (~80 LOC)
+
+**Goal**：proxy 从 source IP 读 container labels，返 `ContainerIdentity`。
+
+子任务：
+
+1. **新建 `src/rolemesh/egress/identity_resolver.py`**:
+   ```python
+   @dataclass(frozen=True)
+   class ContainerIdentity:
+       tenant_id: str
+       coworker_id: str
+       run_id: str
+
+   class UnknownSourceError(Exception):
+       """Source IP doesn't map to any rolemesh-labeled container."""
+
+   class IdentityResolver:
+       def __init__(self, docker_client, *, cache_ttl_seconds: int = 30):
+           self._docker = docker_client
+           self._cache: dict[str, _CacheEntry] = {}  # source_ip → identity
+           self._ttl = cache_ttl_seconds
+
+       async def resolve(self, source_ip: str) -> ContainerIdentity:
+           if cached := self._cache.get(source_ip):
+               if cached.expires_at > now():
+                   return cached.identity
+           container = await self._docker.containers.find_by_ip(source_ip)
+           # 或更具体：list all containers + match by NetworkSettings.IPAddress
+           if container is None:
+               raise UnknownSourceError(source_ip)
+           labels = container.labels
+           identity = ContainerIdentity(
+               tenant_id=labels["rolemesh.tenant_id"],
+               coworker_id=labels["rolemesh.coworker_id"],
+               run_id=labels["rolemesh.run_id"],
+           )
+           self._cache[source_ip] = _CacheEntry(identity, now() + self._ttl)
+           return identity
+   ```
+
+2. **`find_by_ip` 实现**（如果 aiodocker 没原生 helper）：
+   - List all containers + match `NetworkSettings.Networks[<bridge>].IPAddress`
+   - 缓存 list 30 秒（avoid per-request listing 整 Docker daemon）
+   - Container 重启 IP 变 → cache miss → 重 list 即可
+
+3. **3 mutation-resistant tests**：
+   - `test_resolve_returns_identity_from_labels` —— mock docker，验返 3 个 label 值
+   - `test_resolve_unknown_ip_raises` —— IP 不对应任何 container
+   - `test_resolve_cache_hit` —— 同 IP 第二次调用不打 docker（mock call_count == 1）
+
+**Commit message 模板**：
+
+```
+feat(egress): IdentityResolver reads tenant from container labels
+
+Translates source IP → ContainerIdentity by docker inspect. Cache
+30s; container lifetime is short, IPs don't reuse rapidly.
+
+Three failure modes are explicit:
+- UnknownSourceError: source IP isn't a rolemesh-labeled container
+  (operator script, leaked test container, network spoofing).
+- Missing label key: KeyError surfaces as 500 to fail loudly —
+  labels are spawned by build_container_spec and must be present.
+- Docker daemon unreachable: bubbles up as 503 from proxy handler.
+
+This is the identity layer for Option A. Next commits use it.
+```
+
+### PR 3 (commit 3) — `CredentialResolver` + `reverse_proxy.py` 改造 (~250 LOC)
+
+**Goal**：proxy 所有 LLM key 注入从 host env 换到 DB-via-vault。
+
+子任务：
+
+1. **新建 `src/rolemesh/egress/credential_resolver.py`** (~80 LOC):
+   ```python
+   class MissingCredentialError(Exception):
+       def __init__(self, tenant_id: str, provider: str):
+           self.tenant_id = tenant_id
+           self.provider = provider
+
    class CredentialResolver:
        def __init__(self, vault: CredentialVault, *, cache_ttl_seconds: int = 60):
            self._vault = vault
            self._cache: dict[tuple[str, str], _CacheEntry] = {}
            self._ttl = cache_ttl_seconds
-           self._lock = asyncio.Lock()  # per-tenant lock 太细；module-level 够用 dev 阶段
 
-       async def resolve_llm_credential(
-           self, tenant_id: str, provider: str,
-       ) -> dict[str, str]:
-           """Return {api_key, ...extras} for (tenant, provider).
-           Raises MissingCredentialError if no row in DB."""
-           ...
+       async def resolve_llm(self, tenant_id: str, provider: str) -> dict:
+           key = (tenant_id, f"llm:{provider}")
+           if cached := self._cache.get(key):
+               if cached.expires_at > now():
+                   return cached.value
+           blob = await get_credential_data(tenant_id, provider)
+           if blob is None:
+               raise MissingCredentialError(tenant_id, provider)
+           value = self._vault.decrypt_json(blob)
+           self._cache[key] = _CacheEntry(value, now() + self._ttl)
+           return value
 
-       async def resolve_mcp_credential(
-           self, tenant_id: str, mcp_server_name: str,
-       ) -> dict[str, str] | None:
-           """Return decrypted credential for service-mode MCP.
-           None if auth_mode != service or credential_ref unset."""
-           ...
-
-       def invalidate(self, tenant_id: str, key: str) -> None:
-           """Called when credential changes via PUT endpoint (NATS event subscribe)."""
+       async def resolve_mcp(self, tenant_id: str, mcp_server_name: str) -> dict | None:
+           # 同 pattern；mcp_servers.credential_ref 解 vault
            ...
    ```
-   - cache key: `(tenant_id, "llm:" + provider)` / `(tenant_id, "mcp:" + name)`
-   - cache value: `_CacheEntry(value: dict, expires_at: datetime)`
-   - 过期 → 重 decrypt，单 process 内一把 asyncio.Lock 防 thundering herd
-2. **新建 `src/rolemesh/egress/tenant_lookup.py`**：
-   ```python
-   async def resolve_tenant_for_request(
-       conversation_id: str,
-       *,
-       get_active_container_name: ContainerLookup,  # chore A 落地
-   ) -> str:
-       """Reverse-lookup tenant_id from conversation_id header.
-       Verifies the conv is owned by the current active container
-       (anti-spoofing)."""
-       ...
 
-   class ConversationIdMissingError(Exception): ...
-   class ConversationIdSpoofingError(Exception): ...  # header 与 active container 不匹配
-   ```
-3. **NATS subscribe credential change event** (`webui/v1/credentials.py` 已 publish `web.coworker.restart`；本 chore 加 `web.credential.changed.{tenant_id}.{provider}` event + CredentialResolver subscribe → invalidate cache)
-4. **pinned tests** (`tests/egress/test_credential_resolver.py`)：
-   - resolve LLM cache hit / miss / expire
-   - resolve MCP credential 三态 (service has ref / service no ref / user-mode)
-   - missing credential 抛 `MissingCredentialError`
-   - invalidate event triggers re-decrypt next call
-   - tenant_lookup happy path + missing header + spoofed header
+2. **`reverse_proxy.py` 改 ~6-10 个注入点**：
+   - 每个 handler 入口：
+     ```python
+     identity = await identity_resolver.resolve(request.client.host)
+     # provider 从 path / Host header 推断
+     try:
+         cred = await credential_resolver.resolve_llm(identity.tenant_id, provider)
+     except MissingCredentialError:
+         return error_response(401, "MISSING_CREDENTIAL", ...)
+     # 用 cred dict 注入 header
+     headers["x-api-key"] = cred["api_key"]
+     ```
+   - **删除**所有 `os.environ.get("ANTHROPIC_API_KEY")` / `secrets.get("ANTHROPIC_API_KEY")` 等读 host env LLM key 的位置
+   - Bedrock region 从 `cred["extras"]["region"]` 拿（v2-B 已存）；不再从 host AWS_REGION
 
-**估算**：~500 LOC（含 tests）
+3. **`egress/launcher.py` `_FORWARDABLE` 删 LLM 行**：
+   - 删：`ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` / `PI_OPENAI_API_KEY` / `OPENAI_BASE_URL` / `PI_GOOGLE_API_KEY` / `GOOGLE_BASE_URL` / `AWS_BEARER_TOKEN_BEDROCK` / `AWS_REGION`
+   - 保留：`EGRESS_UPSTREAM_DNS` 等真 infra
 
-### PR 2 — `reverse_proxy.py` 改造：所有 LLM key 注入走 resolver
+4. **不订阅 NATS event 做 cache invalidate** —— 1 分钟 TTL 简单粗暴；用户 PUT 后体感"1 分钟内生效"可接受。**Findings 段记录这是有意决定**
 
-**Goal**：把 `secrets.get("ANTHROPIC_API_KEY", "")` 等所有 `os.environ.get(...)` 读 LLM key 的位置换成 `await resolver.resolve_llm_credential(tenant_id, provider)`。
+5. **5 mutation-resistant tests** (`tests/egress/test_reverse_proxy_db_credentials.py`):
+   - `test_tenant_a_request_injects_tenant_a_key` —— mock vault + DB，验跨 tenant 隔离
+   - `test_missing_credential_returns_401_not_fallback` —— mutation test：临时改回 fallback host env → 测试红
+   - `test_cache_hit_skips_vault_decrypt` —— 同 (tenant, provider) 2 次请求，vault.decrypt_json 被调 1 次
+   - `test_bedrock_region_from_db_not_host_env` —— Bedrock 请求 region 来自 cred["extras"]["region"]
+   - `test_unknown_source_ip_returns_401` —— spoofed / non-rolemesh container
 
-子任务：
+**Commit message 模板**：
 
-1. **grep + 列清单**（session 开头跑）：
-   ```bash
-   grep -rn "secrets\.get\|os\.environ\.get" src/rolemesh/egress/reverse_proxy.py \
-     | grep -iE "API_KEY|OAUTH_TOKEN|AUTH_TOKEN|BEARER" 
-   ```
-   贴到 session 开头作为工作清单
-2. 改造每个注入点（应该 ~6-10 处）：
-   - Anthropic native (api-key + oauth 两条)
-   - OpenAI
-   - Google
-   - Bedrock（AWS bearer + region）
-3. 改造每个 handler 入口：
-   - 从 request header 拿 `X-RoleMesh-Conversation-Id`
-   - 调 `tenant_lookup.resolve_tenant_for_request(conv_id, ...)` → tenant_id
-   - 推断 provider（看 request path / Host header）
-   - 调 `resolver.resolve_llm_credential(tenant_id, provider)` → credential dict
-   - 用 dict 注入 header
-4. **失败处理**：
-   - missing conv_id header → 400 `MISSING_CONVERSATION_ID`
-   - spoofed conv_id → 403 `CONVERSATION_NOT_OWNED`
-   - missing credential → **不要 fallback host env**（这是当前 bug 根源）→ 401 `MISSING_CREDENTIAL` + 结构化 error
-5. **删 `egress/launcher.py` 内 `_FORWARDABLE` 的 LLM-related 行**：
-   - `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL` / `PI_OPENAI_API_KEY` / `OPENAI_BASE_URL` / `PI_GOOGLE_API_KEY` / `GOOGLE_BASE_URL` / `AWS_BEARER_TOKEN_BEDROCK` / `AWS_REGION`
-   - 保留 infra forward: `EGRESS_UPSTREAM_DNS`
-6. **pinned tests** (`tests/egress/test_reverse_proxy_db_credentials.py`)：
-   - tenant A 配 anthropic key → tenant A 请求 → 注入 A 的 key（mock vault + DB）
-   - tenant B 配 anthropic key → tenant B 请求 → 注入 B 的 key
-   - 同 tenant 两次连续请求 → vault decrypt 调 1 次（cache hit）
-   - tenant 未配 credential → 401 + 结构化 error，**不 fallback host env**
-   - missing conv_id header → 400
-   - spoofed conv_id → 403
-   - **Mutation test**：把 reverse_proxy 改回 fallback host env → tenant isolation test 应该红
+```
+feat(egress): reverse_proxy reads per-tenant credentials from DB
 
-**估算**：~700 LOC（含 tests）
+Replaces all os.environ.get("*_API_KEY") in reverse_proxy.py with
+CredentialResolver lookups keyed on (tenant_id, provider). Identity
+comes from the source IP via IdentityResolver (previous commit).
 
-### PR 3 — service-mode MCP credential 同款路径
+Removes 10 LLM-key forwards from launcher.py _FORWARDABLE —
+gateway container no longer needs host env LLM keys.
 
-**Goal**：`POST /proxy/mcp/<server-name>/...` 时按 (tenant_id, server name) 查 `mcp_servers.credential_ref` → 注入对应 header。
+Cache: plain dict + 1-minute TTL. No NATS invalidation event;
+"new credential takes up to 1 minute to apply" is acceptable for
+dev stage. Production tightening (event-driven invalidation) is
+a separate chore if needed.
+
+Missing credential → 401 MISSING_CREDENTIAL. No silent fallback
+to host env. Mutation test pinned: changing the handler to
+fallback fails test_missing_credential_returns_401_not_fallback.
+
+Bedrock region now comes from credential extras (v2-B credential
+dialog already stores it). The AWS_REGION env forward is removed.
+
+This is the core D1 fix. D4 (MCP service-mode credentials) is
+the next commit; both flow through the same resolver pattern.
+```
+
+### PR 4 (commit 4) — MCP service-mode credential + INV-CRED lint (~80 LOC)
+
+**Goal**：service-mode MCP credentials 同款路径 + 防回退 lint。
 
 子任务：
 
 1. **`reverse_proxy.py` MCP routing 加 credential resolve**：
    - 路径前缀 `/proxy/mcp/<server-name>` 触发
-   - 调 `resolver.resolve_mcp_credential(tenant_id, server_name)`
-   - 返 None（auth_mode != service）→ 不注入，pass-through
-   - 返 dict → 按 `mcp_servers.auth_mode` 决定注入哪个 header（看 02a Findings）
-2. **`mcp_cache.py` 更新**：移除任何"启动时 load 一份 credentials 缓存"逻辑（应该已经没有，但 grep 验证）
-3. **pinned tests**：
-   - service-mode MCP request 走 resolver
-   - `auth_mode=user` 路径不调 resolver（user-mode 留 OIDC chore）
-   - mcp_servers.credential_ref 改了 → next request 拿新值（cache invalidate）
+   - `identity = await identity_resolver.resolve(request.client.host)`
+   - `cred = await credential_resolver.resolve_mcp(identity.tenant_id, server_name)`
+   - cred is None（auth_mode != service 或 credential_ref unset）→ pass-through，不注入
+   - cred 有 → 按 server.auth_mode 注入对应 header（看 02a Findings）
 
-**估算**：~300 LOC
+2. **`scripts/lint-no-host-env-llm-keys.py`** (~40 LOC):
+   - grep `src/rolemesh/egress/` 找 `os.environ.get` 读名字含 `*_API_KEY` / `*_OAUTH_TOKEN` / `*_AUTH_TOKEN` / `BEARER` 的
+   - 例外白名单走 `# inv-cred-1-ok: <reason>` 注释豁免
+   - 命中输出 file:line + 总数；exit 1
+   - 加进 `web/package.json` scripts 或 pyproject 的 test runner
 
-### PR 4 — INV-CRED-* lint + 文档
+3. **2 tests** (`tests/egress/test_mcp_credentials.py` + `tests/test_lint_no_host_env.py`)：
+   - `test_service_mode_mcp_injects_credential` —— mock vault，验 mcp 请求注入正确 header
+   - `test_lint_catches_host_env_llm_key_read` —— 临时加一个 `os.environ.get("ANTHROPIC_API_KEY")` 在测试文件外的 egress 模块 → lint 红（变异测试）
 
-**Goal**：防止后续 PR 退回 host env pattern。
+**Commit message 模板**：
 
-子任务：
+```
+feat(egress): service-mode MCP credentials via DB + INV-CRED lint
 
-1. **`scripts/lint-no-host-env-llm-keys.py`**（或加进 pytest）：
-   - grep `src/rolemesh/egress/` 找 `os.environ.get` 读 LLM-key-shaped 名字（`*_API_KEY` / `*_OAUTH_TOKEN` / `*_AUTH_TOKEN` / `BEARER`）
-   - 命中输出 file:line，exit 1
-   - 例外白名单走 `# inv-cred-1-ok: <reason>` 注释
-2. **`scripts/lint-forwardable-no-llm-keys.py`**：
-   - 检查 `egress/launcher.py` `_FORWARDABLE` 不含 LLM provider key names
-3. INV-CRED-2/3 已在 PR 2 tests 覆盖（tenant 隔离 + missing credential 不 fallback）
-4. 更新 `config-drift-fix-plan.md` §3 D1 + D4 标 fixed + 日期
-5. 在 `egress/credential_resolver.py` 顶部 docstring 引 `config-drift-fix-plan.md` 作历史
+Mirrors the LLM credential path for MCP service-mode. Same
+CredentialResolver primitive, keyed on (tenant_id, mcp_server_name)
+rather than (tenant_id, provider).
 
-**估算**：~200 LOC
+INV-CRED-1: scripts/lint-no-host-env-llm-keys.py blocks any new
+os.environ.get("*_API_KEY") in src/rolemesh/egress/. Existing
+violations (none expected after PR 3) get `# inv-cred-1-ok` allow
+comment.
+
+Closes D4 from config-drift-fix-plan §3. mcp_servers.credential_ref
+column finally has a runtime consumer.
+
+Updates docs/config-drift-fix-plan.md to mark D1 + D4 shipped.
+```
 
 ## Acceptance criteria
 
-- [ ] `<rm-credential-dialog>` PUT 后 next agent request 真用新 key（端到端 manual smoke：两 tenant 配不同 key 看 anthropic 日志 / API usage）
-- [ ] `grep -rn "os\.environ\.get.*API_KEY\|os\.environ\.get.*OAUTH_TOKEN" src/rolemesh/egress/` → 应只剩 lint script 自己 + inv-cred-ok 豁免
-- [ ] `egress/launcher.py _FORWARDABLE` 不含 LLM provider key
-- [ ] INV-CRED-1/2/3/4 pinned test 全绿
-- [ ] tenant A / tenant B 配不同 anthropic key → 各自请求注入各自的 key（手动 smoke + 单测）
-- [ ] vault decrypt 在 cache hit 时**不调用**（性能 invariant）
-- [ ] missing credential **不 silent fallback** host env → 401 `MISSING_CREDENTIAL` + 结构化 error
-- [ ] 跨 tenant 攻击（伪造 conversation_id header）被 403 拦
-- [ ] credential PUT 后通过 NATS event invalidate cache，next request 拿新值（live test）
-- [ ] 现有 evaluation CLI 不退化（如果 CLI 不带 conv_id header，需要单独路径或显式 tenant_id 参数；session 内决定）
-- [ ] OpenAPI / contract test / 现有 pytest 全绿
-- [ ] `config-drift-fix-plan.md` 标 D1 + D4 fixed
-- [ ] 加 `INV-CRED-*` 进文档
+- [ ] spawn 后 docker inspect 看到 3 个 rolemesh.* labels（PR 1）
+- [ ] `IdentityResolver` 解析 source IP → identity（PR 2，单测 + 手动 smoke）
+- [ ] tenant A 配 anthropic key K_A、tenant B 配 K_B → 各请求注入各的 key（PR 3 手动 smoke：在 Anthropic console / dashboard 看到两个不同的 API key 使用）
+- [ ] Missing credential → 401 `MISSING_CREDENTIAL` + 结构化 error，不 silent fallback host env
+- [ ] Vault decrypt cache hit 时**不调用**（性能 invariant）
+- [ ] `_FORWARDABLE` 在 `egress/launcher.py` 不再含 LLM provider key names
+- [ ] Bedrock region 从 DB extras 拿，不从 host AWS_REGION
+- [ ] MCP service-mode credential 注入工作（PR 4）
+- [ ] `lint-no-host-env-llm-keys.py` 跑通 + clean
+- [ ] 全部现有 pytest 不退化（特别 INV-VAULT-*, INV-6 等）
+- [ ] 4 commits 用 `git commit -s` 累在 `chore/config-db-truth`
+- [ ] `git push origin chore/config-db-truth`
+- [ ] 更新 `docs/config-drift-fix-plan.md` 标 D1 + D4 fixed + 日期 + Option A 设计 note
 
-## Out of scope
+## Open questions（session 内自决）
 
-- ❌ **user-mode MCP credential 注入**（OIDC vault 路径，02c retired 工作）
-- ❌ **D3 per-tenant max_concurrent_containers**（独立 chore）
-- ❌ **`channel_bindings.credentials` 明文迁 vault**（独立技术债 chore；同根因但不同 vault primitive）
-- ❌ **重构 evaluation CLI / ops script**（如果它们依赖 host env，session 内决定保留分支还是改 CLI 用 tenant 参数）
-- ❌ **删除现有 `ANTHROPIC_API_KEY` etc 在 `.env` 的存在**——dev 阶段开发者本机可能仍 export 这些（与 evaluation CLI 兼容）；只是不再被 credential_proxy 消费
-- ❌ **NATS event 的真 backend publisher**——`webui/v1/credentials.py` 已经 publish coworker restart event；本 chore 加一个 `web.credential.changed.*` 是 additive
-
-## Open questions
-
-需 session 内决策：
-
-1. **`X-RoleMesh-Conversation-Id` header 真生成路径**：当前 agent 容器出站 MCP 调用是否带这个 header？grep `src/rolemesh/agent/` + `src/pi/` 验证。如果没带，本 chore 需要在 Pi / Claude SDK backend 各加注入点（与 02c retired prompt 同款工作）
-2. **Cache size limit**：1 分钟 TTL 但没行数 limit，dev OK；prod 大 tenant 数会爆内存——加 LRU 还是简单 dict？推荐简单 dict（dev 阶段）
-3. **CredentialResolver 是 singleton 还是 per-process**：推荐 module-level singleton（与 `CredentialVault` 同模式）
-4. **evaluation CLI 怎么用**：它没 conv_id 上下文。两选项：(a) CLI 显式带 `--tenant-id` 参数 + 走特殊 path bypass header 检查；(b) CLI 直接调 `CredentialVault.decrypt_json` 不经 proxy。推荐 (b)——CLI 是 ops tool 不该走用户 path
-5. **Bedrock region**：当前 host env `AWS_REGION` forward。本 chore 后 region 从 `tenant_model_credentials.credential_data` decrypted JSON 拿（02a 落地 bedrock extras 含 region）。验证 v2-B credential dialog 确实存了 region
+1. **`find_by_ip` 实现**：aiodocker 没原生 helper，需要 list all containers + match `NetworkSettings.Networks.<bridge>.IPAddress`。30 秒 cache 整 list 还是 per-ip lookup？推荐前者（list 一次便宜，per-request docker inspect 慢）
+2. **Cache TTL 选择**：IdentityResolver 30s（IP 短期不复用）；CredentialResolver 60s（credential PUT 后用户等 1 分钟可接受）。session 内可微调
+3. **provider 从 request 推断**：path-based (`/proxy/anthropic/...`) vs Host header 解析？grep 现有 reverse_proxy.py 的 routing 看
+4. **Bedrock extras schema**：v2-B credential-dialog 存了 region 进 extras——验证 schema 字段名（`region` vs `aws_region`）+ 必填还是可选
+5. **lint 集成位置**：pytest run vs 独立 npm/script？参考 v1.1/v2 lint script pattern（`web/scripts/lint-no-admin-chat.mjs`）
+6. **`get_credential_data(tenant_id, provider) -> bytes | None`** 返 None 还是抛？现有 `db/model.py` 已实现，grep 看签名
 
 ## Pitfalls
 
-- **绝不允许 silent fallback host env** —— 这是当前 bug 的本质。strict: 找不到 credential 就 401，不允许"凑巧能跑"
-- **conversation_id header 信任验证必须做** —— 容器内 agent 可伪造任意 header；proxy 必须验 conv_id 真对应当前 active container（chore A `get_active_container_name`）。02c retired 已诊断，本 chore 落地
-- **cache invalidation 通过 NATS event**——不要靠 `webui/v1/credentials.py` 直接调 resolver.invalidate（跨进程不行）；通过 NATS publish/subscribe
-- **现有 host env LLM keys 在 dev .env 不要删**——evaluation CLI / 旧 ops script 可能仍 export 它们（用 `(b)` 方案后 CLI 直接 decrypt 不走 proxy；它仍可能 export host env 给别的工具用）
-- **`MissingCredentialError` 返 401 不返 500**——这是 user-actionable error（去配 credential），不是系统 bug
-- **Vault decrypt 调用**：`CredentialVault.decrypt_json(blob)` 不便宜（Fernet HMAC verify）；cache 必要
-- **Pi backend env-injection 已有的 placeholder**：`src/rolemesh/container/runner.py` 当前给 Pi 容器注入 `ANTHROPIC_API_KEY="placeholder"` 等（真 key 由 proxy 注入到 HTTP header）。这个 placeholder 路径**保留不动**——容器内 SDK 看到 env 有值就不抛 NoCredentialsError；HTTP 出站才被 proxy 拦截换真值
-- **conversation_id 反查走 admin_conn** —— credential_proxy 是系统级 caller，应该 admin pool（不受 RLS）；但仍带显式 `WHERE` 谓词（INV-1 双层防御）
-- **不要扩 `_FORWARDABLE` 加新 LLM key forward**——任何新 LLM provider 接入都走 DB credential 不走 host env
+- **不要假设 docker inspect 返完整 labels**——`Labels` 字段可能是 `None` 如果 container 启动时没 labels；本 chore PR 1 是 prerequisite，但要兼容旧 container（无 label）→ raise `UnknownSourceError` 而不是 KeyError
+- **source IP 唯一性**：rolemesh-agents 内部 bridge 应该 per-container unique IP（验证：`docker network inspect rolemesh-agents`）；如果用 host network 或 NAT，整个 Option A 不成立——session 第一件事 grep 验证
+- **cache invalidation 不订阅 NATS event** 是 dev 决定；prod 真上要补
+- **`_FORWARDABLE` 删 LLM keys** 后必须确认 evaluation CLI / 其它 host 工具不依赖 gateway 容器有这些 env（已确认 CLI 不走 proxy）
+- **conversation_id header 完全废弃** —— 即使 Option C 推过这个 header，Option A 下不需要；如果 grep 发现 agent SDK / Pi 已经在塞这个 header（02c retired 没真做但万一以后做了），删掉
+- **`MissingCredentialError` 返 401 不返 500** —— user-actionable error
+- **不要 silent fallback** —— 这是当前 bug 根源；strict 是 invariant
+- **vault.decrypt_json 不便宜** —— cache 必要；mutation test 验 cache hit 不打 vault
 
 ## 执行前刷新清单
 
-- [ ] v2 cycle 合 main？决定本 chore 起新分支 off main 还是 off feat/ui-v2
-- [ ] `docs/config-drift-fix-plan.md` 是否要先 review（特别 §5.B 设计细节）
-- [ ] grep `X-RoleMesh-Conversation-Id` 在 src/ 看 header 注入路径是否已存在
-- [ ] 现有 evaluation CLI 是否真使用 LLM credentials 走 credential_proxy？（决定 PR 4 是否需要给 CLI 加 bypass 或显式 vault decrypt 路径）
+- [ ] Session 1 完成？（D2 simplify + D3 fix 已在 chore/config-db-truth 前 2 个 commit）
+- [ ] `docker network inspect rolemesh-agents` 验证 per-container unique IP（Option A 前提）
+- [ ] grep `Labels` 在 docker_runtime.py 看 Docker API label 透传现状
+- [ ] grep `X-RoleMesh-Conversation-Id` 全仓——如非 0 hits，确认其它用途 + 决定是否删
+- [ ] `tests/egress/` 目录是否存在 + 现有 fixture 风格
 
 ## Findings (after execution)
 
-_(empty — 重点记录：reverse_proxy.py 实际改的注入点数量 + 每个 provider 的字段映射 + cache hit ratio 实测 + evaluation CLI 兼容方案 + 对未来 OIDC user-mode chore 复用的接口形状 + 与 D2 fix（已 6eafd33）的接力情况)_
+_(empty — 重点记录：docker network 是否真支持 per-container IP / find_by_ip 实现路径 / Bedrock extras 字段名验证结果 / cache hit ratio 实测 / 对未来 OIDC user-mode chore 复用的 ContainerIdentity 接口形状 / LOC 实际 vs 500 估算 / 删除的 _FORWARDABLE 行清单)_
