@@ -1304,7 +1304,6 @@ export interface components {
             type: components["schemas"]["MCPType"];
             url: string;
             auth_mode: components["schemas"]["MCPAuthMode"];
-            credential_ref?: string | null;
             extra_headers?: {
                 [key: string]: string;
             };
@@ -1328,7 +1327,6 @@ export interface components {
             type: components["schemas"]["MCPType"];
             url: string;
             auth_mode: components["schemas"]["MCPAuthMode"];
-            credential_ref?: string | null;
             extra_headers?: {
                 [key: string]: string;
             } | null;
@@ -1342,7 +1340,6 @@ export interface components {
             type?: components["schemas"]["MCPType"];
             url?: string;
             auth_mode?: components["schemas"]["MCPAuthMode"];
-            credential_ref?: string | null;
             extra_headers?: {
                 [key: string]: string;
             } | null;

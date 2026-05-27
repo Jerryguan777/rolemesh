@@ -333,7 +333,6 @@ class MCPServer(BaseModel):
     type: MCPType
     url: str
     auth_mode: MCPAuthMode
-    credential_ref: str | None = None
     extra_headers: dict[str, str] = Field(default_factory=dict)
     tool_reversibility: dict[str, bool] = Field(default_factory=dict)
     description: str | None = None
@@ -355,7 +354,6 @@ class MCPServerCreate(BaseModel):
     type: MCPType
     url: str = Field(min_length=1)
     auth_mode: MCPAuthMode
-    credential_ref: str | None = None
     extra_headers: dict[str, str] | None = None
     tool_reversibility: dict[str, bool] | None = None
     description: str | None = None
@@ -375,7 +373,6 @@ class MCPServerUpdate(BaseModel):
     type: MCPType | None = None
     url: str | None = Field(default=None, min_length=1)
     auth_mode: MCPAuthMode | None = None
-    credential_ref: str | None = None
     extra_headers: dict[str, str] | None = None
     tool_reversibility: dict[str, bool] | None = None
     description: str | None = None

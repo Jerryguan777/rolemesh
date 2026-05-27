@@ -143,7 +143,6 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             type                VARCHAR(50) NOT NULL,
             url                 TEXT NOT NULL,
             auth_mode           VARCHAR(50) NOT NULL DEFAULT 'service',
-            credential_ref      TEXT,
             extra_headers       JSONB DEFAULT '{}',
             tool_reversibility  JSONB DEFAULT '{}',
             description         TEXT,
@@ -157,6 +156,25 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     await conn.execute(
         "ALTER TABLE mcp_servers ALTER COLUMN auth_mode SET DEFAULT 'service'"
     )
+    # The v1.1 design carried a ``credential_ref TEXT`` column intended
+    # as an indirection handle into an external secret store. The 02a
+    # envelope-encryption pivot retired that pattern for LLM credentials
+    # (see the ``tenant_model_credentials.credential_ref`` drop above)
+    # but the equivalent drop on ``mcp_servers`` was forgotten. The
+    # column never had a runtime consumer and is removed here. If MCP
+    # service-mode credentials are wired later, the storage shape
+    # deserves an explicit design decision rather than reviving an
+    # under-specified ``TEXT`` column.
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'mcp_servers'
+                         AND column_name = 'credential_ref') THEN
+                ALTER TABLE mcp_servers DROP COLUMN credential_ref;
+            END IF;
+        END $$
+    """)
 
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
