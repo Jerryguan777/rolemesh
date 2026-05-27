@@ -4,9 +4,9 @@
 |---|---|
 | Branch | `chore/config-db-truth`（off main，已起 + push） |
 | Prerequisites | none（D2 shipped 在 main：commits `6eafd33` + `25834a5`）|
-| Estimated PRs | 2（每 drift 一个 commit）|
-| Estimated LOC | ~150-200（D2 净 -130 + D3 +80-100） |
-| Status | not started |
+| Estimated PRs | 2 → **1 actual**（D3 已 shipped pre-session，无须 commit）|
+| Estimated LOC | ~150-200 → **actual -100**（只 D2 simplify）|
+| Status | ✅ done 2026-05-26（D2 simplify shipped；D3 跳过，见 Findings §2）|
 
 > **Trigger**：`docs/config-drift-fix-plan.md` §3 D2 / D3。两个同主题"DB 列有值，runtime 应该读它"的 small fix。同 session 同分支，2 commits。
 >
@@ -262,6 +262,44 @@ config-drift-fix-plan.md §5.C.
 - [ ] `tests/container/test_runner.py` 当前 8 个 tests grep 确认（删 5 加 0）
 - [ ] D3 现有 spawn 路径 grep（`global_limit` / `_can_spawn` / `MAX_CONCURRENT`）找到 limit check 位置
 
-## Findings (after execution)
+## Findings (after execution, 2026-05-26)
 
-_(empty — 重点记录：D2 实际 LOC delta / D3 spawn 路径具体位置 / 是否发现 D2 还有其它 over-engineering 残留 / 对 session 2 (D1+D4) 的影响)_
+**1. D2 simplify 实际 LOC delta**
+
+净 -100 LOC（4 files：86 insertions, 186 deletions）。比 doc 估算的 -140 略保守 —— 把 `pi_env_for_model_id` 的 body inline 到 2 处（`_pi_extra_env` + `runner.build_container_spec`）而不是只 1 处，每处 ~10 LOC 是合理的"不抽 helper"代价；如果把 Bedrock 部分提成 `_inject_bedrock_env` 反而违反 doc 的"不抽 helper 除非第 2 caller"原则——但那个 helper 真的有 2 caller，所以这是 doc 的内部不一致点。最终选 inline 两次，因为读 `runner.py` 时能直接看到 Bedrock 处理逻辑，不必跳到 executor.py。
+
+**2. D3 重大发现：已 shipped pre-session，无须代码**
+
+执行前的 grep 审计揭穿了 plan §3.3 的判断错误。完整 wiring 已经在 main 上：
+
+- `Tenant.max_concurrent_containers` 字段 → `core/types.py:112`
+- DB load → `db/tenant.py:67` + `main.py:417-418`
+- per-tenant limit 检查 → `core/orchestrator_state.py:103`
+- counter 维护 → `core/orchestrator_state.py:108-118`
+- scheduler 集成 → `container/scheduler.py:94-95, 382, 408, 417, 438`
+- main.py wire → `main.py:1420` `GroupQueue(..., orchestrator_state=_state)`
+- 已有 tests → `tests/test_multi_tenant_e2e.py`, `tests/container/test_scheduler.py:136`
+
+误判源：原 plan 作者只 grep 了 `GLOBAL_MAX_CONTAINERS`，看见 `OrchestratorState(global_limit=...)` 后没继续看 class 内部的 `tenant_active` dict + `can_start_container` 的 `tenant.max_concurrent_containers` 检查。两条限制本来就并存。
+
+教训 → 写新 chore plan 时 "DB 列 0 reader" 这种声明必须基于"grep 列名 + 在所有 hit 处读完整上下文"才下结论，不能 grep 一个 env 常量就推断。
+
+**3. D2 残留过度工程**
+
+`runner.py:425-438` 的 docstring 描述 `pi_model_id_override` 时占了 14 行。本 session 把它从原本 19 行的"why this design"压到 ~5 行实质内容。代码本身 inline，加之外侧 `Per-coworker model override` 注释，docstring 不再需要重复解释。如未来再有人写 build_container_spec 大段 docstring，是 over-engineering 信号。
+
+**4. 对 session 2 (D1+D4) 的影响**
+
+- **强化"先 audit code 再写 plan"的纪律**：D1 (`credential_proxy`) 也要在 session 2 开 始前 grep `CredentialVault` 在 egress/ 的实际使用，**不可信任 plan §3.1 的"0 callers"结论**——可能它当时是对的，可能现在已经被中间某个 PR 部分修了。
+- **如果 D1 也已 partial shipped**，session 2 的 scope 可能小于 plan 估的 1500-1800 LOC。
+- **D2 simplify 经验**：原始 ~280 LOC ship 然后简化到 ~180 LOC 是合理 trade-off；session 2 一上来就追求 honest minimum 比"先 ship 再 simplify"少 1 个 commit/rerollover。建议 session 2 计划阶段先写一个 `egress/credential_proxy/spec.md` 锁定"honest minimum"再开工，不要随写随膨胀。
+
+**5. 测试纪律变化**
+
+shipped D2 8 个 tests 含 4 个 spec-confirming（如 "openai pass-through")。删后剩 4 个 mutation-resistant：
+- `test_pi_model_id_override_replaces_default` — 核心 invariant（override 覆盖默认）
+- `test_pi_model_id_override_none_keeps_default` — fallback invariant
+- `test_bedrock_override_injects_aws_env` — 合并了原 `recomputes_bedrock_env` 的关键 assertions
+- `test_bedrock_renames_to_amazon_bedrock` (in TestDbToPiProviderMap) — pin `_DB_TO_PI_PROVIDER["bedrock"] == "amazon-bedrock"` 常量本身
+
+每个 test 都能被一个 1-行代码 mutation 抓到。spec-confirming 删除节省 ~70 LOC 测试代码而 mutation 覆盖率不降。
