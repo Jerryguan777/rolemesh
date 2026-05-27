@@ -270,6 +270,32 @@ async def tenant_has_credential_for_provider(
         )
 
 
+async def get_credential_ciphertext(
+    tenant_id: str, provider: str
+) -> bytes | None:
+    """Return the Fernet-encrypted credential blob, or ``None`` if absent.
+
+    Deliberately exposes ciphertext — the rest of this module's
+    credential helpers strip ``credential_data`` from their projections
+    (see :class:`CredentialRow`). This single function is the carve-out:
+    :class:`rolemesh.egress.credentials.CredentialResolver` calls it,
+    immediately Fernet-decrypts the blob into an in-process dict, and
+    never reads the bytes again. Adding a second caller requires
+    auditing that the bytes do not escape the process.
+    """
+    async with tenant_conn(tenant_id) as conn:
+        row = await conn.fetchval(
+            "SELECT credential_data FROM tenant_model_credentials "
+            "WHERE tenant_id = $1::uuid AND provider = $2 "
+            "LIMIT 1",
+            tenant_id,
+            provider,
+        )
+    if row is None:
+        return None
+    return bytes(row)
+
+
 async def list_tenant_credentials(tenant_id: str) -> list[CredentialRow]:
     """Return all credential rows for the tenant (no ciphertext)."""
     async with tenant_conn(tenant_id) as conn:
