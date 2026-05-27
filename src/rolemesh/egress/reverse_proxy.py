@@ -504,9 +504,19 @@ async def start_credential_proxy(
 
 
 def detect_auth_mode() -> AuthMode:
-    """Detect which auth mode the host is configured for."""
+    """Detect which auth mode the host is configured for.
+
+    Used by ``container/runner.py`` at agent spawn time to pick the
+    Pi SDK's auth-mode env var inside the container. This is NOT a
+    request-time credential read — only the existence of the env var
+    is consulted; the value itself is never extracted, forwarded, or
+    used to authenticate an upstream call. Per-tenant auth-mode
+    selection at spawn time is the natural next step; deferred until
+    the wizard learns OAuth (see docs/config-drift-fix-plan §3 D1).
+    """
     import os as _os
 
+    # inv-cred-ok: existence check for Pi spawn auth-mode; value not read.
     return "api-key" if _os.environ.get("ANTHROPIC_API_KEY") else "oauth"
 
 
