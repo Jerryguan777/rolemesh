@@ -1023,7 +1023,7 @@ WsClientFrameModel = (
 
 
 ScheduleType = Literal["cron", "interval", "once"]
-ScheduleStatus = Literal["active", "paused", "completed"]
+ScheduleStatus = Literal["active", "paused", "completed", "cancelled"]
 ScheduleContextMode = Literal["group", "isolated"]
 
 
@@ -1081,6 +1081,38 @@ class ChannelBindingCreate(BaseModel):
     channel_type: ChannelTypeName
     credentials: dict[str, str]
     bot_display_name: str | None = None
+
+
+class ChannelLinkToken(BaseModel):
+    """Issued by ``POST /api/v1/me/channel-links/telegram``.
+
+    The caller (Web SPA) hands the user EITHER ``deep_link`` (which
+    auto-fills ``/start <token>`` when opened in Telegram) OR the
+    raw ``token`` for copy-paste. ``deep_link`` is ``null`` when the
+    tenant has no Telegram bot binding (in which case the POST
+    actually 4xxs); a non-null value carries the bot's @username
+    persisted by the gateway on connect.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    token: str = Field(min_length=22, description="One-shot link token; URL-safe ASCII.")
+    expires_at: str = Field(description="ISO 8601 UTC; ~10 min from issuance.")
+    deep_link: str | None = Field(
+        default=None,
+        description="https://t.me/<bot>?start=<token> if a bot @handle is known.",
+    )
+
+
+class ChannelLinkIdentity(BaseModel):
+    """Wire projection of one ``user_channel_identities`` row."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    platform: Literal["telegram"]
+    channel_id: str = Field(description="Platform-native sender id; opaque.")
+    created_at: str | None = None
 
 
 class ChannelBindingUpdate(BaseModel):

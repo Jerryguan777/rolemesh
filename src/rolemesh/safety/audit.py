@@ -16,10 +16,6 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from rolemesh.db import (
-    insert_safety_decision,
-)
-
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -67,6 +63,13 @@ class DbAuditSink:
     """Persists AuditEvent to the ``safety_decisions`` table."""
 
     async def write(self, event: AuditEvent) -> None:
+        # Lazy import: this class is the orchestrator-side implementation
+        # and is never instantiated inside agent containers. The top-level
+        # import was triggering ``ModuleNotFoundError: rolemesh.db`` in the
+        # container at import time, because audit.py is shipped to agents
+        # for its dataclass + Protocol shapes — only ``DbAuditSink.write``
+        # actually needs the DB and is only ever called on the orchestrator.
+        from rolemesh.db import insert_safety_decision
 
         await insert_safety_decision(
             tenant_id=event.tenant_id,

@@ -324,6 +324,26 @@ export function iconClose(size = 16): SVGTemplateResult {
   `;
 }
 
+/** Link — chain. Used by the Connected channels page. */
+export function iconLink(size = 16): SVGTemplateResult {
+  return svg`
+    <svg
+      width=${size}
+      height=${size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.8"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.72"/>
+      <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.72-1.72"/>
+    </svg>
+  `;
+}
+
 /** Logout — door arrow. User-pill menu danger action. */
 export function iconLogout(size = 15): SVGTemplateResult {
   return svg`

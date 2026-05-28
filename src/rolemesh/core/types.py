@@ -214,6 +214,22 @@ class ChannelBinding:
     bot_display_name: str | None = None
     status: str = "active"
     created_at: str = ""
+    # Platform-native bot handle (Telegram @username, Slack app
+    # name, ...). Populated by the gateway on connect — see
+    # ``rolemesh.db.chat.update_channel_binding_bot_username``.
+    bot_username: str | None = None
+
+
+@dataclass(frozen=True)
+class ChannelIdentity:
+    """A (user, platform, channel_id) link record (v6.1 §P1.2)."""
+
+    id: str  # UUID
+    tenant_id: str
+    user_id: str
+    platform: str
+    channel_id: str
+    created_at: str = ""
 
 
 @dataclass
@@ -304,8 +320,15 @@ class ScheduledTask:
     next_run: str | None = None
     last_run: str | None = None
     last_result: str | None = None
-    status: Literal["active", "paused", "completed"] = "active"
+    status: Literal["active", "paused", "completed", "cancelled"] = "active"
     created_at: str = ""
+    # v6.1 §P1.7 — RoleMesh user whose turn triggered the schedule.
+    # NULL on rows created before the migration; NULL after a hard
+    # ``DELETE FROM users`` (ON DELETE SET NULL on the FK). The
+    # scheduler stamps ``AgentInput.user_id`` from this field so a
+    # task's run-time turn carries the originating user identity
+    # into the approval / audit machinery (Phase 2).
+    created_by_user_id: str | None = None
     # Legacy compat fields (deprecated)
     group_folder: str = ""
     chat_jid: str = ""

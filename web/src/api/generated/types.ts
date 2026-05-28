@@ -67,6 +67,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/me/channel-links/telegram": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Telegram identities linked by the caller
+         * @description Polled by the SPA after a `POST` to detect when the user has
+         *     completed the `/start <token>` round-trip. Returns an array so
+         *     a single user may eventually bind multiple Telegram accounts.
+         */
+        get: operations["listTelegramLinks"];
+        put?: never;
+        /**
+         * Mint a Telegram link token for the caller
+         * @description Returns a single-use link token (and a `t.me/<bot>?start=<token>`
+         *     deep-link when the tenant's Telegram bot @username is on file).
+         *     The token is consumed by the Telegram gateway on the next
+         *     `/start <token>` from the user's account; on success the
+         *     binding shows up in `GET`.
+         *
+         *     409 RESOURCE_NOT_AVAILABLE if the tenant has no Telegram bot
+         *     configured — the SPA renders a "configure a Telegram bot first"
+         *     hint instead of producing a dangling token.
+         */
+        post: operations["issueTelegramLinkToken"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/me/channel-links/{identity_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Remove one Telegram link */
+        delete: operations["unlinkChannelIdentity"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/backends": {
         parameters: {
             query?: never;
@@ -1755,10 +1806,12 @@ export interface components {
         /**
          * @description `completed` is the terminal state for `once` schedules after
          *     they've fired. `paused` is a manual halt — the row stays but
-         *     the orchestrator skips it.
+         *     the orchestrator skips it. `cancelled` is the soft-cancel
+         *     terminal set by `cancel_tasks_for_user` (v6.1 §P1.8) when
+         *     the task's creator is removed from the tenant.
          * @enum {string}
          */
-        ScheduleStatus: "active" | "paused" | "completed";
+        ScheduleStatus: "active" | "paused" | "completed" | "cancelled";
         /**
          * @description `isolated` — each fire spawns a fresh agent without prior
          *     context. `group` — reuses the bound conversation so memory
@@ -1792,6 +1845,38 @@ export interface components {
             status: components["schemas"]["ScheduleStatus"];
             /** Format: date-time */
             created_at?: string;
+        };
+        /**
+         * @description v6.1 §P1.4 — handed back from
+         *     `POST /api/v1/me/channel-links/telegram`. `deep_link` is the
+         *     preferred entry point when the tenant's bot @username is known;
+         *     otherwise the SPA shows `token` for copy-paste.
+         */
+        ChannelLinkToken: {
+            /** @description One-shot URL-safe token; lifetime ≈ 10 min. */
+            token: string;
+            /** Format: date-time */
+            expires_at: string;
+            /**
+             * @description `https://t.me/<bot>?start=<token>` if a Telegram bot
+             *     @username is on file for the tenant; null when the SPA
+             *     should fall back to the copy-paste UI.
+             */
+            deep_link?: string | null;
+        };
+        /**
+         * @description v6.1 §P1.4 — one `user_channel_identities` row as seen by the
+         *     SPA. `channel_id` is the platform-native sender id (opaque
+         *     from the SPA's perspective).
+         */
+        ChannelLinkIdentity: {
+            /** Format: uuid */
+            id: string;
+            /** @enum {string} */
+            platform: "telegram";
+            channel_id: string;
+            /** Format: date-time */
+            created_at?: string | null;
         };
         ChannelBinding: {
             /** Format: uuid */
@@ -2131,6 +2216,79 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+        };
+    };
+    listTelegramLinks: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelLinkIdentity"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    issueTelegramLinkToken: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Token issued. */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelLinkToken"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description Tenant has no Telegram bot configured. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    unlinkChannelIdentity: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                identity_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Unlinked. */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
         };
     };
     getBackends: {

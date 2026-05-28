@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     import asyncpg
 
 __all__ = [
+    "cancel_tasks_for_user",
     "create_task",
     "delete_task",
     "get_all_tasks",
@@ -30,12 +31,25 @@ __all__ = [
 
 
 async def create_task(task: ScheduledTask) -> None:
-    """Create a new scheduled task."""
+    """Create a new scheduled task.
+
+    ``task.created_by_user_id`` lands on the DB row directly (v6.1
+    §P1.7). The orchestrator-side scheduler reads it back when the
+    task fires so the run's ``AgentInput.user_id`` carries the
+    originating user identity into the approval / audit chain.
+    """
     async with tenant_conn(task.tenant_id) as conn:
         await conn.execute(
             """
-            INSERT INTO scheduled_tasks (id, tenant_id, coworker_id, conversation_id, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at)
-            VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8, $9, $10, now())
+            INSERT INTO scheduled_tasks (
+                id, tenant_id, coworker_id, conversation_id, prompt,
+                schedule_type, schedule_value, context_mode, next_run,
+                status, created_at, created_by_user_id
+            )
+            VALUES (
+                $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8,
+                $9, $10, now(), $11::uuid
+            )
             """,
             task.id,
             task.tenant_id,
@@ -47,6 +61,7 @@ async def create_task(task: ScheduledTask) -> None:
             task.context_mode or "isolated",
             _to_dt(task.next_run),
             task.status,
+            task.created_by_user_id,
         )
 
 
@@ -56,6 +71,7 @@ def _record_to_scheduled_task(row: asyncpg.Record) -> ScheduledTask:
     lr = row["last_run"]
     ca = row["created_at"]
     conv_id = row.get("conversation_id")
+    creator = row.get("created_by_user_id")
     return ScheduledTask(
         id=str(row["id"]),
         tenant_id=str(row["tenant_id"]),
@@ -70,6 +86,7 @@ def _record_to_scheduled_task(row: asyncpg.Record) -> ScheduledTask:
         last_result=row["last_result"],
         status=row["status"],
         created_at=ca.isoformat() if ca else "",
+        created_by_user_id=str(creator) if creator is not None else None,
     )
 
 
@@ -259,6 +276,46 @@ async def update_task_after_run(
             task_id,
             tenant_id,
         )
+
+
+async def cancel_tasks_for_user(
+    user_id: str,
+    tenant_id: str,
+    *,
+    conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record] | None = None,
+) -> int:
+    """Soft-cancel every active task whose ``created_by_user_id``
+    equals ``user_id`` (v6.1 §P1.8).
+
+    ``status='cancelled'`` slots into the scheduler's existing
+    ``WHERE status='active'`` filter (see ``get_due_tasks``) so the
+    next tick simply skips the row. The audit row stays alive.
+
+    Optional ``conn`` so the caller can run this inside its own
+    transaction — required by ``delete_user`` so the cancel and the
+    DELETE land atomically (otherwise a tick between cancel and
+    delete would run the task with the just-cancelled user).
+    """
+    sql = (
+        "UPDATE scheduled_tasks "
+        "SET status = 'cancelled' "
+        "WHERE created_by_user_id = $1::uuid "
+        "  AND tenant_id = $2::uuid "
+        "  AND status = 'active'"
+    )
+    if conn is None:
+        async with tenant_conn(tenant_id) as c:
+            result = await c.execute(sql, user_id, tenant_id)
+    else:
+        result = await conn.execute(sql, user_id, tenant_id)
+    # asyncpg returns the tag string e.g. "UPDATE 3"; the trailing
+    # integer is the affected row count. Fall back to 0 on a shape
+    # we don't recognise — the caller is using the return only for
+    # logging.
+    try:
+        return int(result.split()[-1])
+    except (ValueError, IndexError):
+        return 0
 
 
 async def log_task_run(log: TaskRunLog) -> None:

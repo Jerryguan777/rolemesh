@@ -94,6 +94,7 @@ from rolemesh.db import (
     list_coworker_mcp_configs,
     set_session,
     update_conversation_last_invocation,
+    update_conversation_user_id,
     update_tenant_message_cursor,
 )
 from rolemesh.db import (
@@ -114,14 +115,9 @@ from rolemesh.auth.credential_vault import (
     get_credential_vault,
     set_credential_vault,
 )
+from rolemesh.channels.admission import admit_telegram_1on1
 from rolemesh.egress.credentials import CredentialResolver
 from rolemesh.security.credential_proxy import register_mcp_server, set_token_vault, start_credential_proxy
-from rolemesh.security.sender_allowlist import (
-    is_sender_allowed,
-    is_trigger_allowed,
-    load_sender_allowlist,
-    should_drop_message,
-)
 
 if TYPE_CHECKING:
     from rolemesh.container.runtime import ContainerRuntime
@@ -264,37 +260,79 @@ _safety_rpc_server: object | None = None
 _safety_thread_pool: object | None = None
 
 
-def _handle_agent_message_ipc(data: dict[str, object]) -> None:
+async def _handle_agent_message_ipc(data: dict[str, object]) -> None:
     """Handle one ``agent.*.messages`` NATS publish from the send_message tool.
 
-    Current behaviour: log the attempt and drop. The send_message tool
-    publishes to this subject when the agent calls it, but the tool
-    hard-codes ``chatJid=ctx.chat_jid`` (``rolemesh_tools.py:169``)
-    — meaning it can only ever target the agent's current conversation.
-    That conversation's natural output (``agent.*.results`` → ``_on_output``)
-    already delivers the final reply, so forwarding this IPC to the
-    channel gateway a SECOND time resulted in duplicate user-visible
-    replies. Previously a race-prone string-match dedup (``_ipc_sent_texts``)
-    tried to suppress the duplicate; removing the forward here removes
-    the duplicate at the source.
+    Two delivery regimes share this subject:
 
-    If the send_message tool signature gains a target chat_jid parameter
-    in the future (for cross-chat notifications / scheduled-task inbox /
-    agent-to-agent messaging), this function grows a branch: forward to
-    ``_send_via_coworker`` only when ``data["chatJid"] !=`` the source
-    coworker's currently-processed conversation. Until then the handler
-    is strictly log-and-drop.
+    Interactive turns: the agent's reply already flows through the
+    natural-output path (``agent.*.results`` → ``_on_output`` →
+    ``send_stream_chunk`` / ``send_message`` on the channel gateway).
+    Path β (this handler) was historically forwarding the same text a
+    second time — every Claude AssistantMessage echoes the content it
+    passed to ``send_message``, so users saw doubles. Commit a67d3e6
+    removed that forward; interactive turns are still log-and-drop here.
+
+    Scheduled-task turns: ``_run_task``'s ``_on_output`` only forwards
+    when the agent produces a non-empty final ``result``. Agents
+    typically just call ``send_message`` for "remind me at T" prompts
+    and produce no separate result — so path α is empty for them.
+    Without a forward here their message vanishes. The tool now stamps
+    ``isScheduledTask`` on the payload so this handler can route only
+    those into ``_send_via_coworker``; interactive turns still drop.
+
+    Cross-chat targeting (one agent's send_message landing on another
+    coworker's conversation) is still not supported — the tool hard-
+    codes ``chatJid=ctx.chat_jid``, so the forward target is always
+    the source coworker's own conversation. A future cross-chat feature
+    would need a real target parameter AND a routing branch here.
     """
     if data.get("type") != "message":
         return
-    if not data.get("chatJid") or not data.get("text"):
+    chat_jid = data.get("chatJid")
+    text = data.get("text")
+    if not chat_jid or not text:
+        return
+
+    if not data.get("isScheduledTask"):
+        # Interactive turn: natural-output path is the source of
+        # truth (see a67d3e6). Drop the IPC echo to avoid doubles.
+        logger.info(
+            "Dropped send_message IPC (redundant with natural output path)",
+            chat_jid=chat_jid,
+            source_group=data.get("groupFolder", ""),
+            text_preview=str(text)[:80],
+        )
+        return
+
+    # Scheduled-task turn: forward to the channel gateway. Without
+    # this, ``_run_task``'s empty-``result`` path leaves the user
+    # with no delivery at all.
+    source_group = str(data.get("groupFolder", ""))
+    claimed_coworker_id = data.get("coworkerId")
+    cw_state: CoworkerState | None = None
+    if isinstance(claimed_coworker_id, str) and claimed_coworker_id:
+        cw_state = _state.coworkers.get(claimed_coworker_id)
+    if cw_state is None and source_group:
+        for tenant in _state.tenants.values():
+            cw_state = _state.get_coworker_by_folder(tenant.id, source_group)
+            if cw_state is not None:
+                break
+    if cw_state is None:
+        logger.warning(
+            "Cannot route scheduled-task send_message IPC — coworker unresolved",
+            chat_jid=chat_jid,
+            source_group=source_group,
+            claimed_coworker_id=claimed_coworker_id,
+        )
         return
     logger.info(
-        "Dropped send_message IPC (redundant with natural output path)",
-        chat_jid=data["chatJid"],
-        source_group=data.get("groupFolder", ""),
-        text_preview=str(data["text"])[:80],
+        "Forwarding scheduled-task send_message IPC",
+        chat_jid=chat_jid,
+        coworker=cw_state.config.name,
+        text_preview=str(text)[:80],
     )
+    await _send_via_coworker(cw_state, str(chat_jid), str(text))
 
 
 @dataclass(frozen=True)
@@ -484,6 +522,66 @@ async def _load_state() -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _auto_create_telegram_1on1_conversation(
+    binding_id: str, chat_id: str, admitted_user_id: str
+) -> tuple[CoworkerState, ConversationState] | None:
+    """v6.1 §P1.5/§P1.6 — auto-create a Telegram 1:1 conversation
+    for an *already admitted* sender.
+
+    Counterpart of ``_auto_create_web_conversation``: the design's
+    "已关联→建 conv" implicit case. ``admission_user_id`` is the
+    resolved RoleMesh user_id from ``admit_telegram_1on1`` — passed
+    in so the row lands with ``user_id`` populated on first write
+    instead of needing the lazy-backfill UPDATE later.
+
+    Reset is one-shot (the §P1.3 cleanup wiped every legacy IM conv
+    on the first migration); without auto-create here, every linked
+    Telegram user's first message after relink would silently drop.
+    """
+    from rolemesh.db import (
+        get_channel_binding_by_id_admin,
+        get_conversation_by_binding_and_chat,
+    )
+
+    binding = await get_channel_binding_by_id_admin(binding_id)
+    if binding is None or binding.channel_type != "telegram":
+        return None
+    cw = _state.coworkers.get(binding.coworker_id)
+    if cw is None:
+        logger.warning(
+            "binding's coworker not in state; cannot route Telegram inbound",
+            binding_id=binding_id,
+            coworker_id=binding.coworker_id,
+        )
+        return None
+    if binding.channel_type not in cw.channel_bindings:
+        cw.channel_bindings[binding.channel_type] = binding
+
+    # get-or-create: the row may already exist if a previous inbound
+    # raced ahead, or if the channel chat reused a stale chat_id.
+    conv = await get_conversation_by_binding_and_chat(
+        binding_id, chat_id, tenant_id=cw.config.tenant_id
+    )
+    if conv is None:
+        conv = await create_conversation(
+            tenant_id=cw.config.tenant_id,
+            coworker_id=cw.config.id,
+            channel_binding_id=binding_id,
+            channel_chat_id=chat_id,
+            user_id=admitted_user_id,
+        )
+        logger.info(
+            "Auto-created Telegram 1:1 conversation",
+            coworker=cw.config.name,
+            chat_id=chat_id,
+            conversation_id=conv.id,
+            user_id=admitted_user_id,
+        )
+    conv_state = ConversationState(conversation=conv)
+    cw.conversations[conv.id] = conv_state
+    return cw, conv_state
+
+
 async def _auto_create_web_conversation(
     binding_id: str, chat_id: str
 ) -> tuple[CoworkerState, ConversationState] | None:
@@ -612,11 +710,46 @@ async def _handle_incoming(
     is_group: bool,
 ) -> None:
     """Unified message handler for all channel gateways."""
+    # v6.1 §P1.5/§P1.6: For Telegram 1:1, gate admission BEFORE any
+    # conversation lookup. Otherwise an admitted sender whose first
+    # ever message arrives before a conv row exists (the common case
+    # right after the §P1.3 reset wiped legacy IM convs) would
+    # silently drop. The Telegram gateway already short-circuits
+    # groups, so ``is_group=False`` is the only realistic branch
+    # here; the explicit guard is belt-and-braces.
+    #
+    # ``binding`` lookup is admin_conn so this works even when the
+    # binding's CoworkerState cache is empty (the cache populates
+    # later via _auto_create_telegram_1on1_conversation).
+    admitted_user_id: str | None = None
+    if not is_group:
+        from rolemesh.db import get_channel_binding_by_id_admin
+
+        binding = await get_channel_binding_by_id_admin(binding_id)
+        if binding is not None and binding.channel_type == "telegram":
+            gateway = _gateways.get("telegram")
+            if gateway is not None:
+                admitted_user_id = await admit_telegram_1on1(
+                    tenant_id=binding.tenant_id,
+                    sender_channel_id=sender,
+                    gateway=gateway,
+                    binding_id=binding_id,
+                    chat_id=chat_id,
+                )
+                if admitted_user_id is None:
+                    return  # admission denied — guidance reply already sent
+
     # Find conversation
     result = _state.find_conversation_by_binding_and_chat(binding_id, chat_id)
     if not result:
         # Auto-create conversation for web channel (each browser tab = new chat_id)
         result = await _auto_create_web_conversation(binding_id, chat_id)
+        if not result and admitted_user_id is not None:
+            # v6.1 §P1.5/§P1.6: admitted Telegram 1:1 sender, no
+            # existing conv → create one stamped with their user_id.
+            result = await _auto_create_telegram_1on1_conversation(
+                binding_id, chat_id, admitted_user_id
+            )
         if not result:
             return
 
@@ -630,12 +763,24 @@ async def _handle_incoming(
     if is_group and conv.requires_trigger and not cw_state.trigger_pattern.search(text.strip()):
         return  # Not for this coworker — skip silently
 
-    # Sender allowlist check
-    cfg = load_sender_allowlist()
-    if should_drop_message(chat_id, cfg) and not is_sender_allowed(chat_id, sender, cfg):
-        if cfg.log_denied:
-            logger.debug("sender-allowlist: dropping message (drop mode)", chat_id=chat_id, sender=sender)
-        return
+    # v6.1 §P1.6 lazy backfill + §P1.4 identity-reassignment
+    # correction (defense-in-depth complement to the same-transaction
+    # NULL inside ``delete_channel_identity``):
+    #
+    # The original spec talked about backfilling NULL → user_id on
+    # legacy convs. The stronger condition ``conv.user_id !=
+    # admitted_user_id`` also catches the employee-handover case
+    # where A unbound and B re-linked the same channel between
+    # turns: even if a future bug in the unbind path forgot to NULL
+    # the conv stamp, the admission layer here re-stamps it to the
+    # currently-resolved user. The conv ``channel_binding_id`` is
+    # not channel_type-mixed (binding ids are stable per channel),
+    # so a cross-channel comparison can never trigger this branch.
+    if admitted_user_id is not None and conv.user_id != admitted_user_id:
+        await update_conversation_user_id(
+            conv.id, admitted_user_id, tenant_id=conv.tenant_id
+        )
+        conv.user_id = admitted_user_id
 
     # Store message
     await db_store_message(
@@ -681,10 +826,13 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
         return True
 
     if config.agent_role != "super_agent" and conv.requires_trigger:
-        allowlist_cfg = load_sender_allowlist()
+        # v6.1 §P1.5: the sender allowlist that used to gate non-self
+        # senders is gone (decision #14); the trigger pattern alone
+        # decides. For Telegram 1:1 ``requires_trigger`` is False by
+        # construction so this path only fires for Slack groups —
+        # which keep current behaviour.
         has_trigger = any(
             cw_state.trigger_pattern.search(m.content.strip())
-            and (m.is_from_me or is_trigger_allowed(conv.channel_chat_id, m.sender, allowlist_cfg))
             for m in missed_messages
         )
         if not has_trigger:
@@ -1031,7 +1179,7 @@ async def _start_nats_ipc_subscriptions(transport: NatsTransport, deps: _IpcDeps
     async def _handle_messages() -> None:
         async for msg in messages_sub.messages:
             try:
-                _handle_agent_message_ipc(json.loads(msg.data))
+                await _handle_agent_message_ipc(json.loads(msg.data))
                 await msg.ack()
             except Exception:
                 logger.exception("Error processing NATS IPC message")
@@ -1237,10 +1385,12 @@ async def _message_loop(shutdown_event: asyncio.Event) -> None:
 
                     if needs_trigger:
                         conv_messages = [msg for cid, msg in results if cid == conv_id]
-                        allowlist_cfg = load_sender_allowlist()
+                        # v6.1 §P1.5: trigger pattern alone — no
+                        # per-sender allowlist (see the parallel
+                        # branch in ``_process_conversation_messages``
+                        # for the same simplification).
                         has_trigger = any(
                             cw_state.trigger_pattern.search(m.content.strip())
-                            and (m.is_from_me or is_trigger_allowed(chat_id, m.sender, allowlist_cfg))
                             for m in conv_messages
                         )
                         if not has_trigger:

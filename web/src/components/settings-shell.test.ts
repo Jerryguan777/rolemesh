@@ -44,6 +44,7 @@ vi.mock('../api/client.js', async () => {
       listApprovals: stub,
       listSafetyRules: stub,
       listSafetyDecisions: stub,
+      listTelegramLinks: stub,
       getMe: single,
       setToken: vi.fn(),
     }),
@@ -147,14 +148,13 @@ describe('<rm-settings-shell>', () => {
     ['approval-policies',  'Approval policies',  'rm-approvals-page'],
     ['general',            'General',            'rm-coming-soon'],
     ['members',            'Members',            'rm-coming-soon'],
+    ['connected-channels', 'Connected channels', 'rm-connected-channels-page'],
     ['appearance',         'Appearance',         'rm-appearance-page'],
   ];
 
-  it('renders one sidebar entry per page slot (10 first-class entries)', async () => {
+  it('renders one sidebar entry per page slot', async () => {
     const el = await mount();
     const entries = el.querySelectorAll('[data-testid="settings-nav-entry"]');
-    // 10 — same as ENTRIES above. (Bindings is removed from v2; v2
-    // surfaces credentials directly.)
     expect(entries.length).toBe(ENTRIES.length);
   });
 

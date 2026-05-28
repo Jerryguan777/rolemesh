@@ -10,10 +10,23 @@ from __future__ import annotations
 import contextlib
 from typing import TYPE_CHECKING
 
+import asyncpg
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
+from rolemesh.channels.admission import (
+    GROUP_NOT_SUPPORTED_TEXT,
+    LINK_ALREADY_BOUND_TEXT,
+    LINK_MISSING_TOKEN_TEXT,
+    LINK_REJECTED_TEXT,
+    LINK_SUCCESS_PREFIX,
+)
 from rolemesh.core.logger import get_logger
+from rolemesh.db import (
+    consume_link_token,
+    create_channel_identity,
+    update_channel_binding_bot_username,
+)
 
 if TYPE_CHECKING:
     from telegram import Bot, Update
@@ -25,6 +38,99 @@ if TYPE_CHECKING:
 logger = get_logger()
 
 _MAX_LENGTH = 4096
+# v6.1 §P1.5: 1:1 only. Includes 'channel' (broadcast) defensively —
+# telegram-bot-api rarely delivers normal messages from a channel but
+# the type set is what the design specifies.
+_GROUP_CHAT_TYPES = ("group", "supergroup", "channel")
+
+
+async def _short_circuit_group(update: Update) -> bool:
+    """If ``update`` is from a group/supergroup/channel, reply with
+    the not-supported guidance and return True so the caller drops
+    the message without dispatching to ``on_message``.
+
+    Module-level so the unit tests can drive it with a stub Update
+    instead of spinning up a real Application.
+    """
+    chat = update.effective_chat
+    if chat is None:
+        return False
+    if chat.type not in _GROUP_CHAT_TYPES:
+        return False
+    try:
+        await chat.send_message(GROUP_NOT_SUPPORTED_TEXT)
+    except Exception:
+        # Sending the guidance reply is best-effort — the short-
+        # circuit must still drop the message even if Telegram is
+        # transiently flaky.
+        logger.exception(
+            "telegram_group_guidance_send_failed",
+            chat_id=getattr(chat, "id", None),
+        )
+    return True
+
+
+# v6.1 §P1.4 link guidance — wire strings live in
+# ``rolemesh.channels.admission`` so admission + link flows share a
+# single source of truth (see F2 / "引导文本统一一处").
+
+
+async def _handle_start_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """``/start [<token>]`` — Telegram side of the WebUI link flow.
+
+    Registered as a ``CommandHandler`` at the gateway so unlinked
+    senders can complete the binding *before* admission (which would
+    otherwise deny them). The token carries its own (user_id,
+    tenant_id), so no per-bot tenant lookup is needed here.
+
+    Module-level (not a closure) so the link logic is testable
+    without spinning up a live Telegram ``Application``.
+    """
+    chat = update.effective_chat
+    user = update.effective_user
+    if chat is None or user is None:
+        return
+    args = context.args or []
+    if not args:
+        await chat.send_message(LINK_MISSING_TOKEN_TEXT)
+        return
+    token = args[0]
+    channel_id = str(user.id)
+    consumed = await consume_link_token(token)
+    if consumed is None:
+        # Atomic UPDATE returned no row → token was already used,
+        # expired, or unknown. We deliberately collapse the three so
+        # a leaked-and-replayed token cannot leak its prior owner via
+        # a distinguishing error message.
+        await chat.send_message(LINK_REJECTED_TEXT)
+        logger.info("telegram_link_token_rejected", channel_id=channel_id)
+        return
+    user_id, tenant_id, _ = consumed
+    try:
+        await create_channel_identity(
+            tenant_id, "telegram", channel_id, user_id
+        )
+    except asyncpg.UniqueViolationError:
+        # Token is already marked used by the atomic UPDATE above —
+        # the correct outcome, since the user must unbind in Web and
+        # restart the flow with a fresh token.
+        await chat.send_message(LINK_ALREADY_BOUND_TEXT)
+        logger.info(
+            "telegram_link_unique_violation",
+            channel_id=channel_id,
+            tenant_id=tenant_id,
+        )
+        return
+    display = user.first_name or user.username or channel_id
+    await chat.send_message(f"✅ {LINK_SUCCESS_PREFIX} ({display}).")
+    logger.info(
+        "telegram_link_bound",
+        tenant_id=tenant_id,
+        user_id=user_id,
+        channel_id=channel_id,
+    )
 
 
 async def _send_telegram_message(bot: Bot, chat_id: str | int, text: str) -> None:
@@ -75,6 +181,12 @@ class _BotInstance:
             chat = update.effective_chat
             user = update.effective_user
             if msg is None or chat is None or msg.text is None:
+                return
+            # v6.1 §P1.5: 1:1 only. Replies the guidance and drops
+            # before any binding sees the message. Group support is
+            # paused (not removed) so the requires_trigger machinery
+            # in main.py stays available for a future opt-in revival.
+            if await _short_circuit_group(update):
                 return
             if msg.text.startswith("/"):
                 cmd = msg.text.lstrip("/").split()[0].split("@")[0].lower()
@@ -132,6 +244,8 @@ class _BotInstance:
                 user = update.effective_user
                 if msg is None or chat is None:
                     return
+                if await _short_circuit_group(update):
+                    return
                 chat_id = str(chat.id)
                 timestamp = msg.date.isoformat() if msg.date else ""
                 sender_name = user.first_name if user else "Unknown"
@@ -153,6 +267,14 @@ class _BotInstance:
             app.add_handler(MessageHandler(filt, _media_handler))
 
         # Commands
+        # v6.1 §P1.4: ``/start <token>`` MUST be registered before the
+        # generic TEXT MessageHandler so an unlinked sender can
+        # complete the link without being admission-denied. python-
+        # telegram-bot dispatches CommandHandler before MessageHandler
+        # within the same group; registration order here keeps the
+        # intent explicit even if PTB internals change.
+        app.add_handler(CommandHandler("start", _handle_start_command))
+
         async def _cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if update.effective_chat is None:
                 return
@@ -179,6 +301,21 @@ class _BotInstance:
         await app.initialize()
         me = await app.bot.get_me()
         self._bot_username = me.username
+        # v6.1 §P1.4: persist the @handle so the WebUI can synthesise
+        # ``t.me/<bot>?start=<token>`` deep-links without an extra hop
+        # to Telegram. Every binding currently served by this bot
+        # token shares the same @username (multiple coworkers can pool
+        # one bot token). Best-effort — gateway start must not fail if
+        # the DB is briefly unavailable; the value re-syncs on the
+        # next reconnect.
+        if me.username:
+            for bid in self._binding_ids:
+                try:
+                    await update_channel_binding_bot_username(bid, me.username)
+                except Exception:
+                    logger.exception(
+                        "Failed to persist bot_username", binding_id=bid
+                    )
         logger.info(
             "Telegram bot connected",
             username=me.username,
@@ -249,6 +386,20 @@ class TelegramGateway:
         if existing_bot is not None:
             # Reuse existing bot instance — just register this binding_id
             existing_bot.add_binding_id(binding.id, binding.bot_display_name)
+            # v6.1 §P1.4: the new binding inherits the live bot's
+            # @handle so the WebUI can build a deep-link the moment
+            # the binding is created (instead of waiting for the next
+            # gateway restart).
+            if existing_bot._bot_username:
+                try:
+                    await update_channel_binding_bot_username(
+                        binding.id, existing_bot._bot_username
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to persist bot_username on binding add",
+                        binding_id=binding.id,
+                    )
             logger.info(
                 "Telegram binding added to existing bot",
                 binding_id=binding.id,

@@ -175,6 +175,7 @@ async def run_query_loop(
         coworker_id=init.coworker_id,
         conversation_id=init.conversation_id,
         user_id=init.user_id,
+        is_scheduled_task=init.is_scheduled_task,
         mcp_tool_reversibility=mcp_tool_reversibility,
     )
 

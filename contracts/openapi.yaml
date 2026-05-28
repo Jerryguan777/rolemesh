@@ -122,6 +122,74 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /api/v1/me/channel-links/telegram:
+    post:
+      tags: [Auth]
+      operationId: issueTelegramLinkToken
+      summary: Mint a Telegram link token for the caller
+      description: |
+        Returns a single-use link token (and a `t.me/<bot>?start=<token>`
+        deep-link when the tenant's Telegram bot @username is on file).
+        The token is consumed by the Telegram gateway on the next
+        `/start <token>` from the user's account; on success the
+        binding shows up in `GET`.
+
+        409 RESOURCE_NOT_AVAILABLE if the tenant has no Telegram bot
+        configured — the SPA renders a "configure a Telegram bot first"
+        hint instead of producing a dangling token.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '201':
+          description: Token issued.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChannelLinkToken' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Tenant has no Telegram bot configured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    get:
+      tags: [Auth]
+      operationId: listTelegramLinks
+      summary: List Telegram identities linked by the caller
+      description: |
+        Polled by the SPA after a `POST` to detect when the user has
+        completed the `/start <token>` round-trip. Returns an array so
+        a single user may eventually bind multiple Telegram accounts.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ChannelLinkIdentity' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/me/channel-links/{identity_id}:
+    delete:
+      tags: [Auth]
+      operationId: unlinkChannelIdentity
+      summary: Remove one Telegram link
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: identity_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204':
+          description: Unlinked.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /api/v1/backends:
     get:
       tags: [Backends]
@@ -2887,11 +2955,13 @@ components:
 
     ScheduleStatus:
       type: string
-      enum: [active, paused, completed]
+      enum: [active, paused, completed, cancelled]
       description: |
         `completed` is the terminal state for `once` schedules after
         they've fired. `paused` is a manual halt — the row stays but
-        the orchestrator skips it.
+        the orchestrator skips it. `cancelled` is the soft-cancel
+        terminal set by `cancel_tasks_for_user` (v6.1 §P1.8) when
+        the task's creator is removed from the tenant.
 
     ScheduleContextMode:
       type: string
@@ -2941,6 +3011,49 @@ components:
           nullable: true
         status: { $ref: '#/components/schemas/ScheduleStatus' }
         created_at: { type: string, format: date-time }
+
+    ChannelLinkToken:
+      type: object
+      required: [token, expires_at]
+      description: |
+        v6.1 §P1.4 — handed back from
+        `POST /api/v1/me/channel-links/telegram`. `deep_link` is the
+        preferred entry point when the tenant's bot @username is known;
+        otherwise the SPA shows `token` for copy-paste.
+      properties:
+        token:
+          type: string
+          minLength: 22
+          description: One-shot URL-safe token; lifetime ≈ 10 min.
+        expires_at:
+          type: string
+          format: date-time
+        deep_link:
+          type: string
+          nullable: true
+          description: |
+            `https://t.me/<bot>?start=<token>` if a Telegram bot
+            @username is on file for the tenant; null when the SPA
+            should fall back to the copy-paste UI.
+
+    ChannelLinkIdentity:
+      type: object
+      required: [id, platform, channel_id]
+      description: |
+        v6.1 §P1.4 — one `user_channel_identities` row as seen by the
+        SPA. `channel_id` is the platform-native sender id (opaque
+        from the SPA's perspective).
+      properties:
+        id: { type: string, format: uuid }
+        platform:
+          type: string
+          enum: [telegram]
+        channel_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
 
     ChannelBinding:
       type: object

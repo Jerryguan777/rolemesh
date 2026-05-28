@@ -37,6 +37,7 @@ import {
   iconClose,
   iconHome,
   iconKey,
+  iconLink,
   iconServer,
   iconSettings,
   iconShield,
@@ -56,6 +57,7 @@ import './approvals-page.js';
 import './appearance-page.js';
 import './coming-soon.js';
 import './skill-detail-page.js';
+import './connected-channels-page.js';
 
 interface NavEntry {
   /** Sub-path under `#/manage/`. */
@@ -167,6 +169,13 @@ const NAV_GROUPS: NavGroup[] = [
   {
     heading: 'Account',
     entries: [
+      {
+        slug: 'connected-channels',
+        label: 'Connected channels',
+        icon: () => iconLink(16),
+        render: () =>
+          html`<rm-connected-channels-page></rm-connected-channels-page>`,
+      },
       {
         slug: 'appearance',
         label: 'Appearance',

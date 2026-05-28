@@ -186,6 +186,8 @@ async def _init_test_database(
         await conn.execute("DROP TABLE IF EXISTS task_run_logs CASCADE")
         await conn.execute("DROP TABLE IF EXISTS messages CASCADE")
         await conn.execute("DROP TABLE IF EXISTS scheduled_tasks CASCADE")
+        await conn.execute("DROP TABLE IF EXISTS link_tokens CASCADE")
+        await conn.execute("DROP TABLE IF EXISTS user_channel_identities CASCADE")
         await conn.execute("DROP TABLE IF EXISTS sessions CASCADE")
         await conn.execute("DROP TABLE IF EXISTS sessions_legacy CASCADE")
         await conn.execute("DROP TABLE IF EXISTS conversations CASCADE")

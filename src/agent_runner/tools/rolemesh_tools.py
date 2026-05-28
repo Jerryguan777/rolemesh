@@ -180,6 +180,12 @@ async def send_message(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         "groupFolder": ctx.group_folder,
         "tenantId": ctx.tenant_id,
         "coworkerId": ctx.coworker_id,
+        # Scheduled-task fires lose the natural-output dedup path the
+        # orchestrator relies on (see ``_handle_agent_message_ipc``);
+        # stamp the flag so the orchestrator forwards instead of drops.
+        # Default-false flag — interactive turns get the legacy drop
+        # behaviour, scheduled tasks get a forward branch.
+        "isScheduledTask": ctx.is_scheduled_task,
         "timestamp": datetime.now().isoformat(),
     }
     if args.get("sender"):
@@ -244,6 +250,11 @@ async def schedule_task(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
             "groupFolder": ctx.group_folder,
             "tenantId": ctx.tenant_id,
             "coworkerId": ctx.coworker_id,
+            # v6.1 §P1.7: forward the RoleMesh user behind this turn.
+            # The orchestrator's task handler writes it onto
+            # ``scheduled_tasks.created_by_user_id`` so the run-time
+            # ``AgentInput.user_id`` can be reconstructed at fire time.
+            "userId": ctx.user_id,
             "timestamp": datetime.now().isoformat(),
         },
     )

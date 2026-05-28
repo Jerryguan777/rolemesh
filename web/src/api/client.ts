@@ -39,6 +39,9 @@ export type Conversation = components['schemas']['Conversation'];
 export type Message = components['schemas']['Message'];
 export type Run = components['schemas']['Run'];
 export type Me = components['schemas']['Me'];
+export type ChannelLinkToken = components['schemas']['ChannelLinkToken'];
+export type ChannelLinkIdentity =
+  components['schemas']['ChannelLinkIdentity'];
 export type Model = components['schemas']['Model'];
 export type ModelProvider = components['schemas']['ModelProvider'];
 export type CredentialResponse = components['schemas']['CredentialResponse'];
@@ -135,6 +138,36 @@ export class ApiClient {
     });
     if (!resp.ok) throw await this.parseError(resp);
     return (await resp.json()) as Me;
+  }
+
+  /** v6.1 §P1.4 — mint a Telegram link token. May 409 with
+   *  `RESOURCE_NOT_AVAILABLE` when the tenant has no Telegram bot
+   *  configured; the caller renders that as a "configure a bot
+   *  first" hint, not a transient error. */
+  async issueTelegramLinkToken(): Promise<ChannelLinkToken> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/me/channel-links/telegram`,
+      { method: 'POST', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as ChannelLinkToken;
+  }
+
+  async listTelegramLinks(): Promise<ChannelLinkIdentity[]> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/me/channel-links/telegram`,
+      { method: 'GET', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as ChannelLinkIdentity[];
+  }
+
+  async unlinkChannelIdentity(identityId: string): Promise<void> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/me/channel-links/${encodeURIComponent(identityId)}`,
+      { method: 'DELETE', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
   }
 
   async createCoworker(body: CoworkerCreate): Promise<Coworker> {
