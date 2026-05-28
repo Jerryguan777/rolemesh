@@ -29,6 +29,7 @@ from urllib.parse import urlparse
 import httpx
 import nats
 from aiohttp import web
+from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from nats.js.api import KeyValueConfig, StreamConfig
 
@@ -36,6 +37,7 @@ from rolemesh.approval.engine import ApprovalEngine
 from rolemesh.approval.executor import ApprovalWorker
 from rolemesh.approval.expiry import run_approval_maintenance_loop
 from rolemesh.approval.notification import NotificationTargetResolver
+from rolemesh.auth.credential_vault import CredentialVault
 from rolemesh.auth.provider import AuthenticatedUser
 from rolemesh.db import (
     _get_pool,
@@ -46,6 +48,7 @@ from rolemesh.db import (
     create_user,
     get_conversation_for_notification,
 )
+from rolemesh.egress.credentials import CredentialResolver
 from rolemesh.security.credential_proxy import (
     register_mcp_server,
     start_credential_proxy,
@@ -370,7 +373,16 @@ async def orchestrator_harness(
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         proxy_port = s.getsockname()[1]
-    proxy_runner = await start_credential_proxy(proxy_port, "127.0.0.1")
+    # ApprovalWorker only calls /mcp-proxy/, which doesn't touch
+    # CredentialResolver, but the proxy boot requires one.
+    _harness_resolver = CredentialResolver(
+        CredentialVault(Fernet.generate_key())
+    )
+    proxy_runner = await start_credential_proxy(
+        proxy_port,
+        "127.0.0.1",
+        credential_resolver=_harness_resolver,
+    )
     # Register the mock MCP server under a test-specific name.
     register_mcp_server(
         mcp_server_name,

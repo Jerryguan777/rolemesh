@@ -109,6 +109,12 @@ from rolemesh.orchestration.remote_control import (
 )
 from rolemesh.orchestration.router import format_messages, format_outbound
 from rolemesh.orchestration.task_scheduler import start_scheduler_loop
+from rolemesh.auth.credential_vault import (
+    create_credential_vault_from_env,
+    get_credential_vault,
+    set_credential_vault,
+)
+from rolemesh.egress.credentials import CredentialResolver
 from rolemesh.security.credential_proxy import register_mcp_server, set_token_vault, start_credential_proxy
 from rolemesh.security.sender_allowlist import (
     is_sender_allowed,
@@ -1419,16 +1425,24 @@ async def main() -> None:
 
     _queue = GroupQueue(transport=_transport, runtime=_runtime, orchestrator_state=_state)
 
-    # Host-side credential proxy: kept running for backward compatibility
-    # with operator tooling and so the `register_mcp_server` /
-    # `set_token_vault` wiring below has a sink to write to. Agents no
-    # longer reach this listener (the EC-1 agent bridge is Internal=true
-    # and agents resolve ``egress-gateway`` via Docker DNS instead), but
-    # the in-process dicts are still authoritative state that EC-2 will
-    # propagate into the gateway container. Leaving the host-side
-    # listener bound is the simplest compatibility shim during the PR-1
-    # → PR-2 transition; EC-2 removes this line entirely.
-    proxy_runner = await start_credential_proxy(CREDENTIAL_PROXY_PORT, PROXY_BIND_HOST)
+    # Install the per-process CredentialVault so the resolver below
+    # can decrypt rows from tenant_model_credentials. The webui process
+    # already installs its own; orchestrator and webui share the same
+    # CREDENTIAL_VAULT_KEY env var so the ciphertext written by one
+    # decrypts in the other.
+    set_credential_vault(create_credential_vault_from_env())
+    _credential_resolver = CredentialResolver(get_credential_vault())
+
+    # Host-side credential proxy: still bound for the ApprovalWorker
+    # (which calls /mcp-proxy/<server>/ from 127.0.0.1) and so the
+    # `register_mcp_server` / `set_token_vault` wiring below has a
+    # sink to write to. Agents reach the gateway container directly
+    # via Docker DNS, not this host listener.
+    proxy_runner = await start_credential_proxy(
+        CREDENTIAL_PROXY_PORT,
+        PROXY_BIND_HOST,
+        credential_resolver=_credential_resolver,
+    )
 
     # Gateway reachability is already enforced in
     # _ensure_container_system_running() via wait_for_gateway_ready. No
@@ -1656,6 +1670,18 @@ async def main() -> None:
 
         token_sub = await start_token_responder(_transport.nc, vault=_vault)
         egress_responder_subs.append(token_sub)
+
+    # Credential RPC: the gateway's RemoteCredentialResolver forwards
+    # every (tenant_id, provider) lookup here so we can decrypt rows
+    # using THIS process's CredentialResolver (which holds the DB
+    # conn and the Fernet vault). Without this responder the gateway's
+    # RPC times out and the agent's LLM call surfaces as 502.
+    from rolemesh.egress.orch_glue import start_credential_responder
+
+    cred_sub = await start_credential_responder(
+        _transport.nc, resolver=_credential_resolver,
+    )
+    egress_responder_subs.append(cred_sub)
 
     # v1.1 §7: hot-reload pipeline for coworker config changes from
     # the WebUI. The /api/v1 PATCH publishes ``web.coworker.restart``

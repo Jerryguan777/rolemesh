@@ -105,96 +105,52 @@ CLAUDE_CODE_BACKEND = AgentBackendConfig(
     extra_env={"AGENT_BACKEND": "claude"},
 )
 
-# DB row provider → Pi PI_MODEL_ID format-string provider segment.
-# Pi inherits the vendor convention from upstream where Bedrock is
-# called "amazon-bedrock" (the boto3 service stem). The DB calls it
-# just "bedrock" because that's what users see in the UI's provider
-# picker. Map at the boundary.
+# DB row provider → Pi PI_MODEL_ID prefix. Pi inherits the upstream
+# vendor name "amazon-bedrock" (boto3 service stem); the DB stores
+# just "bedrock" because that's what the UI's provider picker shows.
+# Translate at the boundary.
 _DB_TO_PI_PROVIDER: dict[str, str] = {
     "bedrock": "amazon-bedrock",
 }
 
 
-def pi_format_model_id(provider: str, model_id: str) -> str:
-    """Format a DB (provider, model_id) pair into Pi's PI_MODEL_ID string.
+def _pi_extra_env() -> dict[str, str]:
+    """Build the static Pi-backend env from .env defaults.
 
-    Pi expects ``<provider>/<model_id>``. Most DB providers are 1:1
-    with Pi (``openai``/``anthropic``/``google``); only ``bedrock``
-    gets renamed to ``amazon-bedrock``.
-    """
-    pi_provider = _DB_TO_PI_PROVIDER.get(provider, provider)
-    return f"{pi_provider}/{model_id}"
-
-
-def pi_env_for_model_id(model_id: str) -> dict[str, str]:
-    """Build the env keys Pi backend needs for a given PI_MODEL_ID.
-
-    Pure function — same input yields same output (modulo os.environ
-    fallback for AWS_REGION). Used in two paths:
-
-    1. Module-load default (``_pi_extra_env()`` below) — reads
-       ``PI_MODEL_ID`` from the host's .env so spawns without a
-       coworker (e.g. evaluation CLI) still get a working default.
-    2. Per-spawn override (PR30 wiring) — the container executor
-       resolves ``coworker.model_id`` against the ``models`` table
-       and calls this with the resulting Pi-formatted string so the
-       per-coworker model selection actually reaches the container.
-
-    Returns just the model-related env (PI_MODEL_ID + optional
-    Bedrock boto3 placeholders). The caller composes it with
-    ``AGENT_BACKEND`` and other static keys.
-
-    API keys are NOT injected here; all LLM requests go through the
-    credential proxy which injects real keys at the HTTP level. For
-    Bedrock we inject placeholder ``AWS_BEARER_TOKEN_BEDROCK`` so
-    boto3 doesn't raise ``NoCredentialsError`` before sending; the
-    proxy is the real credential gate. ``AWS_REGION`` makes boto3's
-    model-ARN resolution line up with the upstream URL the proxy
-    bound (single-source via ``BEDROCK_DEFAULT_REGION``).
-
-    ``BEDROCK_BASE_URL`` is intentionally NOT set here — it lives
-    in ``rolemesh.container.runner.build_container_spec`` because it
-    depends on per-spawn proxy routing decisions.
+    Load-time default for spawns without a coworker (evaluation CLI,
+    ad-hoc tooling). Per-spawn coworker model_id selection is applied
+    in ``container.runner.build_container_spec`` via the
+    ``pi_model_id_override`` arg, which recomputes the same model-
+    related keys this function sets here. ``BEDROCK_BASE_URL`` is
+    deliberately set in ``build_container_spec`` instead — it
+    depends on the per-spawn EC/rollback proxy routing decision.
     """
     import os
 
     from rolemesh.core.config import BEDROCK_DEFAULT_REGION
 
-    env: dict[str, str] = {}
+    env: dict[str, str] = {"AGENT_BACKEND": "pi"}
+    model_id = os.environ.get("PI_MODEL_ID", "")
     if not model_id:
         return env
     env["PI_MODEL_ID"] = model_id
-
     if model_id.startswith("amazon-bedrock/"):
         if not os.environ.get("AWS_BEARER_TOKEN_BEDROCK"):
+            # Loud at module load so an operator who sets a Bedrock
+            # PI_MODEL_ID but forgets the host token sees the
+            # misconfiguration up front rather than as opaque 404s
+            # from the credential proxy at first tool call.
             logger.warning(
                 "Pi backend uses a Bedrock model id but host has no "
-                "AWS_BEARER_TOKEN_BEDROCK set; the credential proxy "
-                "will not register a bedrock provider, and every "
-                "tool call will return 404 from the proxy. Set "
-                "AWS_BEARER_TOKEN_BEDROCK in .env to fix.",
+                "AWS_BEARER_TOKEN_BEDROCK set; tool calls will 404 "
+                "from the credential proxy. Set AWS_BEARER_TOKEN_BEDROCK "
+                "in .env to fix.",
                 model_id=model_id,
             )
         env["AWS_BEARER_TOKEN_BEDROCK"] = "placeholder-proxy-replaces-this"
         env["AWS_REGION"] = (
             os.environ.get("AWS_REGION", "") or BEDROCK_DEFAULT_REGION
         )
-
-    return env
-
-
-def _pi_extra_env() -> dict[str, str]:
-    """Build the static Pi-backend env from .env defaults.
-
-    Used as the load-time default when no per-coworker model_id is
-    resolved at spawn time (evaluation CLI, ad-hoc tooling). The
-    container executor's per-spawn path (see container_executor.py)
-    overrides PI_MODEL_ID with the coworker's choice when available.
-    """
-    import os
-
-    env: dict[str, str] = {"AGENT_BACKEND": "pi"}
-    env.update(pi_env_for_model_id(os.environ.get("PI_MODEL_ID", "")))
     return env
 
 

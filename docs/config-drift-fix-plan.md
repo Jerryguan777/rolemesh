@@ -123,37 +123,43 @@ _FORWARDABLE: tuple[_ForwardSpec, ...] = (
 
 **为何 dev 阶段未暴露**：单 tenant + 单 ANTHROPIC_API_KEY 覆盖所有需求，凑巧能跑。
 
-### 3.2 D2 — `coworker.model_id` 对 Pi backend 不生效
+### 3.2 D2 — `coworker.model_id` 对 Pi backend 不生效  ✅ shipped + simplified 2026-05-26
 
 **现状**：
 
 - DB 列存在（v1.1 02a + 00b）
 - Wizard 让用户选 model_id 入 DB（v2-B）
-- **`src/rolemesh/agent/executor.py` Pi 容器启动时读 host `PI_MODEL_ID` env var**，不查 DB
+- **修复已 shipped**：spawn 时查 DB，map 到 Pi-format string，注入到容器 env
 
-**证据**：当前 feat/ui-v2 working tree 有 4 个**未 commit** 文件正在修这个（已写代码 + 8 tests）：
+**Shipped 历史**：
+- `6eafd33` + `25834a5`（feat/ui-v2 上 PR30；原始 293 LOC，含 over-engineering bloat）
+- `chore/config-db-truth` 简化 commit（净 -100 LOC；折叠 helper、3-branch → try/except、删 5 spec-confirming tests）
 
-```
-M  src/rolemesh/agent/container_executor.py   spawn 时 lookup coworker.model_id
-M  src/rolemesh/agent/executor.py             pi_format_model_id() 纯函数
-M  src/rolemesh/container/runner.py           build_container_spec 加 override 参
-M  tests/container/test_runner.py             8 个 tests
-```
+**最终态文件**：
+- `src/rolemesh/agent/container_executor.py` — spawn 时 lookup coworker.model_id，try/except fallback
+- `src/rolemesh/agent/executor.py` — `_pi_extra_env` inline 了模型 env 逻辑；`_DB_TO_PI_PROVIDER` 常量留存
+- `src/rolemesh/container/runner.py` — `build_container_spec(pi_model_id_override=...)` 含 inline override 逻辑
+- `tests/container/test_runner.py` — 4 个 mutation-resistant tests pin 公共 contract
 
-**影响**：用户在 wizard 选 gpt-4o 但 Pi 容器仍用 host .env 配的那个 model。
+### 3.3 D3 — `tenants.max_concurrent_containers`  ✅ already shipped pre-session (no work needed 2026-05-26)
 
-**Stage A 解决**（见 §5.A）。
+**修订**：本节最初按"DB 列未被读取"立项；2026-05-26 chore session 1 准备执行时审计 `main`，发现 wiring 完整：
 
-### 3.3 D3 — `tenants.max_concurrent_containers` 从未读取
+- `core/types.py:112` — `Tenant.max_concurrent_containers` 字段
+- `db/tenant.py:67` — `get_all_tenants()` 从 DB 投影该列
+- `main.py:417-418` — `_load_state()` 启动时 `for t in await get_all_tenants(): _state.tenants[t.id] = t`
+- `core/orchestrator_state.py:103` — `can_start_container` 真的读 `tenant.max_concurrent_containers` 检查
+- `core/orchestrator_state.py:108-118` — `increment_active`/`decrement_active` 维护 `tenant_active` dict
+- `container/scheduler.py:94-95` — `GroupQueue._can_start` 调 `_orch_state.can_start_container`
+- `main.py:1420` — `_queue = GroupQueue(transport=..., runtime=..., orchestrator_state=_state)`
+- `container/scheduler.py:382, 408, 417, 438` — spawn / terminate 路径 inc/dec
+- 已有 tests：`tests/test_multi_tenant_e2e.py` (test_global_limit_blocks_all_tenants 等), `tests/container/test_scheduler.py:136` (三级 concurrency)
 
-**现状**：
+**为何最初误判**：grep `GLOBAL_MAX_CONTAINERS` 看见 `OrchestratorState(global_limit=...)` 后误以为 `tenant.max_concurrent_containers` 没人读；实际两条限制并存（global + per-tenant），都生效。
 
-- DB 列：`tenants.max_concurrent_containers INT DEFAULT 5`（v1.1 04 multi-tenant 加）
-- `src/rolemesh/db/tenant.py` write/read column
-- **但 `OrchestratorState(global_limit=GLOBAL_MAX_CONTAINERS)` 用 env，不查 DB**
-- 整个 process 一个 global limit，per-tenant 字段无人消费
+**无须代码修改**。如未来发现真实 gap（如 hot-reload tenant 限额、admin endpoint 改限额后不生效），独立 chore 再处理。
 
-**证据**：
+**原始证据（保留供 archaeology）**：
 
 ```
 $ grep -rn "max_concurrent_containers\|GLOBAL_MAX_CONTAINERS" src/rolemesh/
@@ -337,17 +343,9 @@ agent → credential_proxy (X-RoleMesh-Conversation-Id) → DB lookup →
 - **conversation_id header 信任问题**——02c retired prompt 当时讨论过，容器内 agent 可伪造任意 header。需要 credential_proxy **验证 header 中的 conversation_id 真对应当前 active container**（chore A `get_active_container_name` 比对）
 - **缓存 TTL race**——超过 TTL 但请求 in-flight 时不要 panic，刷一次重试
 
-### 5.C — D3（per-tenant container limit）
+### 5.C — D3（per-tenant container limit）  ✅ already shipped pre-session
 
-**低优先级**。dev 阶段无感，生产多 tenant 才需要。
-
-**做法**：
-- `OrchestratorState` 改成 per-tenant `Dict[tenant_id, int]` 当前 running 计数
-- 启动时 + tenant created/updated event 时 load `tenants.max_concurrent_containers` 进 limit dict
-- spawn 时检查 `current[tenant_id] >= limit[tenant_id]`
-- 保留 `GLOBAL_MAX_CONTAINERS` env 作为全局兜底
-
-**估算**：~150 LOC。
+见 §3.3 修订段。`OrchestratorState.can_start_container` 已经按 `tenant.max_concurrent_containers` 检查；`_load_state()` 启动时 load 所有 tenant；`tenant_active` dict + `increment_active`/`decrement_active` 都 in 位；`GroupQueue` 已绑 `_orch_state`。无须代码。
 
 ### 5.D — 不建议改
 
@@ -377,9 +375,9 @@ agent → credential_proxy (X-RoleMesh-Conversation-Id) → DB lookup →
 
 | Stage | Scope | LOC | 优先级 | 何时做 |
 |---|---|---|---|---|
-| A | D2 commit/push | 280（已写） | high | **立即**（5 分钟） |
+| A | D2 commit + 后续 simplify | 280 ship + -100 simplify | high | ✅ done 2026-05-26 |
 | B | D1+D4 credential_proxy 改造 | 1500-1800 | **CRITICAL** | 下个独立 chore session（与 v2 / v1.1 平级）|
-| C | D3 per-tenant limit | 150 | low | 任何时候顺手；或推到 v3 |
+| C | D3 per-tenant limit | 0 | low | ✅ already shipped pre-session（见 §3.3 修订）|
 
 **不要等 v3 整 cycle 来做 B**——B 是当前真 bug，每多等一天 prod 部署多一份风险。
 

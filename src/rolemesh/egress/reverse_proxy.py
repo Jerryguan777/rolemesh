@@ -1,32 +1,28 @@
-"""HTTP reverse proxy with credential injection + optional egress safety hook.
+"""HTTP reverse proxy with per-tenant credential injection + egress safety.
 
-Migrated from ``rolemesh.security.credential_proxy`` as part of EC-2.
-The old module becomes a thin re-export (public API unchanged) so that
-every ``from rolemesh.security.credential_proxy import …`` call site
-continues to resolve without code churn.
+Routes:
 
-Business-logic surface is identical to the pre-EC-2 credential proxy:
+    /proxy/{provider}/{path}  Multi-provider LLM proxy (Anthropic, OpenAI,
+                              Google, Bedrock). Credentials resolved
+                              per-request from the source IP -> Identity
+                              -> tenant_model_credentials lookup.
+    /mcp-proxy/{name}/{path}  MCP server proxy with per-user OIDC token
+                              forwarding.
+    /healthz                  Liveness probe (returns 200 "ok").
 
-    /proxy/{provider}/{path}  Multi-provider LLM proxy (Anthropic, OpenAI, Google, …)
-    /mcp-proxy/{name}/{path}  MCP server proxy with per-user token forwarding
-    /healthz                  Liveness probe (returns 200 "ok")
-    /{path}                   Legacy Anthropic-only catch-all
+Credential resolution is fail-closed by design:
 
-What EC-2 added:
+    * Unknown source IP (no Identity in the resolver) -> 401 UNKNOWN_SOURCE.
+    * No credential row for (tenant_id, provider)     -> 401 MISSING_CREDENTIAL.
 
-    * Optional ``safety_caller`` argument. When provided, every request
-      first runs through the gateway's Safety pipeline
-      (stage='egress_request', mode='reverse'); a block verdict returns
-      403 before credentials are injected and before any upstream
-      request is made.
-    * Optional ``identity_resolver`` argument. Needed because the
-      safety pipeline is keyed on tenant_id + coworker_id, which we
-      recover from the source IP (agents on the internal bridge are
-      always identified by IP via ``IdentityResolver``).
+There is no host-env fallback for LLM keys. The boot-time secrets dict
+that earlier versions read from ``os.environ`` is gone; only the
+non-secret ``*_BASE_URL`` deployment overrides remain on os.environ.
 
-Both arguments are optional so the host-side legacy path (which still
-runs during the PR-1 → PR-2 transition) can call ``start_credential_proxy``
-with positional args identical to pre-EC-2 behaviour.
+``credential_resolver`` is a required keyword argument to
+``start_credential_proxy``: every caller must wire a real
+:class:`rolemesh.egress.credentials.CredentialResolver` so there is no
+hidden code path where credentials come from somewhere else.
 """
 
 from __future__ import annotations
@@ -39,6 +35,7 @@ from aiohttp import ClientSession, web
 
 from rolemesh.core.logger import get_logger
 
+from .credentials import CredentialResolverProtocol, MissingCredentialError
 from .safety_call import EgressRequest
 
 if TYPE_CHECKING:
@@ -94,90 +91,100 @@ _SKIP_RESPONSE_HEADERS = frozenset(
 
 
 # ---------------------------------------------------------------------------
-# Multi-provider registry
+# Multi-provider routing (static templates + per-provider helpers)
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
-class _ProviderConfig:
-    upstream: str
-    secret_key: str
+class _ProviderTemplate:
+    """Non-secret routing config for a provider.
+
+    Static at process start: holds the default upstream URL, an optional
+    host env override name (deployment-level, not per-tenant), and the
+    convention for translating ``cred[key_field]`` into the upstream
+    auth header. Anthropic and Bedrock have provider-specific logic
+    and are dispatched directly in the handler, not via this table.
+    """
+
+    upstream_default: str
+    base_url_env: str | None
+    key_field: str
     header_name: str
     header_format: str
 
 
-_provider_registry: dict[str, _ProviderConfig] = {}
+_PROVIDER_TEMPLATES: dict[str, _ProviderTemplate] = {
+    "openai": _ProviderTemplate(
+        upstream_default="https://api.openai.com/v1",
+        base_url_env="OPENAI_BASE_URL",
+        key_field="api_key",
+        header_name="authorization",
+        header_format="Bearer {key}",
+    ),
+    "google": _ProviderTemplate(
+        upstream_default="https://generativelanguage.googleapis.com",
+        base_url_env="GOOGLE_BASE_URL",
+        key_field="api_key",
+        header_name="x-goog-api-key",
+        header_format="{key}",
+    ),
+}
 
 
-def _build_provider_registry(
-    secrets: dict[str, str], anthropic_auth_mode: AuthMode
-) -> dict[str, _ProviderConfig]:
-    registry: dict[str, _ProviderConfig] = {}
+def _provider_upstream(template: _ProviderTemplate) -> str:
+    import os
+    if template.base_url_env:
+        override = os.environ.get(template.base_url_env, "")
+        if override:
+            return override
+    return template.upstream_default
 
-    if anthropic_auth_mode == "api-key":
-        ak = secrets.get("ANTHROPIC_API_KEY", "")
-        if ak:
-            registry["anthropic"] = _ProviderConfig(
-                upstream=secrets.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
-                secret_key=ak,
-                header_name="x-api-key",
-                header_format="{key}",
-            )
-    else:
-        oauth = secrets.get("CLAUDE_CODE_OAUTH_TOKEN") or secrets.get("ANTHROPIC_AUTH_TOKEN", "")
+
+def _anthropic_upstream() -> str:
+    """Deployment-level Anthropic upstream override (non-secret)."""
+    import os
+    return os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+
+
+def _build_anthropic_header(
+    cred: dict[str, Any],
+) -> tuple[str, str] | None:
+    """Pick the upstream auth header from a tenant's Anthropic credential.
+
+    The wizard writes ``{"api_key": "..."}`` today. A future UI may
+    also write ``{"extras": {"oauth_token": "..."}}`` for Claude
+    Pro/Max OAuth users; the proxy consumes both shapes already so
+    that UI change is purely a frontend chore.
+
+    Returns ``None`` if neither field is populated — the row exists
+    but is unusable; the handler treats this identically to a missing
+    row (fail-closed).
+    """
+    api_key = cred.get("api_key") or ""
+    if api_key:
+        return ("x-api-key", str(api_key))
+    extras = cred.get("extras") or {}
+    if isinstance(extras, dict):
+        oauth = extras.get("oauth_token") or ""
         if oauth:
-            registry["anthropic"] = _ProviderConfig(
-                upstream=secrets.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
-                secret_key=oauth,
-                header_name="authorization",
-                header_format="Bearer {key}",
-            )
+            return ("authorization", f"Bearer {oauth}")
+    return None
 
-    openai_key = secrets.get("PI_OPENAI_API_KEY", "")
-    if openai_key:
-        registry["openai"] = _ProviderConfig(
-            upstream=secrets.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-            secret_key=openai_key,
-            header_name="authorization",
-            header_format="Bearer {key}",
-        )
 
-    google_key = secrets.get("PI_GOOGLE_API_KEY", "")
-    if google_key:
-        registry["google"] = _ProviderConfig(
-            upstream=secrets.get(
-                "GOOGLE_BASE_URL", "https://generativelanguage.googleapis.com"
-            ),
-            secret_key=google_key,
-            header_name="x-goog-api-key",
-            header_format="{key}",
-        )
+def _bedrock_upstream(cred: dict[str, Any]) -> str:
+    """Bedrock upstream URL is region-locked; region travels with the cred.
 
-    # AWS Bedrock — long-term API key (Bearer ABSK...). The token is
-    # held on the host; agent containers see only a placeholder env
-    # var and route their boto3 client at this proxy via
-    # ``BEDROCK_BASE_URL``. Whatever Authorization header boto3
-    # synthesises (SigV4 signature in older releases, Bearer in
-    # boto3 1.42+) gets overwritten by ``handle_provider_proxy`` —
-    # the proxy is the authoritative authn injector.
-    #
-    # Region is locked at registry-build time. Multi-region deploys
-    # would need to encode region in the proxy path
-    # (``/proxy/bedrock/{region}/...``); not in scope for the
-    # initial Sonnet/Opus 4.6 use case.
-    bedrock_token = secrets.get("AWS_BEARER_TOKEN_BEDROCK", "")
-    if bedrock_token:
-        from rolemesh.core.config import BEDROCK_DEFAULT_REGION
-
-        bedrock_region = secrets.get("AWS_REGION", "") or BEDROCK_DEFAULT_REGION
-        registry["bedrock"] = _ProviderConfig(
-            upstream=f"https://bedrock-runtime.{bedrock_region}.amazonaws.com",
-            secret_key=bedrock_token,
-            header_name="authorization",
-            header_format="Bearer {key}",
-        )
-
-    return registry
+    Falls back to :data:`BEDROCK_DEFAULT_REGION` when the credential
+    doesn't carry one (older rows written before the wizard learned
+    the region field).
+    """
+    from rolemesh.core.config import BEDROCK_DEFAULT_REGION
+    extras = cred.get("extras") or {}
+    region = ""
+    if isinstance(extras, dict):
+        region = str(extras.get("region") or "")
+    region = region or BEDROCK_DEFAULT_REGION
+    return f"https://bedrock-runtime.{region}.amazonaws.com"
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +247,7 @@ async def _safety_gate(
     if safety_caller is None or identity_resolver is None:
         return None
 
-    peer = request.transport.get_extra_info("peername") if request.transport else None  # type: ignore[union-attr]
+    peer = request.transport.get_extra_info("peername") if request.transport else None
     source_ip = peer[0] if peer else ""
     identity = identity_resolver.resolve(source_ip)
     decision = await safety_caller.decide(
@@ -270,60 +277,24 @@ async def start_credential_proxy(
     port: int,
     host: str = "127.0.0.1",
     *,
+    credential_resolver: CredentialResolverProtocol,
     identity_resolver: IdentityResolver | None = None,
     safety_caller: EgressSafetyCaller | None = None,
 ) -> web.AppRunner:
-    """Start the reverse-proxy HTTP server on (host, port).
+    """Start the reverse-proxy HTTP server on ``(host, port)``.
 
-    The trailing keyword-only arguments enable the EC-2 gateway
-    deployment (both set). The host-side legacy path leaves them at
-    their defaults and gets the pre-EC-2 behaviour.
+    ``credential_resolver`` is required: every caller must supply a
+    real :class:`CredentialResolver` so credential injection has a
+    single, auditable source. There is no fallback to host env LLM
+    keys — the boot-time secrets dict that earlier versions read is
+    gone.
+
+    ``identity_resolver`` remains optional only because the host-
+    side orchestrator can run in unit-test configurations where no
+    NATS lifecycle stream exists yet; when it is ``None``, the
+    handler returns 401 UNKNOWN_SOURCE for every request (still
+    fail-closed).
     """
-    # .env is loaded into os.environ by rolemesh.bootstrap at
-    # process entry; host-side callers (orchestrator) and the gateway
-    # container (env vars forwarded explicitly in launcher._gateway_env)
-    # both reach this via os.environ.
-    import os as _os
-
-    secrets: dict[str, str] = {
-        k: v
-        for k, v in (
-            (k, _os.environ.get(k, ""))
-            for k in (
-                "ANTHROPIC_API_KEY",
-                "CLAUDE_CODE_OAUTH_TOKEN",
-                "ANTHROPIC_AUTH_TOKEN",
-                "ANTHROPIC_BASE_URL",
-                "PI_OPENAI_API_KEY",
-                "OPENAI_BASE_URL",
-                "PI_GOOGLE_API_KEY",
-                "GOOGLE_BASE_URL",
-                # Bedrock — long-term API key (Bearer ABSK...). Held
-                # only on the host; agents see a placeholder
-                # (see ``rolemesh.agent.executor._pi_extra_env``).
-                # Region picks the regional endpoint upstream URL.
-                "AWS_BEARER_TOKEN_BEDROCK",
-                "AWS_REGION",
-            )
-        )
-        if v
-    }
-
-    auth_mode: AuthMode = "api-key" if secrets.get("ANTHROPIC_API_KEY") else "oauth"
-    oauth_token = secrets.get("CLAUDE_CODE_OAUTH_TOKEN") or secrets.get("ANTHROPIC_AUTH_TOKEN", "")
-
-    upstream_url = secrets.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
-    parsed = urlparse(upstream_url)
-    is_https = parsed.scheme == "https"
-    upstream_host = parsed.hostname or "api.anthropic.com"
-    upstream_port = parsed.port or (443 if is_https else 80)
-    upstream_scheme = parsed.scheme or "https"
-
-    global _provider_registry
-    _provider_registry = _build_provider_registry(secrets, auth_mode)
-    for name in _provider_registry:
-        logger.info("LLM provider proxy registered", provider=name)
-
     session = ClientSession()
 
     async def _stream_upstream(
@@ -359,11 +330,71 @@ async def start_credential_proxy(
         if request.query_string:
             remaining_path += "?" + request.query_string
 
-        config = _provider_registry.get(provider_name)
-        if not config:
-            return web.Response(status=404, text=f"LLM provider not configured: {provider_name}")
+        # Identity must resolve. UNKNOWN_SOURCE before credential
+        # lookup so a leaked / off-network client gets a clear 401
+        # rather than a misleading MISSING_CREDENTIAL.
+        if identity_resolver is None:
+            return web.Response(status=401, text="UNKNOWN_SOURCE")
+        peer = request.transport.get_extra_info("peername") if request.transport else None
+        source_ip = peer[0] if peer else ""
+        identity = identity_resolver.resolve(source_ip)
+        if identity is None:
+            return web.Response(status=401, text="UNKNOWN_SOURCE")
 
-        up = urlparse(config.upstream)
+        # Per-tenant credential lookup — fail-closed if absent.
+        # 401 vs 502 distinction matters: MISSING is "operator should
+        # configure this tenant's credential"; RuntimeError is
+        # "orchestrator-side fault" (RPC timeout, vault decrypt error,
+        # etc.) and is not the requester's problem to fix.
+        try:
+            cred = await credential_resolver.resolve(
+                identity.tenant_id, provider_name,
+            )
+        except MissingCredentialError:
+            return web.Response(status=401, text="MISSING_CREDENTIAL")
+        except RuntimeError as exc:
+            logger.error(
+                "credential resolver fault",
+                tenant_id=identity.tenant_id,
+                provider=provider_name,
+                error=str(exc),
+            )
+            return web.Response(status=502, text="CREDENTIAL_LOOKUP_FAILED")
+
+        # Dispatch by provider — Anthropic and Bedrock have provider-
+        # specific routing; everything else flows through the static
+        # _PROVIDER_TEMPLATES table.
+        upstream: str
+        header_name: str
+        header_value: str
+        if provider_name == "anthropic":
+            upstream = _anthropic_upstream()
+            anth = _build_anthropic_header(cred)
+            if anth is None:
+                return web.Response(status=401, text="MISSING_CREDENTIAL")
+            header_name, header_value = anth
+        elif provider_name == "bedrock":
+            upstream = _bedrock_upstream(cred)
+            api_key = str(cred.get("api_key") or "")
+            if not api_key:
+                return web.Response(status=401, text="MISSING_CREDENTIAL")
+            header_name = "authorization"
+            header_value = f"Bearer {api_key}"
+        else:
+            template = _PROVIDER_TEMPLATES.get(provider_name)
+            if template is None:
+                return web.Response(
+                    status=404,
+                    text=f"LLM provider not configured: {provider_name}",
+                )
+            upstream = _provider_upstream(template)
+            key_value = str(cred.get(template.key_field) or "")
+            if not key_value:
+                return web.Response(status=401, text="MISSING_CREDENTIAL")
+            header_name = template.header_name
+            header_value = template.header_format.format(key=key_value)
+
+        up = urlparse(upstream)
         up_host = up.hostname or ""
         up_port = up.port or (443 if up.scheme == "https" else 80)
 
@@ -377,7 +408,7 @@ async def start_credential_proxy(
         if blocked is not None:
             return blocked
 
-        target_url = f"{config.upstream}{remaining_path}"
+        target_url = f"{upstream}{remaining_path}"
 
         fwd_headers = _forward_headers(request)
         body = await request.read()
@@ -389,9 +420,9 @@ async def start_credential_proxy(
             fwd_headers["host"] = up_host
 
         for k in list(fwd_headers):
-            if k.lower() == config.header_name:
+            if k.lower() == header_name:
                 del fwd_headers[k]
-        fwd_headers[config.header_name] = config.header_format.format(key=config.secret_key)
+        fwd_headers[header_name] = header_value
 
         fwd_headers.pop(_USER_ID_HEADER, None)
 
@@ -453,48 +484,6 @@ async def start_credential_proxy(
             logger.error("MCP proxy upstream error", server=server_name, error=str(exc))
             return web.Response(status=502, text="MCP proxy: Bad Gateway")
 
-    async def handle_legacy_anthropic(request: web.Request) -> web.StreamResponse:
-        blocked = await _safety_gate(
-            request,
-            identity_resolver=identity_resolver,
-            safety_caller=safety_caller,
-            upstream_host=upstream_host,
-            upstream_port=upstream_port,
-        )
-        if blocked is not None:
-            return blocked
-
-        body = await request.read()
-
-        headers: dict[str, str] = {}
-        for key, value in request.headers.items():
-            if key.lower() not in _HOP_BY_HOP:
-                headers[key] = value
-        headers["host"] = f"{upstream_host}:{upstream_port}" if upstream_port not in (80, 443) else upstream_host
-        headers["content-length"] = str(len(body))
-
-        if auth_mode == "api-key":
-            headers.pop("x-api-key", None)
-            headers["x-api-key"] = secrets.get("ANTHROPIC_API_KEY", "")
-        else:
-            if "authorization" in {k.lower() for k in headers}:
-                for k in list(headers):
-                    if k.lower() == "authorization":
-                        del headers[k]
-                if oauth_token:
-                    headers["authorization"] = f"Bearer {oauth_token}"
-
-        target_url = f"{upstream_scheme}://{upstream_host}:{upstream_port}{request.path_qs}"
-
-        try:
-            return await _stream_upstream(request, request.method, target_url, headers, body)
-        except ConnectionResetError:
-            logger.debug("Credential proxy: client disconnected", url=str(request.url))
-            return web.Response(status=499, text="Client Disconnected")
-        except (OSError, RuntimeError, ValueError) as exc:
-            logger.error("Credential proxy upstream error", url=str(request.url), error=str(exc))
-            return web.Response(status=502, text="Bad Gateway")
-
     async def handle_healthz(_request: web.Request) -> web.Response:
         return web.Response(status=200, text="ok")
 
@@ -502,7 +491,6 @@ async def start_credential_proxy(
     app.router.add_get("/healthz", handle_healthz)
     app.router.add_route("*", "/proxy/{provider_name}/{path_info:.*}", handle_provider_proxy)
     app.router.add_route("*", "/mcp-proxy/{server_name}/{path_info:.*}", handle_mcp_proxy)
-    app.router.add_route("*", "/{path_info:.*}", handle_legacy_anthropic)
 
     app["client_session"] = session
 
@@ -520,17 +508,27 @@ async def start_credential_proxy(
         "Credential proxy started",
         port=port,
         host=host,
-        auth_mode=auth_mode,
-        providers=list(_provider_registry.keys()),
+        providers=[*_PROVIDER_TEMPLATES, "anthropic", "bedrock"],
+        identity_wired=identity_resolver is not None,
         safety_gated=safety_caller is not None,
     )
     return runner
 
 
 def detect_auth_mode() -> AuthMode:
-    """Detect which auth mode the host is configured for."""
+    """Detect which auth mode the host is configured for.
+
+    Used by ``container/runner.py`` at agent spawn time to pick the
+    Pi SDK's auth-mode env var inside the container. This is NOT a
+    request-time credential read — only the existence of the env var
+    is consulted; the value itself is never extracted, forwarded, or
+    used to authenticate an upstream call. Per-tenant auth-mode
+    selection at spawn time is the natural next step; deferred until
+    the wizard learns OAuth (see docs/config-drift-fix-plan §3 D1).
+    """
     import os as _os
 
+    # inv-cred-ok: existence check for Pi spawn auth-mode; value not read.
     return "api-key" if _os.environ.get("ANTHROPIC_API_KEY") else "oauth"
 
 

@@ -54,6 +54,7 @@ from .mcp_cache import (  # noqa: E402
     entry_to_dict,
 )
 from .policy_cache import RULE_CHANGED_SUBJECT, SNAPSHOT_REQUEST_SUBJECT  # noqa: E402
+from .remote_credentials import CREDENTIAL_REQUEST_SUBJECT  # noqa: E402
 from .remote_token_vault import TOKEN_ACCESS_REQUEST_SUBJECT  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -385,6 +386,95 @@ async def _respond(msg: object, payload: dict[str, Any]) -> None:
     body = json.dumps(payload).encode("utf-8")
     with contextlib.suppress(Exception):
         await msg.respond(body)  # type: ignore[attr-defined]
+
+
+async def start_credential_responder(
+    nc: nats.aio.client.Client,
+    *,
+    resolver: Any,
+) -> object:
+    """Subscribe to ``egress.credential.request`` and serve credentials
+    out of the orchestrator's local
+    :class:`rolemesh.egress.credentials.CredentialResolver`.
+
+    The egress gateway runs without DB access; it can't decrypt rows
+    itself. The gateway's
+    :class:`rolemesh.egress.remote_credentials.RemoteCredentialResolver`
+    forwards each lookup to this subject. The orchestrator already
+    has a real :class:`CredentialResolver` (DB + vault); we just plumb
+    each RPC into it.
+
+    ``resolver`` is typed ``Any`` so this module doesn't import the
+    DB-backed resolver (transitively pulls in ``rolemesh.db``); the
+    duck-typed call is ``resolver.resolve(tenant_id, provider)``
+    returning a dict and raising
+    :class:`rolemesh.egress.credentials.MissingCredentialError` on miss.
+
+    Returns the subscription handle; caller is responsible for
+    ``await sub.unsubscribe()`` at shutdown — same pattern as
+    :func:`start_token_responder`.
+    """
+    from .credentials import MissingCredentialError
+
+    async def _handler(msg: object) -> None:
+        try:
+            payload = json.loads(msg.data)  # type: ignore[attr-defined]
+        except (ValueError, AttributeError) as exc:
+            logger.warning(
+                "credential responder: non-JSON request", error=str(exc),
+            )
+            await _respond(
+                msg, {"credential": None, "error": "bad_json"},
+            )
+            return
+        if not isinstance(payload, dict):
+            await _respond(
+                msg, {"credential": None, "error": "bad_payload"},
+            )
+            return
+        tenant_id = payload.get("tenant_id")
+        provider = payload.get("provider")
+        if not isinstance(tenant_id, str) or not tenant_id:
+            await _respond(
+                msg, {"credential": None, "error": "missing_tenant_id"},
+            )
+            return
+        if not isinstance(provider, str) or not provider:
+            await _respond(
+                msg, {"credential": None, "error": "missing_provider"},
+            )
+            return
+
+        try:
+            credential = await resolver.resolve(tenant_id, provider)
+        except MissingCredentialError:
+            await _respond(
+                msg, {"credential": None, "error": "MISSING"},
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 — keep subscriber alive
+            # InvalidToken (wrong master key) or any other vault /
+            # DB-layer fault. Surface as a non-MISSING error so the
+            # gateway maps to 502 not 401.
+            logger.error(
+                "credential responder: resolver raised",
+                tenant_id=tenant_id,
+                provider=provider,
+                error=str(exc),
+            )
+            await _respond(
+                msg, {"credential": None, "error": "resolver_error"},
+            )
+            return
+
+        await _respond(msg, {"credential": credential})
+
+    sub = await nc.subscribe(CREDENTIAL_REQUEST_SUBJECT, cb=_handler)
+    logger.info(
+        "credential responder subscribed",
+        subject=CREDENTIAL_REQUEST_SUBJECT,
+    )
+    return sub
 
 
 async def fetch_all_egress_rules() -> list[dict[str, Any]]:

@@ -175,26 +175,6 @@ async def test_patch_partial_leaves_unspecified_fields_alone() -> None:
     assert body["tool_reversibility"] == {"safe_tool": True}
 
 
-async def test_patch_can_clear_credential_ref() -> None:
-    """Explicit ``None`` for a nullable column clears it."""
-    user = await _make_user()
-    async with _client(_build_app(user)) as ac:
-        created = await ac.post(
-            "/api/v1/mcp-servers",
-            json=_payload(name="clearable", credential_ref="cred-abc"),
-            headers={"Authorization": "Bearer x"},
-        )
-        cid = created.json()["id"]
-        assert created.json()["credential_ref"] == "cred-abc"
-        patched = await ac.patch(
-            f"/api/v1/mcp-servers/{cid}",
-            json={"credential_ref": None},
-            headers={"Authorization": "Bearer x"},
-        )
-    assert patched.status_code == 200
-    assert patched.json()["credential_ref"] is None
-
-
 # ---------------------------------------------------------------------------
 # DELETE 409
 # ---------------------------------------------------------------------------

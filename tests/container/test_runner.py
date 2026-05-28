@@ -169,8 +169,15 @@ class TestBuildContainerSpec:
         host.docker.internal."""
         with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
             spec = build_container_spec([], "c", "j")
-        assert "egress-gateway" in spec.env["ANTHROPIC_BASE_URL"]
-        assert "egress-gateway" in spec.env["OPENAI_BASE_URL"]
+        # All providers route through ``/proxy/<name>/`` after PR 2
+        # deleted the legacy Anthropic catch-all. Without the prefix
+        # the agent's SDK hits the reverse proxy at a 404 path.
+        assert spec.env["ANTHROPIC_BASE_URL"] == (
+            "http://egress-gateway:3001/proxy/anthropic"
+        )
+        assert spec.env["OPENAI_BASE_URL"] == (
+            "http://egress-gateway:3001/proxy/openai"
+        )
         # Bedrock — same proxy_base; agents on Internal=true bridge
         # cannot resolve host.docker.internal, so this MUST be the
         # gateway service name. Pre-fix it was synthesised in
@@ -604,46 +611,18 @@ class TestOciRuntimeMerge:
 
 
 # ---------------------------------------------------------------------------
-# PR30: coworker.model_id → container env wiring
+# coworker.model_id → container env wiring
 # ---------------------------------------------------------------------------
 
 
 class TestPiModelIdOverride:
-    """The bug PR30 fixed: coworker.model_id was in DB but ignored at
-    spawn time; the container always used whatever PI_MODEL_ID came
-    from the host's .env. Now build_container_spec accepts an
-    explicit override and applies it on top of the .env-derived
-    default so the UI's model picker actually reaches the container.
-    """
+    """build_container_spec must apply the per-spawn override on top
+    of the .env-derived default so the UI's model picker actually
+    reaches the container instead of being silently ignored."""
 
     def test_pi_model_id_override_replaces_default(self) -> None:
         # Static .env-derived backend extra_env has PI_MODEL_ID set
-        # (here we simulate it). The override should win.
-        config = AgentBackendConfig(
-            name="pi",
-            image="rolemesh-agent:latest",
-            extra_env={
-                "AGENT_BACKEND": "pi",
-                "PI_MODEL_ID": "openai/gpt-4o-mini",  # .env-style default
-            },
-        )
-        with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
-            spec = build_container_spec(
-                [], "c", "j",
-                backend_config=config,
-                pi_model_id_override="anthropic/claude-sonnet-4-6",
-            )
-        assert spec.env["PI_MODEL_ID"] == "anthropic/claude-sonnet-4-6", (
-            "coworker's model choice MUST override the host .env default; "
-            "this is the exact bug PR30 fixed"
-        )
-
-    def test_pi_model_id_override_recomputes_bedrock_env(self) -> None:
-        # Switching to a Bedrock model has to also inject boto3
-        # placeholders. Without this, a coworker bound to a Bedrock
-        # model would still spawn with no AWS_BEARER_TOKEN_BEDROCK
-        # and boto3 inside the container would raise NoCredentialsError
-        # before sending its first request.
+        # (here we simulate it). The override must win.
         config = AgentBackendConfig(
             name="pi",
             image="rolemesh-agent:latest",
@@ -656,17 +635,13 @@ class TestPiModelIdOverride:
             spec = build_container_spec(
                 [], "c", "j",
                 backend_config=config,
-                pi_model_id_override="amazon-bedrock/us.anthropic.claude-sonnet-4-6",
+                pi_model_id_override="anthropic/claude-sonnet-4-6",
             )
-        assert spec.env["PI_MODEL_ID"] == "amazon-bedrock/us.anthropic.claude-sonnet-4-6"
-        assert "AWS_BEARER_TOKEN_BEDROCK" in spec.env
-        assert "AWS_REGION" in spec.env
+        assert spec.env["PI_MODEL_ID"] == "anthropic/claude-sonnet-4-6"
 
     def test_pi_model_id_override_none_keeps_default(self) -> None:
-        # The override is opt-in; callers that don't have a coworker
-        # context (evaluation CLI, ad-hoc tooling) pass None and the
-        # static .env-derived default wins. Pin so a future refactor
-        # doesn't accidentally make this required.
+        # Override is opt-in; callers without a coworker context
+        # (evaluation CLI) pass None and the .env default wins.
         config = AgentBackendConfig(
             name="pi",
             image="rolemesh-agent:latest",
@@ -683,62 +658,43 @@ class TestPiModelIdOverride:
             )
         assert spec.env["PI_MODEL_ID"] == "openai/gpt-4o-mini"
 
-    def test_pi_model_id_override_ignored_for_claude_backend(self) -> None:
-        # The override only kicks in when backend_config.name == "pi".
-        # Claude backend doesn't read PI_MODEL_ID; passing the
-        # override should be a no-op so a future caller that
-        # mistakenly forwards a Pi string to a Claude coworker
-        # doesn't accidentally poison the env.
+    def test_bedrock_override_injects_aws_env(self) -> None:
+        # DB stores "bedrock" but Pi expects "amazon-bedrock"; the
+        # container_executor spawn path renames at the boundary
+        # before calling build_container_spec with the resulting
+        # "amazon-bedrock/..." string. Verify that an amazon-bedrock
+        # override (a) lands as PI_MODEL_ID and (b) injects boto3
+        # placeholders — without these, boto3 inside the container
+        # raises NoCredentialsError before sending its first request.
         config = AgentBackendConfig(
-            name="claude",
+            name="pi",
             image="rolemesh-agent:latest",
-            extra_env={"AGENT_BACKEND": "claude"},
+            extra_env={
+                "AGENT_BACKEND": "pi",
+                "PI_MODEL_ID": "openai/gpt-4o-mini",
+            },
         )
         with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
             spec = build_container_spec(
                 [], "c", "j",
                 backend_config=config,
-                pi_model_id_override="anthropic/claude-sonnet-4-6",
+                pi_model_id_override="amazon-bedrock/us.anthropic.claude-sonnet-4-6",
             )
-        # Claude backend's env shape has AGENT_BACKEND but NOT
-        # PI_MODEL_ID.
-        assert spec.env["AGENT_BACKEND"] == "claude"
-        assert "PI_MODEL_ID" not in spec.env
-
-
-class TestPiFormatModelId:
-    """Pure-function tests for the DB → Pi format-string mapping."""
-
-    def test_openai_passes_through_unchanged(self) -> None:
-        from rolemesh.agent.executor import pi_format_model_id
-
-        assert pi_format_model_id("openai", "gpt-4o") == "openai/gpt-4o"
-
-    def test_anthropic_passes_through_unchanged(self) -> None:
-        from rolemesh.agent.executor import pi_format_model_id
-
-        assert (
-            pi_format_model_id("anthropic", "claude-sonnet-4-6")
-            == "anthropic/claude-sonnet-4-6"
+        assert spec.env["PI_MODEL_ID"] == (
+            "amazon-bedrock/us.anthropic.claude-sonnet-4-6"
         )
+        assert spec.env["AWS_BEARER_TOKEN_BEDROCK"] == (
+            "placeholder-proxy-replaces-this"
+        )
+        assert spec.env["AWS_REGION"]  # region defaulted from BEDROCK_DEFAULT_REGION
+
+
+class TestDbToPiProviderMap:
+    """The DB-side "bedrock" name must rename to Pi's "amazon-bedrock"
+    at the boundary. Pin the constant so a future refactor that loses
+    this entry (e.g. by typoing the key) fires immediately."""
 
     def test_bedrock_renames_to_amazon_bedrock(self) -> None:
-        # DB stores "bedrock" (what users see in the provider picker);
-        # Pi uses "amazon-bedrock" (boto3 service stem). The mapping
-        # at the boundary must rename — without it, the spawned
-        # container's Pi tries to route via an unknown provider name.
-        from rolemesh.agent.executor import pi_format_model_id
+        from rolemesh.agent.executor import _DB_TO_PI_PROVIDER
 
-        assert (
-            pi_format_model_id("bedrock", "us.anthropic.claude-sonnet-4-6")
-            == "amazon-bedrock/us.anthropic.claude-sonnet-4-6"
-        )
-
-    def test_unknown_provider_passes_through(self) -> None:
-        # Defensive: a future provider added to the DB but not yet to
-        # _DB_TO_PI_PROVIDER should still produce a non-empty mapping
-        # rather than dropping the model_id entirely. Pi will return
-        # a clear "unknown provider" error rather than silent failure.
-        from rolemesh.agent.executor import pi_format_model_id
-
-        assert pi_format_model_id("ollama", "llama3") == "ollama/llama3"
+        assert _DB_TO_PI_PROVIDER["bedrock"] == "amazon-bedrock"

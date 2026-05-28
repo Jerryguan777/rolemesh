@@ -41,7 +41,6 @@ def _row_to_response(row: MCPServerRow) -> MCPServer:
         type=row.type,  # type: ignore[arg-type]
         url=row.url,
         auth_mode=row.auth_mode,  # type: ignore[arg-type]
-        credential_ref=row.credential_ref,
         extra_headers=dict(row.extra_headers or {}),
         tool_reversibility={
             str(k): bool(v) for k, v in (row.tool_reversibility or {}).items()
@@ -87,7 +86,6 @@ async def create_endpoint(
             type=body.type,
             url=body.url,
             auth_mode=body.auth_mode,
-            credential_ref=body.credential_ref,
             extra_headers=body.extra_headers,
             tool_reversibility=body.tool_reversibility,
             description=body.description,
@@ -135,7 +133,6 @@ async def patch_endpoint(
         "type",
         "url",
         "auth_mode",
-        "credential_ref",
         "extra_headers",
         "tool_reversibility",
         "description",

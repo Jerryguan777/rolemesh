@@ -2169,9 +2169,6 @@ components:
         type: { $ref: '#/components/schemas/MCPType' }
         url: { type: string }
         auth_mode: { $ref: '#/components/schemas/MCPAuthMode' }
-        credential_ref:
-          type: string
-          nullable: true
         extra_headers:
           type: object
           additionalProperties: { type: string }
@@ -2202,9 +2199,6 @@ components:
           type: string
           minLength: 1
         auth_mode: { $ref: '#/components/schemas/MCPAuthMode' }
-        credential_ref:
-          type: string
-          nullable: true
         extra_headers:
           type: object
           additionalProperties: { type: string }
@@ -2229,9 +2223,6 @@ components:
           type: string
           minLength: 1
         auth_mode: { $ref: '#/components/schemas/MCPAuthMode' }
-        credential_ref:
-          type: string
-          nullable: true
         extra_headers:
           type: object
           additionalProperties: { type: string }

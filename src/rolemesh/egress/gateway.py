@@ -69,6 +69,7 @@ from .policy_cache import (
     fetch_snapshot_via_nats,
     subscribe_rule_changes,
 )
+from .remote_credentials import RemoteCredentialResolver
 from .remote_token_vault import RemoteTokenVault
 from .reverse_proxy import set_token_vault, start_credential_proxy
 from .safety_call import AuditPublisher, EgressSafetyCaller
@@ -237,10 +238,17 @@ async def main() -> None:
         set_token_vault(RemoteTokenVault(nats_client))
         logger.info("gateway: RemoteTokenVault wired")
 
+        # --- Credential resolver (remote via NATS) ------------------
+        # Gateway ships without rolemesh.db / rolemesh.auth (EC-1
+        # stateless boundary). Each credential lookup forwards to the
+        # orchestrator's start_credential_responder over NATS.
+        credential_resolver = RemoteCredentialResolver(nats_client)
+
         # --- Reverse proxy (port 3001) -------------------------------
         reverse_runner = await start_credential_proxy(
             port=CREDENTIAL_PROXY_PORT,
             host="0.0.0.0",
+            credential_resolver=credential_resolver,
             identity_resolver=identity,
             safety_caller=safety,
         )

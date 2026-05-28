@@ -50,7 +50,6 @@ class MCPServerRow:
     type: str
     url: str
     auth_mode: str
-    credential_ref: str | None
     extra_headers: dict[str, Any] = field(default_factory=dict)
     tool_reversibility: dict[str, Any] = field(default_factory=dict)
     description: str | None = None
@@ -86,7 +85,6 @@ def _row_to_dataclass(row: "asyncpg.Record") -> MCPServerRow:
         type=row["type"],
         url=row["url"],
         auth_mode=row["auth_mode"],
-        credential_ref=row["credential_ref"],
         extra_headers=_parse_jsonb(row["extra_headers"]),
         tool_reversibility=_parse_jsonb(row["tool_reversibility"]),
         description=row["description"],
@@ -96,7 +94,7 @@ def _row_to_dataclass(row: "asyncpg.Record") -> MCPServerRow:
 
 
 _SELECT_COLUMNS = (
-    "id, tenant_id, name, type, url, auth_mode, credential_ref, "
+    "id, tenant_id, name, type, url, auth_mode, "
     "extra_headers, tool_reversibility, description, "
     "created_at, updated_at"
 )
@@ -133,7 +131,6 @@ async def create_mcp_server(
     type: str,
     url: str,
     auth_mode: str,
-    credential_ref: str | None = None,
     extra_headers: dict[str, Any] | None = None,
     tool_reversibility: dict[str, Any] | None = None,
     description: str | None = None,
@@ -141,11 +138,11 @@ async def create_mcp_server(
     async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
             f"INSERT INTO mcp_servers ("
-            "tenant_id, name, type, url, auth_mode, credential_ref, "
+            "tenant_id, name, type, url, auth_mode, "
             "extra_headers, tool_reversibility, description) "
-            "VALUES ($1::uuid, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9) "
+            "VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8) "
             f"RETURNING {_SELECT_COLUMNS}",
-            tenant_id, name, type, url, auth_mode, credential_ref,
+            tenant_id, name, type, url, auth_mode,
             json.dumps(extra_headers or {}),
             json.dumps(tool_reversibility or {}),
             description,
@@ -162,7 +159,6 @@ async def update_mcp_server(
     type: Any = _UNSET,
     url: Any = _UNSET,
     auth_mode: Any = _UNSET,
-    credential_ref: Any = _UNSET,
     extra_headers: Any = _UNSET,
     tool_reversibility: Any = _UNSET,
     description: Any = _UNSET,
@@ -181,7 +177,6 @@ async def update_mcp_server(
         ("type", type),
         ("url", url),
         ("auth_mode", auth_mode),
-        ("credential_ref", credential_ref),
         ("description", description),
     ):
         if value is _UNSET:
