@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     import asyncpg
 
 __all__ = [
+    "cancel_tasks_for_user",
     "create_task",
     "delete_task",
     "get_all_tasks",
@@ -275,6 +276,46 @@ async def update_task_after_run(
             task_id,
             tenant_id,
         )
+
+
+async def cancel_tasks_for_user(
+    user_id: str,
+    tenant_id: str,
+    *,
+    conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record] | None = None,
+) -> int:
+    """Soft-cancel every active task whose ``created_by_user_id``
+    equals ``user_id`` (v6.1 §P1.8).
+
+    ``status='cancelled'`` slots into the scheduler's existing
+    ``WHERE status='active'`` filter (see ``get_due_tasks``) so the
+    next tick simply skips the row. The audit row stays alive.
+
+    Optional ``conn`` so the caller can run this inside its own
+    transaction — required by ``delete_user`` so the cancel and the
+    DELETE land atomically (otherwise a tick between cancel and
+    delete would run the task with the just-cancelled user).
+    """
+    sql = (
+        "UPDATE scheduled_tasks "
+        "SET status = 'cancelled' "
+        "WHERE created_by_user_id = $1::uuid "
+        "  AND tenant_id = $2::uuid "
+        "  AND status = 'active'"
+    )
+    if conn is None:
+        async with tenant_conn(tenant_id) as c:
+            result = await c.execute(sql, user_id, tenant_id)
+    else:
+        result = await conn.execute(sql, user_id, tenant_id)
+    # asyncpg returns the tag string e.g. "UPDATE 3"; the trailing
+    # integer is the affected row count. Fall back to 0 on a shape
+    # we don't recognise — the caller is using the return only for
+    # logging.
+    try:
+        return int(result.split()[-1])
+    except (ValueError, IndexError):
+        return 0
 
 
 async def log_task_run(log: TaskRunLog) -> None:
