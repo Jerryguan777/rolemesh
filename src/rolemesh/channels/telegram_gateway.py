@@ -14,7 +14,13 @@ import asyncpg
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
-from rolemesh.channels.admission import GROUP_NOT_SUPPORTED_TEXT
+from rolemesh.channels.admission import (
+    GROUP_NOT_SUPPORTED_TEXT,
+    LINK_ALREADY_BOUND_TEXT,
+    LINK_MISSING_TOKEN_TEXT,
+    LINK_REJECTED_TEXT,
+    LINK_SUCCESS_PREFIX,
+)
 from rolemesh.core.logger import get_logger
 from rolemesh.db import (
     consume_link_token,
@@ -64,20 +70,9 @@ async def _short_circuit_group(update: Update) -> bool:
     return True
 
 
-# v6.1 §P1.4 link guidance — kept as constants so tests can match
-# the exact wire content and a future copy edit is one diff away.
-_LINK_GUIDE_MISSING_TOKEN = (
-    "Open RoleMesh Web → Settings → Connected channels to start the "
-    "link flow, then send /start with the token shown there."
-)
-_LINK_REJECTED_TEXT = (
-    "Link token invalid or expired. Please restart the flow from Web."
-)
-_LINK_ALREADY_BOUND_TEXT = (
-    "This Telegram account is already linked to another RoleMesh "
-    "account. Please unlink it from Web first."
-)
-_LINK_SUCCESS_PREFIX = "Linked"
+# v6.1 §P1.4 link guidance — wire strings live in
+# ``rolemesh.channels.admission`` so admission + link flows share a
+# single source of truth (see F2 / "引导文本统一一处").
 
 
 async def _handle_start_command(
@@ -99,7 +94,7 @@ async def _handle_start_command(
         return
     args = context.args or []
     if not args:
-        await chat.send_message(_LINK_GUIDE_MISSING_TOKEN)
+        await chat.send_message(LINK_MISSING_TOKEN_TEXT)
         return
     token = args[0]
     channel_id = str(user.id)
@@ -109,7 +104,7 @@ async def _handle_start_command(
         # expired, or unknown. We deliberately collapse the three so
         # a leaked-and-replayed token cannot leak its prior owner via
         # a distinguishing error message.
-        await chat.send_message(_LINK_REJECTED_TEXT)
+        await chat.send_message(LINK_REJECTED_TEXT)
         logger.info("telegram_link_token_rejected", channel_id=channel_id)
         return
     user_id, tenant_id, _ = consumed
@@ -121,7 +116,7 @@ async def _handle_start_command(
         # Token is already marked used by the atomic UPDATE above —
         # the correct outcome, since the user must unbind in Web and
         # restart the flow with a fresh token.
-        await chat.send_message(_LINK_ALREADY_BOUND_TEXT)
+        await chat.send_message(LINK_ALREADY_BOUND_TEXT)
         logger.info(
             "telegram_link_unique_violation",
             channel_id=channel_id,
@@ -129,7 +124,7 @@ async def _handle_start_command(
         )
         return
     display = user.first_name or user.username or channel_id
-    await chat.send_message(f"✅ {_LINK_SUCCESS_PREFIX} ({display}).")
+    await chat.send_message(f"✅ {LINK_SUCCESS_PREFIX} ({display}).")
     logger.info(
         "telegram_link_bound",
         tenant_id=tenant_id,

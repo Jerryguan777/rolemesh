@@ -26,13 +26,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from rolemesh.channels.telegram_gateway import (
-    _LINK_ALREADY_BOUND_TEXT,
-    _LINK_GUIDE_MISSING_TOKEN,
-    _LINK_REJECTED_TEXT,
-    _LINK_SUCCESS_PREFIX,
-    _handle_start_command,
+from rolemesh.channels.admission import (
+    LINK_ALREADY_BOUND_TEXT,
+    LINK_MISSING_TOKEN_TEXT,
+    LINK_REJECTED_TEXT,
+    LINK_SUCCESS_PREFIX,
 )
+from rolemesh.channels.telegram_gateway import _handle_start_command
 from rolemesh.db import (
     _get_admin_pool,
     consume_link_token,
@@ -87,7 +87,7 @@ async def test_start_with_no_args_replies_guidance_and_does_not_consume() -> Non
     """
     update, context, send_mock = _make_update(telegram_user_id=42)
     await _handle_start_command(update, context)
-    send_mock.assert_awaited_once_with(_LINK_GUIDE_MISSING_TOKEN)
+    send_mock.assert_awaited_once_with(LINK_MISSING_TOKEN_TEXT)
 
 
 # ---------------------------------------------------------------------------
@@ -106,7 +106,7 @@ async def test_start_with_unknown_token_replies_generic_rejection() -> None:
         args=["bogus-" + uuid.uuid4().hex],
     )
     await _handle_start_command(update, context)
-    send_mock.assert_awaited_once_with(_LINK_REJECTED_TEXT)
+    send_mock.assert_awaited_once_with(LINK_REJECTED_TEXT)
 
 
 async def test_start_with_expired_token_replies_generic_rejection() -> None:
@@ -117,7 +117,7 @@ async def test_start_with_expired_token_replies_generic_rejection() -> None:
         telegram_user_id=99, args=[token]
     )
     await _handle_start_command(update, context)
-    send_mock.assert_awaited_once_with(_LINK_REJECTED_TEXT)
+    send_mock.assert_awaited_once_with(LINK_REJECTED_TEXT)
 
 
 async def test_start_with_already_used_token_replies_generic_rejection() -> None:
@@ -133,7 +133,7 @@ async def test_start_with_already_used_token_replies_generic_rejection() -> None
         telegram_user_id=99, args=[token]
     )
     await _handle_start_command(update, context)
-    send_mock.assert_awaited_once_with(_LINK_REJECTED_TEXT)
+    send_mock.assert_awaited_once_with(LINK_REJECTED_TEXT)
 
 
 # ---------------------------------------------------------------------------
@@ -157,7 +157,7 @@ async def test_start_happy_path_writes_identity_and_normalises_channel_id() -> N
     [(reply_args, _kw)] = [
         (c.args, c.kwargs) for c in send_mock.await_args_list
     ]
-    assert _LINK_SUCCESS_PREFIX in reply_args[0]
+    assert LINK_SUCCESS_PREFIX in reply_args[0]
     # DB shape: one row, channel_id is the digits-as-string form.
     links = await list_channel_identities_for_user(uid, tid)
     assert len(links) == 1
@@ -186,7 +186,7 @@ async def test_start_unique_violation_branch_still_marks_token_used() -> None:
         telegram_user_id=555, args=[token_b]
     )
     await _handle_start_command(update, context)
-    send_mock.assert_awaited_once_with(_LINK_ALREADY_BOUND_TEXT)
+    send_mock.assert_awaited_once_with(LINK_ALREADY_BOUND_TEXT)
     # The token must be unusable now — replay attempt yields None.
     replay = await consume_link_token(token_b)
     assert replay is None, "token must be marked used on UNIQUE branch too"

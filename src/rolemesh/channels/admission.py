@@ -33,17 +33,44 @@ if TYPE_CHECKING:
 logger = get_logger()
 
 
-# Unified guidance text. Used when an unlinked Telegram sender either
-# DMs the bot directly or sends ``/start`` with no token. The
-# telegram_gateway side reuses this same constant in both spots so
-# UX copy is identical across entry points (design §P1.5 "引导文本
-# 统一一处").
+# v6.1 §P1.5 "引导文本统一一处" — every Telegram wire string the
+# user can see during the link / admission flow lives here, even
+# the ones whose physical reply happens inside
+# ``telegram_gateway._handle_start_command``. The two modules then
+# share a single source of truth: a copy edit lands in one diff,
+# tests import the same constants the production code sends.
+#
+# The two "go to Web" messages stay deliberately distinct because
+# they address different user mental states:
+#   - ADMISSION_GUIDE_TEXT — sender has never linked; needs the full
+#     "your account is not linked" framing;
+#   - LINK_MISSING_TOKEN_TEXT — sender ran ``/start`` so they're
+#     already mid-flow; just remind them to include the token.
+# Collapsing them onto one string would over-explain to the second
+# audience and under-explain to the first.
+
 ADMISSION_GUIDE_TEXT = (
     "I cannot start a chat with you because your Telegram account is "
     "not linked to a RoleMesh user. Open RoleMesh Web → Settings → "
     "Connected channels to link your account, then send /start with "
     "the token shown there."
 )
+
+LINK_MISSING_TOKEN_TEXT = (
+    "Open RoleMesh Web → Settings → Connected channels to start the "
+    "link flow, then send /start with the token shown there."
+)
+
+LINK_REJECTED_TEXT = (
+    "Link token invalid or expired. Please restart the flow from Web."
+)
+
+LINK_ALREADY_BOUND_TEXT = (
+    "This Telegram account is already linked to another RoleMesh "
+    "account. Please unlink it from Web first."
+)
+
+LINK_SUCCESS_PREFIX = "Linked"
 
 
 GROUP_NOT_SUPPORTED_TEXT = (
