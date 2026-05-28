@@ -304,7 +304,7 @@ class ScheduledTask:
     next_run: str | None = None
     last_run: str | None = None
     last_result: str | None = None
-    status: Literal["active", "paused", "completed"] = "active"
+    status: Literal["active", "paused", "completed", "cancelled"] = "active"
     created_at: str = ""
     # Legacy compat fields (deprecated)
     group_folder: str = ""

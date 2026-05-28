@@ -183,6 +183,9 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             name TEXT NOT NULL,
             email TEXT,
             role TEXT DEFAULT 'member',
+            -- DEPRECATED (v6.1 §P1.2): kept as redundant display field;
+            -- linkage / lookup now go through ``user_channel_identities``.
+            -- Slated for removal once nothing reads it.
             channel_ids JSONB DEFAULT '{}',
             created_at TIMESTAMPTZ DEFAULT now()
         )
@@ -830,6 +833,101 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             )
         """)
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_task_run_logs ON task_run_logs(task_id, run_at)")
+
+    # --- v6.1 §P1.7: per-task creator id for run-time user_id passthrough ---
+    # ON DELETE SET NULL keeps the row for audit; tasks must be soft-
+    # cancelled before the user is removed (see ``cancel_tasks_for_user``
+    # in db/task.py) so the scheduler's ``status = 'active'`` filter
+    # drops them before NULL ever reaches the run path. The SET-NULL +
+    # cancel-before-delete pairing is mandatory: NULL alone would
+    # leak through to ``AgentInput.user_id``.
+    await conn.execute(
+        "ALTER TABLE scheduled_tasks "
+        "ADD COLUMN IF NOT EXISTS created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL"
+    )
+
+    # --- v6.1 §P1.2: per-(user, platform, channel) identity linkage ---
+    # One-shot reset of legacy IM state before the new identity model
+    # comes online. Gated on ``user_channel_identities`` not existing
+    # yet so the cleanup runs at most once per DB. dev-only data per
+    # design §P1.3 ("dev data can be rebuilt"); production deployments
+    # will not have unlinked IM conversations to delete.
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_name = 'user_channel_identities'
+            ) THEN
+                DELETE FROM scheduled_tasks WHERE conversation_id IN (
+                    SELECT c.id FROM conversations c
+                    JOIN channel_bindings cb ON c.channel_binding_id = cb.id
+                    WHERE cb.channel_type IN ('telegram', 'slack')
+                );
+                DELETE FROM conversations WHERE channel_binding_id IN (
+                    SELECT id FROM channel_bindings
+                    WHERE channel_type IN ('telegram', 'slack')
+                );
+            END IF;
+        END $$
+    """)
+
+    # ``user_channel_identities``: which (platform, channel_id) belongs
+    # to which user. ``channel_id`` is the platform-native sender id,
+    # normalised at the gateway (e.g. ``str(update.effective_user.id)``
+    # for Telegram so the format never depends on whether ``from.id``
+    # arrived as int vs str). UNIQUE (tenant_id, platform, channel_id)
+    # is the race guard: two concurrent ``/start`` requests cannot both
+    # link the same Telegram account.
+    #
+    # Per decision §2 row #13 there is NO ``UNIQUE (user_id, platform)``:
+    # one user can intentionally link multiple Telegram accounts (e.g.
+    # personal + work numbers).
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_channel_identities (
+            id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            tenant_id   UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            platform    TEXT NOT NULL,
+            channel_id  TEXT NOT NULL,
+            user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at  TIMESTAMPTZ DEFAULT now(),
+            UNIQUE (tenant_id, platform, channel_id)
+        )
+    """)
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_uci_user_platform "
+        "ON user_channel_identities(user_id, platform)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_uci_lookup "
+        "ON user_channel_identities(tenant_id, platform, channel_id)"
+    )
+
+    # ``link_tokens``: short-lived one-shot tokens that prove the user
+    # holding the WebUI session also controls the IM account that
+    # echoes the token back. Atomic consumption via
+    # ``UPDATE ... WHERE used_at IS NULL AND expires_at > now()
+    #            RETURNING ...`` (see ``db.channel_identity``); the
+    # check-and-mark is one statement so two concurrent ``/start``
+    # commands with the same token cannot both succeed.
+    #
+    # GC is intentionally not implemented (design §P1.2): the row
+    # volume is tiny and expired rows are harmless.
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS link_tokens (
+            token       TEXT PRIMARY KEY,
+            user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            tenant_id   UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            platform    TEXT NOT NULL,
+            expires_at  TIMESTAMPTZ NOT NULL,
+            used_at     TIMESTAMPTZ,
+            created_at  TIMESTAMPTZ DEFAULT now()
+        )
+    """)
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_link_tokens_expiry "
+        "ON link_tokens(expires_at) WHERE used_at IS NULL"
+    )
 
     # --- Approval module tables ---
     await conn.execute("""
