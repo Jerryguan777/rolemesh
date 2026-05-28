@@ -44,7 +44,6 @@ from rolemesh.db import (
     find_pending_request_by_action_hash,
     get_approval_request,
     get_enabled_policies_for_coworker,
-    get_tenant,
     get_users_for_agent,
     get_users_for_tenant,
     list_expired_pending_approvals,
@@ -149,6 +148,7 @@ class ApprovalRequestBuilder:
         rationale: str,
         policy: ApprovalPolicy | None,
         approvers: list[str],
+        source: str = "proposal",
     ) -> ApprovalRequest:
         """Create a pending proposal row and notify approvers.
 
@@ -156,6 +156,11 @@ class ApprovalRequestBuilder:
         ``create_skipped`` instead. ``policy`` may be None for
         proposals that matched no policy (the auto-executed path);
         the engine sets state to 'approved' afterwards.
+
+        ``source`` defaults to ``'proposal'`` for normal policy-matched
+        flow. Case A (no matching policy) passes ``'auto_execute'`` so
+        the audit row visibly records "system auto-allowed", never
+        impersonating a human approver. See v6.1 §P2.3.
         """
         mcp_server = str(actions[0].get("mcp_server") or "") if actions else ""
         expiry = _expiry(policy.auto_expire_minutes if policy else None)
@@ -171,7 +176,7 @@ class ApprovalRequestBuilder:
             actions=actions,
             action_hashes=action_hashes,
             rationale=rationale,
-            source="proposal",
+            source=source,
             status="pending",
             resolved_approvers=approvers,
             expires_at=expiry,
@@ -365,21 +370,15 @@ class ApprovalEngine:
             for a in actions
         ]
 
-        # Case A: no action matches any policy. Behaviour is governed
-        # by the tenant's ``approval_default_mode``:
-        #   auto_execute     — legacy: create pending+approved, publish
-        #                      decided so the Worker executes.
-        #   require_approval — create the row as skipped so admins see
-        #                      it; actions never run without an
-        #                      explicit policy.
-        #   deny             — create the row as rejected (system note);
-        #                      Worker just delivers the rejection
-        #                      notification.
+        # Case A (v6.1 §P2.3): no action matches any policy. Collapse to
+        # a single auto-allow path — create the row pre-stamped with
+        # ``source='auto_execute'``, flip status to 'approved', publish
+        # ``decided`` so the Worker runs the actions. The audit row's
+        # ``source`` column distinguishes this system-allowed row from
+        # human-approved entries; the audit trigger writes a 'created'
+        # row with user_id as actor (proposer) and the subsequent
+        # set_approval_status writes 'approved' with NULL actor.
         if all(m is None for m in matched):
-            tenant = await get_tenant(tenant_id)
-            default_mode = (
-                tenant.approval_default_mode if tenant else "auto_execute"
-            )
             req = await self._builder.create_from_proposal(
                 tenant_id=tenant_id,
                 coworker_id=coworker_id,
@@ -391,44 +390,14 @@ class ApprovalEngine:
                 rationale=rationale,
                 policy=None,
                 approvers=[],
+                source="auto_execute",
             )
-            if default_mode == "auto_execute":
-                await set_approval_status(
-                    req.id, "approved", tenant_id=req.tenant_id
-                )
-                await self._publish_decided(
-                    req.id, tenant_id=req.tenant_id, status="approved", note=None
-                )
-            elif default_mode == "require_approval":
-                # Move pending → skipped (system transition). The
-                # originating conversation is notified; admins must
-                # create a policy or decide manually via a side channel.
-                await set_approval_status(
-                    req.id, "skipped", tenant_id=req.tenant_id
-                )
-                await self._send_to_origin(
-                    (
-                        await get_approval_request(
-                            req.id, tenant_id=req.tenant_id
-                        )
-                    )
-                    or req,
-                    format_skipped_message(req),
-                )
-            else:  # "deny"
-                # Treat as a system rejection. Publish so the Worker
-                # delivers a uniform rejection notification; the note
-                # explains why.
-                note = (
-                    "No matching approval policy; this tenant is "
-                    "configured for deny-by-default."
-                )
-                await set_approval_status(
-                    req.id, "rejected", tenant_id=req.tenant_id, note=note
-                )
-                await self._publish_decided(
-                    req.id, tenant_id=req.tenant_id, status="rejected", note=note
-                )
+            await set_approval_status(
+                req.id, "approved", tenant_id=req.tenant_id
+            )
+            await self._publish_decided(
+                req.id, tenant_id=req.tenant_id, status="approved", note=None
+            )
             return
 
         # Case B: at least one match — approval required.

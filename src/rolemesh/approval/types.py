@@ -84,7 +84,10 @@ class ApprovalRequest:
     actions: list[dict[str, Any]]
     action_hashes: list[str]
     rationale: str | None
-    source: str  # "proposal" | "auto_intercept"
+    # "proposal" | "auto_intercept" | "safety_require_approval" |
+    # "auto_execute" (v6.1 Case A collapse). See approval_requests
+    # source CHECK in db/schema.py.
+    source: str
     status: str
     post_exec_mode: str
     resolved_approvers: list[str]

@@ -44,23 +44,18 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             created_at TIMESTAMPTZ DEFAULT now()
         )
     """)
-    # Approval module — per-tenant default behaviour when a proposal
-    # matches NO policy. Values:
-    #   'auto_execute'     — legacy: run the actions unsupervised
-    #                        (audit chain created→approved→executing→
-    #                        executed, all with system actor).
-    #   'require_approval' — create the request as ``skipped`` so an
-    #                        operator sees it but it does not run.
-    #                        Use when the tenant treats "no matching
-    #                        policy" as a config gap, not an allowlist.
-    #   'deny'             — create the request as ``rejected`` with a
-    #                        system note. Use when the tenant is in a
-    #                        deny-by-default posture.
+    # v6.1 §P2.3 — ``tenants.approval_default_mode`` dropped: Case A
+    # (no matching policy) now collapses to auto-allow + audit row
+    # stamped ``source='auto_execute'``. The old three-mode escape
+    # hatch is intentionally removed; default-deny posture will be
+    # reintroduced via a future allow-list policy primitive.
+    #
+    # REVERSAL (manual; not auto-run):
+    #   ALTER TABLE tenants ADD COLUMN approval_default_mode TEXT
+    #     DEFAULT 'auto_execute' CHECK (approval_default_mode IN
+    #     ('auto_execute', 'require_approval', 'deny'));
     await conn.execute(
-        "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS "
-        "approval_default_mode TEXT DEFAULT 'auto_execute' "
-        "CHECK (approval_default_mode IN ("
-        "'auto_execute', 'require_approval', 'deny'))"
+        "ALTER TABLE tenants DROP COLUMN IF EXISTS approval_default_mode"
     )
 
     # ----- Platform model catalog (v1.1 §2.1) -----------------------------
@@ -1017,9 +1012,11 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     await conn.execute(
         "ALTER TABLE approval_requests ALTER COLUMN policy_id DROP NOT NULL"
     )
-    # V2 P1.1: widen the source CHECK to include safety-driven
-    # approval requests. Old deployments have the two-value CHECK;
-    # drop-then-add so the rollout is a single migration.
+    # v6.1 §P2.3: widen the source CHECK to include
+    # ``auto_execute`` (Case A collapse — see ApprovalEngine
+    # .handle_proposal). Drop-then-add keeps the rollout in a
+    # single migration; older deployments lose either the V2 widen
+    # or the v6.1 widen on the same statement.
     await conn.execute(
         "ALTER TABLE approval_requests "
         "DROP CONSTRAINT IF EXISTS approval_requests_source_check"
@@ -1028,7 +1025,7 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         "ALTER TABLE approval_requests ADD CONSTRAINT "
         "approval_requests_source_check CHECK ("
         "source IN ('proposal', 'auto_intercept', "
-        "'safety_require_approval'))"
+        "'safety_require_approval', 'auto_execute'))"
     )
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_approval_requests_tenant_status "
