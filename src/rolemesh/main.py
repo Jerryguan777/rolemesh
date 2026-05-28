@@ -1671,6 +1671,18 @@ async def main() -> None:
         token_sub = await start_token_responder(_transport.nc, vault=_vault)
         egress_responder_subs.append(token_sub)
 
+    # Credential RPC: the gateway's RemoteCredentialResolver forwards
+    # every (tenant_id, provider) lookup here so we can decrypt rows
+    # using THIS process's CredentialResolver (which holds the DB
+    # conn and the Fernet vault). Without this responder the gateway's
+    # RPC times out and the agent's LLM call surfaces as 502.
+    from rolemesh.egress.orch_glue import start_credential_responder
+
+    cred_sub = await start_credential_responder(
+        _transport.nc, resolver=_credential_resolver,
+    )
+    egress_responder_subs.append(cred_sub)
+
     # v1.1 §7: hot-reload pipeline for coworker config changes from
     # the WebUI. The /api/v1 PATCH publishes ``web.coworker.restart``
     # on the JS ``web-ipc`` stream; this subscriber re-reads the row

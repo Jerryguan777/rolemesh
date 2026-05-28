@@ -35,7 +35,7 @@ from aiohttp import ClientSession, web
 
 from rolemesh.core.logger import get_logger
 
-from .credentials import CredentialResolver, MissingCredentialError
+from .credentials import CredentialResolverProtocol, MissingCredentialError
 from .safety_call import EgressRequest
 
 if TYPE_CHECKING:
@@ -277,7 +277,7 @@ async def start_credential_proxy(
     port: int,
     host: str = "127.0.0.1",
     *,
-    credential_resolver: CredentialResolver,
+    credential_resolver: CredentialResolverProtocol,
     identity_resolver: IdentityResolver | None = None,
     safety_caller: EgressSafetyCaller | None = None,
 ) -> web.AppRunner:
@@ -342,12 +342,24 @@ async def start_credential_proxy(
             return web.Response(status=401, text="UNKNOWN_SOURCE")
 
         # Per-tenant credential lookup — fail-closed if absent.
+        # 401 vs 502 distinction matters: MISSING is "operator should
+        # configure this tenant's credential"; RuntimeError is
+        # "orchestrator-side fault" (RPC timeout, vault decrypt error,
+        # etc.) and is not the requester's problem to fix.
         try:
             cred = await credential_resolver.resolve(
                 identity.tenant_id, provider_name,
             )
         except MissingCredentialError:
             return web.Response(status=401, text="MISSING_CREDENTIAL")
+        except RuntimeError as exc:
+            logger.error(
+                "credential resolver fault",
+                tenant_id=identity.tenant_id,
+                provider=provider_name,
+                error=str(exc),
+            )
+            return web.Response(status=502, text="CREDENTIAL_LOOKUP_FAILED")
 
         # Dispatch by provider — Anthropic and Bedrock have provider-
         # specific routing; everything else flows through the static

@@ -263,12 +263,6 @@ _FORWARDABLE: tuple[_ForwardSpec, ...] = (
     _ForwardSpec("ANTHROPIC_BASE_URL", is_url=True),
     _ForwardSpec("OPENAI_BASE_URL", is_url=True),
     _ForwardSpec("GOOGLE_BASE_URL", is_url=True),
-    # Master key for the CredentialVault. Same value as the
-    # orchestrator/webui processes — Fernet symmetric, so the
-    # gateway needs it to decrypt rows the wizard wrote on the host.
-    # NOT a per-tenant secret: classification "App master secret" per
-    # docs/config-drift-fix-plan.md §2.1.
-    _ForwardSpec("CREDENTIAL_VAULT_KEY"),
 )
 
 
