@@ -232,6 +232,57 @@ async def test_no_pending_lets_turn_proceed(
     execute.assert_awaited()
 
 
+@pytest.mark.parametrize(
+    "user_text",
+    [
+        "approve",
+        "Approve",
+        "approve please",
+        "yes approve it",
+        "批准",
+        "批准这个",
+        "reject",
+        "拒绝",
+        "lgtm",
+        "ok",
+    ],
+)
+async def test_natural_language_decision_words_never_decide(
+    monkeypatch: pytest.MonkeyPatch, user_text: str,
+) -> None:
+    """T2a.15 — invariant #7: a decision must come through the
+    decide API (REST or button callback), never through the chat
+    transcript. The guard path is the natural place to surface a
+    regression: if a future refactor accidentally wired the LLM
+    output to ``handle_decision`` for token-matching text, the
+    pending row would resolve mid-turn and this test would catch
+    it.
+
+    We don't try to assert ``handle_decision was not called`` via
+    a spy because the chat transcript never reaches the engine in
+    v6.1 — instead, we assert the only safe-side observable: after
+    the turn, the row is still pending. This is the user-visible
+    invariant; the spy would over-fit to the current call graph.
+    """
+    s = await _build_state("nl-no-decide")
+    _send, _execute = _patch_orchestrator(monkeypatch, state=s["state"])
+    req_id = await _insert_pending_approval(s)
+    await _insert_message(
+        tenant_id=s["tenant_id"], conv_id=s["conv"].id,
+        content=user_text,
+        ts="2026-05-28T01:00:00Z",
+    )
+    await orchestrator._process_conversation_messages(s["conv"].id)
+
+    from rolemesh.db import get_approval_request
+    fresh = await get_approval_request(req_id, tenant_id=s["tenant_id"])
+    assert fresh is not None
+    assert fresh.status == "pending", (
+        f"NL text {user_text!r} must not resolve the approval; "
+        f"observed status: {fresh.status}"
+    )
+
+
 async def test_resolved_approval_does_not_block_turn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -6,8 +6,11 @@ Responsibilities are split across this file:
 - ``ApprovalRequestBuilder`` owns request creation + approver resolution
   and calls into the audit layer via the DB trigger (see
   ``_approval_write_audit_from_trigger`` in ``src/rolemesh/db/approval.py``).
-- ``_resolve_approvers`` implements the fallback chain
-  (policy → assigned users → tenant owners).
+- ``_resolve_approvers`` implements v6.1 §P2.2 self-approval — the
+  requester is the sole approver. The legacy three-tier fallback
+  chain (policy → assigned users → tenant owners) is deleted; the
+  safety bridge (``create_from_safety``) keeps its direct tenant-
+  owners path per decision #12.
 
 The engine does NOT execute MCP calls — that is the Worker's job
 (see ``src/rolemesh/approval/executor.py``). Decoupling execution
