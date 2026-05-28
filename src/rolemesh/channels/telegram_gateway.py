@@ -14,6 +14,7 @@ import asyncpg
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
+from rolemesh.channels.admission import GROUP_NOT_SUPPORTED_TEXT
 from rolemesh.core.logger import get_logger
 from rolemesh.db import (
     consume_link_token,
@@ -31,6 +32,36 @@ if TYPE_CHECKING:
 logger = get_logger()
 
 _MAX_LENGTH = 4096
+# v6.1 §P1.5: 1:1 only. Includes 'channel' (broadcast) defensively —
+# telegram-bot-api rarely delivers normal messages from a channel but
+# the type set is what the design specifies.
+_GROUP_CHAT_TYPES = ("group", "supergroup", "channel")
+
+
+async def _short_circuit_group(update: Update) -> bool:
+    """If ``update`` is from a group/supergroup/channel, reply with
+    the not-supported guidance and return True so the caller drops
+    the message without dispatching to ``on_message``.
+
+    Module-level so the unit tests can drive it with a stub Update
+    instead of spinning up a real Application.
+    """
+    chat = update.effective_chat
+    if chat is None:
+        return False
+    if chat.type not in _GROUP_CHAT_TYPES:
+        return False
+    try:
+        await chat.send_message(GROUP_NOT_SUPPORTED_TEXT)
+    except Exception:  # noqa: BLE001
+        # Sending the guidance reply is best-effort — the short-
+        # circuit must still drop the message even if Telegram is
+        # transiently flaky.
+        logger.exception(
+            "telegram_group_guidance_send_failed",
+            chat_id=getattr(chat, "id", None),
+        )
+    return True
 
 
 # v6.1 §P1.4 link guidance — kept as constants so tests can match
@@ -156,6 +187,12 @@ class _BotInstance:
             user = update.effective_user
             if msg is None or chat is None or msg.text is None:
                 return
+            # v6.1 §P1.5: 1:1 only. Replies the guidance and drops
+            # before any binding sees the message. Group support is
+            # paused (not removed) so the requires_trigger machinery
+            # in main.py stays available for a future opt-in revival.
+            if await _short_circuit_group(update):
+                return
             if msg.text.startswith("/"):
                 cmd = msg.text.lstrip("/").split()[0].split("@")[0].lower()
                 if cmd in ("chatid", "ping"):
@@ -211,6 +248,8 @@ class _BotInstance:
                 chat = update.effective_chat
                 user = update.effective_user
                 if msg is None or chat is None:
+                    return
+                if await _short_circuit_group(update):
                     return
                 chat_id = str(chat.id)
                 timestamp = msg.date.isoformat() if msg.date else ""
