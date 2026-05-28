@@ -36,6 +36,7 @@ __all__ = [
     "create_link_token",
     "delete_channel_identity",
     "list_channel_identities_for_user",
+    "resolve_user_from_channel_sender",
 ]
 
 
@@ -176,6 +177,50 @@ async def list_channel_identities_for_user(
             user_id, tenant_id,
         )
     return [_record_to_identity(r) for r in rows]
+
+
+async def resolve_user_from_channel_sender(
+    tenant_id: str, platform: str, channel_id: str
+) -> str | None:
+    """Look up a RoleMesh user_id from a normalised channel sender.
+
+    Single hot-path SELECT against the
+    ``(tenant_id, platform, channel_id)`` UNIQUE / index. The hot path
+    is "linked sender DMs bot" — every inbound 1:1 message hits this,
+    so it must stay O(1) lookup.
+
+    Returns ``None`` if no linkage exists. The caller decides what to
+    do (Phase 1 denies admission and replies guidance — see
+    :mod:`rolemesh.channels.admission`). An INFO-level log line is
+    emitted on the miss so operators watching onboarding can see
+    silent admission failures without grepping for application
+    errors. Hits are not logged — too noisy at scale, and the
+    subsequent agent run is what observability cares about anyway.
+    """
+    async with admin_conn() as conn:
+        # admin_conn (cross-tenant by design): the row's tenant_id is
+        # in the WHERE, so the query never crosses tenants in practice;
+        # admin_conn avoids the per-request GUC round-trip on a path
+        # taken once per inbound message.
+        row = await conn.fetchrow(
+            """
+            SELECT user_id FROM user_channel_identities
+             WHERE tenant_id = $1::uuid
+               AND platform = $2
+               AND channel_id = $3
+            """,
+            tenant_id, platform, channel_id,
+        )
+    if row is None:
+        from rolemesh.core.logger import get_logger
+        get_logger().info(
+            "channel_identity_resolve_miss",
+            tenant_id=tenant_id,
+            platform=platform,
+            channel_id=channel_id,
+        )
+        return None
+    return str(row["user_id"])
 
 
 async def delete_channel_identity(

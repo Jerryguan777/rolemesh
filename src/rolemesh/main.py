@@ -114,14 +114,9 @@ from rolemesh.auth.credential_vault import (
     get_credential_vault,
     set_credential_vault,
 )
+from rolemesh.channels.admission import admit_telegram_1on1
 from rolemesh.egress.credentials import CredentialResolver
 from rolemesh.security.credential_proxy import register_mcp_server, set_token_vault, start_credential_proxy
-from rolemesh.security.sender_allowlist import (
-    is_sender_allowed,
-    is_trigger_allowed,
-    load_sender_allowlist,
-    should_drop_message,
-)
 
 if TYPE_CHECKING:
     from rolemesh.container.runtime import ContainerRuntime
@@ -630,12 +625,26 @@ async def _handle_incoming(
     if is_group and conv.requires_trigger and not cw_state.trigger_pattern.search(text.strip()):
         return  # Not for this coworker — skip silently
 
-    # Sender allowlist check
-    cfg = load_sender_allowlist()
-    if should_drop_message(chat_id, cfg) and not is_sender_allowed(chat_id, sender, cfg):
-        if cfg.log_denied:
-            logger.debug("sender-allowlist: dropping message (drop mode)", chat_id=chat_id, sender=sender)
-        return
+    # v6.1 §P1.5/§P1.6: Telegram 1:1 admission. The Telegram gateway
+    # already short-circuits groups (see ``_short_circuit_group``) so
+    # ``is_group`` is False on this branch by the time the message
+    # reaches us — the explicit check is belt-and-braces against a
+    # future Slack/Web pathway that might (incorrectly) drop the
+    # gateway-side short-circuit. Slack and web are intentionally
+    # unguarded in Phase 1; only Telegram has a link flow.
+    channel_type = _get_channel_type_for_conv(cw_state, conv)
+    if channel_type == "telegram" and not is_group:
+        gateway = _gateways.get("telegram")
+        if gateway is not None:
+            admitted_user_id = await admit_telegram_1on1(
+                tenant_id=conv.tenant_id,
+                sender_channel_id=sender,
+                gateway=gateway,
+                binding_id=binding_id,
+                chat_id=chat_id,
+            )
+            if admitted_user_id is None:
+                return  # admission denied — guidance reply already sent
 
     # Store message
     await db_store_message(
@@ -681,10 +690,13 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
         return True
 
     if config.agent_role != "super_agent" and conv.requires_trigger:
-        allowlist_cfg = load_sender_allowlist()
+        # v6.1 §P1.5: the sender allowlist that used to gate non-self
+        # senders is gone (decision #14); the trigger pattern alone
+        # decides. For Telegram 1:1 ``requires_trigger`` is False by
+        # construction so this path only fires for Slack groups —
+        # which keep current behaviour.
         has_trigger = any(
             cw_state.trigger_pattern.search(m.content.strip())
-            and (m.is_from_me or is_trigger_allowed(conv.channel_chat_id, m.sender, allowlist_cfg))
             for m in missed_messages
         )
         if not has_trigger:
@@ -1237,10 +1249,12 @@ async def _message_loop(shutdown_event: asyncio.Event) -> None:
 
                     if needs_trigger:
                         conv_messages = [msg for cid, msg in results if cid == conv_id]
-                        allowlist_cfg = load_sender_allowlist()
+                        # v6.1 §P1.5: trigger pattern alone — no
+                        # per-sender allowlist (see the parallel
+                        # branch in ``_process_conversation_messages``
+                        # for the same simplification).
                         has_trigger = any(
                             cw_state.trigger_pattern.search(m.content.strip())
-                            and (m.is_from_me or is_trigger_allowed(chat_id, m.sender, allowlist_cfg))
                             for m in conv_messages
                         )
                         if not has_trigger:

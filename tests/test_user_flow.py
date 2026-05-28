@@ -328,34 +328,6 @@ class TestScenarioCredentialProxy:
             await runner.cleanup()
 
 
-class TestScenarioSenderAllowlist:
-    async def test_drop_mode_blocks_unauthorized(self, env: Path) -> None:
-        from rolemesh.core.types import NewMessage
-        from rolemesh.security.sender_allowlist import (
-            ChatAllowlistEntry,
-            SenderAllowlistConfig,
-            is_sender_allowed,
-            should_drop_message,
-        )
-
-        cfg = SenderAllowlistConfig(
-            default=ChatAllowlistEntry(allow=["admin_user"], mode="drop"),
-        )
-
-        msg = NewMessage(
-            id="blocked-1",
-            chat_jid="group@test",
-            sender="random_user",
-            sender_name="Random",
-            content="@Andy do something",
-            timestamp="2024-06-01T12:00:01Z",
-        )
-
-        dropped = should_drop_message(msg.chat_jid, cfg) and not is_sender_allowed(msg.chat_jid, msg.sender, cfg)
-        assert dropped is True
-        assert is_sender_allowed("group@test", "admin_user", cfg) is True
-
-
 class TestScenarioMountSecurity:
     async def test_blocked_paths_rejected(self, env: Path) -> None:
         from rolemesh.core.types import AdditionalMount

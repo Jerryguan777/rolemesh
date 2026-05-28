@@ -23,7 +23,6 @@ PROJECT_ROOT: Path = Path.cwd()
 HOME_DIR: Path = Path.home()
 
 MOUNT_ALLOWLIST_PATH: Path = HOME_DIR / ".config" / "rolemesh" / "mount-allowlist.json"
-SENDER_ALLOWLIST_PATH: Path = HOME_DIR / ".config" / "rolemesh" / "sender-allowlist.json"
 STORE_DIR: Path = PROJECT_ROOT / "store"
 GROUPS_DIR: Path = PROJECT_ROOT / "groups"
 DATA_DIR: Path = PROJECT_ROOT / "data"
