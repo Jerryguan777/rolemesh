@@ -31,6 +31,7 @@ __all__ = [
     "get_channel_binding_by_id_admin",
     "get_channel_binding_for_coworker",
     "get_channel_bindings_for_coworker",
+    "get_channel_bindings_for_tenant",
     "get_conversation",
     "get_conversation_by_binding_and_chat",
     "get_conversation_for_notification",
@@ -171,6 +172,26 @@ async def get_all_channel_bindings() -> list[ChannelBinding]:
     """Get all channel bindings."""
     async with admin_conn() as conn:
         rows = await conn.fetch("SELECT * FROM channel_bindings ORDER BY tenant_id, coworker_id")
+    return [_record_to_channel_binding(row) for row in rows]
+
+
+async def get_channel_bindings_for_tenant(
+    tenant_id: str, channel_type: str
+) -> list[ChannelBinding]:
+    """All bindings of one channel_type for ``tenant_id``.
+
+    Used by the WebUI link endpoint to find a Telegram bot to point
+    the user at (deep-link construction needs the @username). Ordered
+    by ``created_at`` so a tenant that adds bots over time deep-links
+    against a stable choice rather than an arbitrary one.
+    """
+    async with tenant_conn(tenant_id) as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM channel_bindings "
+            "WHERE tenant_id = $1::uuid AND channel_type = $2 "
+            "ORDER BY created_at NULLS LAST",
+            tenant_id, channel_type,
+        )
     return [_record_to_channel_binding(row) for row in rows]
 
 

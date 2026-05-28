@@ -22,6 +22,7 @@ from webui.v1.approvals import router as approvals_router
 from webui.v1.auth import me_router as auth_me_router
 from webui.v1.auth import router as auth_router
 from webui.v1.bindings import router as bindings_router
+from webui.v1.channel_links import router as channel_links_router
 from webui.v1.conversations import (
     conversations_router,
     coworker_conversations_router,
@@ -83,3 +84,6 @@ router.include_router(safety_router)
 router.include_router(schedules_router)
 router.include_router(bindings_router)
 router.include_router(admin_models_router)
+# v6.1 §P1.4 — Telegram IM linking surfaces (POST/GET telegram +
+# DELETE by identity).
+router.include_router(channel_links_router)
