@@ -480,6 +480,66 @@ async def _load_state() -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _auto_create_telegram_1on1_conversation(
+    binding_id: str, chat_id: str, admitted_user_id: str
+) -> tuple[CoworkerState, ConversationState] | None:
+    """v6.1 §P1.5/§P1.6 — auto-create a Telegram 1:1 conversation
+    for an *already admitted* sender.
+
+    Counterpart of ``_auto_create_web_conversation``: the design's
+    "已关联→建 conv" implicit case. ``admission_user_id`` is the
+    resolved RoleMesh user_id from ``admit_telegram_1on1`` — passed
+    in so the row lands with ``user_id`` populated on first write
+    instead of needing the lazy-backfill UPDATE later.
+
+    Reset is one-shot (the §P1.3 cleanup wiped every legacy IM conv
+    on the first migration); without auto-create here, every linked
+    Telegram user's first message after relink would silently drop.
+    """
+    from rolemesh.db import (
+        get_channel_binding_by_id_admin,
+        get_conversation_by_binding_and_chat,
+    )
+
+    binding = await get_channel_binding_by_id_admin(binding_id)
+    if binding is None or binding.channel_type != "telegram":
+        return None
+    cw = _state.coworkers.get(binding.coworker_id)
+    if cw is None:
+        logger.warning(
+            "binding's coworker not in state; cannot route Telegram inbound",
+            binding_id=binding_id,
+            coworker_id=binding.coworker_id,
+        )
+        return None
+    if binding.channel_type not in cw.channel_bindings:
+        cw.channel_bindings[binding.channel_type] = binding
+
+    # get-or-create: the row may already exist if a previous inbound
+    # raced ahead, or if the channel chat reused a stale chat_id.
+    conv = await get_conversation_by_binding_and_chat(
+        binding_id, chat_id, tenant_id=cw.config.tenant_id
+    )
+    if conv is None:
+        conv = await create_conversation(
+            tenant_id=cw.config.tenant_id,
+            coworker_id=cw.config.id,
+            channel_binding_id=binding_id,
+            channel_chat_id=chat_id,
+            user_id=admitted_user_id,
+        )
+        logger.info(
+            "Auto-created Telegram 1:1 conversation",
+            coworker=cw.config.name,
+            chat_id=chat_id,
+            conversation_id=conv.id,
+            user_id=admitted_user_id,
+        )
+    conv_state = ConversationState(conversation=conv)
+    cw.conversations[conv.id] = conv_state
+    return cw, conv_state
+
+
 async def _auto_create_web_conversation(
     binding_id: str, chat_id: str
 ) -> tuple[CoworkerState, ConversationState] | None:
@@ -608,11 +668,46 @@ async def _handle_incoming(
     is_group: bool,
 ) -> None:
     """Unified message handler for all channel gateways."""
+    # v6.1 §P1.5/§P1.6: For Telegram 1:1, gate admission BEFORE any
+    # conversation lookup. Otherwise an admitted sender whose first
+    # ever message arrives before a conv row exists (the common case
+    # right after the §P1.3 reset wiped legacy IM convs) would
+    # silently drop. The Telegram gateway already short-circuits
+    # groups, so ``is_group=False`` is the only realistic branch
+    # here; the explicit guard is belt-and-braces.
+    #
+    # ``binding`` lookup is admin_conn so this works even when the
+    # binding's CoworkerState cache is empty (the cache populates
+    # later via _auto_create_telegram_1on1_conversation).
+    admitted_user_id: str | None = None
+    if not is_group:
+        from rolemesh.db import get_channel_binding_by_id_admin
+
+        binding = await get_channel_binding_by_id_admin(binding_id)
+        if binding is not None and binding.channel_type == "telegram":
+            gateway = _gateways.get("telegram")
+            if gateway is not None:
+                admitted_user_id = await admit_telegram_1on1(
+                    tenant_id=binding.tenant_id,
+                    sender_channel_id=sender,
+                    gateway=gateway,
+                    binding_id=binding_id,
+                    chat_id=chat_id,
+                )
+                if admitted_user_id is None:
+                    return  # admission denied — guidance reply already sent
+
     # Find conversation
     result = _state.find_conversation_by_binding_and_chat(binding_id, chat_id)
     if not result:
         # Auto-create conversation for web channel (each browser tab = new chat_id)
         result = await _auto_create_web_conversation(binding_id, chat_id)
+        if not result and admitted_user_id is not None:
+            # v6.1 §P1.5/§P1.6: admitted Telegram 1:1 sender, no
+            # existing conv → create one stamped with their user_id.
+            result = await _auto_create_telegram_1on1_conversation(
+                binding_id, chat_id, admitted_user_id
+            )
         if not result:
             return
 
@@ -626,38 +721,17 @@ async def _handle_incoming(
     if is_group and conv.requires_trigger and not cw_state.trigger_pattern.search(text.strip()):
         return  # Not for this coworker — skip silently
 
-    # v6.1 §P1.5/§P1.6: Telegram 1:1 admission. The Telegram gateway
-    # already short-circuits groups (see ``_short_circuit_group``) so
-    # ``is_group`` is False on this branch by the time the message
-    # reaches us — the explicit check is belt-and-braces against a
-    # future Slack/Web pathway that might (incorrectly) drop the
-    # gateway-side short-circuit. Slack and web are intentionally
-    # unguarded in Phase 1; only Telegram has a link flow.
-    channel_type = _get_channel_type_for_conv(cw_state, conv)
-    if channel_type == "telegram" and not is_group:
-        gateway = _gateways.get("telegram")
-        if gateway is not None:
-            admitted_user_id = await admit_telegram_1on1(
-                tenant_id=conv.tenant_id,
-                sender_channel_id=sender,
-                gateway=gateway,
-                binding_id=binding_id,
-                chat_id=chat_id,
-            )
-            if admitted_user_id is None:
-                return  # admission denied — guidance reply already sent
-            # v6.1 §P1.6 lazy backfill: legacy conversations created
-            # before the identity model existed have ``user_id IS
-            # NULL``; the first admitted inbound stamps the
-            # conversation. Subsequent paths (main.py:782/980 etc.)
-            # then read ``conv.user_id`` directly. We update the
-            # in-memory dataclass too so the rest of this turn is
-            # consistent without another DB hop.
-            if conv.user_id is None:
-                await update_conversation_user_id(
-                    conv.id, admitted_user_id, tenant_id=conv.tenant_id
-                )
-                conv.user_id = admitted_user_id
+    # v6.1 §P1.6 lazy backfill: a Telegram conv that existed before
+    # the identity model (or was created via web prior to a link)
+    # has ``user_id IS NULL``. Stamp it on the first admitted inbound
+    # so subsequent paths (main.py:782/980 etc.) read user_id
+    # directly. The in-memory dataclass is updated too so the rest
+    # of this turn is consistent without another DB hop.
+    if admitted_user_id is not None and conv.user_id is None:
+        await update_conversation_user_id(
+            conv.id, admitted_user_id, tenant_id=conv.tenant_id
+        )
+        conv.user_id = admitted_user_id
 
     # Store message
     await db_store_message(
