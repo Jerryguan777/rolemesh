@@ -169,8 +169,15 @@ class TestBuildContainerSpec:
         host.docker.internal."""
         with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
             spec = build_container_spec([], "c", "j")
-        assert "egress-gateway" in spec.env["ANTHROPIC_BASE_URL"]
-        assert "egress-gateway" in spec.env["OPENAI_BASE_URL"]
+        # All providers route through ``/proxy/<name>/`` after PR 2
+        # deleted the legacy Anthropic catch-all. Without the prefix
+        # the agent's SDK hits the reverse proxy at a 404 path.
+        assert spec.env["ANTHROPIC_BASE_URL"] == (
+            "http://egress-gateway:3001/proxy/anthropic"
+        )
+        assert spec.env["OPENAI_BASE_URL"] == (
+            "http://egress-gateway:3001/proxy/openai"
+        )
         # Bedrock — same proxy_base; agents on Internal=true bridge
         # cannot resolve host.docker.internal, so this MUST be the
         # gateway service name. Pre-fix it was synthesised in

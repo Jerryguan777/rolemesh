@@ -482,8 +482,13 @@ def build_container_spec(
         "TZ": TIMEZONE,
         "NATS_URL": nats_url,
         "JOB_ID": job_id,
-        # Legacy: Claude backend reads ANTHROPIC_BASE_URL directly (no /proxy prefix)
-        "ANTHROPIC_BASE_URL": proxy_base,
+        # Per-provider proxy URL. The reverse proxy routes everything
+        # through ``/proxy/{provider}/`` since the legacy catch-all was
+        # deleted in the chore/config-db-truth credential refactor —
+        # without the suffix the SDK hits 404. Both Pi and Claude SDKs
+        # honour ANTHROPIC_BASE_URL and append ``/v1/messages`` etc., so
+        # the suffix flows through cleanly.
+        "ANTHROPIC_BASE_URL": f"{proxy_base}/proxy/anthropic",
         # Multi-provider proxy URLs for Pi backend (each SDK reads its own env var)
         "OPENAI_BASE_URL": f"{proxy_base}/proxy/openai",
         # Bedrock — boto3 honours ``BEDROCK_BASE_URL`` as ``endpoint_url``.
