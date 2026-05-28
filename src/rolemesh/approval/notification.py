@@ -281,6 +281,39 @@ def format_execution_stale_message(request: ApprovalRequest) -> str:
     )
 
 
+def format_edge_fyi(
+    *,
+    server: str,
+    tool: str,
+    coworker_name: str | None = None,
+    tenant_name: str | None = None,
+) -> str:
+    """Owner-FYI text for the v6.1 edge fallback path (§P2.6).
+
+    Sent when a controlled tool call has no resolvable approver — bot-
+    chained task, pure system turn, or bootstrap actor. The message
+    deliberately does NOT include action buttons: there is no
+    ``approval_requests`` row for the owner to decide on; the hook
+    already fail-closed the call. Owners are informed for visibility
+    only.
+    """
+    lines = ["⚠️ FYI (controlled action with no responsible user)"]
+    if tenant_name:
+        lines.append(f"  tenant: {tenant_name}")
+    if coworker_name:
+        lines.append(f"  coworker: {coworker_name}")
+    lines.extend(
+        [
+            f"  intercepted: {server}/{tool}",
+            "  reason: the triggering turn has no identifiable user "
+            "(system / chained / bootstrap)",
+            "  status: the action was blocked and will not run; see the "
+            "Web activity log for context.",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def format_execution_report(
     *, request: ApprovalRequest, results: list[dict[str, object]], status: str
 ) -> str:

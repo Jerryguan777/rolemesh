@@ -658,6 +658,278 @@ class TestAutoIntercept:
 
 
 # ---------------------------------------------------------------------------
+# v6.1 §P2.6 — edge fallback (empty requester) on auto_intercept
+# ---------------------------------------------------------------------------
+
+
+def _engine_with_owner_convs(
+    owner_id_to_conv: dict[str, list[str]],
+) -> tuple[ApprovalEngine, _FakePublisher, _FakeChannel]:
+    """An engine variant whose resolver answers
+    ``get_conversations_for_user_and_coworker`` from a fixed map. Used
+    for the edge fallback tests where we need owners to have a
+    deliverable conversation (otherwise the engine has nowhere to
+    send the FYI and the assertion is meaningless).
+    """
+    pub = _FakePublisher()
+    ch = _FakeChannel()
+
+    async def _convs(user_id: str, _coworker_id: str) -> list[str]:
+        return list(owner_id_to_conv.get(user_id, []))
+
+    async def _get_conv(_conv_id: str) -> object | None:
+        return object()
+
+    resolver = NotificationTargetResolver(
+        get_conversations_for_user_and_coworker=_convs,
+        get_conversation=_get_conv,
+    )
+    eng = ApprovalEngine(publisher=pub, channel_sender=ch, resolver=resolver)
+    return eng, pub, ch
+
+
+class TestAutoInterceptEdgeFallback:
+    """T2a.2 / T2a.7 / T2a.8 / T2a.9 / T2a.10 — v6.1 §P2.6 wraps the
+    five edge-path invariants. Keeping them in one class lets a future
+    refactor that tries to satisfy any single one without honouring
+    the others fail loudly together.
+    """
+
+    async def test_split_drops_only_when_server_or_tool_missing(self) -> None:
+        """T2a.2 — the legacy combined check
+        ``not user_id or not server or not tool`` is split. Empty
+        ``server`` must still drop (we cannot identify what was
+        intercepted); empty ``user_id`` must NOT drop — it has its
+        own E-path handler now."""
+        tenant_id, user_id, cw_id, conv_id, _j, _p = await _seed()
+        engine, _pub, _ch = _engine()
+        # Empty server is genuinely malformed.
+        await _call_auto_intercept(engine,
+            {
+                "tenantId": tenant_id,
+                "coworkerId": cw_id,
+                "conversationId": conv_id,
+                "jobId": "j-malformed",
+                "userId": user_id,
+                "mcp_server_name": "",  # missing
+                "tool_name": "refund",
+                "tool_params": {"amount": 1},
+                "action_hash": "h",
+            }
+        )
+        assert await list_approval_requests(tenant_id) == [], (
+            "missing server must drop the message — engine cannot "
+            "identify the intercepted action"
+        )
+
+    async def test_empty_user_id_sends_owner_fyi_without_db_row(
+        self,
+    ) -> None:
+        """T2a.7 — empty requester (system / chained / bootstrap)
+        triggers the E path: tenant owners are FYI'd, but **no**
+        ``approval_requests`` row is created. The hook already
+        fail-closed the call; surfacing a row would mislead operators
+        into thinking they had a pending decision."""
+        tenant_id, user_id, cw_id, conv_id, _j, _p = await _seed()
+        # Make sure a matching policy exists so we actually reach the
+        # E path (otherwise the policy-no-longer-matches branch wins).
+        engine, _pub, ch = _engine_with_owner_convs({user_id: [conv_id]})
+        await _call_auto_intercept(engine,
+            {
+                "tenantId": tenant_id,
+                "coworkerId": cw_id,
+                "conversationId": conv_id,
+                "jobId": "j-edge",
+                "userId": "",  # the v6.1 edge signal
+                "mcp_server_name": "erp",
+                "tool_name": "refund",
+                "tool_params": {"amount": 5000},
+                "action_hash": "h-edge",
+            }
+        )
+        # No DB row was created — invariant #6.
+        assert await list_approval_requests(tenant_id) == []
+        # Exactly one FYI was sent to the owner's conversation.
+        assert ch.sent, "owner FYI must be sent to a conversation"
+        assert ch.sent[0][0] == conv_id
+        body = ch.sent[0][1]
+        # Plain text, no buttons — the format helper's signature line
+        # carries no markdown action.
+        assert "FYI" in body
+        assert "erp/refund" in body
+
+    async def test_no_owners_logs_error_and_returns(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T2a.8 — no tenant owners → ERROR log + return, no FYI.
+        Importantly: no exception leaks (the hook is upstream and
+        cannot recover from one), and no DB row is written.
+
+        We patch the engine module's logger so the ERROR-level call
+        can be asserted directly. structlog's ``PrintLoggerFactory``
+        with ``cache_logger_on_first_use=True`` caches a stderr
+        reference at first use, defeating both ``capsys`` and
+        ``capfd`` — so an in-test ``_RecordingLogger`` is the
+        smallest way to pin the contract.
+        """
+        # Tenant with a non-owner member only.
+        t = await create_tenant(name="Tno", slug=f"tno-{uuid.uuid4().hex[:8]}")
+        member = await create_user(
+            tenant_id=t.id, name="M", email="m@x.com", role="member"
+        )
+        cw = await create_coworker(
+            tenant_id=t.id, name="CW", folder=f"cw-{uuid.uuid4().hex[:8]}"
+        )
+        b = await create_channel_binding(
+            coworker_id=cw.id, tenant_id=t.id,
+            channel_type="telegram", credentials={"bot_token": "x"},
+        )
+        conv = await create_conversation(
+            tenant_id=t.id, coworker_id=cw.id, channel_binding_id=b.id,
+            channel_chat_id=str(uuid.uuid4()),
+        )
+        await create_approval_policy(
+            tenant_id=t.id, coworker_id=cw.id,
+            mcp_server_name="erp", tool_name="refund",
+            condition_expr={"always": True},
+            approver_user_ids=[member.id],
+        )
+
+        engine, _pub, ch = _engine_with_owner_convs({})
+        # Record every (level, message, kwargs) tuple to a list.
+        records: list[tuple[str, str, dict[str, Any]]] = []
+
+        class _RecordingLogger:
+            def _record(self, level: str):
+                def inner(msg: str, **kwargs: Any) -> None:
+                    records.append((level, msg, kwargs))
+                return inner
+
+            def __getattr__(self, name: str):
+                return self._record(name)
+
+        from rolemesh.approval import engine as engine_module
+        monkeypatch.setattr(engine_module, "logger", _RecordingLogger())
+
+        await _call_auto_intercept(engine,
+            {
+                "tenantId": t.id,
+                "coworkerId": cw.id,
+                "conversationId": conv.id,
+                "jobId": "j-no-owner",
+                "userId": "",  # E path
+                "mcp_server_name": "erp",
+                "tool_name": "refund",
+                "tool_params": {"amount": 5000},
+                "action_hash": "h-no-owner",
+            }
+        )
+        # No DB row, no FYI.
+        assert await list_approval_requests(t.id) == []
+        assert ch.sent == [], (
+            "edge fallback without owners must not send any message"
+        )
+        # An ERROR-level log carrying the tenant id + the keywords
+        # 'edge fallback' / 'no tenant owners'. Operators search for
+        # those when triaging silent failures.
+        errors = [
+            (msg, kw) for level, msg, kw in records if level == "error"
+        ]
+        assert errors, (
+            f"expected an error-level log; got records: {records}"
+        )
+        assert any(
+            "edge fallback" in msg.lower() and "no tenant owners" in msg.lower()
+            for msg, _ in errors
+        ), f"expected 'edge fallback' + 'no tenant owners'; got: {errors}"
+        # Tenant id must be in the kwargs so a structured-log
+        # consumer can index by tenant.
+        assert any(kw.get("tenant_id") == t.id for _, kw in errors), (
+            f"expected tenant_id={t.id} in log kwargs; got: {errors}"
+        )
+
+    async def test_rate_limit_suppresses_second_fyi_within_window(
+        self,
+    ) -> None:
+        """T2a.9 — the in-process LRU rate-limits FYIs per
+        ``(tenant, coworker, server, tool)`` to one per 5-minute
+        window. Without it, a misbehaving system turn loop would
+        carpet-bomb tenant owners."""
+        tenant_id, user_id, cw_id, conv_id, _j, _p = await _seed()
+        engine, _pub, ch = _engine_with_owner_convs({user_id: [conv_id]})
+
+        payload: dict[str, Any] = {
+            "tenantId": tenant_id,
+            "coworkerId": cw_id,
+            "conversationId": conv_id,
+            "jobId": "j-rl",
+            "userId": "",
+            "mcp_server_name": "erp",
+            "tool_name": "refund",
+            "tool_params": {"amount": 5000},
+            # NOTE: action_hash must differ on each call so the DB
+            # dedup path does not pre-empt the rate-limit check —
+            # otherwise we would be measuring the wrong thing.
+            "action_hash": "h-rl-1",
+        }
+        await _call_auto_intercept(engine, payload)
+        payload2 = {**payload, "action_hash": "h-rl-2"}
+        await _call_auto_intercept(engine, payload2)
+
+        # Exactly one FYI delivered despite two upstream calls.
+        assert len(ch.sent) == 1, (
+            f"rate-limit must collapse the second call; got {ch.sent}"
+        )
+
+        # A different tool with the same other fields is a different
+        # rate-limit key and must NOT be suppressed.
+        payload3 = {**payload, "tool_name": "cancel_order", "action_hash": "h-rl-3"}
+        await create_approval_policy(
+            tenant_id=tenant_id, coworker_id=cw_id,
+            mcp_server_name="erp", tool_name="cancel_order",
+            condition_expr={"always": True},
+            approver_user_ids=[user_id],
+        )
+        await _call_auto_intercept(engine, payload3)
+        assert len(ch.sent) == 2, (
+            "different (server, tool) keys must not share the rate "
+            "limit; second tool should produce a fresh FYI"
+        )
+
+    async def test_create_skipped_no_longer_fires_on_empty_approvers(
+        self,
+    ) -> None:
+        """T2a.10 — M1 decision: the legacy 'approvers empty →
+        create_skipped' branch in handle_auto_intercept is removed.
+        Reaching that condition now goes through the edge FYI path,
+        which does NOT write a row. ``approval_requests`` table
+        must stay empty after the call."""
+        tenant_id, user_id, cw_id, conv_id, _j, _p = await _seed()
+        engine, _pub, _ch = _engine_with_owner_convs({user_id: [conv_id]})
+        await _call_auto_intercept(engine,
+            {
+                "tenantId": tenant_id,
+                "coworkerId": cw_id,
+                "conversationId": conv_id,
+                "jobId": "j-no-skip",
+                "userId": "",
+                "mcp_server_name": "erp",
+                "tool_name": "refund",
+                "tool_params": {"amount": 5000},
+                "action_hash": "h-no-skip",
+            }
+        )
+        reqs = await list_approval_requests(tenant_id)
+        assert all(r.status != "skipped" for r in reqs), (
+            "create_skipped must no longer fire from the auto_intercept "
+            "edge path"
+        )
+        # In fact no row at all was written — the engine-side
+        # invariant is "edge → no row".
+        assert reqs == []
+
+
+# ---------------------------------------------------------------------------
 # Decision path
 # ---------------------------------------------------------------------------
 

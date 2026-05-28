@@ -27,6 +27,8 @@ the CRUD layer.
 from __future__ import annotations
 
 import json
+import time
+from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -57,6 +59,7 @@ from .notification import (
     NotificationTargetResolver,
     format_approver_request_message,
     format_cancelled_message,
+    format_edge_fyi,
     format_execution_stale_message,
     format_expired_message,
     format_skipped_message,
@@ -85,6 +88,16 @@ _DEFAULT_EXPIRE_MINUTES = 60
 # maintenance loop acts on it.
 _RECONCILE_APPROVED_GRACE_S = 60
 _RECONCILE_EXECUTING_GRACE_S = 300
+
+# v6.1 §P2.6 — edge-path owner-FYI rate limit: per
+# ``(tenant_id, coworker_id, server, tool)`` key, emit at most one
+# FYI per ``_EDGE_FYI_WINDOW_SECONDS``. Prevents a runaway system
+# turn from carpet-bombing tenant owners. Reset on process restart;
+# that is acceptable — duplicate FYIs after a restart are
+# annoying but not load-bearing for safety (the hook already
+# fail-closed the call).
+_EDGE_FYI_WINDOW_SECONDS = 5 * 60
+_EDGE_FYI_LRU_CAPACITY = 1024
 
 
 class NatsPublisher(Protocol):
@@ -322,6 +335,14 @@ class ApprovalEngine:
         self._builder = ApprovalRequestBuilder(
             channel_sender=channel_sender, resolver=resolver
         )
+        # v6.1 §P2.6 — edge-path FYI rate limit. Insertion-ordered
+        # dict acts as a tiny LRU keyed by
+        # ``(tenant_id, coworker_id, server, tool)`` → last-emit
+        # monotonic timestamp. Bounded by ``_EDGE_FYI_LRU_CAPACITY``
+        # so a flood of distinct edge calls cannot leak memory.
+        self._edge_fyi_last_sent: OrderedDict[
+            tuple[str, str, str, str], float
+        ] = OrderedDict()
 
     # -- Entry points -----------------------------------------------------
 
@@ -461,8 +482,17 @@ class ApprovalEngine:
         tool = str(data.get("tool_name") or "")
         params = data.get("tool_params") or {}
         action_hash = str(data.get("action_hash") or "")
-        if not user_id or not server or not tool:
-            logger.warning("approval: malformed auto_approval_request dropped")
+        # v6.1 §P2.6 — split: ``server`` / ``tool`` empty is a true
+        # malformed message (we cannot identify the action); drop it.
+        # ``user_id`` empty is the edge case (bot-chained / system /
+        # bootstrap turn) and flows down to the owner-FYI path below.
+        if not server or not tool:
+            logger.warning(
+                "approval: malformed auto_approval_request dropped",
+                has_user=bool(user_id),
+                has_server=bool(server),
+                has_tool=bool(tool),
+            )
             return
 
         # Dedup: short-circuit if a pending request with the same
@@ -505,18 +535,17 @@ class ApprovalEngine:
         final_hash = action_hash or compute_action_hash(tool, params)
 
         if not approvers:
-            await self._builder.create_skipped(
+            # v6.1 §P2.6 — edge fallback: empty requester (system /
+            # chained / bootstrap turn). No ``approval_requests`` row
+            # is created (decision #5 — that would mislead operators
+            # into thinking they had a decision to make). The hook
+            # has already fail-closed the call; we only owe owners
+            # an FYI so the situation does not slip silently.
+            await self._handle_edge_fallback(
                 tenant_id=tenant_id,
                 coworker_id=coworker_id,
-                conversation_id=conversation_id,
-                user_id=user_id,
-                policy=policy,
-                job_id=job_id,
-                actions=actions,
-                action_hashes=[final_hash],
-                rationale=None,
-                source="auto_intercept",
-                mcp_server=server,
+                server=server,
+                tool=tool,
             )
             return
 
@@ -984,6 +1013,91 @@ class ApprovalEngine:
                 conversation_id=request.conversation_id,
                 error=str(exc),
             )
+
+    # -- v6.1 §P2.6 edge fallback ---------------------------------------
+
+    def _edge_dedup_seen(
+        self, tenant_id: str, coworker_id: str, server: str, tool: str
+    ) -> bool:
+        """Return True if the same edge tuple emitted an FYI within
+        ``_EDGE_FYI_WINDOW_SECONDS`` and we should suppress this one.
+
+        Updates the LRU position so genuinely fresh keys evict the
+        oldest when the bound is hit. Time source is ``time.monotonic``
+        so wallclock jumps do not poison the window.
+        """
+        key = (tenant_id, coworker_id, server, tool)
+        now = time.monotonic()
+        cache = self._edge_fyi_last_sent
+        previous = cache.get(key)
+        if previous is not None and (now - previous) < _EDGE_FYI_WINDOW_SECONDS:
+            cache.move_to_end(key)
+            return True
+        cache[key] = now
+        cache.move_to_end(key)
+        while len(cache) > _EDGE_FYI_LRU_CAPACITY:
+            cache.popitem(last=False)
+        return False
+
+    async def _handle_edge_fallback(
+        self,
+        *,
+        tenant_id: str,
+        coworker_id: str,
+        server: str,
+        tool: str,
+    ) -> None:
+        """Owner-FYI dispatch for v6.1 §P2.6 edge cases.
+
+        Crucial invariant: this method NEVER creates an
+        ``approval_requests`` row. The hook has already fail-closed
+        the call; an audit row would mislead operators into thinking
+        they had a decision to take. We owe owners awareness only.
+        """
+        if self._edge_dedup_seen(tenant_id, coworker_id, server, tool):
+            logger.info(
+                "approval: edge fallback FYI rate-limited",
+                tenant_id=tenant_id,
+                coworker_id=coworker_id,
+                server=server,
+                tool=tool,
+            )
+            return
+
+        owner_ids = await _tenant_owner_ids(tenant_id)
+        if not owner_ids:
+            logger.error(
+                "approval: edge fallback — no tenant owners to notify",
+                tenant_id=tenant_id,
+                coworker_id=coworker_id,
+                server=server,
+                tool=tool,
+            )
+            return
+
+        message = format_edge_fyi(server=server, tool=tool)
+        # Best-effort fan-out across each owner's recent conversations
+        # with this coworker. If an owner has no conversation with this
+        # coworker, they are silently skipped — the active-channel
+        # rule keeps us from reaching out via paths the owner has not
+        # opted into.
+        sent_to: set[str] = set()
+        for owner_id in owner_ids:
+            convs = await self._resolver._get_conversations_for_user_and_coworker(  # noqa: SLF001
+                owner_id, coworker_id
+            )
+            for conv_id in convs:
+                if not conv_id or conv_id in sent_to:
+                    continue
+                try:
+                    await self._channel.send_to_conversation(conv_id, message)
+                    sent_to.add(conv_id)
+                except Exception as exc:  # noqa: BLE001 — best-effort
+                    logger.warning(
+                        "approval: edge FYI notify failed",
+                        conversation_id=conv_id,
+                        error=str(exc),
+                    )
 
 
 # ---------------------------------------------------------------------------
