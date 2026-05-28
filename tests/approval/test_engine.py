@@ -231,8 +231,11 @@ class TestTrustedTenantGuard:
 class TestStrictestPolicyWins:
     async def test_batch_picks_strictest_by_priority(self) -> None:
         # Three actions; two match a low-priority policy, one matches a
-        # high-priority one. Engine should use the high-priority policy's
-        # approvers + expiry for the request as a whole.
+        # high-priority one. Engine should select the high-priority
+        # policy for ``policy_id`` + expiry. Under v6.1 self-approval,
+        # the policy's ``approver_user_ids`` field is intentionally
+        # ignored — ``resolved_approvers`` snapshots the requester
+        # (decision #1).
         tenant_id, user_id, cw_id, conv_id, job_id, _ = await _seed(
             with_policy=False
         )
@@ -254,6 +257,9 @@ class TestStrictestPolicyWins:
             mcp_server_name="erp",
             tool_name="cancel_order",
             condition_expr={"always": True},
+            # The policy still carries a non-requester approver (DB
+            # column survives as SoD seam), but the v6.1 engine must
+            # not honour it — proven by the assertion below.
             approver_user_ids=[manager.id],
             priority=10,
         )
@@ -278,11 +284,20 @@ class TestStrictestPolicyWins:
         assert len(reqs) == 1
         req = reqs[0]
         assert req.status == "pending"
-        # Strictest wins: high-priority policy's approvers are snapshot.
-        assert req.resolved_approvers == [manager.id]
+        # Strictest wins for policy selection (drives expiry,
+        # post_exec_mode, etc.). high.priority > low.priority.
         assert req.policy_id == high.id
-        # low is still around, just not selected
+        # low is still around, just not selected.
         assert low.id != req.policy_id
+        # v6.1 self-approval: the requester is the sole resolved
+        # approver, regardless of policy.approver_user_ids. If a
+        # future refactor reintroduces three-tier fallback, the
+        # observed value would flip back to [manager.id] and this
+        # assertion would catch it.
+        assert req.resolved_approvers == [user_id], (
+            "v6.1 self-approval: resolved_approvers must be the "
+            "requester, not the policy's approver_user_ids"
+        )
 
 
 class TestHandleProposal:
@@ -382,11 +397,23 @@ class TestHandleProposal:
         assert len(decided) == 1
         assert decided[0][0] == f"approval.decided.{reqs[0].id}"
 
-    async def test_empty_approvers_triggers_skipped(self) -> None:
-        # Policy with no explicit approvers AND no user-agent assignment
-        # AND no owner fallback (we pass approver_ids=[] but also delete
-        # the owner by making the user a member).
+    async def test_member_requester_self_approves_pending_even_without_owner(
+        self,
+    ) -> None:
+        """T2a.1 — v6.1 self-approval semantics replace the legacy
+        three-tier fallback chain. Even when the policy lists an
+        empty ``approver_user_ids`` AND the tenant has no owner,
+        ``_resolve_approvers`` snapshots the requester so the row
+        is pending (not skipped). The requester themselves can then
+        decide; SoD is intentionally relinquished for the v6.1 cut.
+
+        The legacy test asserted "skipped" — that branch is
+        unreachable under v6.1 except when requester_user_id is
+        empty, which ``handle_proposal``'s malformed-drop check
+        already rules out before the resolve step.
+        """
         t = await create_tenant(name="Tnone", slug=f"tn-{uuid.uuid4().hex[:8]}")
+        # Member, not owner — proves we no longer fall back to owners.
         member = await create_user(
             tenant_id=t.id, name="Member", email="m@x.com", role="member"
         )
@@ -411,16 +438,16 @@ class TestHandleProposal:
             mcp_server_name="erp",
             tool_name="refund",
             condition_expr={"always": True},
-            approver_user_ids=[],
+            approver_user_ids=[],  # empty — pre-v6.1 this triggered skipped
         )
 
-        engine, _pub, ch = _engine()
+        engine, _pub, _ch = _engine()
         await _call_proposal(engine,
             {
                 "tenantId": t.id,
                 "coworkerId": cw.id,
                 "conversationId": conv.id,
-                "jobId": "job-skip",
+                "jobId": "job-self",
                 "userId": member.id,
                 "rationale": "r",
                 "actions": [
@@ -434,11 +461,102 @@ class TestHandleProposal:
         )
         reqs = await list_approval_requests(t.id)
         assert len(reqs) == 1
-        assert reqs[0].status == "skipped"
-        audit = await list_approval_audit(reqs[0].id, tenant_id=reqs[0].tenant_id)
-        assert [e.action for e in audit] == ["created", "skipped"]
-        # Originating conversation was notified of the skip.
-        assert any(conv.id == c for c, _t in ch.sent)
+        req = reqs[0]
+        assert req.status == "pending", (
+            "v6.1 self-approval must keep the row pending so the "
+            "requester can decide; legacy 'skipped' is gone"
+        )
+        # The requester is the sole resolved approver — not policy
+        # approvers (empty), not tenant owners (none), not coworker
+        # assignees (none). This is the v6.1 invariant.
+        assert req.resolved_approvers == [member.id]
+
+
+class TestResolveApprovers:
+    """Direct exercise of the v6.1 self-approval primitive without
+    relying on full handle_proposal plumbing. The function is the
+    chokepoint where the legacy three-tier fallback was deleted; this
+    class pins the new contract independently of caller wiring.
+    """
+
+    async def test_self_approval_returns_requester_only(self) -> None:
+        """T2a.1 — non-empty requester → ``[requester]`` regardless
+        of policy.approver_user_ids."""
+        tenant_id, user_id, cw_id, _conv_id, _job_id, policy_id = await _seed()
+        engine, _pub, _ch = _engine()
+        from rolemesh.db import get_approval_policy
+
+        policy = await get_approval_policy(policy_id, tenant_id=tenant_id)
+        assert policy is not None
+        # Even though the policy lists user_id as the only approver,
+        # the engine route is independent: it returns [requester_user_id].
+        # Pick a non-requester to make the assertion sharp.
+        non_requester = str(uuid.uuid4())
+        out = await engine._resolve_approvers(  # noqa: SLF001 — pinning private contract
+            tenant_id, cw_id, policy, requester_user_id=non_requester
+        )
+        assert out == [non_requester], (
+            "self-approval must use the requester, not policy approvers"
+        )
+
+    async def test_empty_requester_returns_empty_list(self) -> None:
+        """T2a.1 — empty requester → ``[]``. Caller (handle_auto_intercept
+        or Case B fallback) is responsible for routing to the E path,
+        not for inventing an approver."""
+        tenant_id, _user_id, cw_id, _conv_id, _job_id, policy_id = await _seed()
+        engine, _pub, _ch = _engine()
+        from rolemesh.db import get_approval_policy
+
+        policy = await get_approval_policy(policy_id, tenant_id=tenant_id)
+        assert policy is not None
+        out = await engine._resolve_approvers(  # noqa: SLF001
+            tenant_id, cw_id, policy, requester_user_id=""
+        )
+        assert out == [], (
+            "empty requester must propagate as [] so callers can "
+            "route to the owner-FYI edge path"
+        )
+
+
+class TestSafetyDoesNotSelfApprove:
+    """T2a.4 — the safety bridge intentionally bypasses self-approval
+    (decision #12). A safety verdict's whole point is to take the
+    decision out of the requester's hands; routing back to them would
+    invert the gate. The test pins that the resolved_approvers on a
+    safety-created row is tenant owners, never the requester.
+    """
+
+    async def test_safety_resolves_to_tenant_owners_not_requester(
+        self,
+    ) -> None:
+        tenant_id, user_id, cw_id, conv_id, _job_id, _p = await _seed()
+        # Add a non-owner who will be the safety event's "requester".
+        member = await create_user(
+            tenant_id=tenant_id, name="Mem", email="mem@x.com", role="member"
+        )
+        engine, _pub, _ch = _engine()
+        req = await engine.create_from_safety(
+            tenant_id=tenant_id,
+            coworker_id=cw_id,
+            conversation_id=conv_id,
+            job_id="safety-1",
+            user_id=member.id,
+            tool_name="dangerous",
+            tool_input={"flag": True},
+            mcp_server_name="safety-mcp",
+        )
+        assert req is not None
+        # Owners list contains the seed-created owner (user_id), not
+        # the requester (member). If a future refactor swaps the
+        # safety path to use _resolve_approvers, the list would
+        # collapse to [member.id] and this assertion would catch it.
+        assert user_id in req.resolved_approvers
+        assert member.id not in req.resolved_approvers, (
+            "safety path must not self-approve — requester is recorded "
+            "as user_id but not as an approver"
+        )
+        # Requester is still recorded on the row (for audit).
+        assert req.user_id == member.id
 
 
 # ---------------------------------------------------------------------------

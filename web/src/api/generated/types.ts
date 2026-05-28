@@ -1583,7 +1583,6 @@ export interface components {
             condition_expr: {
                 [key: string]: unknown;
             };
-            approver_user_ids?: string[];
             /** Format: uuid */
             notify_conversation_id?: string | null;
             auto_expire_minutes: number;
@@ -1603,7 +1602,6 @@ export interface components {
             };
             /** Format: uuid */
             coworker_id?: string | null;
-            approver_user_ids?: string[];
             /** Format: uuid */
             notify_conversation_id?: string | null;
             /** @default 60 */
@@ -1620,7 +1618,6 @@ export interface components {
             condition_expr?: {
                 [key: string]: unknown;
             };
-            approver_user_ids?: string[];
             /** Format: uuid */
             notify_conversation_id?: string | null;
             auto_expire_minutes?: number;

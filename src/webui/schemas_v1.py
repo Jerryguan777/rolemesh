@@ -641,7 +641,15 @@ ApprovalDecideAction = Literal["approve", "reject"]
 
 
 class ApprovalPolicy(BaseModel):
-    """Wire projection of an ``approval_policies`` row."""
+    """Wire projection of an ``approval_policies`` row.
+
+    v6.1 §P2.4 (decision #2) — ``approver_user_ids`` is intentionally
+    NOT exposed on this projection. The DB column is preserved as a
+    seam for a future SoD-aware extension; the v6.1 engine routes
+    decisions to the requester (self-approval) and never reads the
+    column, so surfacing it on the API would mislead operators about
+    its effect.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -651,7 +659,6 @@ class ApprovalPolicy(BaseModel):
     mcp_server_name: str
     tool_name: str
     condition_expr: dict[str, object]
-    approver_user_ids: list[str] = Field(default_factory=list)
     notify_conversation_id: str | None = None
     auto_expire_minutes: int = Field(ge=1, le=10080)
     post_exec_mode: ApprovalPostExecMode
@@ -662,7 +669,12 @@ class ApprovalPolicy(BaseModel):
 
 
 class ApprovalPolicyCreate(BaseModel):
-    """``POST /api/v1/approval-policies`` body."""
+    """``POST /api/v1/approval-policies`` body.
+
+    v6.1 §P2.4 — ``approver_user_ids`` removed from the input
+    surface. The engine self-approves under v6.1; the DB column is
+    retained but not writable through the public API.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -670,7 +682,6 @@ class ApprovalPolicyCreate(BaseModel):
     tool_name: str = Field(min_length=1)
     condition_expr: dict[str, object]
     coworker_id: str | None = None
-    approver_user_ids: list[str] = Field(default_factory=list)
     notify_conversation_id: str | None = None
     auto_expire_minutes: int = Field(default=60, ge=1, le=10080)
     post_exec_mode: ApprovalPostExecMode = "report"
@@ -685,6 +696,9 @@ class ApprovalPolicyUpdate(BaseModel):
     "leave alone" from "explicit clear". The DB helper accepts the
     same shape and treats explicit ``None`` for nullable columns as
     "clear".
+
+    v6.1 §P2.4 — ``approver_user_ids`` removed; see
+    :class:`ApprovalPolicyCreate` for the rationale.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -692,7 +706,6 @@ class ApprovalPolicyUpdate(BaseModel):
     mcp_server_name: str | None = Field(default=None, min_length=1)
     tool_name: str | None = Field(default=None, min_length=1)
     condition_expr: dict[str, object] | None = None
-    approver_user_ids: list[str] | None = None
     notify_conversation_id: str | None = None
     auto_expire_minutes: int | None = Field(default=None, ge=1, le=10080)
     post_exec_mode: ApprovalPostExecMode | None = None

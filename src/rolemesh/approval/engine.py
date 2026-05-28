@@ -44,7 +44,6 @@ from rolemesh.db import (
     find_pending_request_by_action_hash,
     get_approval_request,
     get_enabled_policies_for_coworker,
-    get_users_for_agent,
     get_users_for_tenant,
     list_expired_pending_approvals,
     list_stuck_approved_approvals,
@@ -403,10 +402,18 @@ class ApprovalEngine:
         # Case B: at least one match — approval required.
         strict = _pick_strictest(matched)
         policy = next(p for p in policies if p.id == strict["id"])
-        approvers = await self._resolve_approvers(tenant_id, coworker_id, policy)
+        approvers = await self._resolve_approvers(
+            tenant_id, coworker_id, policy, requester_user_id=user_id
+        )
         mcp_server = str(actions[0].get("mcp_server") or "")
 
         if not approvers:
+            # v6.1 self-approval invariant: with a non-empty
+            # requester_user_id, _resolve_approvers returns at least
+            # one element. Reaching here means the proposer was empty,
+            # but handle_proposal already rejects empty user_id at the
+            # malformed-drop check above — this is a defensive guard
+            # for future shape changes, not a live path.
             await self._builder.create_skipped(
                 tenant_id=tenant_id,
                 coworker_id=coworker_id,
@@ -490,7 +497,9 @@ class ApprovalEngine:
             return
 
         policy = next(p for p in policies if p.id == policy_match["id"])
-        approvers = await self._resolve_approvers(tenant_id, coworker_id, policy)
+        approvers = await self._resolve_approvers(
+            tenant_id, coworker_id, policy, requester_user_id=user_id
+        )
 
         actions = [{"mcp_server": server, "tool_name": tool, "params": params}]
         final_hash = action_hash or compute_action_hash(tool, params)
@@ -547,9 +556,16 @@ class ApprovalEngine:
 
         No policy is associated with this request (``policy_id`` stays
         NULL) because the decision came from a safety rule, not an
-        approval policy. Expiry defaults to the module-wide
-        ``_DEFAULT_EXPIRE_MINUTES``; approvers fall back to tenant
-        owners which matches the chain tail in ``_resolve_approvers``.
+        approval policy.
+
+        v6.1 §P2.2 — the safety path **does not self-approve** (design
+        decision #12). The whole point of a safety gate is to take the
+        decision OUT of the requester's hands; routing to the requester
+        would undo that. We resolve approvers directly via
+        :func:`_tenant_owner_ids` instead of calling
+        :meth:`_resolve_approvers`. The requester is still recorded as
+        ``user_id`` on the row for auditing — they triggered the gate
+        — but the approvers list is tenant owners.
 
         ``user_id`` is required (approval_requests.user_id is NOT NULL
         FK): it identifies the user whose turn triggered the safety
@@ -928,15 +944,30 @@ class ApprovalEngine:
     # -- Internal helpers -------------------------------------------------
 
     async def _resolve_approvers(
-        self, tenant_id: str, coworker_id: str, policy: ApprovalPolicy
+        self,
+        tenant_id: str,
+        coworker_id: str,
+        policy: ApprovalPolicy,
+        requester_user_id: str,
     ) -> list[str]:
-        """Fallback chain: policy → assigned users → tenant owners."""
-        if policy.approver_user_ids:
-            return list(policy.approver_user_ids)
-        assigned = await get_users_for_agent(coworker_id, tenant_id=tenant_id)
-        if assigned:
-            return [u.id for u in assigned]
-        return await _tenant_owner_ids(tenant_id)
+        """v6.1 self-approval: the requester is the sole approver.
+
+        Empty ``requester_user_id`` signals an edge case (bot-chained
+        task / pure system turn / bootstrap actor) — the caller must
+        route those to the owner-FYI edge path in
+        :meth:`handle_auto_intercept` (see v6.1 §P2.6). We never
+        invent an approver, so an empty input returns ``[]``.
+
+        ``policy``, ``tenant_id`` and ``coworker_id`` are accepted for
+        a future SoD-aware extension (decision #2 retains the DB
+        column ``approver_user_ids`` as the wire-in point). v6.1
+        deliberately ignores them — the legacy three-tier fallback
+        chain is deleted.
+        """
+        del policy, tenant_id, coworker_id
+        if not requester_user_id:
+            return []
+        return [requester_user_id]
 
     async def _send_to_origin(
         self, request: ApprovalRequest, message: str
