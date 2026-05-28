@@ -349,6 +349,17 @@ async def deliver_approval_card_or_text(
     await channel.send_to_conversation(conversation_id, body)
 
 
+# v6.1 §P2.8 — guide text emitted to a conversation when the user
+# tries to take a new turn while an approval is still pending. The
+# string is canonical here so the IM and Web surfaces share one copy;
+# the frontend renders the same text behind a localised error code.
+PENDING_TURN_GUIDE_TEXT = (
+    "This conversation has an approval pending. Please decide it in "
+    "the Web inbox or by replying to the approval card before sending "
+    "another instruction."
+)
+
+
 def format_edge_fyi(
     *,
     server: str,

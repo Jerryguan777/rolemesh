@@ -90,6 +90,7 @@ from rolemesh.db import (
     get_messages_since,
     get_new_messages_for_conversations,
     get_tenant_by_slug,
+    has_pending_approvals_for_conversation,
     init_database,
     list_coworker_mcp_configs,
     set_session,
@@ -103,6 +104,7 @@ from rolemesh.db import (
 from rolemesh.db import (
     store_message as db_store_message,
 )
+from rolemesh.approval.notification import PENDING_TURN_GUIDE_TEXT
 from rolemesh.ipc.nats_transport import NatsTransport
 from rolemesh.ipc.task_handler import process_task_ipc
 from rolemesh.orchestration.remote_control import (
@@ -837,6 +839,35 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
         )
         if not has_trigger:
             return True
+
+    # v6.1 §P2.8 — interactive-turn entry guard. If the user has an
+    # approval pending in this conversation, reply with the canonical
+    # guide and short-circuit before the agent runs. We deliberately
+    # do NOT advance ``conv_state.last_agent_timestamp`` so the
+    # queued messages re-process on the next tick after the user
+    # decides; without that, the user's turn would be silently
+    # consumed by the guide reply.
+    #
+    # Only the interactive turn entry checks pending — hook fail-close
+    # already protects the per-tool-call path; doubling up here would
+    # be cosmetic, not load-bearing.
+    if await has_pending_approvals_for_conversation(
+        conv.id, tenant_id=conv.tenant_id
+    ):
+        channel_type = _get_channel_type_for_conv(cw_state, conv)
+        binding = cw_state.channel_bindings.get(channel_type)
+        gw = _gateways.get(channel_type) if binding else None
+        if binding and gw:
+            with contextlib.suppress(OSError, RuntimeError, TypeError, ValueError):
+                await gw.send_message(
+                    binding.id, conv.channel_chat_id, PENDING_TURN_GUIDE_TEXT
+                )
+        logger.info(
+            "turn_blocked_by_pending_approval",
+            conversation_id=conv.id,
+            tenant_id=conv.tenant_id,
+        )
+        return True
 
     prompt = format_messages(missed_messages, TIMEZONE)
 

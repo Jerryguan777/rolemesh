@@ -31,6 +31,7 @@ __all__ = [
     "get_approval_policy",
     "get_approval_request",
     "get_enabled_policies_for_coworker",
+    "has_pending_approvals_for_conversation",
     "list_approval_audit",
     "list_approval_policies",
     "list_approval_requests",
@@ -479,6 +480,40 @@ async def list_approval_requests(
     async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(sql, *params)
     return [_record_to_approval_request(r) for r in rows]
+
+
+async def has_pending_approvals_for_conversation(
+    conversation_id: str, *, tenant_id: str
+) -> bool:
+    """Return True iff ``conversation_id`` has any approval_requests
+    in 'pending' status under ``tenant_id``.
+
+    v6.1 §P2.8 — the interactive-turn entry guard reads this before
+    dispatching the agent so a user with an outstanding decision gets
+    a "please decide first" guide rather than the agent silently
+    queuing while the action is gated. We deliberately fetch only
+    the existence flag (``EXISTS`` short-circuit) so the hot path
+    stays cheap.
+
+    The function is tenant-scoped so a malformed call cannot leak
+    "yes you have approvals" cross-tenant; the index on
+    ``(tenant_id, status)`` keeps the lookup O(log n).
+    """
+    async with tenant_conn(tenant_id) as conn:
+        return bool(
+            await conn.fetchval(
+                """
+                SELECT EXISTS (
+                    SELECT 1 FROM approval_requests
+                    WHERE tenant_id = $1::uuid
+                      AND conversation_id = $2::uuid
+                      AND status = 'pending'
+                )
+                """,
+                tenant_id,
+                conversation_id,
+            )
+        )
 
 
 async def find_pending_request_by_action_hash(

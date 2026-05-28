@@ -84,10 +84,21 @@ export class InlineApproval extends LitElement {
         }),
       );
     } catch (err) {
-      this.error =
-        err instanceof ApiError
-          ? `${err.status} ${err.body?.code ?? ''} — ${err.message}`
-          : (err as Error).message ?? 'decide failed';
+      // v6.1 §P2.8 — the engine's decide is intentionally non-idempotent.
+      // A 409 here means someone (or a second tab) already decided this
+      // request. Render the "already processed" affordance and surface
+      // the row as resolved-unknown so the UI does not re-offer the
+      // buttons. The status arrives via the WS resolved frame moments
+      // later; the optimistic flip avoids the inter-frame flicker.
+      if (err instanceof ApiError && err.status === 409) {
+        this.status = 'unknown';
+        this.error = 'Already processed.';
+      } else {
+        this.error =
+          err instanceof ApiError
+            ? `${err.status} ${err.body?.code ?? ''} — ${err.message}`
+            : (err as Error).message ?? 'decide failed';
+      }
     } finally {
       this.busy = false;
     }
@@ -141,7 +152,13 @@ export class InlineApproval extends LitElement {
             ? 'Expired before a decision'
             : this.status === 'cancelled'
               ? 'Cancelled'
-              : this.status;
+              : this.status === 'unknown'
+                // v6.1 §P2.8 — ConflictError landed at decide time;
+                // the row was already resolved by another decider /
+                // tab. Surface the affordance directly so the user
+                // understands the buttons are gone on purpose.
+                ? 'Already processed'
+                : this.status;
     const tone =
       this.status === 'approved'
         ? 'text-green-700 dark:text-green-300'
