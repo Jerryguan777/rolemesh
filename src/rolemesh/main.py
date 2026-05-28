@@ -260,37 +260,79 @@ _safety_rpc_server: object | None = None
 _safety_thread_pool: object | None = None
 
 
-def _handle_agent_message_ipc(data: dict[str, object]) -> None:
+async def _handle_agent_message_ipc(data: dict[str, object]) -> None:
     """Handle one ``agent.*.messages`` NATS publish from the send_message tool.
 
-    Current behaviour: log the attempt and drop. The send_message tool
-    publishes to this subject when the agent calls it, but the tool
-    hard-codes ``chatJid=ctx.chat_jid`` (``rolemesh_tools.py:169``)
-    — meaning it can only ever target the agent's current conversation.
-    That conversation's natural output (``agent.*.results`` → ``_on_output``)
-    already delivers the final reply, so forwarding this IPC to the
-    channel gateway a SECOND time resulted in duplicate user-visible
-    replies. Previously a race-prone string-match dedup (``_ipc_sent_texts``)
-    tried to suppress the duplicate; removing the forward here removes
-    the duplicate at the source.
+    Two delivery regimes share this subject:
 
-    If the send_message tool signature gains a target chat_jid parameter
-    in the future (for cross-chat notifications / scheduled-task inbox /
-    agent-to-agent messaging), this function grows a branch: forward to
-    ``_send_via_coworker`` only when ``data["chatJid"] !=`` the source
-    coworker's currently-processed conversation. Until then the handler
-    is strictly log-and-drop.
+    Interactive turns: the agent's reply already flows through the
+    natural-output path (``agent.*.results`` → ``_on_output`` →
+    ``send_stream_chunk`` / ``send_message`` on the channel gateway).
+    Path β (this handler) was historically forwarding the same text a
+    second time — every Claude AssistantMessage echoes the content it
+    passed to ``send_message``, so users saw doubles. Commit a67d3e6
+    removed that forward; interactive turns are still log-and-drop here.
+
+    Scheduled-task turns: ``_run_task``'s ``_on_output`` only forwards
+    when the agent produces a non-empty final ``result``. Agents
+    typically just call ``send_message`` for "remind me at T" prompts
+    and produce no separate result — so path α is empty for them.
+    Without a forward here their message vanishes. The tool now stamps
+    ``isScheduledTask`` on the payload so this handler can route only
+    those into ``_send_via_coworker``; interactive turns still drop.
+
+    Cross-chat targeting (one agent's send_message landing on another
+    coworker's conversation) is still not supported — the tool hard-
+    codes ``chatJid=ctx.chat_jid``, so the forward target is always
+    the source coworker's own conversation. A future cross-chat feature
+    would need a real target parameter AND a routing branch here.
     """
     if data.get("type") != "message":
         return
-    if not data.get("chatJid") or not data.get("text"):
+    chat_jid = data.get("chatJid")
+    text = data.get("text")
+    if not chat_jid or not text:
+        return
+
+    if not data.get("isScheduledTask"):
+        # Interactive turn: natural-output path is the source of
+        # truth (see a67d3e6). Drop the IPC echo to avoid doubles.
+        logger.info(
+            "Dropped send_message IPC (redundant with natural output path)",
+            chat_jid=chat_jid,
+            source_group=data.get("groupFolder", ""),
+            text_preview=str(text)[:80],
+        )
+        return
+
+    # Scheduled-task turn: forward to the channel gateway. Without
+    # this, ``_run_task``'s empty-``result`` path leaves the user
+    # with no delivery at all.
+    source_group = str(data.get("groupFolder", ""))
+    claimed_coworker_id = data.get("coworkerId")
+    cw_state: CoworkerState | None = None
+    if isinstance(claimed_coworker_id, str) and claimed_coworker_id:
+        cw_state = _state.coworkers.get(claimed_coworker_id)
+    if cw_state is None and source_group:
+        for tenant in _state.tenants.values():
+            cw_state = _state.get_coworker_by_folder(tenant.id, source_group)
+            if cw_state is not None:
+                break
+    if cw_state is None:
+        logger.warning(
+            "Cannot route scheduled-task send_message IPC — coworker unresolved",
+            chat_jid=chat_jid,
+            source_group=source_group,
+            claimed_coworker_id=claimed_coworker_id,
+        )
         return
     logger.info(
-        "Dropped send_message IPC (redundant with natural output path)",
-        chat_jid=data["chatJid"],
-        source_group=data.get("groupFolder", ""),
-        text_preview=str(data["text"])[:80],
+        "Forwarding scheduled-task send_message IPC",
+        chat_jid=chat_jid,
+        coworker=cw_state.config.name,
+        text_preview=str(text)[:80],
     )
+    await _send_via_coworker(cw_state, str(chat_jid), str(text))
 
 
 @dataclass(frozen=True)
@@ -1137,7 +1179,7 @@ async def _start_nats_ipc_subscriptions(transport: NatsTransport, deps: _IpcDeps
     async def _handle_messages() -> None:
         async for msg in messages_sub.messages:
             try:
-                _handle_agent_message_ipc(json.loads(msg.data))
+                await _handle_agent_message_ipc(json.loads(msg.data))
                 await msg.ack()
             except Exception:
                 logger.exception("Error processing NATS IPC message")
