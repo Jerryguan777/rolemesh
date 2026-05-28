@@ -228,21 +228,54 @@ async def delete_channel_identity(
 ) -> bool:
     """Unbind one identity row; returns True iff a row was deleted.
 
-    Tenant + user filter on the query so a guess at someone else's
-    identity_id 404s instead of leaking row existence. Caller side
-    (WebUI handler) maps False to 404.
+    v6.1 §P1.4 contract (边界 table, row 3): same-transaction NULL of
+    ``conv.user_id`` on every 1:1 conversation the deleted identity
+    was the sole authorising binding for. Without that, a different
+    RoleMesh user who later re-links the same channel (the
+    employee-handover / shared-device scenario) inherits the prior
+    owner's stamp on the conv row — and every subsequent admission
+    short-circuits the "if conv.user_id is None" backfill, so the
+    agent runs B's request under A's identity. That's an
+    audit-attribution + Phase-2 self-approval bypass; clearing the
+    conv stamp here closes the gap at unbind time. The admission
+    side adds a second layer (see main.py's lazy-backfill condition).
+
+    Tenant + user filter on the DELETE so a guess at someone else's
+    identity_id 404s instead of leaking row existence. The conv
+    UPDATE is scoped to the SAME (tenant, channel_chat_id,
+    platform-typed binding) tuple plus the same ``user_id``, so a
+    misconfigured caller cannot use this helper to silently re-write
+    a conversation it didn't own.
     """
-    async with tenant_conn(tenant_id) as conn:
-        result = await conn.execute(
+    async with tenant_conn(tenant_id) as conn, conn.transaction():
+        row = await conn.fetchrow(
             """
             DELETE FROM user_channel_identities
              WHERE id = $1::uuid
                AND user_id = $2::uuid
                AND tenant_id = $3::uuid
+            RETURNING platform, channel_id
             """,
             identity_id, user_id, tenant_id,
         )
-    return result == "DELETE 1"
+        if row is None:
+            return False
+        await conn.execute(
+            """
+            UPDATE conversations
+               SET user_id = NULL
+             WHERE tenant_id = $1::uuid
+               AND user_id = $2::uuid
+               AND channel_chat_id = $3
+               AND channel_binding_id IN (
+                   SELECT id FROM channel_bindings
+                    WHERE tenant_id = $1::uuid
+                      AND channel_type = $4
+               )
+            """,
+            tenant_id, user_id, row["channel_id"], row["platform"],
+        )
+    return True
 
 
 def _record_to_identity(row: asyncpg.Record) -> ChannelIdentity:

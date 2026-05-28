@@ -25,6 +25,7 @@ import asyncpg
 import pytest
 
 from rolemesh.db import (
+    _get_admin_pool,
     consume_link_token,
     create_channel_identity,
     create_link_token,
@@ -213,6 +214,131 @@ async def test_unbind_then_relink_with_new_token_succeeds() -> None:
     # And only the new row is live.
     links = await list_channel_identities_for_user(uid, tid)
     assert [l.id for l in links] == [new_identity.id]
+
+
+async def test_delete_channel_identity_nulls_corresponding_conv_user_id() -> None:
+    """v6.1 §P1.4 / F1 — unbind a Telegram identity → NULL the
+    ``conv.user_id`` on every 1:1 conv pinned to that
+    ``(tenant, channel_chat_id, telegram-binding)`` tuple that was
+    carrying the now-unbound user.
+
+    Without this, a different RoleMesh user who later relinks the
+    same Telegram chat (employee handover / shared device) inherits
+    the prior owner's stamp on the conv row; the admission layer's
+    ``if conv.user_id is None`` short-circuit then never re-stamps,
+    and the agent ends up running B's request under A's identity —
+    breaks audit attribution and Phase-2 self-approval.
+    """
+    import json
+    tid, uid = await _seed_user("nullify-conv")
+    # Need real Coworker + channel_binding + conversation rows; the
+    # raw inserts below mirror what the orchestrator/webui would
+    # create. SQL not the high-level helpers to keep the test focused
+    # on the DELETE branch only.
+    pool = _get_admin_pool()
+    async with pool.acquire() as conn:
+        cw_id = await conn.fetchval(
+            "INSERT INTO coworkers (tenant_id, name, folder) "
+            "VALUES ($1::uuid, $2, $3) RETURNING id",
+            tid, "CW", f"folder-{uuid.uuid4().hex[:6]}",
+        )
+        binding_id = await conn.fetchval(
+            "INSERT INTO channel_bindings "
+            "(coworker_id, tenant_id, channel_type, credentials) "
+            "VALUES ($1::uuid, $2::uuid, $3, $4::jsonb) RETURNING id",
+            cw_id, tid, "telegram", json.dumps({"bot_token": "t"}),
+        )
+        conv_id = await conn.fetchval(
+            "INSERT INTO conversations "
+            "(tenant_id, coworker_id, channel_binding_id, "
+            " channel_chat_id, user_id) "
+            "VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5::uuid) "
+            "RETURNING id",
+            tid, cw_id, binding_id, "12345", uid,
+        )
+    # Also link the user → channel binding.
+    identity = await create_channel_identity(tid, "telegram", "12345", uid)
+
+    # Sanity: conv carries the user_id.
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT user_id FROM conversations WHERE id = $1::uuid", conv_id,
+        )
+    assert row["user_id"] is not None
+    assert str(row["user_id"]) == uid
+
+    # Unbind.
+    assert await delete_channel_identity(identity.id, uid, tid) is True
+
+    # Conv survives; user_id is NULL (the spec — "不删会话，保留历史").
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT user_id FROM conversations WHERE id = $1::uuid", conv_id,
+        )
+    assert row is not None, "conv row must NOT be deleted"
+    assert row["user_id"] is None, (
+        "delete_channel_identity must NULL the corresponding conv.user_id; "
+        "non-null leaks the unbound user's identity to the next relinker"
+    )
+
+
+async def test_delete_channel_identity_only_nulls_matching_conv() -> None:
+    """The NULL UPDATE is scoped tight: only convs in the SAME tenant,
+    the SAME channel_chat_id, AND pinned to a binding of the SAME
+    platform get cleared. A regression that drops one predicate would
+    over-clear (e.g. cross-channel) or leave a stale conv behind.
+
+    We seed two convs: one matches the unbind triple, one differs by
+    channel_chat_id. Only the first should be cleared.
+    """
+    import json
+    tid, uid = await _seed_user("scope-null")
+    pool = _get_admin_pool()
+    async with pool.acquire() as conn:
+        cw_id = await conn.fetchval(
+            "INSERT INTO coworkers (tenant_id, name, folder) "
+            "VALUES ($1::uuid, $2, $3) RETURNING id",
+            tid, "CW", f"folder-{uuid.uuid4().hex[:6]}",
+        )
+        binding_id = await conn.fetchval(
+            "INSERT INTO channel_bindings "
+            "(coworker_id, tenant_id, channel_type, credentials) "
+            "VALUES ($1::uuid, $2::uuid, $3, $4::jsonb) RETURNING id",
+            cw_id, tid, "telegram", json.dumps({"bot_token": "t"}),
+        )
+        match_conv = await conn.fetchval(
+            "INSERT INTO conversations "
+            "(tenant_id, coworker_id, channel_binding_id, "
+            " channel_chat_id, user_id) "
+            "VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5::uuid) "
+            "RETURNING id",
+            tid, cw_id, binding_id, "111", uid,
+        )
+        other_conv = await conn.fetchval(
+            "INSERT INTO conversations "
+            "(tenant_id, coworker_id, channel_binding_id, "
+            " channel_chat_id, user_id) "
+            "VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5::uuid) "
+            "RETURNING id",
+            tid, cw_id, binding_id, "999", uid,
+        )
+    identity = await create_channel_identity(tid, "telegram", "111", uid)
+
+    await delete_channel_identity(identity.id, uid, tid)
+
+    async with pool.acquire() as conn:
+        match_row = await conn.fetchrow(
+            "SELECT user_id FROM conversations WHERE id = $1::uuid",
+            match_conv,
+        )
+        other_row = await conn.fetchrow(
+            "SELECT user_id FROM conversations WHERE id = $1::uuid",
+            other_conv,
+        )
+    assert match_row["user_id"] is None
+    assert str(other_row["user_id"]) == uid, (
+        "conv with different channel_chat_id must NOT be cleared"
+    )
 
 
 async def test_delete_channel_identity_rejects_other_users_id() -> None:

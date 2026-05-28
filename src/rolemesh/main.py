@@ -721,13 +721,20 @@ async def _handle_incoming(
     if is_group and conv.requires_trigger and not cw_state.trigger_pattern.search(text.strip()):
         return  # Not for this coworker — skip silently
 
-    # v6.1 §P1.6 lazy backfill: a Telegram conv that existed before
-    # the identity model (or was created via web prior to a link)
-    # has ``user_id IS NULL``. Stamp it on the first admitted inbound
-    # so subsequent paths (main.py:782/980 etc.) read user_id
-    # directly. The in-memory dataclass is updated too so the rest
-    # of this turn is consistent without another DB hop.
-    if admitted_user_id is not None and conv.user_id is None:
+    # v6.1 §P1.6 lazy backfill + §P1.4 identity-reassignment
+    # correction (defense-in-depth complement to the same-transaction
+    # NULL inside ``delete_channel_identity``):
+    #
+    # The original spec talked about backfilling NULL → user_id on
+    # legacy convs. The stronger condition ``conv.user_id !=
+    # admitted_user_id`` also catches the employee-handover case
+    # where A unbound and B re-linked the same channel between
+    # turns: even if a future bug in the unbind path forgot to NULL
+    # the conv stamp, the admission layer here re-stamps it to the
+    # currently-resolved user. The conv ``channel_binding_id`` is
+    # not channel_type-mixed (binding ids are stable per channel),
+    # so a cross-channel comparison can never trigger this branch.
+    if admitted_user_id is not None and conv.user_id != admitted_user_id:
         await update_conversation_user_id(
             conv.id, admitted_user_id, tenant_id=conv.tenant_id
         )
