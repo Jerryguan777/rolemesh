@@ -1,0 +1,252 @@
+"""v6.1 §P1.4 — link_tokens / user_channel_identities behaviour.
+
+Companion to ``test_channel_identity_schema.py`` (which nails column
+shape + constraints). This file targets the *flow* the IM gateway and
+WebUI handlers depend on:
+
+- T1.1: atomic single-use consumption under concurrency.
+- T1.2: expiry + already-used rejection.
+- T1.4: unbind + re-link.
+- Plus collision behaviour for ``create_channel_identity``.
+
+No mocks; testcontainer Postgres. Concurrency uses
+``asyncio.gather`` over independent admin pool connections so the
+``UPDATE ... RETURNING`` race lives in the actual asyncpg + PG MVCC
+stack we'll see in production.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import uuid
+from datetime import UTC, datetime, timedelta
+
+import asyncpg
+import pytest
+
+from rolemesh.db import (
+    consume_link_token,
+    create_channel_identity,
+    create_link_token,
+    create_tenant,
+    create_user,
+    delete_channel_identity,
+    list_channel_identities_for_user,
+)
+
+pytestmark = pytest.mark.usefixtures("test_db")
+
+
+async def _seed_user(slug_tag: str) -> tuple[str, str]:
+    t = await create_tenant(name="T", slug=f"{slug_tag}-{uuid.uuid4().hex[:6]}")
+    u = await create_user(
+        tenant_id=t.id, name="U",
+        email=f"u-{uuid.uuid4().hex[:6]}@x.com",
+    )
+    return t.id, u.id
+
+
+# ---------------------------------------------------------------------------
+# create_link_token — shape
+# ---------------------------------------------------------------------------
+
+
+async def test_create_link_token_returns_long_url_safe_string() -> None:
+    """Tokens must be ≥ 22 URL-safe characters (design §P1.2). A
+    weaker token would burn entropy on guessing during the 10-minute
+    validity window.
+    """
+    tid, uid = await _seed_user("tok-shape")
+    token, exp = await create_link_token(uid, tid, "telegram")
+    # Length / character set probes — URL-safe base64 is [A-Za-z0-9_-].
+    assert len(token) >= 22, f"token too short: {len(token)} chars"
+    assert all(c.isalnum() or c in "_-" for c in token), token
+    # expires_at is in the future (allow modest scheduler skew).
+    assert exp > datetime.now(UTC)
+
+
+async def test_create_link_token_uniqueness_under_burst() -> None:
+    """Tokens are random; two consecutive calls must not collide.
+    Without uniqueness one user could not reissue an in-flight token.
+    """
+    tid, uid = await _seed_user("tok-uniq")
+    seen: set[str] = set()
+    for _ in range(20):
+        token, _ = await create_link_token(uid, tid, "telegram")
+        assert token not in seen, "secrets.token_urlsafe collision — RNG broken?"
+        seen.add(token)
+
+
+# ---------------------------------------------------------------------------
+# consume_link_token — T1.1, T1.2
+# ---------------------------------------------------------------------------
+
+
+async def test_consume_link_token_first_caller_wins_concurrent_race() -> None:
+    """T1.1 — Two concurrent ``/start <token>`` deliveries on the
+    same token result in **exactly one** successful consumer.
+
+    The check-and-mark is one statement; MVCC + UNIQUE serialisation
+    are what guarantee it. We exercise that by issuing both UPDATEs
+    on independent connections through ``asyncio.gather`` so the
+    race actually overlaps in time.
+    """
+    tid, uid = await _seed_user("tok-race")
+    token, _ = await create_link_token(uid, tid, "telegram")
+
+    # Two parallel consumers on independent pool acquisitions.
+    results = await asyncio.gather(
+        consume_link_token(token),
+        consume_link_token(token),
+    )
+    successes = [r for r in results if r is not None]
+    failures = [r for r in results if r is None]
+    assert len(successes) == 1, f"expected 1 winner, got {len(successes)}: {results}"
+    assert len(failures) == 1
+    user_id, tenant_id, platform = successes[0]
+    assert user_id == uid
+    assert tenant_id == tid
+    assert platform == "telegram"
+
+
+async def test_consume_link_token_rejects_already_used() -> None:
+    """T1.2a — A second consume on a previously consumed token returns
+    None. Otherwise a leaked/replayed deep-link could re-bind."""
+    tid, uid = await _seed_user("tok-used")
+    token, _ = await create_link_token(uid, tid, "telegram")
+    first = await consume_link_token(token)
+    assert first is not None
+    second = await consume_link_token(token)
+    assert second is None, "replay must not yield a second binding"
+
+
+async def test_consume_link_token_rejects_expired() -> None:
+    """T1.2b — A token whose ``expires_at`` is in the past returns
+    None. We sidestep the 10-minute default by issuing with a -1s TTL
+    so ``expires_at`` lands strictly before ``now()`` at consume time.
+    """
+    tid, uid = await _seed_user("tok-exp")
+    # ttl_seconds=-1 ⇒ expires_at = now() - 1s; row is born expired.
+    token, _ = await create_link_token(uid, tid, "telegram", ttl_seconds=-1)
+    result = await consume_link_token(token)
+    assert result is None, "expired token must not consume"
+
+
+async def test_consume_link_token_unknown_token_returns_none() -> None:
+    """A bogus token returns None — never a row from a different
+    user. Defends against typo + targeted guess in equal measure."""
+    result = await consume_link_token("not-a-real-token-" + uuid.uuid4().hex)
+    assert result is None
+
+
+async def test_consume_link_token_boundary_at_expiry() -> None:
+    """A token whose ``expires_at == now()`` must be rejected. Catches
+    the off-by-one mutation ``expires_at > now() → expires_at >= now()``
+    (the spec is strict-greater so a token expiring this instant is
+    *not* consumable).
+    """
+    tid, uid = await _seed_user("tok-bnd")
+    # ttl=0 ⇒ expires_at == now() at insert, which is ≤ now() at
+    # consume time. The strict-> check must fail.
+    token, _ = await create_link_token(uid, tid, "telegram", ttl_seconds=0)
+    result = await consume_link_token(token)
+    assert result is None, "token at the boundary must be rejected"
+
+
+# ---------------------------------------------------------------------------
+# create_channel_identity — collision and tenant scoping
+# ---------------------------------------------------------------------------
+
+
+async def test_create_channel_identity_collision_raises_unique_violation() -> None:
+    """Two link attempts for the same Telegram account must collide.
+    The caller (Telegram gateway) maps this to the user-facing
+    "already linked" reply.
+    """
+    tid, uid_a = await _seed_user("ci-col-a")
+    _, uid_b = await _seed_user("ci-col-b")
+    # Same tenant so the UNIQUE bites; cross-tenant is covered by the
+    # schema test file.
+    await create_channel_identity(tid, "telegram", "777", uid_a)
+    with pytest.raises(asyncpg.UniqueViolationError):
+        await create_channel_identity(tid, "telegram", "777", uid_b)
+
+
+# ---------------------------------------------------------------------------
+# list / delete + unbind→re-link round trip (T1.4)
+# ---------------------------------------------------------------------------
+
+
+async def test_list_channel_identities_scoped_to_user_and_tenant() -> None:
+    """The lister filters by both ``user_id`` and ``tenant_id`` so a
+    Web caller cannot read another user's links. A future drift that
+    drops the user predicate would surface as the second user seeing
+    the first's link in the assertion below.
+    """
+    tid_a, uid_a = await _seed_user("list-a")
+    tid_b, uid_b = await _seed_user("list-b")
+    await create_channel_identity(tid_a, "telegram", "alpha", uid_a)
+    await create_channel_identity(tid_b, "telegram", "beta", uid_b)
+    a_links = await list_channel_identities_for_user(uid_a, tid_a)
+    b_links = await list_channel_identities_for_user(uid_b, tid_b)
+    assert {l.channel_id for l in a_links} == {"alpha"}
+    assert {l.channel_id for l in b_links} == {"beta"}
+
+
+async def test_unbind_then_relink_with_new_token_succeeds() -> None:
+    """T1.4 — After DELETEing an identity, the user can mint a fresh
+    link_token, consume it, and bind the same Telegram account again.
+    Without this, a stray click on "disconnect" would soft-brick the
+    user.
+    """
+    tid, uid = await _seed_user("relink")
+    identity = await create_channel_identity(tid, "telegram", "12345", uid)
+    # Unbind.
+    assert await delete_channel_identity(identity.id, uid, tid) is True
+    # Mint + consume a brand-new token and re-bind.
+    token, _ = await create_link_token(uid, tid, "telegram")
+    consumed = await consume_link_token(token)
+    assert consumed is not None
+    new_identity = await create_channel_identity(tid, "telegram", "12345", uid)
+    assert new_identity.id != identity.id
+    # And only the new row is live.
+    links = await list_channel_identities_for_user(uid, tid)
+    assert [l.id for l in links] == [new_identity.id]
+
+
+async def test_delete_channel_identity_rejects_other_users_id() -> None:
+    """Probing another user's identity_id from your own session must
+    not delete — returns False so the WebUI handler 404s.
+    """
+    tid, uid_a = await _seed_user("del-a")
+    _, uid_b = await _seed_user("del-b")
+    identity = await create_channel_identity(tid, "telegram", "555", uid_a)
+    deleted = await delete_channel_identity(identity.id, uid_b, tid)
+    assert deleted is False, "user B must not be able to delete user A's link"
+    # And the row really still exists.
+    links = await list_channel_identities_for_user(uid_a, tid)
+    assert any(l.id == identity.id for l in links)
+
+
+# ---------------------------------------------------------------------------
+# Sanity: an unexpired but used token does NOT come back to life on
+# a near-miss WHERE-clause mutation
+# ---------------------------------------------------------------------------
+
+
+async def test_used_token_with_future_expiry_still_rejected() -> None:
+    """Mutation defence: if a future hand-edit changes the consume
+    WHERE clause from ``used_at IS NULL AND expires_at > now()`` to
+    just ``expires_at > now()``, a previously-used but unexpired token
+    would suddenly be re-consumable. This test pins that down.
+    """
+    tid, uid = await _seed_user("mut-defense")
+    token, exp = await create_link_token(uid, tid, "telegram", ttl_seconds=600)
+    # First consume succeeds.
+    first = await consume_link_token(token)
+    assert first is not None
+    # Token still has plenty of expires_at runway:
+    assert exp - datetime.now(UTC) > timedelta(seconds=30)
+    # But replay still rejected because used_at is non-null.
+    second = await consume_link_token(token)
+    assert second is None

@@ -214,6 +214,22 @@ class ChannelBinding:
     bot_display_name: str | None = None
     status: str = "active"
     created_at: str = ""
+    # Platform-native bot handle (Telegram @username, Slack app
+    # name, ...). Populated by the gateway on connect — see
+    # ``rolemesh.db.chat.update_channel_binding_bot_username``.
+    bot_username: str | None = None
+
+
+@dataclass(frozen=True)
+class ChannelIdentity:
+    """A (user, platform, channel_id) link record (v6.1 §P1.2)."""
+
+    id: str  # UUID
+    tenant_id: str
+    user_id: str
+    platform: str
+    channel_id: str
+    created_at: str = ""
 
 
 @dataclass

@@ -633,6 +633,16 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             UNIQUE (coworker_id, channel_type)
         )
     """)
+    # v6.1 §P1.4: persist the platform-native bot handle (Telegram
+    # @username, Slack app name, ...) so the WebUI can construct the
+    # ``https://t.me/<bot>?start=<token>`` deep-link without an
+    # extra runtime hop to the platform. Populated by the gateway
+    # on bot connect (``bot.get_me().username``); nullable because
+    # the row is created before the gateway has talked to the
+    # platform.
+    await conn.execute(
+        "ALTER TABLE channel_bindings ADD COLUMN IF NOT EXISTS bot_username TEXT"
+    )
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS conversations (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -41,6 +41,7 @@ __all__ = [
     "set_session",
     "store_message",
     "update_channel_binding",
+    "update_channel_binding_bot_username",
     "update_conversation_last_invocation",
     "update_conversation_user_id",
 ]
@@ -64,7 +65,7 @@ async def create_channel_binding(
             """
             INSERT INTO channel_bindings (coworker_id, tenant_id, channel_type, credentials, bot_display_name)
             VALUES ($1::uuid, $2::uuid, $3, $4::jsonb, $5)
-            RETURNING id, coworker_id, tenant_id, channel_type, credentials, bot_display_name, status, created_at
+            RETURNING id, coworker_id, tenant_id, channel_type, credentials, bot_display_name, status, created_at, bot_username
             """,
             coworker_id,
             tenant_id,
@@ -87,7 +88,28 @@ def _record_to_channel_binding(row: asyncpg.Record) -> ChannelBinding:
         bot_display_name=row["bot_display_name"],
         status=row["status"] or "active",
         created_at=row["created_at"].isoformat() if row["created_at"] else "",
+        bot_username=row.get("bot_username"),
     )
+
+
+async def update_channel_binding_bot_username(
+    binding_id: str, bot_username: str
+) -> None:
+    """Persist the platform-native bot handle on connect (v6.1 §P1.4).
+
+    Called by the gateway when ``bot.get_me().username`` resolves so
+    the WebUI can synthesise a Telegram deep-link URL on the next
+    ``POST /api/v1/me/channel-links/telegram``. Cross-tenant by id is
+    safe because the row is uniquely keyed; bot_username is not a
+    privileged field (it's published in the @handle the user already
+    sees).
+    """
+    async with admin_conn() as conn:
+        await conn.execute(
+            "UPDATE channel_bindings SET bot_username = $1 WHERE id = $2::uuid",
+            bot_username,
+            binding_id,
+        )
 
 
 async def get_channel_binding(binding_id: str, *, tenant_id: str) -> ChannelBinding | None:
