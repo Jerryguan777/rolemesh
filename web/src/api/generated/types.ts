@@ -1806,10 +1806,12 @@ export interface components {
         /**
          * @description `completed` is the terminal state for `once` schedules after
          *     they've fired. `paused` is a manual halt — the row stays but
-         *     the orchestrator skips it.
+         *     the orchestrator skips it. `cancelled` is the soft-cancel
+         *     terminal set by `cancel_tasks_for_user` (v6.1 §P1.8) when
+         *     the task's creator is removed from the tenant.
          * @enum {string}
          */
-        ScheduleStatus: "active" | "paused" | "completed";
+        ScheduleStatus: "active" | "paused" | "completed" | "cancelled";
         /**
          * @description `isolated` — each fire spawns a fresh agent without prior
          *     context. `group` — reuses the bound conversation so memory

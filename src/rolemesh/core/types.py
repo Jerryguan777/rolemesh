@@ -322,6 +322,13 @@ class ScheduledTask:
     last_result: str | None = None
     status: Literal["active", "paused", "completed", "cancelled"] = "active"
     created_at: str = ""
+    # v6.1 §P1.7 — RoleMesh user whose turn triggered the schedule.
+    # NULL on rows created before the migration; NULL after a hard
+    # ``DELETE FROM users`` (ON DELETE SET NULL on the FK). The
+    # scheduler stamps ``AgentInput.user_id`` from this field so a
+    # task's run-time turn carries the originating user identity
+    # into the approval / audit machinery (Phase 2).
+    created_by_user_id: str | None = None
     # Legacy compat fields (deprecated)
     group_folder: str = ""
     chat_jid: str = ""

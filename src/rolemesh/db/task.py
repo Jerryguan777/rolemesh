@@ -30,12 +30,25 @@ __all__ = [
 
 
 async def create_task(task: ScheduledTask) -> None:
-    """Create a new scheduled task."""
+    """Create a new scheduled task.
+
+    ``task.created_by_user_id`` lands on the DB row directly (v6.1
+    §P1.7). The orchestrator-side scheduler reads it back when the
+    task fires so the run's ``AgentInput.user_id`` carries the
+    originating user identity into the approval / audit chain.
+    """
     async with tenant_conn(task.tenant_id) as conn:
         await conn.execute(
             """
-            INSERT INTO scheduled_tasks (id, tenant_id, coworker_id, conversation_id, prompt, schedule_type, schedule_value, context_mode, next_run, status, created_at)
-            VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8, $9, $10, now())
+            INSERT INTO scheduled_tasks (
+                id, tenant_id, coworker_id, conversation_id, prompt,
+                schedule_type, schedule_value, context_mode, next_run,
+                status, created_at, created_by_user_id
+            )
+            VALUES (
+                $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6, $7, $8,
+                $9, $10, now(), $11::uuid
+            )
             """,
             task.id,
             task.tenant_id,
@@ -47,6 +60,7 @@ async def create_task(task: ScheduledTask) -> None:
             task.context_mode or "isolated",
             _to_dt(task.next_run),
             task.status,
+            task.created_by_user_id,
         )
 
 
@@ -56,6 +70,7 @@ def _record_to_scheduled_task(row: asyncpg.Record) -> ScheduledTask:
     lr = row["last_run"]
     ca = row["created_at"]
     conv_id = row.get("conversation_id")
+    creator = row.get("created_by_user_id")
     return ScheduledTask(
         id=str(row["id"]),
         tenant_id=str(row["tenant_id"]),
@@ -70,6 +85,7 @@ def _record_to_scheduled_task(row: asyncpg.Record) -> ScheduledTask:
         last_result=row["last_result"],
         status=row["status"],
         created_at=ca.isoformat() if ca else "",
+        created_by_user_id=str(creator) if creator is not None else None,
     )
 
 

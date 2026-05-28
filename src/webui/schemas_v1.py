@@ -1023,7 +1023,7 @@ WsClientFrameModel = (
 
 
 ScheduleType = Literal["cron", "interval", "once"]
-ScheduleStatus = Literal["active", "paused", "completed"]
+ScheduleStatus = Literal["active", "paused", "completed", "cancelled"]
 ScheduleContextMode = Literal["group", "isolated"]
 
 

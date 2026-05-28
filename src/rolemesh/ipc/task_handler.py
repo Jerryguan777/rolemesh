@@ -138,6 +138,19 @@ async def process_task_ipc(
 
         conversation_id = str(data.get("conversationId", "")) or None
 
+        # v6.1 §P1.7: forward the originating user_id. The tool side
+        # (``agent_runner.tools.rolemesh_tools.schedule_task``) passes
+        # ``ctx.user_id``; bootstrap / system actors may legitimately
+        # leave it empty (no user behind the turn) — store NULL in
+        # that case so downstream code can distinguish "system" from
+        # "user X" rather than misattributing.
+        raw_user_id = data.get("userId")
+        created_by_user_id: str | None
+        if isinstance(raw_user_id, str) and raw_user_id:
+            created_by_user_id = raw_user_id
+        else:
+            created_by_user_id = None
+
         await create_task(
             ScheduledTask(
                 id=task_id,
@@ -151,6 +164,7 @@ async def process_task_ipc(
                 next_run=next_run,
                 status="active",
                 created_at=datetime.now(UTC).isoformat(),
+                created_by_user_id=created_by_user_id,
             )
         )
         logger.info(

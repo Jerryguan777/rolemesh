@@ -244,6 +244,11 @@ async def schedule_task(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
             "groupFolder": ctx.group_folder,
             "tenantId": ctx.tenant_id,
             "coworkerId": ctx.coworker_id,
+            # v6.1 §P1.7: forward the RoleMesh user behind this turn.
+            # The orchestrator's task handler writes it onto
+            # ``scheduled_tasks.created_by_user_id`` so the run-time
+            # ``AgentInput.user_id`` can be reconstructed at fire time.
+            "userId": ctx.user_id,
             "timestamp": datetime.now().isoformat(),
         },
     )

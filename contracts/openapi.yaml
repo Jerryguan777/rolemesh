@@ -2955,11 +2955,13 @@ components:
 
     ScheduleStatus:
       type: string
-      enum: [active, paused, completed]
+      enum: [active, paused, completed, cancelled]
       description: |
         `completed` is the terminal state for `once` schedules after
         they've fired. `paused` is a manual halt — the row stays but
-        the orchestrator skips it.
+        the orchestrator skips it. `cancelled` is the soft-cancel
+        terminal set by `cancel_tasks_for_user` (v6.1 §P1.8) when
+        the task's creator is removed from the tenant.
 
     ScheduleContextMode:
       type: string
