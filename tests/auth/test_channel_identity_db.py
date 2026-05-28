@@ -32,6 +32,7 @@ from rolemesh.db import (
     create_user,
     delete_channel_identity,
     list_channel_identities_for_user,
+    resolve_user_from_channel_sender,
 )
 
 pytestmark = pytest.mark.usefixtures("test_db")
@@ -232,6 +233,67 @@ async def test_delete_channel_identity_rejects_other_users_id() -> None:
 # Sanity: an unexpired but used token does NOT come back to life on
 # a near-miss WHERE-clause mutation
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# resolve_user_from_channel_sender — T1.5, T1.6
+# ---------------------------------------------------------------------------
+
+
+async def test_resolve_returns_user_id_on_hit() -> None:
+    """T1.5 — A row exists for (tenant, telegram, channel_id):
+    the helper returns the user_id. The query is keyed by the
+    indexed UNIQUE so a hit is one B-tree probe, not a scan; we
+    don't assert plan shape here (EXPLAIN is brittle across PG
+    versions) but the test does pin functional correctness.
+    """
+    tid, uid = await _seed_user("resolve-hit")
+    await create_channel_identity(tid, "telegram", "1234", uid)
+    assert (
+        await resolve_user_from_channel_sender(tid, "telegram", "1234") == uid
+    )
+
+
+async def test_resolve_returns_none_on_miss() -> None:
+    """T1.6 — A sender with no linkage returns None (the caller
+    decides what to do; admission rejects with guidance text)."""
+    tid, _ = await _seed_user("resolve-miss")
+    assert (
+        await resolve_user_from_channel_sender(tid, "telegram", "9999") is None
+    )
+
+
+async def test_resolve_scoped_by_tenant() -> None:
+    """A sender linked under tenant A is NOT visible from tenant B.
+    Catches a mutation that drops the ``tenant_id`` predicate
+    (which would turn the lookup into a cross-tenant identity leak).
+    """
+    tid_a, uid_a = await _seed_user("resolve-scope-a")
+    tid_b, _ = await _seed_user("resolve-scope-b")
+    await create_channel_identity(tid_a, "telegram", "1010", uid_a)
+    # Same channel_id, different tenant — must miss.
+    assert (
+        await resolve_user_from_channel_sender(tid_b, "telegram", "1010")
+        is None
+    )
+    # Same call from the right tenant hits.
+    assert (
+        await resolve_user_from_channel_sender(tid_a, "telegram", "1010")
+        == uid_a
+    )
+
+
+async def test_resolve_scoped_by_platform() -> None:
+    """Linking on Telegram does NOT grant Slack admission (and vice
+    versa). The platform predicate must be on the query — a future
+    drop would let one platform's identity authorize the other.
+    """
+    tid, uid = await _seed_user("resolve-plat")
+    await create_channel_identity(tid, "telegram", "1234", uid)
+    # Same channel_id literal, different platform — must miss.
+    assert (
+        await resolve_user_from_channel_sender(tid, "slack", "1234") is None
+    )
 
 
 async def test_used_token_with_future_expiry_still_rejected() -> None:

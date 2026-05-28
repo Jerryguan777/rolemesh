@@ -94,6 +94,7 @@ from rolemesh.db import (
     list_coworker_mcp_configs,
     set_session,
     update_conversation_last_invocation,
+    update_conversation_user_id,
     update_tenant_message_cursor,
 )
 from rolemesh.db import (
@@ -645,6 +646,18 @@ async def _handle_incoming(
             )
             if admitted_user_id is None:
                 return  # admission denied — guidance reply already sent
+            # v6.1 §P1.6 lazy backfill: legacy conversations created
+            # before the identity model existed have ``user_id IS
+            # NULL``; the first admitted inbound stamps the
+            # conversation. Subsequent paths (main.py:782/980 etc.)
+            # then read ``conv.user_id`` directly. We update the
+            # in-memory dataclass too so the rest of this turn is
+            # consistent without another DB hop.
+            if conv.user_id is None:
+                await update_conversation_user_id(
+                    conv.id, admitted_user_id, tenant_id=conv.tenant_id
+                )
+                conv.user_id = admitted_user_id
 
     # Store message
     await db_store_message(
