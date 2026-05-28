@@ -20,6 +20,8 @@ operations. Cross-user identity access is prevented at the DB layer
 
 from __future__ import annotations
 
+import uuid as _uuid
+
 from fastapi import APIRouter, Depends, Response
 
 from rolemesh.auth.provider import AuthenticatedUser
@@ -34,6 +36,32 @@ from webui.schemas_v1 import ChannelLinkIdentity, ChannelLinkToken
 from webui.v1.errors import raise_error_response
 
 router = APIRouter(tags=["Auth"])
+
+
+def _require_real_user(user: AuthenticatedUser) -> None:
+    """Reject the single-token ``ADMIN_BOOTSTRAP_TOKEN`` actor.
+
+    The bootstrap actor's ``user_id`` is the sentinel string
+    ``"bootstrap"`` — not a UUID, so the IM identity tables (UUID FK)
+    can't carry rows for it. The flow only makes sense for real,
+    DB-backed users; surface that with a 422 + a hint instead of
+    blowing up on the UUID cast.
+
+    Bootstrap mode is supported by ``BOOTSTRAP_USERS`` (a JSON
+    multi-user map whose user_ids are derived via uuid5 and persisted
+    as real ``users`` rows) — that path works fine through here.
+    """
+    try:
+        _uuid.UUID(user.user_id)
+    except (ValueError, AttributeError):
+        raise_error_response(
+            "ACTOR_NOT_LINKABLE",
+            "The bootstrap admin token has no real user record; "
+            "linking IM channels requires logging in as a real user. "
+            "Configure BOOTSTRAP_USERS or use OIDC.",
+            status_code=422,
+            details={"actor": user.user_id},
+        )
 
 
 def _build_deep_link(bot_username: str | None, token: str) -> str | None:
@@ -66,6 +94,7 @@ async def issue_telegram_link_token(
     so the SPA can render a "no Telegram bot configured for this
     tenant" hint instead of producing a dangling token.
     """
+    _require_real_user(user)
     bindings = await get_channel_bindings_for_tenant(
         user.tenant_id, "telegram"
     )
@@ -110,6 +139,7 @@ async def list_telegram_links(
     (not a single object) anticipates decision #13 — one user can
     bind multiple Telegram accounts.
     """
+    _require_real_user(user)
     identities = await list_channel_identities_for_user(
         user.user_id, user.tenant_id
     )
@@ -140,6 +170,7 @@ async def unlink_channel_identity(
     handler cannot leak the existence of another user's link via a
     different status code.
     """
+    _require_real_user(user)
     deleted = await delete_channel_identity(
         identity_id, user.user_id, user.tenant_id
     )
