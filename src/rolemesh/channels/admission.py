@@ -82,7 +82,7 @@ async def admit_telegram_1on1(
         return user_id
     try:
         await gateway.send_message(binding_id, chat_id, ADMISSION_GUIDE_TEXT)
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception(
             "admission_guidance_send_failed",
             binding_id=binding_id,

@@ -53,7 +53,7 @@ async def _short_circuit_group(update: Update) -> bool:
         return False
     try:
         await chat.send_message(GROUP_NOT_SUPPORTED_TEXT)
-    except Exception:  # noqa: BLE001
+    except Exception:
         # Sending the guidance reply is best-effort — the short-
         # circuit must still drop the message even if Telegram is
         # transiently flaky.
@@ -317,7 +317,7 @@ class _BotInstance:
             for bid in self._binding_ids:
                 try:
                     await update_channel_binding_bot_username(bid, me.username)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.exception(
                         "Failed to persist bot_username", binding_id=bid
                     )
@@ -400,7 +400,7 @@ class TelegramGateway:
                     await update_channel_binding_bot_username(
                         binding.id, existing_bot._bot_username
                     )
-                except Exception:  # noqa: BLE001
+                except Exception:
                     logger.exception(
                         "Failed to persist bot_username on binding add",
                         binding_id=binding.id,
