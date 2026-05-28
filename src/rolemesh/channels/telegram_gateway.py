@@ -10,10 +10,16 @@ from __future__ import annotations
 import contextlib
 from typing import TYPE_CHECKING
 
+import asyncpg
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 from rolemesh.core.logger import get_logger
+from rolemesh.db import (
+    consume_link_token,
+    create_channel_identity,
+    update_channel_binding_bot_username,
+)
 
 if TYPE_CHECKING:
     from telegram import Bot, Update
@@ -25,6 +31,80 @@ if TYPE_CHECKING:
 logger = get_logger()
 
 _MAX_LENGTH = 4096
+
+
+# v6.1 §P1.4 link guidance — kept as constants so tests can match
+# the exact wire content and a future copy edit is one diff away.
+_LINK_GUIDE_MISSING_TOKEN = (
+    "Open RoleMesh Web → Settings → Connected channels to start the "
+    "link flow, then send /start with the token shown there."
+)
+_LINK_REJECTED_TEXT = (
+    "Link token invalid or expired. Please restart the flow from Web."
+)
+_LINK_ALREADY_BOUND_TEXT = (
+    "This Telegram account is already linked to another RoleMesh "
+    "account. Please unlink it from Web first."
+)
+_LINK_SUCCESS_PREFIX = "Linked"
+
+
+async def _handle_start_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """``/start [<token>]`` — Telegram side of the WebUI link flow.
+
+    Registered as a ``CommandHandler`` at the gateway so unlinked
+    senders can complete the binding *before* admission (which would
+    otherwise deny them). The token carries its own (user_id,
+    tenant_id), so no per-bot tenant lookup is needed here.
+
+    Module-level (not a closure) so the link logic is testable
+    without spinning up a live Telegram ``Application``.
+    """
+    chat = update.effective_chat
+    user = update.effective_user
+    if chat is None or user is None:
+        return
+    args = context.args or []
+    if not args:
+        await chat.send_message(_LINK_GUIDE_MISSING_TOKEN)
+        return
+    token = args[0]
+    channel_id = str(user.id)
+    consumed = await consume_link_token(token)
+    if consumed is None:
+        # Atomic UPDATE returned no row → token was already used,
+        # expired, or unknown. We deliberately collapse the three so
+        # a leaked-and-replayed token cannot leak its prior owner via
+        # a distinguishing error message.
+        await chat.send_message(_LINK_REJECTED_TEXT)
+        logger.info("telegram_link_token_rejected", channel_id=channel_id)
+        return
+    user_id, tenant_id, _ = consumed
+    try:
+        await create_channel_identity(
+            tenant_id, "telegram", channel_id, user_id
+        )
+    except asyncpg.UniqueViolationError:
+        # Token is already marked used by the atomic UPDATE above —
+        # the correct outcome, since the user must unbind in Web and
+        # restart the flow with a fresh token.
+        await chat.send_message(_LINK_ALREADY_BOUND_TEXT)
+        logger.info(
+            "telegram_link_unique_violation",
+            channel_id=channel_id,
+            tenant_id=tenant_id,
+        )
+        return
+    display = user.first_name or user.username or channel_id
+    await chat.send_message(f"✅ {_LINK_SUCCESS_PREFIX} ({display}).")
+    logger.info(
+        "telegram_link_bound",
+        tenant_id=tenant_id,
+        user_id=user_id,
+        channel_id=channel_id,
+    )
 
 
 async def _send_telegram_message(bot: Bot, chat_id: str | int, text: str) -> None:
@@ -153,6 +233,14 @@ class _BotInstance:
             app.add_handler(MessageHandler(filt, _media_handler))
 
         # Commands
+        # v6.1 §P1.4: ``/start <token>`` MUST be registered before the
+        # generic TEXT MessageHandler so an unlinked sender can
+        # complete the link without being admission-denied. python-
+        # telegram-bot dispatches CommandHandler before MessageHandler
+        # within the same group; registration order here keeps the
+        # intent explicit even if PTB internals change.
+        app.add_handler(CommandHandler("start", _handle_start_command))
+
         async def _cmd_chatid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if update.effective_chat is None:
                 return
@@ -179,6 +267,21 @@ class _BotInstance:
         await app.initialize()
         me = await app.bot.get_me()
         self._bot_username = me.username
+        # v6.1 §P1.4: persist the @handle so the WebUI can synthesise
+        # ``t.me/<bot>?start=<token>`` deep-links without an extra hop
+        # to Telegram. Every binding currently served by this bot
+        # token shares the same @username (multiple coworkers can pool
+        # one bot token). Best-effort — gateway start must not fail if
+        # the DB is briefly unavailable; the value re-syncs on the
+        # next reconnect.
+        if me.username:
+            for bid in self._binding_ids:
+                try:
+                    await update_channel_binding_bot_username(bid, me.username)
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "Failed to persist bot_username", binding_id=bid
+                    )
         logger.info(
             "Telegram bot connected",
             username=me.username,
@@ -249,6 +352,20 @@ class TelegramGateway:
         if existing_bot is not None:
             # Reuse existing bot instance — just register this binding_id
             existing_bot.add_binding_id(binding.id, binding.bot_display_name)
+            # v6.1 §P1.4: the new binding inherits the live bot's
+            # @handle so the WebUI can build a deep-link the moment
+            # the binding is created (instead of waiting for the next
+            # gateway restart).
+            if existing_bot._bot_username:
+                try:
+                    await update_channel_binding_bot_username(
+                        binding.id, existing_bot._bot_username
+                    )
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "Failed to persist bot_username on binding add",
+                        binding_id=binding.id,
+                    )
             logger.info(
                 "Telegram binding added to existing bot",
                 binding_id=binding.id,
