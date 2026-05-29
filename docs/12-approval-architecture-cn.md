@@ -1,5 +1,12 @@
 # 审批模块架构
 
+> **v6.1 (2026-05-28) 状态变更——已落地：**
+> - 审批模型收敛为**自审**：`resolved_approvers = [requester]`，三级 fallback 链已删除。详见 [`design/auth-approval-v6.md`](design/auth-approval-v6.md)。
+> - `tenants.approval_default_mode` 列与配置已删除；未命中策略的 proposal 走单一 default-allow 路径，并落 `source='auto_execute'` 审计行。下方"每租户默认值 → approval_default_mode"小节为**遗留文本**，保留以便对照历史。
+> - Web 卡片 + 按钮、Telegram InlineKeyboard 按钮已上线；NL 文本永远不能触发决策（INV-7）。
+> - `approver_user_ids` 列保留作 SoD 接缝，但已从 API/UI 移除。
+> - safety 触发的审批路径**不自审**（仍用 `_tenant_owner_ids`，决策 #12）。
+
 本文档介绍 RoleMesh 的人工介入审批模块——一种允许管理员在不修改权限模型的前提下，将特定的外部 MCP 工具调用置于审核步骤之后才能执行的机制。
 
 文档涵盖了为什么该模块是策略驱动而非权限驱动、考虑过哪些设计以及为何被否决、容器侧 hook 与 orchestrator 侧引擎之间的职责拆分，以及状态机所提供的并发与崩溃恢复保证。

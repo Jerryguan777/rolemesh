@@ -1,5 +1,12 @@
 # Approval Module Architecture
 
+> **v6.1 (2026-05-28) — shipped:**
+> - Approval model collapses to **self-approval**: `resolved_approvers = [requester]`; the legacy three-tier fallback chain is gone. See [`design/auth-approval-v6.md`](design/auth-approval-v6.md).
+> - The `tenants.approval_default_mode` column and its setting are removed. A proposal that matches no policy now takes the single default-allow path and writes an audit row with `source='auto_execute'`. The "Per-tenant defaults → `approval_default_mode`" subsection below is **historical context** kept for reference.
+> - Web cards with action buttons and Telegram InlineKeyboard buttons are live; natural-language text never decides an approval (INV-7).
+> - The `approver_user_ids` column is retained as a future Separation-of-Duties seam but is no longer surfaced in the API or UI.
+> - The safety-driven approval path **does not** self-approve (it still resolves to `_tenant_owner_ids`, decision #12).
+
 This document explains RoleMesh's human-in-the-loop approval module — the mechanism that lets administrators gate specific external MCP tool calls behind a review step, without modifying the permission model.
 
 It covers why the module is policy-driven instead of permission-driven, which designs were considered and rejected, the split between the container-side hook and the orchestrator-side engine, and the concurrency / crash-recovery guarantees the state machine provides.
