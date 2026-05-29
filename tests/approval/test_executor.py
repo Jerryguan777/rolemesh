@@ -207,6 +207,67 @@ class TestApprovedExecution:
         # Both actions were attempted (best-effort batch).
         assert len(recorder.requests) == 2
 
+    async def test_execution_started_message_sent_before_mcp_call(
+        self, proxy_base
+    ) -> None:
+        """T2a.6 — v6.1 §P2.5. The worker must emit a 'starting
+        execution' line to the originating conversation **between**
+        the successful claim and the first MCP call. We assert two
+        invariants:
+
+        1. ``ch.sent`` for the origin conv contains a 'starting'
+           message before the execution-report line. Ordering
+           catches a future refactor that defers the message to
+           after the batch (which would re-introduce the silent
+           multi-minute window the design closes).
+        2. The MCP proxy was hit exactly once (the started message
+           must not duplicate the execution).
+        """
+        base, recorder = proxy_base
+        req_id, conv_id, _user, _cw, tenant_id = await _seed_request(
+            status="approved"
+        )
+        ch = _FakeChannel()
+        w = ApprovalWorker(  # type: ignore[arg-type]
+            js=None, channel_sender=ch, proxy_base_url=base,
+        )
+        msg = _FakeMsg(
+            subject=f"approval.decided.{req_id}",
+            data=json.dumps(
+                {"status": "approved", "tenant_id": tenant_id}
+            ).encode(),
+        )
+        await w._handle_message(msg)
+
+        # Filter by conversation so we don't accidentally match a
+        # message sent to a different conv.
+        origin_messages = [(i, t) for i, (c, t) in enumerate(ch.sent) if c == conv_id]
+        # Find the started message and the report.
+        started_idxs = [
+            i for i, t in origin_messages if "starting execution" in t.lower()
+        ]
+        report_idxs = [
+            i for i, t in origin_messages
+            if "executed" in t.lower() and "starting" not in t.lower()
+        ]
+        assert started_idxs, (
+            f"expected a 'starting execution' message on the origin "
+            f"conversation; got: {origin_messages}"
+        )
+        assert report_idxs, (
+            f"expected an execution report on the origin conversation; "
+            f"got: {origin_messages}"
+        )
+        # Started message must precede the execution report (would
+        # be wrong to wedge it to the end).
+        assert started_idxs[0] < report_idxs[0], (
+            f"'starting execution' must precede the execution report; "
+            f"got: {origin_messages}"
+        )
+        assert len(recorder.requests) == 1, (
+            "started message must not trigger an extra MCP call"
+        )
+
     async def test_duplicate_decided_does_not_double_execute(self, proxy_base) -> None:
         base, recorder = proxy_base
         req_id, _c, _u, _cw, tenant_id = await _seed_request(status="approved")

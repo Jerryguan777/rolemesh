@@ -1,9 +1,9 @@
 # Auth + Approval v6.1 — Frozen Design
 
-**状态**: 冻结（v6.1 = v6 + 评估修订）。后续修改请新建 v7 而非原地编辑。
+**状态**: 冻结（v6.1 = v6 + 评估修订）。**Phase 1 / 2a / 2b 全部已落地（2026-05-28，branch `feat/self-approval`）**。后续修改请新建 v7 而非原地编辑。
 **适用范围**: Phase 1（身份/渠道底座）+ Phase 2（自审审批）。两个 phase 共三个 implementation session。
-**日期**: 2026-05-27
-**与现有架构文档关系**: 本文是 `12-approval-architecture-cn.md` 的演进。当两者冲突时，以本文为准；待 v6.1 落地后回填 12 号文档。
+**日期**: 2026-05-27（设计）/ 2026-05-28（落地）
+**与现有架构文档关系**: 本文是 `12-approval-architecture-cn.md` 的演进。当两者冲突时，以本文为准；`12-approval-architecture*.md` 顶部已加 v6.1 状态横幅，正文遗留段落保留作历史参考。
 
 ---
 

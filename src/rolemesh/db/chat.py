@@ -29,6 +29,7 @@ __all__ = [
     "get_all_sessions",
     "get_channel_binding",
     "get_channel_binding_by_id_admin",
+    "get_channel_binding_for_bot_token",
     "get_channel_binding_for_coworker",
     "get_channel_bindings_for_coworker",
     "get_channel_bindings_for_tenant",
@@ -123,6 +124,47 @@ async def get_channel_binding(binding_id: str, *, tenant_id: str) -> ChannelBind
             "SELECT * FROM channel_bindings WHERE id = $1::uuid AND tenant_id = $2::uuid",
             binding_id,
             tenant_id,
+        )
+    if row is None:
+        return None
+    return _record_to_channel_binding(row)
+
+
+async def get_channel_binding_for_bot_token(
+    bot_token: str,
+) -> ChannelBinding | None:
+    """Resolve the channel binding for a Telegram bot token (v6.1 §P2b.1).
+
+    Used by the inbound CallbackQueryHandler to derive the tenant
+    that **owns** the bot receiving the click. The tenant MUST come
+    from this lookup, never from the sender_id — design decision S5:
+    the same Telegram user_id may be linked under different RoleMesh
+    accounts across tenants, so tenant routing has to ride on the
+    bot's own credential.
+
+    Multiple coworkers within a tenant can share one Telegram token
+    (see ``TelegramGateway`` / ``_BotInstance`` deduplication); the
+    rows still agree on ``tenant_id`` because the gateway dispatches
+    by binding within the same incoming Application. The function
+    returns whichever row is most recent; callers only need
+    ``tenant_id``, not coworker_id.
+
+    Admin-scoped because the caller has only the bot token and no
+    tenant context yet — RLS would block the lookup. This is safe: the
+    only legitimate caller is the Telegram gateway inside the
+    orchestrator process, and the bot token is the gateway's own
+    operating credential.
+    """
+    if not bot_token:
+        return None
+    async with admin_conn() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM channel_bindings "
+            "WHERE channel_type = 'telegram' "
+            "  AND credentials->>'bot_token' = $1 "
+            "ORDER BY created_at DESC NULLS LAST "
+            "LIMIT 1",
+            bot_token,
         )
     if row is None:
         return None

@@ -90,6 +90,7 @@ from rolemesh.db import (
     get_messages_since,
     get_new_messages_for_conversations,
     get_tenant_by_slug,
+    has_pending_approvals_for_conversation,
     init_database,
     list_coworker_mcp_configs,
     set_session,
@@ -103,6 +104,7 @@ from rolemesh.db import (
 from rolemesh.db import (
     store_message as db_store_message,
 )
+from rolemesh.approval.notification import PENDING_TURN_GUIDE_TEXT
 from rolemesh.ipc.nats_transport import NatsTransport
 from rolemesh.ipc.task_handler import process_task_ipc
 from rolemesh.orchestration.remote_control import (
@@ -837,6 +839,35 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
         )
         if not has_trigger:
             return True
+
+    # v6.1 §P2.8 — interactive-turn entry guard. If the user has an
+    # approval pending in this conversation, reply with the canonical
+    # guide and short-circuit before the agent runs. We deliberately
+    # do NOT advance ``conv_state.last_agent_timestamp`` so the
+    # queued messages re-process on the next tick after the user
+    # decides; without that, the user's turn would be silently
+    # consumed by the guide reply.
+    #
+    # Only the interactive turn entry checks pending — hook fail-close
+    # already protects the per-tool-call path; doubling up here would
+    # be cosmetic, not load-bearing.
+    if await has_pending_approvals_for_conversation(
+        conv.id, tenant_id=conv.tenant_id
+    ):
+        channel_type = _get_channel_type_for_conv(cw_state, conv)
+        binding = cw_state.channel_bindings.get(channel_type)
+        gw = _gateways.get(channel_type) if binding else None
+        if binding and gw:
+            with contextlib.suppress(OSError, RuntimeError, TypeError, ValueError):
+                await gw.send_message(
+                    binding.id, conv.channel_chat_id, PENDING_TURN_GUIDE_TEXT
+                )
+        logger.info(
+            "turn_blocked_by_pending_approval",
+            conversation_id=conv.id,
+            tenant_id=conv.tenant_id,
+        )
+        return True
 
     prompt = format_messages(missed_messages, TIMEZONE)
 
@@ -1651,7 +1682,10 @@ async def main() -> None:
     # resolves conversation_id → binding_id+chat_id via the gateway
     # fan-out.
     from rolemesh.approval.engine import ApprovalEngine
-    from rolemesh.approval.notification import NotificationTargetResolver
+    from rolemesh.approval.notification import (
+        ApprovalCardPayload,
+        NotificationTargetResolver,
+    )
     from rolemesh.db import get_conversation_for_notification as _pg_get_conv
 
     async def _convs_for_user_and_cw(user_id: str, coworker_id: str) -> list[str]:
@@ -1706,6 +1740,62 @@ async def main() -> None:
             cw = _state.coworkers.get(conv.coworker_id)
             await _send_via_coworker(cw, conv.channel_chat_id, text)
 
+        async def send_approval_card(
+            self,
+            conversation_id: str,
+            card: ApprovalCardPayload,
+        ) -> None:
+            """v6.1 §P2b.1 — deliver an interactive approval card.
+
+            Resolves the conversation to a binding/gateway and asks
+            the gateway to render the card natively (Telegram inline
+            buttons). Gateways that have not opted in keep the
+            historical text behaviour by falling back through
+            :meth:`send_to_conversation`. This adapter therefore
+            preserves the dispatcher contract:
+            :func:`deliver_approval_card_or_text` sees that the
+            orchestrator sender implements the card method, and the
+            gateway-level capability check happens here where we
+            actually know which channel will deliver the message.
+            """
+            conv = await _pg_get_conv(conversation_id)
+            if conv is None:
+                logger.warning(
+                    "approval card: conversation not found",
+                    conversation_id=conversation_id,
+                )
+                return
+            cw = _state.coworkers.get(conv.coworker_id)
+            if cw is None:
+                # No live coworker means we cannot identify a binding;
+                # fall back to the text path so the approver still hears
+                # something (the message will degrade gracefully to a
+                # plain reply via the scan-all-coworkers branch in
+                # ``_send_via_coworker``).
+                body = card.text_fallback
+                if card.approval_url and card.approval_url not in body:
+                    body = f"{body}\n  review: {card.approval_url}"
+                await _send_via_coworker(None, conv.channel_chat_id, body)
+                return
+            channel_type = _get_channel_type_for_conv(cw, conv)
+            binding = cw.channel_bindings.get(channel_type)
+            gw = _gateways.get(channel_type)
+            send_card = (
+                getattr(gw, "send_approval_card", None)
+                if gw is not None
+                else None
+            )
+            if binding is not None and send_card is not None:
+                await send_card(binding.id, conv.channel_chat_id, card)
+                return
+            # Gateway has no native card method (Slack today, future
+            # channels until they opt in): degrade to plain text +
+            # Web deep-link so the approver still has a path forward.
+            body = card.text_fallback
+            if card.approval_url and card.approval_url not in body:
+                body = f"{body}\n  review: {card.approval_url}"
+            await _send_via_coworker(cw, conv.channel_chat_id, body)
+
     resolver = NotificationTargetResolver(
         get_conversations_for_user_and_coworker=_convs_for_user_and_cw,
         get_conversation=_pg_get_conv,
@@ -1717,6 +1807,16 @@ async def main() -> None:
         resolver=resolver,
     )
     ipc_deps.set_approval_engine(approval_engine)
+    # v6.1 §P2b.1: wire the engine into the Telegram CallbackQuery
+    # path. The router slot is module-level on
+    # ``rolemesh.channels.telegram_gateway`` so all _BotInstance
+    # callbacks pick up the same engine without each constructor
+    # needing to know about it.
+    from rolemesh.channels.telegram_gateway import (
+        set_approval_decision_router as _set_telegram_decision_router,
+    )
+
+    _set_telegram_decision_router(approval_engine)
 
     # V2 P1.1: thread the approval engine through to SafetyEngine so
     # require_approval verdicts actually produce human-in-the-loop

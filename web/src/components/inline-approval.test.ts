@@ -119,4 +119,27 @@ describe('InlineApproval', () => {
     await card.updateComplete;
     expect(card.innerHTML).toContain('Rejected by bob');
   });
+
+  it('renders "Already processed" when decide returns 409 ConflictError', async () => {
+    // v6.1 §P2.8 — the engine decide is non-idempotent; the UI is
+    // expected to absorb a 409 and present "already processed"
+    // rather than the generic error tag. A future refactor that
+    // drops the 409 special-case would land the body code instead,
+    // which this test catches.
+    const { ApiError } = await import('../api/client.js');
+    decideSpy.mockRejectedValueOnce(
+      new ApiError(409, { code: 'CONFLICT', message: 'conflict' }, 'conflict'),
+    );
+    const approve = Array.from(card.querySelectorAll('button')).find(
+      (b) => (b.textContent ?? '').trim() === 'Approve',
+    ) as HTMLButtonElement | undefined;
+    approve!.click();
+    await Promise.resolve();
+    await Promise.resolve();
+    await card.updateComplete;
+    expect(card.innerHTML).toContain('Already processed');
+    // Buttons are gone — the row is no longer pending.
+    const buttons = Array.from(card.querySelectorAll('button'));
+    expect(buttons).toHaveLength(0);
+  });
 });

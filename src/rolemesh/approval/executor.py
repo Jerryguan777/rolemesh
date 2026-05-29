@@ -49,6 +49,7 @@ from .notification import (
     ChannelSender,
     format_decision_message,
     format_execution_report,
+    format_execution_started,
 )
 
 if TYPE_CHECKING:
@@ -228,6 +229,24 @@ class ApprovalWorker:
             # JetStream does not redeliver indefinitely.
             await msg.ack()
             return
+
+        # v6.1 §P2.5 — send a "starting execution" message before the
+        # MCP fan-out so long-running batches stop reading as a hung
+        # bot. Best-effort: a delivery failure here must not block
+        # execution (we cannot recover from "we executed but failed
+        # to send the heads-up").
+        if req.conversation_id:
+            try:
+                await self._channel.send_to_conversation(
+                    req.conversation_id, format_execution_started(req)
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "approval worker: execution_started notify failed",
+                    request_id=request_id,
+                    conversation_id=req.conversation_id,
+                    error=str(exc),
+                )
 
         # The claim's audit row ('executing') was written by the DB trigger
         # atomically with the status change. No manual write needed here.

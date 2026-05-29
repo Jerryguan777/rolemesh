@@ -637,6 +637,39 @@ describe('<rm-chat-shell>', () => {
     expect(popover?.querySelector('[data-testid="approval-row"]')).not.toBeNull();
   });
 
+  it('renders a new card and bumps the badge on event.approval.required', async () => {
+    // v6.1 §P2.8 — T2a.11. A WS-delivered required event must end
+    // up rendered as a popover row. The shell intentionally
+    // refetches the list (so payload shape stays canonical); we
+    // pin both the refetch and the rendered row so a future
+    // refactor that drops one regresses loudly.
+    listApprovalsSpy.mockResolvedValue([]);
+    const fake = new FakeUserApprovalsClient();
+    const el = document.createElement('rm-chat-shell') as RmChatShell;
+    el.setApprovalsClient(fake as unknown as UserApprovalsClient);
+    document.body.appendChild(el);
+    await settle(el);
+    // No badge before the event.
+    expect(el.querySelector('[data-testid="approvals-badge"]')).toBeNull();
+    // Update the REST stub so the post-event refetch returns one row.
+    listApprovalsSpy.mockResolvedValueOnce([makeApproval('apr-new', ['u-1'])]);
+    fake.emitRequired('apr-new');
+    await settle(el);
+    // Badge appeared with count 1.
+    expect(
+      el.querySelector('[data-testid="approvals-badge"]')?.textContent,
+    ).toBe('1');
+    // Opening the popover renders the row.
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="topbar-approvals"]',
+    )!.click();
+    await settle(el);
+    const popover = el.querySelector('rm-approvals-popover');
+    expect(
+      popover?.querySelector('[data-approval-id="apr-new"]'),
+    ).not.toBeNull();
+  });
+
   it('drops a row from the badge when an approval.resolved event fires', async () => {
     // The chat-shell handles approval.resolved by splicing the row
     // out locally so the badge updates instantly. Pinning this is

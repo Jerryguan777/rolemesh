@@ -6,8 +6,11 @@ Responsibilities are split across this file:
 - ``ApprovalRequestBuilder`` owns request creation + approver resolution
   and calls into the audit layer via the DB trigger (see
   ``_approval_write_audit_from_trigger`` in ``src/rolemesh/db/approval.py``).
-- ``_resolve_approvers`` implements the fallback chain
-  (policy → assigned users → tenant owners).
+- ``_resolve_approvers`` implements v6.1 §P2.2 self-approval — the
+  requester is the sole approver. The legacy three-tier fallback
+  chain (policy → assigned users → tenant owners) is deleted; the
+  safety bridge (``create_from_safety``) keeps its direct tenant-
+  owners path per decision #12.
 
 The engine does NOT execute MCP calls — that is the Worker's job
 (see ``src/rolemesh/approval/executor.py``). Decoupling execution
@@ -27,6 +30,8 @@ the CRUD layer.
 from __future__ import annotations
 
 import json
+import time
+from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -44,8 +49,6 @@ from rolemesh.db import (
     find_pending_request_by_action_hash,
     get_approval_request,
     get_enabled_policies_for_coworker,
-    get_tenant,
-    get_users_for_agent,
     get_users_for_tenant,
     list_expired_pending_approvals,
     list_stuck_approved_approvals,
@@ -55,10 +58,13 @@ from rolemesh.db import (
 
 from .enum_translate import outcome_to_ws_decision
 from .notification import (
+    ApprovalCardPayload,
     ChannelSender,
     NotificationTargetResolver,
+    deliver_approval_card_or_text,
     format_approver_request_message,
     format_cancelled_message,
+    format_edge_fyi,
     format_execution_stale_message,
     format_expired_message,
     format_skipped_message,
@@ -87,6 +93,16 @@ _DEFAULT_EXPIRE_MINUTES = 60
 # maintenance loop acts on it.
 _RECONCILE_APPROVED_GRACE_S = 60
 _RECONCILE_EXECUTING_GRACE_S = 300
+
+# v6.1 §P2.6 — edge-path owner-FYI rate limit: per
+# ``(tenant_id, coworker_id, server, tool)`` key, emit at most one
+# FYI per ``_EDGE_FYI_WINDOW_SECONDS``. Prevents a runaway system
+# turn from carpet-bombing tenant owners. Reset on process restart;
+# that is acceptable — duplicate FYIs after a restart are
+# annoying but not load-bearing for safety (the hook already
+# fail-closed the call).
+_EDGE_FYI_WINDOW_SECONDS = 5 * 60
+_EDGE_FYI_LRU_CAPACITY = 1024
 
 
 class NatsPublisher(Protocol):
@@ -149,6 +165,7 @@ class ApprovalRequestBuilder:
         rationale: str,
         policy: ApprovalPolicy | None,
         approvers: list[str],
+        source: str = "proposal",
     ) -> ApprovalRequest:
         """Create a pending proposal row and notify approvers.
 
@@ -156,6 +173,11 @@ class ApprovalRequestBuilder:
         ``create_skipped`` instead. ``policy`` may be None for
         proposals that matched no policy (the auto-executed path);
         the engine sets state to 'approved' afterwards.
+
+        ``source`` defaults to ``'proposal'`` for normal policy-matched
+        flow. Case A (no matching policy) passes ``'auto_execute'`` so
+        the audit row visibly records "system auto-allowed", never
+        impersonating a human approver. See v6.1 §P2.3.
         """
         mcp_server = str(actions[0].get("mcp_server") or "") if actions else ""
         expiry = _expiry(policy.auto_expire_minutes if policy else None)
@@ -171,7 +193,7 @@ class ApprovalRequestBuilder:
             actions=actions,
             action_hashes=action_hashes,
             rationale=rationale,
-            source="proposal",
+            source=source,
             status="pending",
             resolved_approvers=approvers,
             expires_at=expiry,
@@ -266,15 +288,36 @@ class ApprovalRequestBuilder:
     async def _notify_approvers(
         self, request: ApprovalRequest, policy: ApprovalPolicy
     ) -> None:
+        # v6.1 §P2.7 + §P2b.1: every approver fan-out goes through the
+        # card-or-text dispatcher so channels that opt in
+        # (Telegram InlineKeyboard, Web) render native buttons and
+        # channels that have not (Slack, plain SMTP) degrade to the
+        # text fallback. Owner-FYI (edge-fallback) deliberately keeps
+        # its own ``send_to_conversation`` call site so it cannot
+        # accidentally surface buttons for a request the owner cannot
+        # actually decide on.
         ctx = await self._resolver.resolve_for_approvers(
             request=request, policy=policy
         )
-        message = format_approver_request_message(
+        text_fallback = format_approver_request_message(
             request=request, policy=policy, approval_url=ctx.approval_url
+        )
+        short = request.id[:8]
+        summary = (
+            f"{request.mcp_server_name}: {len(request.actions)} action(s)"
+        )
+        card = ApprovalCardPayload(
+            request_id=request.id,
+            title=f"Approval #{short}",
+            summary=summary,
+            text_fallback=text_fallback,
+            approval_url=ctx.approval_url,
         )
         for conv_id in ctx.target_conversation_ids:
             try:
-                await self._channel.send_to_conversation(conv_id, message)
+                await deliver_approval_card_or_text(
+                    self._channel, conv_id, card
+                )
             except Exception as exc:  # noqa: BLE001 — notification best-effort
                 logger.warning(
                     "approval: notify failed",
@@ -318,6 +361,14 @@ class ApprovalEngine:
         self._builder = ApprovalRequestBuilder(
             channel_sender=channel_sender, resolver=resolver
         )
+        # v6.1 §P2.6 — edge-path FYI rate limit. Insertion-ordered
+        # dict acts as a tiny LRU keyed by
+        # ``(tenant_id, coworker_id, server, tool)`` → last-emit
+        # monotonic timestamp. Bounded by ``_EDGE_FYI_LRU_CAPACITY``
+        # so a flood of distinct edge calls cannot leak memory.
+        self._edge_fyi_last_sent: OrderedDict[
+            tuple[str, str, str, str], float
+        ] = OrderedDict()
 
     # -- Entry points -----------------------------------------------------
 
@@ -365,21 +416,15 @@ class ApprovalEngine:
             for a in actions
         ]
 
-        # Case A: no action matches any policy. Behaviour is governed
-        # by the tenant's ``approval_default_mode``:
-        #   auto_execute     — legacy: create pending+approved, publish
-        #                      decided so the Worker executes.
-        #   require_approval — create the row as skipped so admins see
-        #                      it; actions never run without an
-        #                      explicit policy.
-        #   deny             — create the row as rejected (system note);
-        #                      Worker just delivers the rejection
-        #                      notification.
+        # Case A (v6.1 §P2.3): no action matches any policy. Collapse to
+        # a single auto-allow path — create the row pre-stamped with
+        # ``source='auto_execute'``, flip status to 'approved', publish
+        # ``decided`` so the Worker runs the actions. The audit row's
+        # ``source`` column distinguishes this system-allowed row from
+        # human-approved entries; the audit trigger writes a 'created'
+        # row with user_id as actor (proposer) and the subsequent
+        # set_approval_status writes 'approved' with NULL actor.
         if all(m is None for m in matched):
-            tenant = await get_tenant(tenant_id)
-            default_mode = (
-                tenant.approval_default_mode if tenant else "auto_execute"
-            )
             req = await self._builder.create_from_proposal(
                 tenant_id=tenant_id,
                 coworker_id=coworker_id,
@@ -391,53 +436,31 @@ class ApprovalEngine:
                 rationale=rationale,
                 policy=None,
                 approvers=[],
+                source="auto_execute",
             )
-            if default_mode == "auto_execute":
-                await set_approval_status(
-                    req.id, "approved", tenant_id=req.tenant_id
-                )
-                await self._publish_decided(
-                    req.id, tenant_id=req.tenant_id, status="approved", note=None
-                )
-            elif default_mode == "require_approval":
-                # Move pending → skipped (system transition). The
-                # originating conversation is notified; admins must
-                # create a policy or decide manually via a side channel.
-                await set_approval_status(
-                    req.id, "skipped", tenant_id=req.tenant_id
-                )
-                await self._send_to_origin(
-                    (
-                        await get_approval_request(
-                            req.id, tenant_id=req.tenant_id
-                        )
-                    )
-                    or req,
-                    format_skipped_message(req),
-                )
-            else:  # "deny"
-                # Treat as a system rejection. Publish so the Worker
-                # delivers a uniform rejection notification; the note
-                # explains why.
-                note = (
-                    "No matching approval policy; this tenant is "
-                    "configured for deny-by-default."
-                )
-                await set_approval_status(
-                    req.id, "rejected", tenant_id=req.tenant_id, note=note
-                )
-                await self._publish_decided(
-                    req.id, tenant_id=req.tenant_id, status="rejected", note=note
-                )
+            await set_approval_status(
+                req.id, "approved", tenant_id=req.tenant_id
+            )
+            await self._publish_decided(
+                req.id, tenant_id=req.tenant_id, status="approved", note=None
+            )
             return
 
         # Case B: at least one match — approval required.
         strict = _pick_strictest(matched)
         policy = next(p for p in policies if p.id == strict["id"])
-        approvers = await self._resolve_approvers(tenant_id, coworker_id, policy)
+        approvers = await self._resolve_approvers(
+            tenant_id, coworker_id, policy, requester_user_id=user_id
+        )
         mcp_server = str(actions[0].get("mcp_server") or "")
 
         if not approvers:
+            # v6.1 self-approval invariant: with a non-empty
+            # requester_user_id, _resolve_approvers returns at least
+            # one element. Reaching here means the proposer was empty,
+            # but handle_proposal already rejects empty user_id at the
+            # malformed-drop check above — this is a defensive guard
+            # for future shape changes, not a live path.
             await self._builder.create_skipped(
                 tenant_id=tenant_id,
                 coworker_id=coworker_id,
@@ -485,8 +508,17 @@ class ApprovalEngine:
         tool = str(data.get("tool_name") or "")
         params = data.get("tool_params") or {}
         action_hash = str(data.get("action_hash") or "")
-        if not user_id or not server or not tool:
-            logger.warning("approval: malformed auto_approval_request dropped")
+        # v6.1 §P2.6 — split: ``server`` / ``tool`` empty is a true
+        # malformed message (we cannot identify the action); drop it.
+        # ``user_id`` empty is the edge case (bot-chained / system /
+        # bootstrap turn) and flows down to the owner-FYI path below.
+        if not server or not tool:
+            logger.warning(
+                "approval: malformed auto_approval_request dropped",
+                has_user=bool(user_id),
+                has_server=bool(server),
+                has_tool=bool(tool),
+            )
             return
 
         # Dedup: short-circuit if a pending request with the same
@@ -521,24 +553,24 @@ class ApprovalEngine:
             return
 
         policy = next(p for p in policies if p.id == policy_match["id"])
-        approvers = await self._resolve_approvers(tenant_id, coworker_id, policy)
+        approvers = await self._resolve_approvers(
+            tenant_id, coworker_id, policy, requester_user_id=user_id
+        )
 
-        actions = [{"mcp_server": server, "tool_name": tool, "params": params}]
         final_hash = action_hash or compute_action_hash(tool, params)
 
         if not approvers:
-            await self._builder.create_skipped(
+            # v6.1 §P2.6 — edge fallback: empty requester (system /
+            # chained / bootstrap turn). No ``approval_requests`` row
+            # is created (decision #5 — that would mislead operators
+            # into thinking they had a decision to make). The hook
+            # has already fail-closed the call; we only owe owners
+            # an FYI so the situation does not slip silently.
+            await self._handle_edge_fallback(
                 tenant_id=tenant_id,
                 coworker_id=coworker_id,
-                conversation_id=conversation_id,
-                user_id=user_id,
-                policy=policy,
-                job_id=job_id,
-                actions=actions,
-                action_hashes=[final_hash],
-                rationale=None,
-                source="auto_intercept",
-                mcp_server=server,
+                server=server,
+                tool=tool,
             )
             return
 
@@ -578,9 +610,16 @@ class ApprovalEngine:
 
         No policy is associated with this request (``policy_id`` stays
         NULL) because the decision came from a safety rule, not an
-        approval policy. Expiry defaults to the module-wide
-        ``_DEFAULT_EXPIRE_MINUTES``; approvers fall back to tenant
-        owners which matches the chain tail in ``_resolve_approvers``.
+        approval policy.
+
+        v6.1 §P2.2 — the safety path **does not self-approve** (design
+        decision #12). The whole point of a safety gate is to take the
+        decision OUT of the requester's hands; routing to the requester
+        would undo that. We resolve approvers directly via
+        :func:`_tenant_owner_ids` instead of calling
+        :meth:`_resolve_approvers`. The requester is still recorded as
+        ``user_id`` on the row for auditing — they triggered the gate
+        — but the approvers list is tenant owners.
 
         ``user_id`` is required (approval_requests.user_id is NOT NULL
         FK): it identifies the user whose turn triggered the safety
@@ -959,15 +998,30 @@ class ApprovalEngine:
     # -- Internal helpers -------------------------------------------------
 
     async def _resolve_approvers(
-        self, tenant_id: str, coworker_id: str, policy: ApprovalPolicy
+        self,
+        tenant_id: str,
+        coworker_id: str,
+        policy: ApprovalPolicy,
+        requester_user_id: str,
     ) -> list[str]:
-        """Fallback chain: policy → assigned users → tenant owners."""
-        if policy.approver_user_ids:
-            return list(policy.approver_user_ids)
-        assigned = await get_users_for_agent(coworker_id, tenant_id=tenant_id)
-        if assigned:
-            return [u.id for u in assigned]
-        return await _tenant_owner_ids(tenant_id)
+        """v6.1 self-approval: the requester is the sole approver.
+
+        Empty ``requester_user_id`` signals an edge case (bot-chained
+        task / pure system turn / bootstrap actor) — the caller must
+        route those to the owner-FYI edge path in
+        :meth:`handle_auto_intercept` (see v6.1 §P2.6). We never
+        invent an approver, so an empty input returns ``[]``.
+
+        ``policy``, ``tenant_id`` and ``coworker_id`` are accepted for
+        a future SoD-aware extension (decision #2 retains the DB
+        column ``approver_user_ids`` as the wire-in point). v6.1
+        deliberately ignores them — the legacy three-tier fallback
+        chain is deleted.
+        """
+        del policy, tenant_id, coworker_id
+        if not requester_user_id:
+            return []
+        return [requester_user_id]
 
     async def _send_to_origin(
         self, request: ApprovalRequest, message: str
@@ -984,6 +1038,91 @@ class ApprovalEngine:
                 conversation_id=request.conversation_id,
                 error=str(exc),
             )
+
+    # -- v6.1 §P2.6 edge fallback ---------------------------------------
+
+    def _edge_dedup_seen(
+        self, tenant_id: str, coworker_id: str, server: str, tool: str
+    ) -> bool:
+        """Return True if the same edge tuple emitted an FYI within
+        ``_EDGE_FYI_WINDOW_SECONDS`` and we should suppress this one.
+
+        Updates the LRU position so genuinely fresh keys evict the
+        oldest when the bound is hit. Time source is ``time.monotonic``
+        so wallclock jumps do not poison the window.
+        """
+        key = (tenant_id, coworker_id, server, tool)
+        now = time.monotonic()
+        cache = self._edge_fyi_last_sent
+        previous = cache.get(key)
+        if previous is not None and (now - previous) < _EDGE_FYI_WINDOW_SECONDS:
+            cache.move_to_end(key)
+            return True
+        cache[key] = now
+        cache.move_to_end(key)
+        while len(cache) > _EDGE_FYI_LRU_CAPACITY:
+            cache.popitem(last=False)
+        return False
+
+    async def _handle_edge_fallback(
+        self,
+        *,
+        tenant_id: str,
+        coworker_id: str,
+        server: str,
+        tool: str,
+    ) -> None:
+        """Owner-FYI dispatch for v6.1 §P2.6 edge cases.
+
+        Crucial invariant: this method NEVER creates an
+        ``approval_requests`` row. The hook has already fail-closed
+        the call; an audit row would mislead operators into thinking
+        they had a decision to take. We owe owners awareness only.
+        """
+        if self._edge_dedup_seen(tenant_id, coworker_id, server, tool):
+            logger.info(
+                "approval: edge fallback FYI rate-limited",
+                tenant_id=tenant_id,
+                coworker_id=coworker_id,
+                server=server,
+                tool=tool,
+            )
+            return
+
+        owner_ids = await _tenant_owner_ids(tenant_id)
+        if not owner_ids:
+            logger.error(
+                "approval: edge fallback — no tenant owners to notify",
+                tenant_id=tenant_id,
+                coworker_id=coworker_id,
+                server=server,
+                tool=tool,
+            )
+            return
+
+        message = format_edge_fyi(server=server, tool=tool)
+        # Best-effort fan-out across each owner's recent conversations
+        # with this coworker. If an owner has no conversation with this
+        # coworker, they are silently skipped — the active-channel
+        # rule keeps us from reaching out via paths the owner has not
+        # opted into.
+        sent_to: set[str] = set()
+        for owner_id in owner_ids:
+            convs = await self._resolver._get_conversations_for_user_and_coworker(
+                owner_id, coworker_id
+            )
+            for conv_id in convs:
+                if not conv_id or conv_id in sent_to:
+                    continue
+                try:
+                    await self._channel.send_to_conversation(conv_id, message)
+                    sent_to.add(conv_id)
+                except Exception as exc:  # noqa: BLE001 — best-effort
+                    logger.warning(
+                        "approval: edge FYI notify failed",
+                        conversation_id=conv_id,
+                        error=str(exc),
+                    )
 
 
 # ---------------------------------------------------------------------------

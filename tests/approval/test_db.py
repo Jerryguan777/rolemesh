@@ -40,6 +40,7 @@ from rolemesh.db import (
     get_approval_policy,
     get_approval_request,
     get_enabled_policies_for_coworker,
+    has_pending_approvals_for_conversation,
     list_approval_audit,
     list_approval_policies,
     list_expired_pending_approvals,
@@ -429,6 +430,89 @@ class TestDedupLookup:
         await set_approval_status(request_id, "rejected", tenant_id=tenant_id)
         found = await find_pending_request_by_action_hash(tenant_id, "dedup-hash-2")
         assert found is None
+
+
+class TestHasPendingForConversation:
+    """v6.1 §P2.8 — DB helper consumed by the interactive-turn entry
+    guard. Pins three invariants together so a refactor cannot fix
+    one and silently regress another.
+    """
+
+    async def test_returns_false_when_no_request_at_all(self) -> None:
+        tenant_id, _u, _cw, _b, conv_id = await _chain()
+        assert (
+            await has_pending_approvals_for_conversation(
+                conv_id, tenant_id=tenant_id
+            )
+            is False
+        )
+
+    async def test_returns_true_when_pending_row_exists(self) -> None:
+        tenant_id, user_id, cw_id, _b, conv_id = await _chain()
+        policy_id = await _make_policy(tenant_id, cw_id)
+        await _request(
+            tenant_id, user_id, cw_id, conv_id, policy_id,
+            resolved_approvers=[user_id],
+        )
+        assert (
+            await has_pending_approvals_for_conversation(
+                conv_id, tenant_id=tenant_id
+            )
+            is True
+        )
+
+    async def test_resolved_rows_do_not_keep_it_pending(self) -> None:
+        """Resolved (approved / rejected / cancelled / expired / etc.)
+        rows must not block the guard. The mutation 'status != pending'
+        → '>= pending' would still pass the True test above but would
+        fail this one — exactly the kind of off-by-state error we
+        want surfaced.
+        """
+        tenant_id, user_id, cw_id, _b, conv_id = await _chain()
+        policy_id = await _make_policy(tenant_id, cw_id)
+        request_id = await _request(
+            tenant_id, user_id, cw_id, conv_id, policy_id,
+            resolved_approvers=[user_id],
+            action_hashes=["h-resolved"],
+        )
+        await set_approval_status(request_id, "approved", tenant_id=tenant_id)
+        assert (
+            await has_pending_approvals_for_conversation(
+                conv_id, tenant_id=tenant_id
+            )
+            is False
+        )
+
+    async def test_other_conversation_pending_does_not_block_us(self) -> None:
+        """The check must be conversation-scoped, not tenant-scoped. A
+        pending row in conv A must not surface True for conv B in the
+        same tenant.
+        """
+        tenant_id, user_id, cw_id, b_id, conv_id_a = await _chain()
+        # Second conversation under the same tenant + coworker.
+        conv_b = await create_conversation(
+            tenant_id=tenant_id, coworker_id=cw_id,
+            channel_binding_id=b_id,
+            channel_chat_id=str(uuid.uuid4()),
+        )
+        policy_id = await _make_policy(tenant_id, cw_id)
+        await _request(
+            tenant_id, user_id, cw_id, conv_id_a, policy_id,
+            resolved_approvers=[user_id],
+            action_hashes=["h-conv-a"],
+        )
+        assert (
+            await has_pending_approvals_for_conversation(
+                conv_id_a, tenant_id=tenant_id
+            )
+            is True
+        )
+        assert (
+            await has_pending_approvals_for_conversation(
+                conv_b.id, tenant_id=tenant_id
+            )
+            is False
+        )
 
 
 class TestMaintenanceQueries:

@@ -1,28 +1,29 @@
-"""E2E: tenant-level behaviour when a proposal matches no policy.
+"""E2E: Case A (no matching policy) — v6.1 collapsed auto-allow path.
 
-The tenant's ``approval_default_mode`` column steers the fallback:
+v6.1 §P2.3 removed ``tenants.approval_default_mode``. When a proposal
+does not match any enabled policy, the engine now always:
 
-  * ``auto_execute`` (default, legacy) — executes unsupervised.
-  * ``require_approval`` — create as skipped; nobody runs the actions
-    unless an admin adds a policy and retries.
-  * ``deny`` — create as rejected with a system note; origin gets a
-    rejection message.
+  1. inserts an ``approval_requests`` row stamped ``source='auto_execute'``,
+  2. flips its status to ``approved``,
+  3. publishes ``decided`` so the Worker executes the actions,
+  4. leaves an audit trail (created → approved → executing → executed)
+     so operators can later distinguish system-allowed from
+     human-approved runs by inspecting the ``source`` column.
 
-These are covered separately because tmp.txt audit flagged the
-"auto_execute after admin deletes a policy" path as a real security
-window. Operators who want strictness can pick either of the latter
-two modes.
+Why no per-mode tests anymore: the legacy ``require_approval`` and
+``deny`` modes were deleted along with the column (see
+``docs/design/auth-approval-v6.md`` §P2.3 for the rationale). Future
+default-deny posture will return via a ``policy.action='allow'``
+primitive paired with tenant-level allow-list — not a free-standing
+escape hatch.
 """
 
 from __future__ import annotations
-
-import asyncio
 
 from rolemesh.db import (
     get_approval_request,
     list_approval_audit,
     list_approval_requests,
-    update_tenant,
 )
 
 from .harness import OrchestratorHarness, seed_tenant
@@ -61,12 +62,14 @@ async def _submit_unmatched_proposal(
     return (await list_approval_requests(seed.tenant_id))[0].id
 
 
-async def test_auto_execute_mode_runs_unsupervised(
+async def test_no_match_auto_allows_and_records_source_auto_execute(
     harness: OrchestratorHarness,
 ) -> None:
-    """Legacy behaviour — preserved for existing deployments."""
+    """T2a.3 — Case A: no policy matches → row carries
+    source='auto_execute' (not 'proposal'), status reaches 'executed',
+    MCP was called once. The audit trail must show 'approved' with
+    NULL actor (system-initiated, not a forged human decision)."""
     seed = await seed_tenant()
-    # Default is 'auto_execute'; no explicit update required.
     req_id = await _submit_unmatched_proposal(harness, seed)
 
     async def _executed() -> bool:
@@ -74,82 +77,29 @@ async def test_auto_execute_mode_runs_unsupervised(
         return fresh is not None and fresh.status == "executed"
 
     await harness.wait_for(_executed, timeout=10.0)
-    assert len(harness.mcp.received) == 1
+    fresh = await get_approval_request(req_id, tenant_id=seed.tenant_id)
+    assert fresh is not None
 
-
-async def test_require_approval_mode_blocks_unsupervised_execution(
-    harness: OrchestratorHarness,
-) -> None:
-    seed = await seed_tenant()
-    await update_tenant(
-        seed.tenant_id, approval_default_mode="require_approval"
+    # The whole point of the v6.1 rewrite: the row's source records the
+    # entry path. 'auto_execute' here proves we did not impersonate the
+    # 'proposal' source (which now means "policy matched + a human
+    # took a decision path"). Mutating this string in engine.py to
+    # 'proposal' must fail this test.
+    assert fresh.source == "auto_execute", (
+        f"Case A row must record source='auto_execute' so audits can "
+        f"distinguish system-allowed from policy-matched proposals; "
+        f"got {fresh.source!r}"
     )
-    req_id = await _submit_unmatched_proposal(harness, seed)
-
-    async def _skipped() -> bool:
-        fresh = await get_approval_request(req_id, tenant_id=seed.tenant_id)
-        return fresh is not None and fresh.status == "skipped"
-
-    await harness.wait_for(_skipped, timeout=5.0)
-    # MCP must never be called.
-    await asyncio.sleep(0.3)
-    assert harness.mcp.received == [], (
-        "require_approval mode must not trigger any MCP execution"
-    )
-    # Origin gets a skipped notification (reuses the existing skipped
-    # message since the user-visible outcome is identical).
-    assert any(
-        m.conversation_id == seed.conversation_id
-        and (
-            "not proceed" in m.text.lower()
-            or "no approver" in m.text.lower()
-        )
-        for m in harness.channel.messages
+    assert len(harness.mcp.received) == 1, (
+        "auto_execute path must run the MCP call exactly once"
     )
 
-
-async def test_deny_mode_rejects_with_system_note(
-    harness: OrchestratorHarness,
-) -> None:
-    seed = await seed_tenant()
-    await update_tenant(
-        seed.tenant_id, approval_default_mode="deny"
+    # The 'approved' audit row must have NULL actor — the engine
+    # auto-allowed without any human decision. A non-null actor would
+    # be a forgery of human approval into the audit history.
+    audit = await list_approval_audit(req_id, tenant_id=seed.tenant_id)
+    approved_rows = [a for a in audit if a.action == "approved"]
+    assert approved_rows, "audit trail must include an 'approved' row"
+    assert approved_rows[0].actor_user_id is None, (
+        "system-initiated approval must record NULL actor"
     )
-    req_id = await _submit_unmatched_proposal(harness, seed)
-
-    async def _rejected() -> bool:
-        fresh = await get_approval_request(req_id, tenant_id=seed.tenant_id)
-        return fresh is not None and fresh.status == "rejected"
-
-    await harness.wait_for(_rejected, timeout=5.0)
-    await asyncio.sleep(0.3)
-    assert harness.mcp.received == [], (
-        "deny mode must not trigger any MCP execution"
-    )
-    # The rejection audit row carries the system note explaining why.
-    audit = [
-        e for e in await list_approval_audit(req_id, tenant_id=seed.tenant_id)
-        if e.action == "rejected"
-    ]
-    assert audit, "audit must include a rejected row"
-    assert audit[0].actor_user_id is None, (
-        "system-initiated rejection must have NULL actor"
-    )
-    assert audit[0].note is not None
-    assert "deny-by-default" in audit[0].note.lower()
-    # Origin gets a rejection-style message (delivered via the Worker
-    # handling the decided NATS event).
-    await harness.wait_for(
-        lambda: _async_true(
-            any(
-                m.conversation_id == seed.conversation_id
-                and "rejected" in m.text.lower()
-                for m in harness.channel.messages
-            )
-        ),
-        timeout=5.0,
-    )
-
-
-async def _async_true(v: bool) -> bool:
-    return v

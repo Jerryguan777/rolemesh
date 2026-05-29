@@ -39,6 +39,9 @@ router = APIRouter(prefix="/approval-policies", tags=["ApprovalPolicies"])
 
 
 def _to_response(p: object) -> ApprovalPolicy:
+    # v6.1 §P2.4 — ``approver_user_ids`` is intentionally not
+    # projected; the DB column survives but is invisible at this
+    # surface (decision #2, SoD seam).
     return ApprovalPolicy(
         id=p.id,
         tenant_id=p.tenant_id,
@@ -46,7 +49,6 @@ def _to_response(p: object) -> ApprovalPolicy:
         mcp_server_name=p.mcp_server_name,
         tool_name=p.tool_name,
         condition_expr=p.condition_expr,
-        approver_user_ids=list(p.approver_user_ids),
         notify_conversation_id=p.notify_conversation_id,
         auto_expire_minutes=p.auto_expire_minutes,
         post_exec_mode=p.post_exec_mode,  # type: ignore[arg-type]
@@ -130,7 +132,6 @@ async def create_policy(
         mcp_server_name=body.mcp_server_name,
         tool_name=body.tool_name,
         condition_expr=body.condition_expr,
-        approver_user_ids=body.approver_user_ids,
         notify_conversation_id=body.notify_conversation_id,
         auto_expire_minutes=body.auto_expire_minutes,
         post_exec_mode=body.post_exec_mode,
@@ -163,7 +164,6 @@ async def patch_policy(
         "mcp_server_name",
         "tool_name",
         "condition_expr",
-        "approver_user_ids",
         "notify_conversation_id",
         "auto_expire_minutes",
         "post_exec_mode",

@@ -32,12 +32,36 @@ if TYPE_CHECKING:
 logger = get_logger()
 
 
+@dataclass(frozen=True)
+class ApprovalCardPayload:
+    """Structured approval card surfaced to channel gateways.
+
+    v6.1 §P2.7 — channels that can render interactive buttons (Web,
+    Telegram in Phase 2b) ship the card as native UI. Channels that
+    cannot (Slack-without-bot, plain email, etc.) degrade gracefully
+    via :func:`deliver_approval_card_or_text` to a text body that
+    includes the Web deep-link.
+    """
+
+    request_id: str
+    title: str
+    summary: str
+    text_fallback: str
+    approval_url: str | None = None
+
+
 class ChannelSender(Protocol):
     """How the engine reaches a conversation.
 
     Kept as a Protocol so the orchestrator can hand in its
     channel-gateway fan-out (which resolves binding_id + chat_id from
     a conversation_id) without this module knowing about gateways.
+
+    Implementations may optionally provide :meth:`send_approval_card`
+    to render a native approval UI (buttons + summary). Callers
+    must go through :func:`deliver_approval_card_or_text` which
+    falls back to plain text via :meth:`send_to_conversation` when
+    the method is missing.
     """
 
     async def send_to_conversation(
@@ -265,6 +289,24 @@ def format_cancelled_message(request: ApprovalRequest) -> str:
     )
 
 
+def format_execution_started(request: ApprovalRequest) -> str:
+    """Message sent to the originating conversation right after a
+    claim succeeds, before the Worker fires off MCP calls.
+
+    v6.1 §P2.5 — long-running batches were silent between
+    "decided" and "executed". For multi-minute MCP calls this read
+    as a stalled bot; the started message gives users a deterministic
+    "the action is now running" signal so they can stop wondering.
+    Cheap to send: best-effort by the caller (catch + log on
+    failure), since blocking execution to deliver a status line
+    would itself create a new failure mode.
+    """
+    short = request.id[:8]
+    return (
+        f"Approval #{short} approved — starting execution now."
+    )
+
+
 def format_execution_stale_message(request: ApprovalRequest) -> str:
     """Notification the maintenance loop emits for a wedged ``executing``
     row. Deliberately terse: v1 does not persist per-action progress,
@@ -279,6 +321,76 @@ def format_execution_stale_message(request: ApprovalRequest) -> str:
         "already taken effect on the downstream MCP server. "
         "Please investigate manually — do NOT blindly re-submit."
     )
+
+
+async def deliver_approval_card_or_text(
+    channel: ChannelSender,
+    conversation_id: str,
+    card: ApprovalCardPayload,
+) -> None:
+    """Dispatch an approval card with a graceful text fallback.
+
+    v6.1 §P2.7 — channels can opt in to a structured card by
+    implementing ``send_approval_card(conversation_id, card)``.
+    Channels that have not implemented it (including the default
+    orchestrator sender for now) receive ``text_fallback`` via
+    :meth:`ChannelSender.send_to_conversation`, with the Web
+    approval URL appended when configured. The helper centralises
+    the "buttons or text" decision so callers never need to
+    hasattr-check.
+    """
+    send_card = getattr(channel, "send_approval_card", None)
+    if send_card is not None:
+        await send_card(conversation_id, card)
+        return
+    body = card.text_fallback
+    if card.approval_url and card.approval_url not in body:
+        body = f"{body}\n  review: {card.approval_url}"
+    await channel.send_to_conversation(conversation_id, body)
+
+
+# v6.1 §P2.8 — guide text emitted to a conversation when the user
+# tries to take a new turn while an approval is still pending. The
+# string is canonical here so the IM and Web surfaces share one copy;
+# the frontend renders the same text behind a localised error code.
+PENDING_TURN_GUIDE_TEXT = (
+    "This conversation has an approval pending. Please decide it in "
+    "the Web inbox or by replying to the approval card before sending "
+    "another instruction."
+)
+
+
+def format_edge_fyi(
+    *,
+    server: str,
+    tool: str,
+    coworker_name: str | None = None,
+    tenant_name: str | None = None,
+) -> str:
+    """Owner-FYI text for the v6.1 edge fallback path (§P2.6).
+
+    Sent when a controlled tool call has no resolvable approver — bot-
+    chained task, pure system turn, or bootstrap actor. The message
+    deliberately does NOT include action buttons: there is no
+    ``approval_requests`` row for the owner to decide on; the hook
+    already fail-closed the call. Owners are informed for visibility
+    only.
+    """
+    lines = ["⚠️ FYI (controlled action with no responsible user)"]
+    if tenant_name:
+        lines.append(f"  tenant: {tenant_name}")
+    if coworker_name:
+        lines.append(f"  coworker: {coworker_name}")
+    lines.extend(
+        [
+            f"  intercepted: {server}/{tool}",
+            "  reason: the triggering turn has no identifiable user "
+            "(system / chained / bootstrap)",
+            "  status: the action was blocked and will not run; see the "
+            "Web activity log for context.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def format_execution_report(
