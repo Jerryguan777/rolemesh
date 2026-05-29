@@ -378,3 +378,111 @@ class TestDispatchEdgeCases:
             callback_data=f"apr:{uuid.uuid4()}",
         )
         assert result.kind == "no_engine"
+
+
+# ---------------------------------------------------------------------------
+# T2b.7 — edit-failure fallback in the PTB-bound handler
+# ---------------------------------------------------------------------------
+
+
+class TestEditFailFallback:
+    """The PTB :class:`CallbackQueryHandler` adapter
+    (:func:`_handle_approval_callback`) is thin, but the "edit failed
+    → send fresh message" branch is the single most user-visible
+    failure mode of the inbound flow. If the approver's original card
+    is too old to edit (Telegram returns ``BadRequest``), they MUST
+    still see the decision result — otherwise the spinner stops but
+    the outcome is invisible and they will likely retry.
+
+    We exercise the adapter directly here with a stubbed
+    ``CallbackQuery`` / ``Bot``. Importing PTB types only for the
+    error class keeps the stubs minimal.
+    """
+
+    async def test_edit_failure_falls_back_to_send_message(self) -> None:
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from telegram.error import BadRequest
+
+        from rolemesh.channels.telegram_gateway import (
+            _handle_approval_callback,
+        )
+
+        token = f"tkn-{uuid.uuid4().hex[:8]}"
+        _t, _u, _cw = await _seed_tenant_with_telegram_bot(
+            bot_token=token, linked_telegram_id="700708"
+        )
+        engine = _FakeEngine()
+        set_approval_decision_router(engine)
+        try:
+            answer = AsyncMock()
+            edit = AsyncMock(side_effect=BadRequest("message can't be edited"))
+            send = AsyncMock()
+            chat = SimpleNamespace(id=99)
+            message = SimpleNamespace(chat=chat)
+            from_user = SimpleNamespace(id=700708)
+            query = SimpleNamespace(
+                answer=answer,
+                edit_message_text=edit,
+                message=message,
+                from_user=from_user,
+                data=f"apr:{uuid.uuid4()}",
+            )
+            update = SimpleNamespace(callback_query=query)
+            ctx = SimpleNamespace(
+                bot=SimpleNamespace(token=token, send_message=send)
+            )
+
+            await _handle_approval_callback(update, ctx)
+
+            assert answer.await_count == 1, (
+                "must always ack so the client spinner stops"
+            )
+            assert edit.await_count == 1, (
+                "edit path is attempted first; without this the "
+                "fallback would never know there was a failure"
+            )
+            assert send.await_count == 1, (
+                "BadRequest on edit MUST fall back to a fresh send so "
+                "the user sees the outcome"
+            )
+            send_kwargs = send.call_args.kwargs
+            assert send_kwargs.get("chat_id") == 99
+            assert "Approved" in send_kwargs.get("text", "")
+        finally:
+            set_approval_decision_router(None)
+
+    async def test_ignored_payload_does_not_edit_or_send(self) -> None:
+        """Stray click (non-approval callback_data) must not result in
+        a visible message at all — the original card stays in place
+        and the engine is not consulted. Catches a mutation that
+        treats "ignored" as a "send a message" branch."""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from rolemesh.channels.telegram_gateway import (
+            _handle_approval_callback,
+        )
+
+        answer = AsyncMock()
+        edit = AsyncMock()
+        send = AsyncMock()
+        message = SimpleNamespace(chat=SimpleNamespace(id=1))
+        query = SimpleNamespace(
+            answer=answer,
+            edit_message_text=edit,
+            message=message,
+            from_user=SimpleNamespace(id=1),
+            data="random:payload",
+        )
+        update = SimpleNamespace(callback_query=query)
+        ctx = SimpleNamespace(
+            bot=SimpleNamespace(
+                token="anything", send_message=send
+            )
+        )
+        await _handle_approval_callback(update, ctx)
+        assert answer.await_count == 1
+        assert edit.await_count == 0
+        assert send.await_count == 0
