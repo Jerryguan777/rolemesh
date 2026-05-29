@@ -58,8 +58,10 @@ from rolemesh.db import (
 
 from .enum_translate import outcome_to_ws_decision
 from .notification import (
+    ApprovalCardPayload,
     ChannelSender,
     NotificationTargetResolver,
+    deliver_approval_card_or_text,
     format_approver_request_message,
     format_cancelled_message,
     format_edge_fyi,
@@ -286,15 +288,36 @@ class ApprovalRequestBuilder:
     async def _notify_approvers(
         self, request: ApprovalRequest, policy: ApprovalPolicy
     ) -> None:
+        # v6.1 §P2.7 + §P2b.1: every approver fan-out goes through the
+        # card-or-text dispatcher so channels that opt in
+        # (Telegram InlineKeyboard, Web) render native buttons and
+        # channels that have not (Slack, plain SMTP) degrade to the
+        # text fallback. Owner-FYI (edge-fallback) deliberately keeps
+        # its own ``send_to_conversation`` call site so it cannot
+        # accidentally surface buttons for a request the owner cannot
+        # actually decide on.
         ctx = await self._resolver.resolve_for_approvers(
             request=request, policy=policy
         )
-        message = format_approver_request_message(
+        text_fallback = format_approver_request_message(
             request=request, policy=policy, approval_url=ctx.approval_url
+        )
+        short = request.id[:8]
+        summary = (
+            f"{request.mcp_server_name}: {len(request.actions)} action(s)"
+        )
+        card = ApprovalCardPayload(
+            request_id=request.id,
+            title=f"Approval #{short}",
+            summary=summary,
+            text_fallback=text_fallback,
+            approval_url=ctx.approval_url,
         )
         for conv_id in ctx.target_conversation_ids:
             try:
-                await self._channel.send_to_conversation(conv_id, message)
+                await deliver_approval_card_or_text(
+                    self._channel, conv_id, card
+                )
             except Exception as exc:  # noqa: BLE001 — notification best-effort
                 logger.warning(
                     "approval: notify failed",
