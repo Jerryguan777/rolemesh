@@ -35,7 +35,10 @@ from rolemesh.approval.engine import (
     ConflictError,
     ForbiddenError,
 )
-from rolemesh.approval.notification import NotificationTargetResolver
+from rolemesh.approval.notification import (
+    ApprovalCardPayload,
+    NotificationTargetResolver,
+)
 from rolemesh.db import (
     create_approval_policy,
     create_channel_binding,
@@ -70,6 +73,25 @@ class _FakeChannel:
 
     async def send_to_conversation(self, conversation_id: str, text: str) -> None:
         self.sent.append((conversation_id, text))
+
+
+class _CardCapableFakeChannel(_FakeChannel):
+    """A channel-sender spy that also opts into the card surface.
+
+    v6.1 §P2.7 / §P2b.1 — the dispatcher in ``notification.py`` picks
+    the card path when ``send_approval_card`` exists; this spy lets
+    the engine tests assert the orchestrator actually went down that
+    path instead of silently falling back to text.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.cards: list[tuple[str, ApprovalCardPayload]] = []
+
+    async def send_approval_card(
+        self, conversation_id: str, card: ApprovalCardPayload
+    ) -> None:
+        self.cards.append((conversation_id, card))
 
 
 def _resolver(
@@ -347,6 +369,58 @@ class TestHandleProposal:
         assert len(webreq) == 1
         assert webreq[0][0] == f"web.approval.required.{conv_id}"
         assert ch.sent, "at least one approver notification must be attempted"
+
+    async def test_notify_approvers_routes_card_capable_channels_through_dispatcher(
+        self,
+    ) -> None:
+        """v6.1 §P2b.1 / §P2.7 — ``_notify_approvers`` must build an
+        :class:`ApprovalCardPayload` and call
+        :func:`deliver_approval_card_or_text` so card-capable channels
+        (Telegram, Web) receive the structured payload. The Phase 2a
+        wiring added the dispatcher helper but the engine's call site
+        was still ``send_to_conversation`` — closing that gap is the
+        whole point of §P2b.1 step 3. A future regression that
+        reverts the call site to plain text would silently break
+        Telegram inline buttons without any other test catching it.
+        """
+        tenant_id, user_id, cw_id, conv_id, job_id, _p = await _seed()
+        spy = _CardCapableFakeChannel()
+        engine, _pub, ch = _engine(channel=spy)
+        assert ch is spy
+
+        await _call_proposal(engine,
+            {
+                "tenantId": tenant_id,
+                "coworkerId": cw_id,
+                "conversationId": conv_id,
+                "jobId": job_id,
+                "userId": user_id,
+                "rationale": "refund for customer 99",
+                "actions": [
+                    {
+                        "mcp_server": "erp",
+                        "tool_name": "refund",
+                        "params": {"amount": 5000},
+                    }
+                ],
+            }
+        )
+
+        assert spy.cards, (
+            "card-capable channel must receive an ApprovalCardPayload — "
+            "engine still falls back to plain send_to_conversation"
+        )
+        assert spy.sent == [], (
+            "card-capable channel must NOT also be sent text — that "
+            "would double-notify the approver"
+        )
+        delivered_conv, payload = spy.cards[0]
+        assert delivered_conv == conv_id
+        # The dispatcher contract: text_fallback for Slack-style
+        # channels, but the request_id MUST be carried so Telegram
+        # can build callback_data without re-querying the engine.
+        reqs = await list_approval_requests(tenant_id)
+        assert payload.request_id == reqs[0].id
 
     async def test_no_match_path_creates_executed_trail(self) -> None:
         # Proposal that does not match any policy. Engine still creates
