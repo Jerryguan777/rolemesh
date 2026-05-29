@@ -446,9 +446,14 @@ async def _handle_approval_callback(
                 kind=result.kind,
             )
     if not edited and message is not None:
+        # ``message.chat`` is populated for both ``Message`` and the
+        # ``InaccessibleMessage`` variant of ``MaybeInaccessibleMessage``
+        # (only ``Message.chat_id`` is type-narrowed, so reaching for
+        # ``.chat.id`` instead keeps the narrowing-tolerant fallback in
+        # both branches).
         try:
             await context.bot.send_message(
-                chat_id=message.chat_id, text=result.edit_text
+                chat_id=message.chat.id, text=result.edit_text
             )
         except Exception:
             logger.exception(
