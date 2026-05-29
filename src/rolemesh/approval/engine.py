@@ -534,7 +534,6 @@ class ApprovalEngine:
             tenant_id, coworker_id, policy, requester_user_id=user_id
         )
 
-        actions = [{"mcp_server": server, "tool_name": tool, "params": params}]
         final_hash = action_hash or compute_action_hash(tool, params)
 
         if not approvers:
@@ -1086,7 +1085,7 @@ class ApprovalEngine:
         # opted into.
         sent_to: set[str] = set()
         for owner_id in owner_ids:
-            convs = await self._resolver._get_conversations_for_user_and_coworker(  # noqa: SLF001
+            convs = await self._resolver._get_conversations_for_user_and_coworker(
                 owner_id, coworker_id
             )
             for conv_id in convs:

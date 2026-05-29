@@ -26,6 +26,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 import rolemesh.main as orchestrator
+from rolemesh.approval.notification import PENDING_TURN_GUIDE_TEXT
 from rolemesh.core.orchestrator_state import (
     ConversationState,
     CoworkerState,
@@ -41,7 +42,6 @@ from rolemesh.db import (
     create_user,
     store_message,
 )
-from rolemesh.approval.notification import PENDING_TURN_GUIDE_TEXT
 
 pytestmark = pytest.mark.usefixtures("test_db")
 
@@ -118,10 +118,10 @@ def _patch_orchestrator(
     monkeypatch.setattr(
         orchestrator, "_queue",
         SimpleNamespace(
-            enqueue_message_check=lambda *a, **kw: None,  # noqa: ARG005
-            register_process=lambda *a, **kw: None,  # noqa: ARG005
-            request_shutdown=lambda *a, **kw: None,  # noqa: ARG005
-            set_process_messages_fn=lambda *a, **kw: None,  # noqa: ARG005
+            enqueue_message_check=lambda *_a, **_kw: None,
+            register_process=lambda *_a, **_kw: None,
+            request_shutdown=lambda *_a, **_kw: None,
+            set_process_messages_fn=lambda *_a, **_kw: None,
         ),
     )
     return send, execute_mock

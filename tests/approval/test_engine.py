@@ -482,7 +482,7 @@ class TestResolveApprovers:
     async def test_self_approval_returns_requester_only(self) -> None:
         """T2a.1 — non-empty requester → ``[requester]`` regardless
         of policy.approver_user_ids."""
-        tenant_id, user_id, cw_id, _conv_id, _job_id, policy_id = await _seed()
+        tenant_id, _user_id, cw_id, _conv_id, _job_id, policy_id = await _seed()
         engine, _pub, _ch = _engine()
         from rolemesh.db import get_approval_policy
 
@@ -492,7 +492,7 @@ class TestResolveApprovers:
         # the engine route is independent: it returns [requester_user_id].
         # Pick a non-requester to make the assertion sharp.
         non_requester = str(uuid.uuid4())
-        out = await engine._resolve_approvers(  # noqa: SLF001 — pinning private contract
+        out = await engine._resolve_approvers(
             tenant_id, cw_id, policy, requester_user_id=non_requester
         )
         assert out == [non_requester], (
@@ -509,7 +509,7 @@ class TestResolveApprovers:
 
         policy = await get_approval_policy(policy_id, tenant_id=tenant_id)
         assert policy is not None
-        out = await engine._resolve_approvers(  # noqa: SLF001
+        out = await engine._resolve_approvers(
             tenant_id, cw_id, policy, requester_user_id=""
         )
         assert out == [], (
