@@ -116,34 +116,35 @@ Decision: **clean break** (greenfield DB; no prod rows to preserve — confirm).
 - `src/webui/v1/approval_policies.py:42-44` — remove the "intentionally not projected" comment (moot once gone).
 - `tests/approval/test_engine.py` (~145-195) — delete the "SoD seam is ignored" test.
 
-### 1I. SoD removal — `resolved_approvers` (DECIDED: FULL DELETE)
-Self-approval only; no SoD seam retained. The approver is *always* the
-requester (`user_id`), so the column carries zero information and is dropped.
-- `src/rolemesh/db/schema.py:1004` — drop the `resolved_approvers` column.
-- `src/rolemesh/approval/types.py:94` — drop the field from `ApprovalRequest`.
-- `src/rolemesh/db/approval.py`:
-  - Drop `resolved_approvers` from read/build/INSERT (298, 314, 406).
-  - Rewrite the decide CTE authorization (`616`) from
-    `$3::uuid = ANY(b.resolved_approvers)` to `$3::uuid = b.user_id`
-    (caller must be the requester). Keep the 403/409/200 disambiguation.
-- `src/rolemesh/approval/engine.py` — delete `_resolve_approvers()` (1000-1024)
-  entirely and its two call sites (452-454 in `handle_proposal`, 556-558 in
-  `handle_auto_intercept`); the create path no longer passes an approvers list.
-  The empty-requester edge (bot-chained / system turn) routes to the existing
-  owner-FYI path in `handle_auto_intercept` — preserve that branch but key it
-  off `not user_id` directly instead of `_resolve_approvers() == []`.
-- `src/rolemesh/approval/notification.py:124-130` — replace the
-  `for approver_id in request.resolved_approvers` fan-out with a single lookup
-  on `request.user_id`.
-- `src/webui/v1/approvals.py:156-167` — `scope=mine` filter becomes
-  `r.user_id == user.user_id` (drop the `resolved_approvers` membership test).
-  `scope=all` (admin) unchanged.
+### 1I. `resolved_approvers` — KEEP (Safety framework dependency)
+**REVISED after code check + decision "don't touch Safety this time."** The
+column CANNOT be deleted: `create_from_safety` (`engine.py:632,698`) populates
+it with **tenant owners** (intentional he-approval for high-risk actions), and
+the decide CTE `ANY(resolved_approvers)` (`db/approval.py:616`) serves BOTH
+self-approval (`[requester]`) and Safety (`[owners]`). Deleting it or changing
+the auth to `user_id == requester` would break Safety. So:
+- **KEEP** the column, the dataclass field, and the decide CTE check unchanged
+  (the `ANY()` check is correct for both populations).
+- **Simplify only the normal-approval paths**: replace `_resolve_approvers()`
+  (`engine.py:1000-1024`) with an inline `[user_id]` at its two call sites
+  (452-454, 556-558); keep the empty-requester edge → owner-FYI branch (key it
+  off `not user_id`). Drop the unused `policy/tenant_id/coworker_id` params and
+  the "future SoD" docstring.
+- `notification.py:124-130` — leave the `for approver_id in resolved_approvers`
+  loop (it correctly handles both the single-requester and multi-owner cases).
+- `webui/v1/approvals.py:156-167` — leave `scope=mine` membership filter as-is
+  (works for both). No change needed.
+
+Net:普通审批纯自审(列恒为 `[requester]`),Safety 的 owner 审批保持不变,列因
+Safety 而保留。这与「删干净」的目标一致——普通路径不再有任何 SoD 逻辑;列只是
+Safety 子系统的依赖,留待 Safety 单独评估时再处理。
 
 ### 1J. Stage-1 exit criteria
 - `ruff` + `mypy` clean; full non-deleted approval test suite green.
 - Manual trace: propose → match → pending → notify requester → approve →
   row=`approved` + web-resolved event fired → **nothing executes** (expected).
-- `grep -rn "ApprovalWorker\|approval.decided\|claim_approval_for_execution\|approver_user_ids\|resolved_approvers\|_resolve_approvers\|execution_failed" src/` returns nothing in live paths.
+- `grep -rn "ApprovalWorker\|approval.decided\|claim_approval_for_execution\|approver_user_ids\|_resolve_approvers\|execution_failed" src/` returns nothing in live paths.
+  (`resolved_approvers` intentionally remains — Safety dependency, §1I.)
 
 ---
 
@@ -250,8 +251,12 @@ woken; user is told it expired on their next turn, or via a decision message).
    row `expired` (existing `expire_stale_requests`); the user learns of it on
    their next turn. No decision message is pushed on expiry. (Reject still sends
    its decision message; expiry does not.)
-4. **`resolved_approvers` column** — **DECIDED: FULL DELETE (§1I).** No SoD seam
-   retained anywhere. Approver is always the requester (`user_id`); the column,
-   the dataclass field, `_resolve_approvers()`, and the array-membership auth
-   check are all removed and replaced with direct `user_id` equality. Clean
-   self-approval only.
+4. **`resolved_approvers` column** — **REVISED: KEEP (§1I).** Code check found
+   the Safety framework (`create_from_safety`) populates it with tenant owners
+   (deliberate he-approval), and "don't touch Safety this time" is decided. The
+   normal-approval paths are still made pure self-approval (`_resolve_approvers`
+   inlined to `[user_id]`), but the column/field/auth-CTE stay because Safety
+   depends on them. `approver_user_ids` (the policy column) is still fully
+   deleted — it is genuinely dead (Safety uses `_tenant_owner_ids`, not it).
+5. **Safety framework** — **OUT OF SCOPE this round.** `create_from_safety`,
+   `resolve_for_safety_approvers`, owner-based approval all left untouched.
