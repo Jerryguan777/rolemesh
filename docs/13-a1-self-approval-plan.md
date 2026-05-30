@@ -116,22 +116,34 @@ Decision: **clean break** (greenfield DB; no prod rows to preserve — confirm).
 - `src/webui/v1/approval_policies.py:42-44` — remove the "intentionally not projected" comment (moot once gone).
 - `tests/approval/test_engine.py` (~145-195) — delete the "SoD seam is ignored" test.
 
-### 1I. SoD simplification — `resolved_approvers` (collapse to requester)
-Keep the column (audit), but make self-approval explicit:
-- `src/rolemesh/approval/engine.py` — replace `_resolve_approvers()` (1000-1024)
-  with an inline `[user_id]` (drop the unused `policy/tenant_id/coworker_id`
-  params and the "future SoD" docstring). Empty requester → `[]` edge stays.
-- `src/rolemesh/approval/notification.py:124-130` — collapse the approver
-  fan-out loop to a single requester-conversation lookup.
-- `src/webui/v1/approvals.py:156-167` — keep `scope=mine` filter (now trivially
-  "my own requests"); keep the DB-level authorization CTE check at
-  `db/approval.py:616` as a safety guard. Document both as self-approval-trivial.
+### 1I. SoD removal — `resolved_approvers` (DECIDED: FULL DELETE)
+Self-approval only; no SoD seam retained. The approver is *always* the
+requester (`user_id`), so the column carries zero information and is dropped.
+- `src/rolemesh/db/schema.py:1004` — drop the `resolved_approvers` column.
+- `src/rolemesh/approval/types.py:94` — drop the field from `ApprovalRequest`.
+- `src/rolemesh/db/approval.py`:
+  - Drop `resolved_approvers` from read/build/INSERT (298, 314, 406).
+  - Rewrite the decide CTE authorization (`616`) from
+    `$3::uuid = ANY(b.resolved_approvers)` to `$3::uuid = b.user_id`
+    (caller must be the requester). Keep the 403/409/200 disambiguation.
+- `src/rolemesh/approval/engine.py` — delete `_resolve_approvers()` (1000-1024)
+  entirely and its two call sites (452-454 in `handle_proposal`, 556-558 in
+  `handle_auto_intercept`); the create path no longer passes an approvers list.
+  The empty-requester edge (bot-chained / system turn) routes to the existing
+  owner-FYI path in `handle_auto_intercept` — preserve that branch but key it
+  off `not user_id` directly instead of `_resolve_approvers() == []`.
+- `src/rolemesh/approval/notification.py:124-130` — replace the
+  `for approver_id in request.resolved_approvers` fan-out with a single lookup
+  on `request.user_id`.
+- `src/webui/v1/approvals.py:156-167` — `scope=mine` filter becomes
+  `r.user_id == user.user_id` (drop the `resolved_approvers` membership test).
+  `scope=all` (admin) unchanged.
 
 ### 1J. Stage-1 exit criteria
 - `ruff` + `mypy` clean; full non-deleted approval test suite green.
 - Manual trace: propose → match → pending → notify requester → approve →
   row=`approved` + web-resolved event fired → **nothing executes** (expected).
-- `grep -rn "ApprovalWorker\|approval.decided\|claim_approval_for_execution\|approver_user_ids\|execution_failed" src/` returns only intended residue (none in live paths).
+- `grep -rn "ApprovalWorker\|approval.decided\|claim_approval_for_execution\|approver_user_ids\|resolved_approvers\|_resolve_approvers\|execution_failed" src/` returns nothing in live paths.
 
 ---
 
@@ -228,12 +240,18 @@ woken; user is told it expired on their next turn, or via a decision message).
 
 ---
 
-## Open questions for review
-1. **DB strategy** — confirm clean-break enum trim (1G) is OK (no prod rows), vs.
-   keep-legacy-statuses for safety.
+## Decisions (locked)
+1. **DB strategy** — **DECIDED: clean break (§1G).** Drop the execution statuses
+   from the CHECK constraints outright; no legacy-status retention.
 2. **Resume prompt wording** (2C) and **system-prompt** additions for
-   "report truthfully, re-issue the approved call, don't claim premature success".
-3. **Expiry UX** — on expiry, do we proactively send a decision message, or only
-   surface it when the user next speaks? (Affects 2E reject/expiry branch.)
-4. **`resolved_approvers` column** — keep for audit (recommended) or drop now that
-   it's always `[requester]`?
+   "report truthfully, re-issue the approved call, don't claim premature
+   success" — to be finalized in Stage-2 code review.
+3. **Expiry UX** — **DECIDED: no proactive notification.** Expiry just marks the
+   row `expired` (existing `expire_stale_requests`); the user learns of it on
+   their next turn. No decision message is pushed on expiry. (Reject still sends
+   its decision message; expiry does not.)
+4. **`resolved_approvers` column** — **DECIDED: FULL DELETE (§1I).** No SoD seam
+   retained anywhere. Approver is always the requester (`user_id`); the column,
+   the dataclass field, `_resolve_approvers()`, and the array-membership auth
+   check are all removed and replaced with direct `user_id` equality. Clean
+   self-approval only.
