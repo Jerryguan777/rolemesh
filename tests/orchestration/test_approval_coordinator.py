@@ -237,6 +237,108 @@ async def test_decide_unknown_request_is_noop() -> None:
 
 
 # ---------------------------------------------------------------------------
+# IDOR guard (S4): a guessed request_id must not let one tenant / conversation
+# decide another's approval. The guard runs BEFORE any DB write or relay.
+# ---------------------------------------------------------------------------
+
+
+async def test_decide_refuses_tenant_mismatch() -> None:
+    coord, q, store, decisions = _make()
+    await coord.on_approval_request(_payload())  # tenant t1, conv1
+
+    # An attacker in tenant "evil" guesses req1's UUID and tries to approve it.
+    won = await coord.decide(
+        "req1", decision="approve", decided_by="attacker",
+        expected_tenant_id="evil",
+    )
+    assert won is False
+    assert decisions == []                      # no tool relay
+    assert store.rows["req1"].status == "pending"  # row untouched
+    assert q.is_awaiting_approval("conv1") is True  # still suspended
+
+
+async def test_decide_refuses_conversation_mismatch() -> None:
+    coord, _q, store, decisions = _make()
+    await coord.on_approval_request(_payload())  # conv1
+
+    # Same tenant, but a user who only holds a ticket for conv2.
+    won = await coord.decide(
+        "req1", decision="approve", decided_by="user1",
+        expected_tenant_id="t1", expected_conversation_id="conv2",
+    )
+    assert won is False
+    assert decisions == []
+    assert store.rows["req1"].status == "pending"
+
+
+async def test_decide_allows_matching_tenant_and_conversation() -> None:
+    coord, _q, store, decisions = _make()
+    await coord.on_approval_request(_payload())
+
+    won = await coord.decide(
+        "req1", decision="approve", decided_by="user1",
+        expected_tenant_id="t1", expected_conversation_id="conv1",
+    )
+    assert won is True
+    assert store.rows["req1"].status == "approved"
+    assert decisions and decisions[0][1]["decision"] == "approve"
+
+
+# ---------------------------------------------------------------------------
+# notify_hard wiring: the hard channel fires deterministically on reject /
+# expiry (never on approve — that closes the loop via the decision funnel).
+# ---------------------------------------------------------------------------
+
+
+def _make_with_notify(
+    idle_ms: int = 10_000,
+) -> tuple[ApprovalCoordinator, GroupQueue, _FakeStore, list[Any], list[Any]]:
+    q = GroupQueue(transport=_FakeTransport(), idle_timeout_ms=idle_ms)
+    store = _FakeStore()
+    decisions: list[Any] = []
+    hard: list[Any] = []
+
+    async def _publish(job_id: str, payload: dict[str, Any]) -> None:
+        decisions.append((job_id, payload))
+
+    async def _notify_hard(req: ApprovalRequest, kind: str) -> None:
+        hard.append((req.id, kind))
+
+    coord = ApprovalCoordinator(
+        queue=q,
+        persistence=ApprovalPersistence(
+            store.create_request, store.resolve_request, store.list_pending_all
+        ),
+        resolve_tenant=lambda _cw: "t1",
+        publish_decision=_publish,
+        now=_now,
+        notify_hard=_notify_hard,
+    )
+    return coord, q, store, decisions, hard
+
+
+async def test_notify_hard_fires_on_reject_only_with_kind_rejected() -> None:
+    coord, _q, _store, _decisions, hard = _make_with_notify()
+    await coord.on_approval_request(_payload())
+    await coord.decide("req1", decision="reject", decided_by="user1")
+    assert hard == [("req1", "rejected")]
+
+
+async def test_notify_hard_does_not_fire_on_approve() -> None:
+    coord, _q, _store, _decisions, hard = _make_with_notify()
+    await coord.on_approval_request(_payload())
+    await coord.decide("req1", decision="approve", decided_by="user1")
+    assert hard == []
+
+
+async def test_notify_hard_fires_on_expiry_with_kind_expired() -> None:
+    coord, _q, _store, _decisions, hard = _make_with_notify()
+    await coord.on_approval_request(_payload(expires_in_ms=30))
+    await asyncio.sleep(0.08)
+    assert hard == [("req1", "expired")]
+
+
+# ---------------------------------------------------------------------------
 # the decision race (the headline correctness property)
 # ---------------------------------------------------------------------------
 
