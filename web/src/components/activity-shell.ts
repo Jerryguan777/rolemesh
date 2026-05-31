@@ -115,8 +115,8 @@ export class RmActivityShell extends LitElement {
           <span class="as-card-body">
             <span class="as-card-title">Safety decisions</span>
             <span class="as-card-sub">
-              Live audit of allow / block / approve verdicts across all
-              conversations on this tenant.
+              Live audit of allow / block / redact / warn verdicts across
+              all conversations on this tenant.
             </span>
           </span>
           <span class="as-card-arrow">${iconChevronRight(18)}</span>
