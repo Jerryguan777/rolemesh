@@ -626,6 +626,82 @@ export interface paths {
         patch: operations["updateMCPServer"];
         trace?: never;
     };
+    "/api/v1/approval-policies": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the tenant's HITL approval policies
+         * @description Ordered priority-desc, then newest `updated_at` (the matcher's
+         *     tiebreak order). Tenant-scoped via RLS — never returns another
+         *     tenant's policies.
+         */
+        get: operations["listApprovalPolicies"];
+        put?: never;
+        /**
+         * Create an approval policy
+         * @description `condition_expr` is the structured §7 language
+         *     (`{always}` / `{field,op,value}` / `{and:[…]}` / `{or:[…]}`).
+         *     A malformed expression is rejected with `400`
+         *     (`code="VALIDATION_ERROR"`) so the operator fixes it up front,
+         *     rather than shipping a policy that fail-closed approval-gates
+         *     every matched call at runtime.
+         */
+        post: operations["createApprovalPolicy"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/approval-policies/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        get: operations["getApprovalPolicy"];
+        put?: never;
+        post?: never;
+        /** Delete an approval policy */
+        delete: operations["deleteApprovalPolicy"];
+        options?: never;
+        head?: never;
+        /** Partially update an approval policy */
+        patch: operations["updateApprovalPolicy"];
+        trace?: never;
+    };
+    "/api/v1/approval-requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List in-flight pending approval requests (web reconnect)
+         * @description Authoritative source for re-rendering ✅/❌ approval cards after a
+         *     socket drop — the live `event.approval.requested` push is
+         *     fire-and-forget. Returns only `pending` rows for the caller's
+         *     tenant (oldest first). The optional `conversation_id` filter is
+         *     applied inside the tenant boundary, so a foreign id cannot
+         *     surface another tenant's request.
+         */
+        get: operations["listPendingApprovalRequests"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/runs/{id}": {
         parameters: {
             query?: never;
@@ -1265,6 +1341,69 @@ export interface components {
                 [key: string]: boolean;
             } | null;
             description?: string | null;
+        };
+        /**
+         * @description Structured §7 approval condition. Exactly one form per node:
+         *     `{"always": <bool>}`, `{"field","op","value"}`,
+         *     `{"and": [<expr>,…]}`, or `{"or": [<expr>,…]}`. Ops:
+         *     `== != > >= < <= in not_in contains`. No expression language /
+         *     no eval. At match time evaluation is fail-closed (a malformed
+         *     expr ⇒ require approval); at write time the API rejects a
+         *     malformed expr with 400.
+         */
+        ConditionExpr: {
+            [key: string]: unknown;
+        };
+        ApprovalPolicy: {
+            /** Format: uuid */
+            id: string;
+            /** Format: uuid */
+            tenant_id: string;
+            mcp_server_name: string;
+            /** @description Exact MCP tool name, or `*` for server-wide. */
+            tool_name: string;
+            condition_expr: components["schemas"]["ConditionExpr"];
+            enabled: boolean;
+            /** @description Higher wins on multiple matches; ties break to newest. */
+            priority: number;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        ApprovalPolicyCreate: {
+            mcp_server_name: string;
+            tool_name: string;
+            /**
+             * @description Defaults to `{"always": true}` (every matched call needs
+             *     approval) when omitted.
+             */
+            condition_expr?: components["schemas"]["ConditionExpr"];
+            /** @default true */
+            enabled: boolean;
+            /** @default 0 */
+            priority: number;
+        };
+        ApprovalPolicyUpdate: {
+            mcp_server_name?: string;
+            tool_name?: string;
+            condition_expr?: components["schemas"]["ConditionExpr"];
+            enabled?: boolean;
+            priority?: number;
+        };
+        PendingApprovalRequest: {
+            /**
+             * Format: uuid
+             * @description Echo back in a `request.approval_decision` WS frame.
+             */
+            request_id: string;
+            /** Format: uuid */
+            conversation_id?: string | null;
+            mcp_server_name: string;
+            tool_name: string;
+            action_summary?: string | null;
+            /** Format: date-time */
+            requested_at: string;
+            /** Format: date-time */
+            expires_at: string;
         };
         SkillFile: {
             path: string;
@@ -3066,6 +3205,152 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+        };
+    };
+    listApprovalPolicies: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalPolicy"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    createApprovalPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ApprovalPolicyCreate"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalPolicy"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    getApprovalPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalPolicy"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteApprovalPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateApprovalPolicy: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ApprovalPolicyUpdate"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalPolicy"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listPendingApprovalRequests: {
+        parameters: {
+            query?: {
+                /** @description Only return pending requests for this conversation. */
+                conversation_id?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PendingApprovalRequest"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
         };
     };
     getRun: {

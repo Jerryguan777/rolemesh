@@ -35,9 +35,25 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ApprovalPolicy",
+    "ConditionValidationError",
     "evaluate_condition",
     "find_matching_policy",
+    "validate_condition_expr",
 ]
+
+
+class ConditionValidationError(ValueError):
+    """A condition expression is structurally invalid (write-time check).
+
+    Distinct from the *runtime* fail-closed behaviour of
+    :func:`evaluate_condition`: at runtime a malformed expression errs toward
+    "require approval" so a broken policy can never silently allow a call. But
+    when a policy is *created or edited* (the CRUD surface), we reject the
+    malformed shape up front with a precise message, so the operator fixes the
+    typo instead of unknowingly shipping a policy that approval-gates
+    everything. The two checks are deliberately separate: the gate stays
+    fail-closed; the editor stays strict.
+    """
 
 
 @dataclass(frozen=True)
@@ -182,6 +198,78 @@ def evaluate_condition(expr: dict[str, Any], params: dict[str, Any]) -> bool:
         return _eval(expr, params)
     except Exception:  # noqa: BLE001 — fail-closed: any error ⇒ require approval
         return True
+
+
+def validate_condition_expr(expr: Any, *, _depth: int = 0) -> None:
+    """Raise :class:`ConditionValidationError` if ``expr`` is not a well-formed
+    condition. Returns ``None`` for a valid expression.
+
+    This is the strict, write-time companion to :func:`evaluate_condition`
+    (which is lenient/fail-closed at match time). The accepted grammar is the
+    §7 structured language and nothing else::
+
+        {"always": <bool>}
+        {"field": <str>, "op": <known op>, "value": <any>}
+        {"and": [<expr>, ...]}    # non-empty
+        {"or":  [<expr>, ...]}    # non-empty
+
+    A node must be a dict carrying **exactly** the keys of one form — a dict
+    that mixes forms (``{"always": true, "field": "x"}``) or carries unknown
+    keys is rejected, even though the runtime evaluator would have silently
+    taken the first branch. Nesting is bounded (``_MAX_DEPTH``) so a hostile
+    or accidental deeply-nested payload can't blow the Python recursion limit
+    on the way in.
+    """
+    if _depth > _MAX_CONDITION_DEPTH:
+        raise ConditionValidationError(
+            f"condition nesting exceeds {_MAX_CONDITION_DEPTH} levels"
+        )
+    if not isinstance(expr, dict):
+        raise ConditionValidationError(
+            f"condition node must be an object, got {type(expr).__name__}"
+        )
+    keys = set(expr)
+
+    if "always" in keys:
+        if keys != {"always"}:
+            raise ConditionValidationError(
+                "'always' node must carry only the 'always' key"
+            )
+        if not isinstance(expr["always"], bool):
+            raise ConditionValidationError("'always' must be a boolean")
+        return
+
+    if "and" in keys or "or" in keys:
+        connective = "and" if "and" in keys else "or"
+        if keys != {connective}:
+            raise ConditionValidationError(
+                f"'{connective}' node must carry only the '{connective}' key"
+            )
+        subs = expr[connective]
+        if not isinstance(subs, list) or not subs:
+            raise ConditionValidationError(
+                f"'{connective}' must be a non-empty list of conditions"
+            )
+        for sub in subs:
+            validate_condition_expr(sub, _depth=_depth + 1)
+        return
+
+    # Otherwise it must be a leaf comparison.
+    if keys != {"field", "op", "value"}:
+        raise ConditionValidationError(
+            "leaf condition must carry exactly 'field', 'op', and 'value'"
+        )
+    if not isinstance(expr["field"], str) or not expr["field"]:
+        raise ConditionValidationError("'field' must be a non-empty string")
+    if expr["op"] not in _OPS:
+        raise ConditionValidationError(
+            f"unknown op {expr['op']!r}; expected one of {sorted(_OPS)}"
+        )
+
+
+# Defence-in-depth bound on condition nesting at write time. Real policies are
+# shallow; anything past this is almost certainly an error or an attack.
+_MAX_CONDITION_DEPTH = 32
 
 
 def find_matching_policy(

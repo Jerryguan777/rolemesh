@@ -29,6 +29,7 @@ tags:
   - name: Models
   - name: Runs
   - name: Skills
+  - name: ApprovalPolicies
 
 paths:
   # ===================================================================
@@ -1046,6 +1047,139 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  # ===================================================================
+  # HITL tool approval (docs/21-hitl-approval-plan.md §10 S5)
+  # ===================================================================
+  /api/v1/approval-policies:
+    get:
+      tags: [ApprovalPolicies]
+      operationId: listApprovalPolicies
+      summary: List the tenant's HITL approval policies
+      description: |
+        Ordered priority-desc, then newest `updated_at` (the matcher's
+        tiebreak order). Tenant-scoped via RLS — never returns another
+        tenant's policies.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ApprovalPolicy' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [ApprovalPolicies]
+      operationId: createApprovalPolicy
+      summary: Create an approval policy
+      description: |
+        `condition_expr` is the structured §7 language
+        (`{always}` / `{field,op,value}` / `{and:[…]}` / `{or:[…]}`).
+        A malformed expression is rejected with `400`
+        (`code="VALIDATION_ERROR"`) so the operator fixes it up front,
+        rather than shipping a policy that fail-closed approval-gates
+        every matched call at runtime.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApprovalPolicyCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalPolicy' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/approval-policies/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [ApprovalPolicies]
+      operationId: getApprovalPolicy
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalPolicy' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [ApprovalPolicies]
+      operationId: updateApprovalPolicy
+      summary: Partially update an approval policy
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ApprovalPolicyUpdate' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApprovalPolicy' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [ApprovalPolicies]
+      operationId: deleteApprovalPolicy
+      summary: Delete an approval policy
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '204':
+          description: No content
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/approval-requests:
+    get:
+      tags: [ApprovalPolicies]
+      operationId: listPendingApprovalRequests
+      summary: List in-flight pending approval requests (web reconnect)
+      description: |
+        Authoritative source for re-rendering ✅/❌ approval cards after a
+        socket drop — the live `event.approval.requested` push is
+        fire-and-forget. Returns only `pending` rows for the caller's
+        tenant (oldest first). The optional `conversation_id` filter is
+        applied inside the tenant boundary, so a foreign id cannot
+        surface another tenant's request.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: conversation_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+          description: Only return pending requests for this conversation.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PendingApprovalRequest' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
 
   /api/v1/runs/{id}:
     parameters:
@@ -2066,6 +2200,112 @@ components:
         description:
           type: string
           nullable: true
+
+    # -----------------------------------------------------------------
+    # HITL tool-approval policies (docs/21-hitl-approval-plan.md §4/§7/§10 S5)
+    # -----------------------------------------------------------------
+
+    ConditionExpr:
+      description: |
+        Structured §7 approval condition. Exactly one form per node:
+        `{"always": <bool>}`, `{"field","op","value"}`,
+        `{"and": [<expr>,…]}`, or `{"or": [<expr>,…]}`. Ops:
+        `== != > >= < <= in not_in contains`. No expression language /
+        no eval. At match time evaluation is fail-closed (a malformed
+        expr ⇒ require approval); at write time the API rejects a
+        malformed expr with 400.
+      type: object
+      additionalProperties: true
+
+    ApprovalPolicy:
+      type: object
+      required:
+        - id
+        - tenant_id
+        - mcp_server_name
+        - tool_name
+        - condition_expr
+        - enabled
+        - priority
+        - updated_at
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        mcp_server_name: { type: string }
+        tool_name:
+          type: string
+          description: Exact MCP tool name, or `*` for server-wide.
+        condition_expr: { $ref: '#/components/schemas/ConditionExpr' }
+        enabled: { type: boolean }
+        priority:
+          type: integer
+          description: Higher wins on multiple matches; ties break to newest.
+        updated_at: { type: string, format: date-time }
+
+    ApprovalPolicyCreate:
+      type: object
+      required: [mcp_server_name, tool_name]
+      properties:
+        mcp_server_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        tool_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        condition_expr:
+          allOf:
+            - $ref: '#/components/schemas/ConditionExpr'
+          description: |
+            Defaults to `{"always": true}` (every matched call needs
+            approval) when omitted.
+        enabled:
+          type: boolean
+          default: true
+        priority:
+          type: integer
+          default: 0
+
+    ApprovalPolicyUpdate:
+      type: object
+      properties:
+        mcp_server_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        tool_name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        condition_expr: { $ref: '#/components/schemas/ConditionExpr' }
+        enabled: { type: boolean }
+        priority: { type: integer }
+
+    PendingApprovalRequest:
+      type: object
+      required:
+        - request_id
+        - mcp_server_name
+        - tool_name
+        - requested_at
+        - expires_at
+      properties:
+        request_id:
+          type: string
+          format: uuid
+          description: Echo back in a `request.approval_decision` WS frame.
+        conversation_id:
+          type: string
+          format: uuid
+          nullable: true
+        mcp_server_name: { type: string }
+        tool_name: { type: string }
+        action_summary:
+          type: string
+          nullable: true
+        requested_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
 
     # -----------------------------------------------------------------
     # Skills (design §3 Phase 3 / docs/19-skills-architecture.md)

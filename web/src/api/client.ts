@@ -68,6 +68,14 @@ export type SafetyStage = components['schemas']['SafetyStage'];
 export type SafetyVerdictAction =
   components['schemas']['SafetyVerdictAction'];
 export type SafetyFinding = components['schemas']['SafetyFinding'];
+export type ApprovalPolicy = components['schemas']['ApprovalPolicy'];
+export type ApprovalPolicyCreate =
+  components['schemas']['ApprovalPolicyCreate'];
+export type ApprovalPolicyUpdate =
+  components['schemas']['ApprovalPolicyUpdate'];
+export type PendingApprovalRequest =
+  components['schemas']['PendingApprovalRequest'];
+export type ConditionExpr = components['schemas']['ConditionExpr'];
 
 export type ErrorResponseBody =
   paths['/api/v1/runs/{id}/cancel']['post']['responses']['409']['content']['application/json'];
@@ -400,6 +408,72 @@ export class ApiClient {
       { method: 'DELETE', headers: this.headers() },
     );
     if (!resp.ok) throw await this.parseError(resp);
+  }
+
+  // ------------------------------------------------------------------
+  // HITL tool-approval policies (docs/21-hitl-approval-plan.md §10 S5)
+  // ------------------------------------------------------------------
+
+  async listApprovalPolicies(): Promise<ApprovalPolicy[]> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/approval-policies`, {
+      method: 'GET',
+      headers: this.headers(),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as ApprovalPolicy[];
+  }
+
+  async createApprovalPolicy(
+    body: ApprovalPolicyCreate,
+  ): Promise<ApprovalPolicy> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/approval-policies`, {
+      method: 'POST',
+      headers: this.headers({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as ApprovalPolicy;
+  }
+
+  async updateApprovalPolicy(
+    id: string,
+    body: ApprovalPolicyUpdate,
+  ): Promise<ApprovalPolicy> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/approval-policies/${encodeURIComponent(id)}`,
+      {
+        method: 'PATCH',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(body),
+      },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as ApprovalPolicy;
+  }
+
+  async deleteApprovalPolicy(id: string): Promise<void> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/approval-policies/${encodeURIComponent(id)}`,
+      { method: 'DELETE', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+  }
+
+  /** In-flight pending approvals (web reconnect re-render). Optionally
+   *  scoped to one conversation so the chat surface only re-renders its
+   *  own cards. Tenant scoping is enforced server-side. */
+  async listPendingApprovals(
+    conversationId?: string,
+  ): Promise<PendingApprovalRequest[]> {
+    const qs = conversationId
+      ? `?conversation_id=${encodeURIComponent(conversationId)}`
+      : '';
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/approval-requests${qs}`,
+      { method: 'GET', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as PendingApprovalRequest[];
   }
 
   /** Returns `{ ok: true }` on 202, `{ ok: false, alreadyTerminal: true }`
