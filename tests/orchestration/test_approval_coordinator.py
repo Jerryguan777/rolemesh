@@ -320,7 +320,7 @@ async def test_expiry_marks_expired_and_resumes() -> None:
 
 
 async def test_decision_before_expiry_cancels_the_watcher() -> None:
-    coord, q, store, _decisions = _make()
+    coord, _q, store, _decisions = _make()
     await coord.on_approval_request(_payload(expires_in_ms=40))
     assert await coord.decide("req1", decision="approve", decided_by="user1") is True
 
