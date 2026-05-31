@@ -1,6 +1,6 @@
 # Attack Simulation Matrix
 
-Tracks every modeled attack against RoleMesh's three defense layers (container hardening, content safety pipeline, network egress) plus the approval and tenant-isolation surfaces, with the current status of each defense.
+Tracks every modeled attack against RoleMesh's three defense layers (container hardening, content safety pipeline, network egress) plus the tenant-isolation surface, with the current status of each defense.
 
 This document is a **snapshot** keyed to the test suite. The authoritative status lives in `tests/attack_sim/` and `scripts/verify-hardening.sh`; if a status here disagrees with the test outcomes, the tests win. The matrix is meant for orientation — "what attacks have we modeled, what category does this gap fall in, which doc to read for the defense design."
 
@@ -13,7 +13,6 @@ For the design rationale behind each defense layer, see:
 - [`15-safety-framework-architecture.md`](15-safety-framework-architecture.md) — B4, C, D categories (content checks)
 - [`16-egress-control-architecture.md`](16-egress-control-architecture.md) — D4 and parts of B (network exfil)
 - [`6-auth-architecture.md`](6-auth-architecture.md), [`4-multi-tenant-architecture.md`](4-multi-tenant-architecture.md) — E category
-- [`12-approval-architecture.md`](12-approval-architecture.md) — F category
 
 ---
 
@@ -92,26 +91,7 @@ Backed by [`4-multi-tenant-architecture.md`](4-multi-tenant-architecture.md) (du
 |---|---|---|---|---|
 | E1 | Forge tenantId in NATS payload | Engine `_tenant_matches` guard | `test_E_tenant_isolation::test_E1_*` | ✅ |
 | E2 | Forge coworkerId belonging to another tenant | IPC dispatcher uses source coworker's authoritative tenant | `test_E2_forged_coworker_id_dropped` | ✅ |
-| E3 | Cross-tenant audit read via REST | `list_approval_requests` filters by `tenant_id` | `test_E3_cross_tenant_audit_read_blocked` | ✅ |
-| E4 | Cross-tenant `/decide` call | REST 404s on `req.tenant_id != user.tenant_id` | `test_E4_cross_tenant_decide_blocked` | ✅ |
-| E5 | Cross-tenant idempotency key collision | `<request_id>:<index>` format | `test_E5_idempotency_keys_unique_across_tenants` | ✅ |
 | E6 | NATS subject sidechannel (A reads B's tasks) | NATS account-per-tenant (not implemented) | `test_E6_nats_subject_sidechannel_isolation` | ❌ xfail (NATS ACL gap) |
-
----
-
-## F. Approval flow abuse
-
-Backed by [`12-approval-architecture.md`](12-approval-architecture.md).
-
-| ID | Attack | Defense | Test | Status |
-|---|---|---|---|---|
-| F1 | Non-approver decide | Atomic CAS requires user IN `resolved_approvers` → `ForbiddenError` | `test_F_approval_abuse::test_F1_*` | ✅ |
-| F2 | Concurrent approve race | Atomic `pending → approved` CAS | `test_F2_concurrent_approve_wins_once` | ✅ |
-| F3 | Self-promotion: edit policy to add self, then approve | `resolved_approvers` snapshot at request creation | `test_F3_self_promotion_cannot_reach_prior_pending` | ✅ |
-| F4 | NATS decided-event replay | Worker's atomic `approved → executing` claim | `test_F4_decided_event_replay_does_not_double_execute` | ✅ |
-| F5 | MCP JSON-RPC error masquerading as success | Worker classifies HTTP 200 + `body.error` as failure | `test_F5_jsonrpc_error_classified_as_failure` | ✅ |
-| F6 | Stop → proposal NATS race | Orphan pending reaped by expiry loop | `test_F6_stop_race_orphan_reaped_by_expiry` | 📝 documented limitation |
-| F7 | Concurrent expire + approve | Both use `pending`-CAS; one wins | `test_F7_expire_and_approve_race_wins_once` | ✅ |
 
 ---
 
@@ -124,7 +104,6 @@ Backed by [`14-container-hardening-architecture.md`](14-container-hardening-arch
 | G1 | Fork bomb inside container | PidsLimit 512 | runbook only | 🔧 manual |
 | G2 | Infinite loop agent | `CONTAINER_TIMEOUT` 30 min kill | runbook only | 🔧 manual |
 | G3 | Oversized `tool_input` payload | Pipeline check remains linear | `test_G_dos::test_G3_*` | ✅ |
-| G4 | Approval proposal flood | Atomic insert + audit trigger per row | `test_G4_approval_flood_does_not_corrupt_state` | ✅ |
 | G5 | Registry lookup churn | Dict-based O(1) lookup | `test_G5_registry_lookup_is_constant_time` | ✅ |
 | G6 | Audit write pressure | Single-insert per event | `test_G6_audit_write_pressure` | ✅ |
 
@@ -153,11 +132,10 @@ The counts below were taken at the time the matrix was first drafted. Run `pytes
 | B. Secrets | 10 | 1 | 1 | 1 |
 | C. Prompt injection | 7 | 0 | 3 | 0 |
 | D. Data exfil | 7 | 1 | 0 | 0 |
-| E. Tenant iso | 5 | 1 | 0 | 0 |
-| F. Approval abuse | 7 | 0 | 1 | 0 |
-| G. DoS | 4 | 0 | 0 | 2 |
+| E. Tenant iso | 2 | 1 | 0 | 0 |
+| G. DoS | 3 | 0 | 0 | 2 |
 | H. Config | 8 | 0 | 0 | 1 |
-| **Total** | **60** | **3** | **5** | **10** |
+| **Total** | **49** | **3** | **4** | **10** |
 
 ---
 

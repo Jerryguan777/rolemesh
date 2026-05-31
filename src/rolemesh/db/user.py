@@ -348,10 +348,8 @@ async def delete_user(user_id: str, *, tenant_id: str) -> bool:
     cancelled in the same transaction. Without that, the
     ``ON DELETE SET NULL`` on ``scheduled_tasks.created_by_user_id``
     would leave the row's ``user_id`` NULL on an active task — the
-    next scheduler tick would then run it with a missing user, which
-    the Phase-2 approval E-path treats as "no requester", landing on
-    the owner-FYI fallback for what should have been a clean
-    departure. Cancel-before-delete keeps the audit row but takes
+    next scheduler tick would then run it with a missing user.
+    Cancel-before-delete keeps the audit row but takes
     the task out of the active queue first.
     """
     from rolemesh.db.task import cancel_tasks_for_user

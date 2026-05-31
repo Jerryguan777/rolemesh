@@ -22,9 +22,8 @@ ADMIN_BOOTSTRAP_TOKEN: str = os.environ.get("ADMIN_BOOTSTRAP_TOKEN", "")
 # the config key in one place.
 WS_TICKET_SECRET: str = os.environ.get("WS_TICKET_SECRET", "")
 
-# Base URL of the WebUI — injected into approval notifications so
-# messengers can link back to the approver-facing UI. Empty disables
-# link generation (notification still goes out as plain text).
+# Base URL of the WebUI — used to build links back to the WebUI in
+# outbound messages. Empty disables link generation.
 WEBUI_BASE_URL: str = os.environ.get("WEBUI_BASE_URL", "").rstrip("/")
 
 # --- OIDC configuration (used when AUTH_MODE=oidc) ---

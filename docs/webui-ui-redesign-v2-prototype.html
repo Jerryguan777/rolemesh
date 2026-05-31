@@ -124,21 +124,6 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
 .msg code{font-family:var(--font-mono);font-size:12.5px;background:var(--surface-2);padding:1px 5px;border-radius:5px}
 @keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 
-/* inline approval (rm-inline-approval) */
-.approval{border:1px solid var(--border-2);border-radius:var(--r);background:var(--surface);overflow:hidden;margin:4px 0 10px}
-.approval .hd{display:flex;align-items:center;gap:8px;padding:9px 13px;background:var(--warn-subtle);
-  border-bottom:1px solid var(--border);font-size:12.5px;font-weight:600;color:var(--warn)}
-.approval .bd{padding:12px 13px}
-.approval .row{display:flex;gap:8px;font-size:13px;margin-bottom:5px}
-.approval .row .k{color:var(--ink-3);width:78px;flex-shrink:0}
-.approval .row .v{font-family:var(--font-mono);font-size:12.5px;color:var(--ink)}
-.approval .acts{display:flex;gap:8px;margin-top:11px}
-.approval .acts button{padding:6px 14px;border-radius:8px;font-size:13px;font-weight:500}
-.btn-approve{background:var(--accent);color:var(--accent-ink)}
-.btn-approve:hover{background:var(--accent-2)}
-.btn-deny{border:1px solid var(--border-2);color:var(--ink-2)}
-.btn-deny:hover{background:var(--surface-2)}
-
 .typing{display:flex;gap:4px;padding:6px 0}
 .typing span{width:6px;height:6px;border-radius:50%;background:var(--ink-3);animation:bnc 1.2s infinite}
 .typing span:nth-child(2){animation-delay:.15s}.typing span:nth-child(3){animation-delay:.3s}
@@ -244,18 +229,6 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
 
 .apprbtn{position:relative;display:flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:8px;color:var(--ink-2);transition:.13s}
 .apprbtn:hover{background:var(--surface-2);color:var(--ink)}
-.apprbtn .bdg{position:absolute;top:-3px;right:-3px;min-width:16px;height:16px;padding:0 4px;border-radius:99px;background:var(--accent);color:#fff;font-size:10px;font-weight:600;display:grid;place-items:center}
-.appr-panel{position:absolute;z-index:50;background:var(--surface);border:1px solid var(--border-2);border-radius:var(--r);box-shadow:0 12px 32px rgba(42,38,32,.18);width:340px;display:none;animation:pop .12s ease both;overflow:hidden}
-.appr-panel.show{display:block}
-.appr-hd{display:flex;align-items:center;justify-content:space-between;padding:11px 14px;border-bottom:1px solid var(--border);font-size:13px;font-weight:600}
-.appr-hd small{font-weight:400;color:var(--ink-3)}
-.appr-item{padding:11px 14px;border-bottom:1px solid var(--border)}
-.appr-item:last-child{border-bottom:none}
-.appr-item .h{font-size:13px;font-weight:500;font-family:var(--font-mono)}
-.appr-item .m{font-size:11.5px;color:var(--ink-3);margin:2px 0 8px}
-.appr-item .a{display:flex;gap:7px}
-.appr-item .a button{padding:5px 12px;border-radius:7px;font-size:12.5px;font-weight:500}
-.appr-empty{padding:24px 14px;text-align:center;color:var(--ink-3);font-size:12.5px}
 
 .cwmodal{width:100%;max-width:860px;height:min(620px,86vh);background:var(--surface);border-radius:var(--r-lg);border:1px solid var(--border-2);box-shadow:0 24px 60px rgba(30,27,23,.3);display:flex;flex-direction:column;overflow:hidden;animation:rise .2s ease both}
 .cwhd{display:flex;align-items:center;padding:15px 20px 0}
@@ -404,28 +377,10 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
       <button class="apprbtn" id="actBtn" style="margin-left:auto" onclick="openActivity()" aria-label="Activity" title="Activity">
         <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 12h4l2.5 7 5-14 2.5 7h4"/></svg>
       </button>
-      <button class="apprbtn" id="apprBtn" onclick="toggleApprovals(this)" aria-label="Pending approvals" title="Pending approvals">
-        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
-        <span class="bdg" id="apprBadge">2</span>
-      </button>
       <button class="apprbtn" id="setBtn" onclick="openSettings('general')" aria-label="Settings" title="Settings">
         <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
       </button>
       <span class="right" style="margin-left:10px"><span class="grn"></span>acme-corp · prod</span>
-    </div>
-
-    <div class="appr-panel" id="apprPanel">
-      <div class="appr-hd">Pending approvals <small id="apprCount">2 waiting</small></div>
-      <div class="appr-item">
-        <div class="h">amazon-ads-api · pauseCampaign</div>
-        <div class="m">Ops coworker · "Q2 ad spend review" · 2 min ago</div>
-        <div class="a"><button class="btn-approve" onclick="apprResolve(this,'Approved')">Approve</button><button class="btn-deny" onclick="apprResolve(this,'Denied')">Deny</button></div>
-      </div>
-      <div class="appr-item">
-        <div class="h">feishu · sendMessage</div>
-        <div class="m">Logistics coworker · "Supplier lead times" · 1 hr ago</div>
-        <div class="a"><button class="btn-approve" onclick="apprResolve(this,'Approved')">Approve</button><button class="btn-deny" onclick="apprResolve(this,'Denied')">Deny</button></div>
-      </div>
     </div>
 
     <!-- rm-message-list -->
@@ -462,7 +417,7 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
           </button>
         </div>
       </div>
-      <div class="hint">Coworkers can take actions in connected tools. Risky actions ask for approval.</div>
+      <div class="hint">Coworkers can take actions in connected tools. Risky actions are blocked by safety rules.</div>
     </div>
 
     <!-- coworker menu -->
@@ -494,7 +449,6 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
       <div class="ni" data-p="credentials" onclick="selPane(this)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="8" cy="15" r="4"/><path d="m10.85 12.15 8-8M18 6l2 2M14 8l2 2"/></svg>Credentials</div>
       <div class="ng">Governance</div>
       <div class="ni" data-p="safety" onclick="selPane(this)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>Safety rules</div>
-      <div class="ni" data-p="approvalpolicies" onclick="selPane(this)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>Approval policies</div>
       <div class="ng">Workspace</div>
       <div class="ni" data-p="general" onclick="selPane(this)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>General</div>
       <div class="ni" data-p="members" onclick="selPane(this)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/></svg>Members</div>
@@ -547,7 +501,6 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
       </div>
       <div class="spane" id="p-skills"><div class="ch"><h2>Skills</h2><button class="add" onclick="openSkill()"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>New skill</button></div><p class="sub">Tenant-level skill packages you author and bind to coworkers.</p><div class="card"><div class="mn"><b>roas-analysis</b><span>bound to 3 coworkers · 4 files</span></div><span class="cv">›</span></div><div class="card"><div class="mn"><b>listing-optimization</b><span>bound to 1 coworker · 2 files</span></div><span class="cv">›</span></div><div class="card"><div class="mn"><b>refund-policy</b><span>unbound · 1 file</span></div><span class="cv">›</span></div></div>
       <div class="spane" id="p-safety"><div class="ch"><h2>Safety rules</h2></div><p class="sub">Platform-owned, deterministic guardrails. Fail = block. Decisions are logged under Activity.</p><div class="card"><div class="mn"><b>Block PII egress</b><span>regex · all coworkers</span></div><span class="pill pill-on">enforced</span></div><div class="card"><div class="mn"><b>Deny RFC1918 egress</b><span>network · all coworkers</span></div><span class="pill pill-on">enforced</span></div></div>
-      <div class="spane" id="p-approvalpolicies"><div class="ch"><h2>Approval policies</h2><button class="add"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>New policy</button></div><p class="sub">Which tool calls need human sign-off. The live queue is the inbox in the top bar.</p><div class="card"><div class="mn"><b>Pause / delete campaigns</b><span>amazon-ads-api · all coworkers</span></div><span class="pill pill-warn">requires approval</span></div><div class="card"><div class="mn"><b>Send external messages</b><span>feishu · Logistics, Ops</span></div><span class="pill pill-warn">requires approval</span></div><div class="card"><div class="mn"><b>Read-only queries</b><span>internal-postgres · all coworkers</span></div><span class="pill pill-on">auto-allow</span></div></div>
       <div class="spane" id="p-appearance"><div class="ch"><h2>Appearance</h2></div><p class="sub">Theme follows your system setting in this prototype.</p><div class="card"><div class="mn"><b>Theme</b><span>System (light / dark auto)</span></div><span class="cv">›</span></div></div>
     </div>
   </div>
@@ -559,7 +512,6 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
     <div class="cwtabs">
       <button class="cwtab active" data-t="runs" onclick="actTab(this)">Runs</button>
       <button class="cwtab" data-t="safety" onclick="actTab(this)">Safety decisions</button>
-      <button class="cwtab" data-t="approvals" onclick="actTab(this)">Approval log</button>
     </div>
     <div class="cwbody">
       <div class="cwpane show" id="act-runs">
@@ -575,12 +527,6 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
         <div class="card"><div class="ic" style="background:#FBEAEA;color:#A4322F">!</div><div class="mn"><b>Block PII egress</b><span>Ops · email matched in tool args · 40m ago</span></div><span class="pill pill-bad">blocked</span></div>
         <div class="card"><div class="ic" style="background:#E6F1EA;color:#2F7D5B">✓</div><div class="mn"><b>Allow network egress</b><span>Logistics · api.amazon.com · 1h ago</span></div><span class="pill pill-on">allowed</span></div>
         <div class="card"><div class="ic" style="background:#FBEAEA;color:#A4322F">!</div><div class="mn"><b>Deny RFC1918 egress</b><span>Design · 10.0.0.5 · yesterday</span></div><span class="pill pill-bad">blocked</span></div>
-      </div>
-      <div class="cwpane" id="act-approvals">
-        <p class="sub">Resolved tool-call approvals. The live queue is the inbox in the top bar.</p>
-        <div class="card"><div class="mn"><b>amazon-ads-api · pauseCampaign</b><span>Ops · "Q2 ad spend review" · by Jerry · 5m ago</span></div><span class="pill pill-on">approved</span></div>
-        <div class="card"><div class="mn"><b>feishu · sendMessage</b><span>Logistics · "Supplier lead times" · by Jerry · 1h ago</span></div><span class="pill pill-off">denied</span></div>
-        <div class="card"><div class="mn"><b>internal-postgres · bulkUpdate</b><span>Finance · "Q1 reconciliation" · by Mei · yesterday</span></div><span class="pill pill-on">approved</span></div>
       </div>
     </div>
   </div>
@@ -617,7 +563,7 @@ button{font-family:inherit;cursor:pointer;border:none;background:none;color:inhe
           <div class="warn-inline" id="wizCredWarn" style="display:none"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>Needs a <span class="pv">provider</span> credential — <a onclick="wizAddCred()">add it now</a></div>
         </div>
         <div class="wstep-pane" id="wstep-4">
-          <h3>Tools</h3><p class="hint">Bind MCP servers this coworker can call. Which calls need approval is set under guardrails.</p>
+          <h3>Tools</h3><p class="hint">Bind MCP servers this coworker can call. Risky calls are governed by safety rules under guardrails.</p>
           <div id="wizMcpList">
             <div class="checkrow" onclick="wizToggle('mcp','amazon-ads-api',this)"><span class="ck"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L20 6"/></svg></span><span class="oc"><b>amazon-ads-api</b><span>amazon advertising · oauth</span></span></div>
             <div class="checkrow" onclick="wizToggle('mcp','internal-postgres',this)"><span class="ck"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5L20 6"/></svg></span><span class="oc"><b>internal-postgres</b><span>postgres · read / write</span></span></div>
@@ -708,11 +654,10 @@ const COWORKERS={
   design:{name:'Design coworker',role:'design',av:'DS',dot:'r-design',model:'Bedrock Sonnet',
     convs:[{g:'Previous 7 days',items:['Banner A/B concepts']}]}
 };
-const APPROVAL=`<div class="approval"><div class="hd"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>Approval required · tool call</div><div class="bd"><div class="row"><span class="k">MCP server</span><span class="v">amazon-ads-api</span></div><div class="row"><span class="k">Tool</span><span class="v">pauseCampaign</span></div><div class="row"><span class="k">Args</span><span class="v">{ campaignId: "SD-Retarget-Cart" }</span></div><div class="acts"><button class="btn-approve" onclick="approveCall(this)">Approve</button><button class="btn-deny">Deny</button></div></div></div>`;
 const THREADS={
   'Q2 ad spend review':[
     {who:'user',html:`<p>Pull last quarter's campaign ROAS and flag any below a 2.0 threshold, then suggest where to reallocate budget.</p>`},
-    {who:'bot',html:`<p>I queried <strong>14 active campaigns</strong> over Apr–Jun. Three are below the 2.0 ROAS threshold:</p><ul><li><code>SP-Auto-Hydration</code> — ROAS <strong>1.4</strong>, spend $3,210</li><li><code>SB-Brand-Summer</code> — ROAS <strong>1.7</strong>, spend $5,880</li><li><code>SD-Retarget-Cart</code> — ROAS <strong>1.1</strong>, spend $2,040</li></ul><p>Recommended move: pause <code>SD-Retarget-Cart</code> and shift its budget into <code>SP-Auto-Electrolyte</code> (ROAS 4.2, currently budget-capped). I'll need approval to pause a live campaign:</p>`+APPROVAL}
+    {who:'bot',html:`<p>I queried <strong>14 active campaigns</strong> over Apr–Jun. Three are below the 2.0 ROAS threshold:</p><ul><li><code>SP-Auto-Hydration</code> — ROAS <strong>1.4</strong>, spend $3,210</li><li><code>SB-Brand-Summer</code> — ROAS <strong>1.7</strong>, spend $5,880</li><li><code>SD-Retarget-Cart</code> — ROAS <strong>1.1</strong>, spend $2,040</li></ul><p>Recommended move: pause <code>SD-Retarget-Cart</code> and shift its budget into <code>SP-Auto-Electrolyte</code> (ROAS 4.2, currently budget-capped).</p>`}
   ],
   'Refund policy draft':[
     {who:'user',html:`<p>Draft an updated refund clause covering damaged-in-transit items.</p>`},
@@ -744,7 +689,6 @@ const THREADS={
   ]
 };
 let current='ops';
-function approveCall(btn){btn.closest('.approval').innerHTML='<div class="hd" style="color:var(--good);background:var(--good-subtle)">Approved · running pauseCampaign</div>';}
 function msgHTML(m,i){
   const d=' style="animation-delay:'+(i*0.06)+'s"';
   if(m.who==='user') return '<div class="msg user"'+d+'><div class="who">JG</div><div class="body"><div class="name">You</div>'+m.html+'</div></div>';
@@ -822,27 +766,8 @@ function toggleMenu(id,btn){
 }
 document.addEventListener('click',e=>{
   if(openMenu&&!e.target.closest('.menu')&&!e.target.closest('#coBtn')&&!e.target.closest('#coswitch')&&!e.target.closest('.userbar')){openMenu.classList.remove('show');openMenu=null;}
-  const ap=document.getElementById('apprPanel');
-  if(ap.classList.contains('show')&&!e.target.closest('#apprPanel')&&!e.target.closest('#apprBtn'))ap.classList.remove('show');
 });
-function toggleApprovals(btn){
-  closeMenus();
-  const p=document.getElementById('apprPanel');
-  const show=!p.classList.contains('show');
-  p.classList.toggle('show',show);
-  if(show){const r=btn.getBoundingClientRect();p.style.top=(r.bottom+8)+'px';p.style.right=(window.innerWidth-r.right)+'px';p.style.left='auto';}
-}
-function apprResolve(btn,state){
-  const item=btn.closest('.appr-item');
-  const h=item.querySelector('.h').textContent;
-  const col=state==='Approved'?'var(--good)':'var(--ink-3)';
-  item.innerHTML='<div class="m" style="margin:0;color:'+col+'">'+state+' · '+h+'</div>';
-  const remaining=document.querySelectorAll('#apprPanel .appr-item .a').length;
-  const badge=document.getElementById('apprBadge'),cnt=document.getElementById('apprCount');
-  if(remaining===0){badge.style.display='none';cnt.textContent='all clear';}
-  else{badge.textContent=remaining;cnt.textContent=remaining+' waiting';}
-}
-function closeAllModals(){['overlay','actOverlay','wizOverlay'].forEach(id=>{const el=document.getElementById(id);if(el)el.classList.remove('show');});document.getElementById('apprPanel').classList.remove('show');}
+function closeAllModals(){['overlay','actOverlay','wizOverlay'].forEach(id=>{const el=document.getElementById(id);if(el)el.classList.remove('show');});}
 const WIZ={step:1,engine:null,provider:'Anthropic',model:null,mcp:new Set(),skills:new Set()};
 const WIZ_MODELS={
   sdk:[{id:'Claude Opus',note:'most capable'},{id:'Claude Sonnet',note:'balanced'},{id:'Claude Haiku',note:'fast & low cost'}],

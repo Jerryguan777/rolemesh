@@ -11,7 +11,6 @@ for the historic ``rolemesh.db.pg`` shim, which has been removed.
 """
 
 from rolemesh.db._pool import *  # noqa: F403
-from rolemesh.db.approval import *  # noqa: F403
 from rolemesh.db.channel_identity import *  # noqa: F403
 from rolemesh.db.chat import *  # noqa: F403
 from rolemesh.db.coworker import *  # noqa: F403

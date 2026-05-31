@@ -1,6 +1,6 @@
 # Unified Hook System Architecture
 
-This document explains RoleMesh's unified hook system — the mechanism that lets audit, DLP, transcript-archive, approval, safety, and observability modules observe and intercept agent activity across both agent backends (Claude SDK and Pi) without coupling to either backend's native hook API.
+This document explains RoleMesh's unified hook system — the mechanism that lets audit, DLP, transcript-archive, safety, and observability modules observe and intercept agent activity across both agent backends (Claude SDK and Pi) without coupling to either backend's native hook API.
 
 The goal is to document the *why* behind the shape: what alternatives were rejected, which backend asymmetries we had to paper over, and which silent bugs this system is designed to catch.
 
@@ -77,7 +77,6 @@ Mild tradeoff. `Literal["completed", "aborted", "error"]` gives static-typing be
                        application-defined handlers
                 ┌──────────────────────────────────────────┐
                 │  TranscriptArchiveHandler  (built-in)    │
-                │  ApprovalHandler            (built-in)   │
                 │  SafetyHandler              (built-in)   │
                 │  (future) DLPHandler                     │
                 │  (future) AuditHandler                   │
@@ -122,7 +121,7 @@ Mild tradeoff. `Literal["completed", "aborted", "error"]` gives static-typing be
  └─────────────────────────┘      └──────────────────────────────┘
 ```
 
-The Approval and Safety handlers are the two largest consumers of the hook system — both use `PreToolUse` to gate or block calls. Each has its own architecture document ([`approval-architecture.md`](approval-architecture.md), [`safety/safety-framework.md`](safety/safety-framework.md)); this document is about the **mechanism** they share.
+The Safety handler is the largest consumer of the hook system — it uses `PreToolUse` to gate or block calls. It has its own architecture document ([`safety/safety-framework.md`](safety/safety-framework.md)); this document is about the **mechanism** it builds on.
 
 ### File layout
 
@@ -133,7 +132,6 @@ src/agent_runner/
     registry.py                  # HookRegistry + HookHandler protocol
     handlers/
       transcript_archive.py
-      approval.py
   safety/                        # safety pipeline hooks (separate package)
   claude_backend.py              # owns _build_hook_callbacks + Stop emit
   pi_backend.py                  # owns _build_bridge_extension + Stop emit
@@ -366,5 +364,4 @@ When any of these shows up as a real bug, add a test to the appropriate layer (u
 
 - [`8-switchable-agent-backend.md`](8-switchable-agent-backend.md) — `AgentBackend` protocol, why two backends, Pi-Specific Pitfalls
 - [`backend-stop-contract.md`](backend-stop-contract.md) — full abort/shutdown semantics across backends
-- [`approval-architecture.md`](approval-architecture.md) — `ApprovalHandler`: how the approval module uses `PreToolUse`
 - [`safety/safety-framework.md`](safety/safety-framework.md) — safety pipeline checks that fire through `PreToolUse` and friends

@@ -17,7 +17,7 @@ That refactor closed one entire class of bugs — the forgotten `WHERE` clause �
 - **SQL injection** in any one endpoint bypasses the entire model.
 - **A new query path** added without following the pattern leaks silently; review discipline is the only guard.
 - **Raw `psql` sessions** by operators have full cross-tenant visibility, with no audit on what they read.
-- **Trigger-derived columns** (like `approval_audit_log.tenant_id`) can drift if the trigger is disabled or a new write path bypasses it.
+- **Trigger-derived columns** (like `safety_rules_audit.tenant_id`) can drift if the trigger is disabled or a new write path bypasses it.
 
 RLS is the answer to all four: the database itself rejects the query, regardless of which application bug, operator mistake, or schema drift produced it. After RLS, application-layer tenant filters become **defense in depth** — useful but no longer the primary guard.
 
@@ -68,7 +68,7 @@ Remove the `WHERE tenant_id` clauses from application SQL and let RLS be the sin
 - No defense if RLS is misconfigured on a single table or if GUC isn't set on a connection.
 - Composite indexes `(tenant_id, id)` become useful only via RLS — query planner may not exploit them as effectively.
 - Worse failure mode: a connection with no GUC set returns zero rows silently, looking like "user has no data" rather than a clear error.
-- Application code becomes opaque about its tenant intent ("why is this query reading `approval_requests` without any tenant context in sight?").
+- Application code becomes opaque about its tenant intent ("why is this query reading `safety_decisions` without any tenant context in sight?").
 
 **Rejected.** The application-layer filter is cheap and explicit. Keeping it as defense-in-depth catches the "forgot to set GUC" class of bug at the query layer rather than in production.
 
@@ -159,9 +159,9 @@ Every database function falls into exactly one of four classes:
 
 | Class | Connection | Signature | Returns | Examples |
 |---|---|---|---|---|
-| **A. Tenant-scoped business** | `tenant_conn(tenant_id)` | `tenant_id` required kwarg | Full rows | `get_approval_request`, `list_safety_rules` |
-| **B. Cross-tenant maintenance** | `admin_conn()` | No `tenant_id` param | Rows with `tenant_id` for downstream dispatch | `list_expired_pending_approvals`, `cleanup_old_safety_approval_contexts` |
-| **C. Tenant resolver (boundary bootstrap)** | `admin_conn()` | No `tenant_id` (output is authoritative) | **Minimal scalar** (str / tuple) | `resolve_request_tenant`, `resolve_user_for_auth` |
+| **A. Tenant-scoped business** | `tenant_conn(tenant_id)` | `tenant_id` required kwarg | Full rows | `get_coworker`, `list_safety_rules` |
+| **B. Cross-tenant maintenance** | `admin_conn()` | No `tenant_id` param | Rows with `tenant_id` for downstream dispatch | `list_due_scheduled_tasks`, `cleanup_old_safety_decisions` |
+| **C. Tenant resolver (boundary bootstrap)** | `admin_conn()` | No `tenant_id` (output is authoritative) | **Minimal scalar** (str / tuple) | `resolve_coworker_tenant`, `resolve_user_for_auth` |
 | **D. Startup / DDL** | `admin_conn()` | Free-form | Free-form | `init_database`, `_create_schema` |
 
 The class is not just documentation — it is structurally enforced:
@@ -175,7 +175,7 @@ The reason for treating C separately from B, despite both running on `admin_conn
 
 Tenant resolvers exist because some entry points genuinely don't have tenant context yet:
 
-- **NATS legacy fallback.** A subject like `approval.decided.<request_id>` may arrive without `tenant_id` in the body (e.g., a message published before the protocol carried tenant explicitly). The executor must resolve the request's tenant before any RLS-scoped work can happen.
+- **NATS legacy fallback.** A subject like `agent.<job_id>.results` may arrive without `tenant_id` in the body (e.g., a message published before the protocol carried tenant explicitly). The executor must resolve the job's tenant before any RLS-scoped work can happen.
 - **JWT resume.** When a user presents a signed JWT carrying only `user_id`, the auth provider must look up that user's tenant before any session can be constructed.
 
 These are the **only** legitimate uses. Every resolver carries metadata documenting:
@@ -189,7 +189,7 @@ This metadata is not optional. The CI suite parses the source and rejects any `r
 
 Two tables deserve explicit mention because they're shaped by RLS:
 
-- **`approval_audit_log`** has a denormalized `tenant_id` column (copied from `approval_requests` via insert trigger) and a composite foreign key `(request_id, tenant_id) → approval_requests(id, tenant_id)`. The trigger keeps writes ergonomic; the composite FK makes drift impossible at the database level even if the trigger is disabled. The hot read path uses a composite index `(tenant_id, request_id, created_at)` — an index seek on the first two columns followed by a sorted scan.
+- **`safety_rules_audit`** has a denormalized `tenant_id` column (copied from `safety_rules` via insert trigger) and a composite foreign key `(rule_id, tenant_id) → safety_rules(id, tenant_id)`. The trigger keeps writes ergonomic; the composite FK makes drift impossible at the database level even if the trigger is disabled. The hot read path uses a composite index `(tenant_id, rule_id, created_at)` — an index seek on the first two columns followed by a sorted scan.
 - **`oidc_user_tokens`** is structurally a user-level table (user_id is the natural key), but a denormalized `tenant_id` column is added and synchronized from `users.tenant_id` via the same trigger + composite FK pattern. Without this, the table cannot have a sensible RLS policy.
 
 Two tables explicitly do not have RLS:
@@ -202,9 +202,9 @@ Two tables explicitly do not have RLS:
 
 ### Silent Mismatch vs. Information Disclosure
 
-When application code calls `get_approval_request(req_id, tenant_id="wrong")`, the function returns `None`. This is indistinguishable from "the request does not exist." The behavior is intentional — distinguishing the two would let an attacker probe for the existence of resources in other tenants.
+When application code calls `get_safety_rule(rule_id, tenant_id="wrong")`, the function returns `None`. This is indistinguishable from "the rule does not exist." The behavior is intentional — distinguishing the two would let an attacker probe for the existence of resources in other tenants.
 
-The downside is debugging. A new endpoint with a bug that passes the wrong `tenant_id` produces "not found" symptoms, sending developers to look in the wrong place. The mitigation is that the most security-sensitive by-id functions (`get_approval_request`, `get_user`, `list_approval_audit`) use a CTE pattern that detects the mismatch internally and emits a structured warning log with metric `tenant_mismatch_attempted` — observable to operators without being exposed to callers.
+The downside is debugging. A new endpoint with a bug that passes the wrong `tenant_id` produces "not found" symptoms, sending developers to look in the wrong place. The mitigation is that the most security-sensitive by-id functions (`get_safety_rule`, `get_user`, `list_safety_rule_audit`) use a CTE pattern that detects the mismatch internally and emits a structured warning log with metric `tenant_mismatch_attempted` — observable to operators without being exposed to callers.
 
 ### Verbosity vs. Auditability
 
@@ -212,7 +212,7 @@ Every business call site carries `tenant_id=user.tenant_id` as an explicit keywo
 
 ### Trigger Convenience vs. Drift Risk
 
-`approval_audit_log.tenant_id` is populated by an insert trigger, not by application code. Triggers can be silently disabled by a DBA, and a new application path that bypasses the trigger writes nothing to the column. The composite foreign key `(request_id, tenant_id) → approval_requests(id, tenant_id)` defends against both: a row with a NULL or wrong `tenant_id` cannot be inserted at all. The trigger remains for ergonomics; the FK is the safety net.
+`safety_rules_audit.tenant_id` is populated by an insert trigger, not by application code. Triggers can be silently disabled by a DBA, and a new application path that bypasses the trigger writes nothing to the column. The composite foreign key `(rule_id, tenant_id) → safety_rules(id, tenant_id)` defends against both: a row with a NULL or wrong `tenant_id` cannot be inserted at all. The trigger remains for ergonomics; the FK is the safety net.
 
 ### Two Pools vs. One Pool
 
@@ -227,7 +227,7 @@ RLS was rolled out in five sequential phases. The phases are designed so that ea
 1. **Application-layer pinning.** Add `tenant_id` required kwarg to remaining by-id functions; add `resolve_user_for_auth` for JWT resume; rewrite auth providers to use the two-step bootstrap pattern. No DB changes yet.
 2. **Infrastructure.** Create the `current_tenant_id()` SQL function, the `rolemesh_app` / `rolemesh_system` roles, the dual pool, and the `tenant_conn` / `admin_conn` wrappers. RLS is still off; no business behavior changes.
 3. **Connection migration.** Replace every `pool.acquire()` site with `tenant_conn(tenant_id)` or `admin_conn()` based on the function's class. After this phase, every business path correctly carries tenant context — but RLS is still not enforced.
-4. **Per-table enablement.** Enable RLS one table at a time, starting with the lowest-blast-radius table (`approval_audit_log`) as a canary and ending with `users` and `oidc_user_tokens`. Each table is a single commit, independently rollback-able with one `ALTER TABLE ... DISABLE ROW LEVEL SECURITY` statement.
+4. **Per-table enablement.** Enable RLS one table at a time, starting with the lowest-blast-radius table (`safety_rules_audit`) as a canary and ending with `users` and `oidc_user_tokens`. Each table is a single commit, independently rollback-able with one `ALTER TABLE ... DISABLE ROW LEVEL SECURITY` statement.
 5. **Enforcement tests.** Add tests that verify RLS actually blocks cross-tenant access at the DB level (distinct from application-layer tests that verify the WHERE clause). Add static-analysis CI checks that the four-class taxonomy is preserved.
 
 The order is critical: phase 4 cannot precede phase 3, because turning on RLS while a path still uses raw `pool.acquire()` would silently break that path (no GUC set → fail-closed → empty results).
@@ -289,5 +289,5 @@ The CI AST tests will catch most violations of the pattern; reading them is reco
 
 - [`4-multi-tenant-architecture.md`](4-multi-tenant-architecture.md) — tenant data model, entity hierarchy, message routing
 - [`6-auth-architecture.md`](6-auth-architecture.md) — `AgentPermissions`, JWT resume flow that uses `resolve_user_for_auth`
-- [`12-approval-architecture.md`](12-approval-architecture.md) — approval audit log schema and the trigger that synchronizes `tenant_id`
-- [`2-nats-ipc-architecture.md`](2-nats-ipc-architecture.md) — NATS subjects and the legacy fallback that `resolve_request_tenant` exists to serve
+- [`15-safety-framework-architecture.md`](15-safety-framework-architecture.md) — safety rule audit schema and the trigger that synchronizes `tenant_id`
+- [`2-nats-ipc-architecture.md`](2-nats-ipc-architecture.md) — NATS subjects and the legacy fallback that `resolve_coworker_tenant` exists to serve

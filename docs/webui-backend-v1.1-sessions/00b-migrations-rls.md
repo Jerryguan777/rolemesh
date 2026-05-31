@@ -69,7 +69,7 @@ CREATE POLICY <table>_tenant_isolation ON <table>
 
 新建 `tests/test_inv1_tenant_predicate_lint.py`：
 - grep `src/rolemesh/db/` 所有 SQL 字符串
-- 对 tenant-scoped 表（`coworkers / mcp_servers / runs / tenant_model_credentials / approval_requests / ...` —— 维护一个 known 集合常量）的 `SELECT` / `UPDATE` / `DELETE` 强制要求 `WHERE tenant_id =` 字样
+- 对 tenant-scoped 表（`coworkers / mcp_servers / runs / tenant_model_credentials / safety_rules / ...` —— 维护一个 known 集合常量）的 `SELECT` / `UPDATE` / `DELETE` 强制要求 `WHERE tenant_id =` 字样
 - 缺则 lint 失败 + 明确指出文件:行号
 - 例外白名单（如 join 在父表已带 tenant_id 的）走显式 `# inv-1-ok: <reason>` 注释豁免
 
@@ -198,14 +198,10 @@ ALTER TABLE messages
 
 ### INV-1 lint false positive 数量
 
-启动时的"violations" 共 **8 条**，全部是合法 cross-tenant 维护路径或 join-via-CTE，已用 `# inv-1-ok: <reason>` 显式豁免：
+启动时的"violations" 共 **4 条**，全部是合法 cross-tenant 维护路径或 join-via-CTE，已用 `# inv-1-ok: <reason>` 显式豁免：
 
 | 位置 | 性质 |
 |---|---|
-| `db/approval.py` `decide_approval_request_full` UPDATE 块 | tenant_id 在前置 CTE `before` 已约束，UPDATE join `b.id` |
-| `db/approval.py` `list_expired_pending_approvals` | reconciler 跨租户扫 expired |
-| `db/approval.py` `list_stuck_approved_approvals` | reconciler 跨租户扫 stuck-approved |
-| `db/approval.py` `list_stuck_executing_approvals` | reconciler 跨租户扫 stuck-executing |
 | `db/safety.py` retention cleanup `WITH cleared AS (UPDATE...)` | 跨租户 retention 清理 |
 | `db/task.py` scheduler 的 else 分支（无 tenant_id 入参时） | 跨租户 scheduler 扫描 |
 | `db/user.py` `update_user_access_token` UPDATE | `oidc_user_tokens.user_id` 是 PRIMARY KEY 全局唯一 |
@@ -216,7 +212,7 @@ ALTER TABLE messages
 ### Lint 设计上的关键决定
 
 - **scope**：只扫 `src/rolemesh/db/*.py`，跳过 `schema.py`（DDL，不是数据访问）。Junction 表（`coworker_mcp_servers` / `coworker_skills` / `skill_files`）不在 `TENANT_SCOPED_TABLES` 集合内——它们 transitive RLS 走 JOIN，谓词形态不同；这条边界在 design-review 层维护，不在 grep lint 里。
-- **lookback 窗口** 25 行（不是 boundary-walk）：第一版用了"扫到 async with / async def 停"的边界模式，但有些标注（如 approval.py 里）就在 `async with admin_conn():` 那行 *上方*，被边界拦截 → false positive。改成定长 25-行回溯后，自检 `test_inv1_ok_annotation_silences_lint` 通过且实际 8 条豁免全部命中。
+- **lookback 窗口** 25 行（不是 boundary-walk）：第一版用了"扫到 async with / async def 停"的边界模式，但有些标注就在 `async with admin_conn():` 那行 *上方*，被边界拦截 → false positive。改成定长 25-行回溯后，自检 `test_inv1_ok_annotation_silences_lint` 通过且实际 4 条豁免全部命中。
 - **变异检查**：两个 self-check 测试断言"若把已豁免行的 inv-1-ok 注释删了，lint 立即红"。这是"测试理念"章里的反 mirror test 写法——lint 不只是顺着实现写一遍，而是真能抓 bug。
 
 ### 双层防御覆盖

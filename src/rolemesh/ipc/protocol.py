@@ -54,11 +54,6 @@ class AgentInitData:
     system_prompt: str | None = None
     role_config: dict[str, object] | None = None
     mcp_servers: list[McpServerSpec] | None = None
-    # Approval policies applicable to this agent/user. None means "approval
-    # module is inactive for this run" — the container MUST NOT register
-    # ApprovalHookHandler in that case, so approvals are zero-impact when
-    # nobody configured them.
-    approval_policies: list[dict[str, object]] | None = None
     # Safety Framework rules snapshot. None means "safety is inactive for
     # this run" — the container MUST NOT register SafetyHookHandler in
     # that case. Shape is the dict form produced by

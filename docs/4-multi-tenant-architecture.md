@@ -291,7 +291,6 @@ The schema below includes only columns with defined purpose — no placeholder f
 | `scheduled_tasks` | `id`, `tenant_id`, `coworker_id`, `conversation_id`, `prompt`, `schedule_type`, `schedule_value`, `next_run` | Cron / interval / once tasks |
 | `task_run_logs` | `id`, `task_id`, `run_at`, `duration_ms`, `status`, `result`, `error` | Task execution history |
 | `skills` / `skill_files` | (separate subsystem) | Per-coworker skill folders — see [`skills-architecture.md`](skills-architecture.md) |
-| `approval_policies` / `approval_requests` / `approval_audit_log` | (separate subsystem) | Approval module — see [`approval-architecture.md`](approval-architecture.md) |
 | `safety_rules` / `safety_decisions` / `safety_rule_audit` | (separate subsystem) | Safety framework — see [`safety/safety-framework.md`](safety/safety-framework.md) |
 
 ---
@@ -376,5 +375,4 @@ The orchestrator runs `_create_schema` on startup; rolling deploys work because 
 - [`agent-executor-and-container-runtime.md`](agent-executor-and-container-runtime.md) — three-level concurrency control (`GroupQueue`), container mounts, runtime selection
 - [`nats-ipc-architecture.md`](nats-ipc-architecture.md) — IPC layer between Orchestrator and Agent containers
 - [`skills-architecture.md`](skills-architecture.md) — `skills` / `skill_files` tables (separate from `coworkers`)
-- [`approval-architecture.md`](approval-architecture.md) — approval policies and audit log
 - [`safety/safety-framework.md`](safety/safety-framework.md) — safety rules and decisions

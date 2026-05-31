@@ -44,7 +44,7 @@ RoleMesh 的 agent 容器执行的是 **LLM 生成的、用户输入影响的代
 
 ### 方案 A——保持裸 runc + 完全依靠应用层防御
 
-只在 agent 代码里加 prompt 防御（"不要执行危险命令"）、tool 白名单、approval 工作流。容器层不动。
+只在 agent 代码里加 prompt 防御（"不要执行危险命令"）、tool 白名单、阻断性安全规则。容器层不动。
 
 **优点**：零部署改动，零兼容性风险。
 
@@ -238,7 +238,7 @@ aiodocker.containers.create()
 ### 明确不做（属于其他层或后续任务）
 
 - **Egress proxy / URL allowlist** → Egress Control 模块
-- **请求级访问控制 / approval** → Safety Framework / Approval 模块
+- **请求级访问控制** → Safety Framework
 - **DNS exfiltration 防御** → Egress Control 模块
 - **Firecracker / Kata** → V2 候选
 - **运行时威胁检测（Falco）** → 监控层

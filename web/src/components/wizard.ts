@@ -9,8 +9,8 @@
 //   - validation (parent flips `canAdvance` based on its own rules)
 //   - submit behaviour (parent listens for the `submit` event)
 //
-// This mirrors v2-A's split with <rm-dialog> and the v1.1
-// <rm-inline-approval>: small primitive + parent-controlled state.
+// This mirrors v2-A's split with <rm-dialog>: small primitive +
+// parent-controlled state.
 //
 // The default slot renders the body of the current step. The parent
 // is expected to swap content in/out based on `currentStep`, e.g.

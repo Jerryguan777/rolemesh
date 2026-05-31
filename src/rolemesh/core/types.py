@@ -324,7 +324,7 @@ class ScheduledTask:
     # ``DELETE FROM users`` (ON DELETE SET NULL on the FK). The
     # scheduler stamps ``AgentInput.user_id`` from this field so a
     # task's run-time turn carries the originating user identity
-    # into the approval / audit machinery (Phase 2).
+    # into the audit machinery.
     created_by_user_id: str | None = None
     # Legacy compat fields (deprecated)
     group_folder: str = ""

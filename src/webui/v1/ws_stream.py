@@ -18,14 +18,6 @@ The shape:
   - ``request.cancel`` — fire-and-forget; the actual
     ``status='cancelled'`` write happens via the orchestrator
     (no ghost-container risk — see :mod:`webui.v1.run_events`).
-  - ``request.approval`` — wire decision (``"approve"`` /
-    ``"deny"``) is translated through INV-7's
-    :func:`rolemesh.approval.enum_translate.ws_decision_to_outcome`
-    and forwarded as a NATS event for the orchestrator-side
-    approval engine to act on. The WebUI does not run the engine
-    directly from the WS handler (the engine fan-out lives in the
-    orchestrator process so the worker can pick it up via
-    JetStream).
 * server → client events: a thin pass-through over the existing
   ``web.stream.{binding_id}.{chat_id}`` topics, projecting them
   into ``event.run.*`` frames keyed by the active ``run_id``.
@@ -51,12 +43,6 @@ from fastapi import Query, WebSocket, WebSocketDisconnect
 from nats.js.api import DeliverPolicy
 from starlette.websockets import WebSocketState
 
-from rolemesh.approval.engine import ConflictError, ForbiddenError
-from rolemesh.approval.enum_translate import ws_decision_to_outcome
-from rolemesh.auth.bootstrap_actor import (
-    BootstrapActorError,
-    resolve_actor_user_id,
-)
 from rolemesh.auth.ws_ticket import (
     WsTicketError,
     WsTicketExpired,
@@ -65,7 +51,6 @@ from rolemesh.auth.ws_ticket import (
 )
 from rolemesh.core.logger import get_logger
 from rolemesh.db import (
-    get_channel_binding_for_coworker,
     get_conversation,
     store_message,
     tenant_conn,
@@ -76,7 +61,6 @@ from rolemesh.runs import (
     terminate_run_via_ws_completed,
     terminate_run_via_ws_error,
 )
-from webui.v1.approval_engine_registry import get_approval_engine
 from webui.v1.idempotency import cache as idempotency_cache
 from webui.v1.run_events import publish_run_cancel
 
@@ -276,31 +260,6 @@ async def stream(
         deliver_policy=DeliverPolicy.NEW,
     )
 
-    # 03a PR2: approval event forwarder. Two subscriptions:
-    # * ``web.approval.required.{conversation_id}`` — engine emits
-    #   when a new pending request is created on this conversation.
-    # * ``web.approval.resolved.conv.{conversation_id}`` — engine
-    #   emits when any request on this conversation reaches a
-    #   terminal status (approved / denied / expired / cancelled).
-    #
-    # Both subjects are conversation-keyed: a queue page that wants
-    # ``.req.{approval_id}`` belongs to a different WS topology
-    # (out of scope for the chat WS endpoint; the design's queue
-    # page polls the REST list on a short cadence — design §6.3 I).
-    # Using ``DeliverPolicy.NEW`` for both because a reconnect-and-
-    # refetch reads the REST detail endpoint for truth; replaying
-    # old WS events would only cause duplicate UI animations.
-    approval_required_sub = await js.subscribe(
-        f"web.approval.required.{conversation_id}",
-        ordered_consumer=True,
-        deliver_policy=DeliverPolicy.NEW,
-    )
-    approval_resolved_sub = await js.subscribe(
-        f"web.approval.resolved.conv.{conversation_id}",
-        ordered_consumer=True,
-        deliver_policy=DeliverPolicy.NEW,
-    )
-
     async def _forward_stream() -> None:
         """Fan NATS stream chunks to ``event.run.*`` frames.
 
@@ -394,79 +353,7 @@ async def stream(
                 with contextlib.suppress(OSError, RuntimeError):
                     await msg.ack()
 
-    async def _forward_approval_required() -> None:
-        """Forward ``web.approval.required`` → ``event.approval.required``.
-
-        Payload mapping is straight: the engine already emits the
-        WS-friendly fields (``approval_id`` / ``run_id`` /
-        ``summary``). A malformed payload from a future engine
-        change is logged and dropped — the queue page polls truth
-        anyway, so a missed event delays the UI by one poll cycle.
-        """
-        async for msg in approval_required_sub.messages:
-            try:
-                data = json.loads(msg.data)
-                if not isinstance(data, dict):
-                    raise ValueError("approval.required payload not a dict")
-                await _send_event(
-                    ws,
-                    {
-                        "type": "event.approval.required",
-                        "approval_id": data.get("approval_id"),
-                        "run_id": data.get("run_id"),
-                        "summary": data.get("summary") or {},
-                    },
-                )
-                await msg.ack()
-            except (WebSocketDisconnect, RuntimeError):
-                return
-            except (OSError, ValueError, TypeError, KeyError):
-                logger.warning(
-                    "ws_stream: malformed approval.required dropped",
-                    exc_info=True,
-                )
-                with contextlib.suppress(OSError, RuntimeError):
-                    await msg.ack()
-
-    async def _forward_approval_resolved() -> None:
-        """Forward ``web.approval.resolved.conv.*`` → ``event.approval.resolved``.
-
-        ``decision`` is the WS wire enum (engine has already
-        translated via ``outcome_to_ws_decision``). The frame
-        is reshaped to match the design §4 protocol; extra fields
-        like ``actor_user_id`` / ``note`` pass through verbatim so
-        the SPA can render "Approved by …" copy without an extra
-        GET round-trip.
-        """
-        async for msg in approval_resolved_sub.messages:
-            try:
-                data = json.loads(msg.data)
-                if not isinstance(data, dict):
-                    raise ValueError("approval.resolved payload not a dict")
-                await _send_event(
-                    ws,
-                    {
-                        "type": "event.approval.resolved",
-                        "approval_id": data.get("approval_id"),
-                        "decision": data.get("decision"),
-                        "actor_user_id": data.get("actor_user_id"),
-                        "note": data.get("note"),
-                    },
-                )
-                await msg.ack()
-            except (WebSocketDisconnect, RuntimeError):
-                return
-            except (OSError, ValueError, TypeError, KeyError):
-                logger.warning(
-                    "ws_stream: malformed approval.resolved dropped",
-                    exc_info=True,
-                )
-                with contextlib.suppress(OSError, RuntimeError):
-                    await msg.ack()
-
     fwd_task = asyncio.create_task(_forward_stream())
-    approval_required_task = asyncio.create_task(_forward_approval_required())
-    approval_resolved_task = asyncio.create_task(_forward_approval_resolved())
 
     try:
         while True:
@@ -498,10 +385,6 @@ async def stream(
                 await _handle_request_cancel(
                     ws=ws, frame=frame, payload=payload,
                 )
-            elif kind == "request.approval":
-                await _handle_request_approval(
-                    ws=ws, frame=frame, payload=payload, js=js,
-                )
             else:
                 await _send_event(
                     ws,
@@ -517,17 +400,11 @@ async def stream(
         # and the next GET /runs/{id} reports the truth.
         pass
     finally:
-        for t in (fwd_task, approval_required_task, approval_resolved_task):
-            t.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await t
-        for sub in (
-            stream_sub,
-            approval_required_sub,
-            approval_resolved_sub,
-        ):
-            with contextlib.suppress(Exception):
-                await sub.unsubscribe()
+        fwd_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await fwd_task
+        with contextlib.suppress(Exception):
+            await stream_sub.unsubscribe()
 
 
 # ---------------------------------------------------------------------------
@@ -678,143 +555,6 @@ async def _handle_request_cancel(
         tenant_id=payload.tenant_id,
         conversation_id=payload.conversation_id,
     )
-
-
-async def _handle_request_approval(
-    *,
-    ws: WebSocket,
-    frame: dict[str, Any],
-    payload: WsTicketPayload,
-    js: "JetStreamContext",
-) -> None:
-    """Hand a WS approval decision off to the engine directly.
-
-    The HTTP ``/api/v1/approvals/{id}/decide`` endpoint and this WS
-    handler both terminate at the **same** ``engine.handle_decision``
-    call (via :mod:`webui.v1.approval_engine_registry`). Two
-    entry points, one implementation — no risk of the state
-    machine diverging between transports.
-
-    Wire translations performed at this boundary (INV-7):
-
-    * ``decision`` (``approve``/``deny``) → engine ``ApprovalOutcome``
-      via :func:`ws_decision_to_outcome`. Engine code never sees the
-      wire string.
-
-    Actor resolution (INV-4): ``payload.user_id`` flows through
-    :func:`resolve_actor_user_id`, so the bootstrap fast-path falls
-    back to a real tenant-owner UUID rather than writing
-    ``"bootstrap"`` into the audit FK.
-
-    Failure modes are reported back as ``event.run.error`` frames
-    so the SPA can render an inline error without losing the WS
-    connection. The engine's own ``_publish_web_resolved`` will
-    push the outcome to all subscribed conversations, including
-    this one — the SPA renders that as the canonical resolution.
-    """
-    del js  # No longer publishing — engine handle_decision owns it.
-    approval_id = frame.get("approval_id")
-    decision = frame.get("decision")
-    note = frame.get("note")
-    if not isinstance(approval_id, str) or not isinstance(decision, str):
-        await _send_event(
-            ws,
-            {
-                "type": "event.run.error",
-                "code": "PROTOCOL_BAD_APPROVAL",
-                "message": (
-                    "request.approval requires 'approval_id' and 'decision'"
-                ),
-            },
-        )
-        return
-    try:
-        outcome = ws_decision_to_outcome(decision)
-    except ValueError as exc:
-        await _send_event(
-            ws,
-            {
-                "type": "event.run.error",
-                "code": "PROTOCOL_BAD_DECISION",
-                "message": str(exc),
-            },
-        )
-        return
-
-    engine = get_approval_engine()
-    if engine is None:
-        await _send_event(
-            ws,
-            {
-                "type": "event.run.error",
-                "code": "APPROVAL_ENGINE_UNAVAILABLE",
-                "message": "Approval engine not configured on this process.",
-            },
-        )
-        return
-    try:
-        actor = await resolve_actor_user_id(
-            payload.tenant_id, payload.user_id
-        )
-    except BootstrapActorError as exc:
-        await _send_event(
-            ws,
-            {
-                "type": "event.run.error",
-                "code": exc.code,
-                "message": str(exc),
-                "details": {"tenant_id": exc.tenant_id},
-            },
-        )
-        return
-    try:
-        await engine.handle_decision(
-            request_id=approval_id,
-            tenant_id=payload.tenant_id,
-            outcome=outcome,
-            user_id=actor,
-            note=note if isinstance(note, str) else None,
-        )
-    except ForbiddenError:
-        await _send_event(
-            ws,
-            {
-                "type": "event.run.error",
-                "code": "FORBIDDEN",
-                "message": "User is not an authorised approver.",
-            },
-        )
-    except ConflictError as exc:
-        await _send_event(
-            ws,
-            {
-                "type": "event.run.error",
-                "code": "ALREADY_DECIDED",
-                "message": f"Request already {exc.current_status}.",
-            },
-        )
-    except LookupError:
-        await _send_event(
-            ws,
-            {
-                "type": "event.run.error",
-                "code": "NOT_FOUND",
-                "message": "Approval request not found.",
-            },
-        )
-    except Exception:  # noqa: BLE001 — last-ditch error surface
-        logger.exception(
-            "ws_stream: approval decide raised; surfacing generic error",
-            approval_id=approval_id,
-        )
-        await _send_event(
-            ws,
-            {
-                "type": "event.run.error",
-                "code": "APPROVAL_DECIDE_FAILED",
-                "message": "Approval decision could not be applied.",
-            },
-        )
 
 
 # ---------------------------------------------------------------------------

@@ -20,7 +20,6 @@ import rolemesh.bootstrap  # noqa: F401
 import asyncio
 import contextlib
 import json
-import os
 import re
 import signal
 import sys
@@ -90,7 +89,6 @@ from rolemesh.db import (
     get_messages_since,
     get_new_messages_for_conversations,
     get_tenant_by_slug,
-    has_pending_approvals_for_conversation,
     init_database,
     list_coworker_mcp_configs,
     set_session,
@@ -99,12 +97,8 @@ from rolemesh.db import (
     update_tenant_message_cursor,
 )
 from rolemesh.db import (
-    get_conversations_for_coworker as pg_get_conversations_for_coworker,
-)
-from rolemesh.db import (
     store_message as db_store_message,
 )
-from rolemesh.approval.notification import PENDING_TURN_GUIDE_TEXT
 from rolemesh.ipc.nats_transport import NatsTransport
 from rolemesh.ipc.task_handler import process_task_ipc
 from rolemesh.orchestration.remote_control import (
@@ -376,9 +370,7 @@ async def _apply_model_output_safety(
       - Rule load failure → log, fail-open: text unchanged, no block.
       - Pipeline internal exception → fail-close: emit a generic block.
       - Block / require_approval verdict → emit a block with reason.
-        require_approval is downgraded to block for the user-facing
-        reply on MODEL_OUTPUT; the approval-request creation path is
-        a separate concern.
+        require_approval blocks the turn identically to block.
       - Redact verdict → text substituted from
         ``verdict.modified_payload["text"]``.
       - Warn verdict → text unchanged (warn is audit-only at this
@@ -839,35 +831,6 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
         )
         if not has_trigger:
             return True
-
-    # v6.1 §P2.8 — interactive-turn entry guard. If the user has an
-    # approval pending in this conversation, reply with the canonical
-    # guide and short-circuit before the agent runs. We deliberately
-    # do NOT advance ``conv_state.last_agent_timestamp`` so the
-    # queued messages re-process on the next tick after the user
-    # decides; without that, the user's turn would be silently
-    # consumed by the guide reply.
-    #
-    # Only the interactive turn entry checks pending — hook fail-close
-    # already protects the per-tool-call path; doubling up here would
-    # be cosmetic, not load-bearing.
-    if await has_pending_approvals_for_conversation(
-        conv.id, tenant_id=conv.tenant_id
-    ):
-        channel_type = _get_channel_type_for_conv(cw_state, conv)
-        binding = cw_state.channel_bindings.get(channel_type)
-        gw = _gateways.get(channel_type) if binding else None
-        if binding and gw:
-            with contextlib.suppress(OSError, RuntimeError, TypeError, ValueError):
-                await gw.send_message(
-                    binding.id, conv.channel_chat_id, PENDING_TURN_GUIDE_TEXT
-                )
-        logger.info(
-            "turn_blocked_by_pending_approval",
-            conversation_id=conv.id,
-            tenant_id=conv.tenant_id,
-        )
-        return True
 
     prompt = format_messages(missed_messages, TIMEZONE)
 
@@ -1614,11 +1577,10 @@ async def main() -> None:
     set_credential_vault(create_credential_vault_from_env())
     _credential_resolver = CredentialResolver(get_credential_vault())
 
-    # Host-side credential proxy: still bound for the ApprovalWorker
-    # (which calls /mcp-proxy/<server>/ from 127.0.0.1) and so the
-    # `register_mcp_server` / `set_token_vault` wiring below has a
-    # sink to write to. Agents reach the gateway container directly
-    # via Docker DNS, not this host listener.
+    # Host-side credential proxy: bound so the `register_mcp_server` /
+    # `set_token_vault` wiring below has a sink to write to. Agents
+    # reach the gateway container directly via Docker DNS, not this
+    # host listener.
     proxy_runner = await start_credential_proxy(
         CREDENTIAL_PROXY_PORT,
         PROXY_BIND_HOST,
@@ -1675,211 +1637,12 @@ async def main() -> None:
 
     ipc_deps = _IpcDepsImpl()
 
-    # Approval engine: wired up unconditionally so all three IPC
-    # routes (proposal, auto_intercept, decision from REST) go through
-    # a single coherent state machine. The orchestrator code that sends
-    # notifications hands the engine a ChannelSender adapter that
-    # resolves conversation_id → binding_id+chat_id via the gateway
-    # fan-out.
-    from rolemesh.approval.engine import ApprovalEngine
-    from rolemesh.approval.notification import (
-        ApprovalCardPayload,
-        NotificationTargetResolver,
-    )
-    from rolemesh.db import get_conversation_for_notification as _pg_get_conv
-
-    async def _convs_for_user_and_cw(user_id: str, coworker_id: str) -> list[str]:
-        # Find conversations this user can talk to this coworker in.
-        # A simple heuristic: conversations whose channel_binding_id
-        # belongs to this coworker AND whose user_id matches (set for
-        # web conversations) are candidates, sorted by
-        # last_agent_invocation. Falling back to all conversations for
-        # the coworker when user_id match is absent (e.g. Telegram
-        # group conversations have no single user).
-        all_for_cw = await pg_get_conversations_for_coworker(coworker_id)
-        ranked = [
-            c.id
-            for c in all_for_cw
-            if c.user_id == user_id or c.user_id is None
-        ]
-        return ranked
-
-    class _OrchestratorChannelSender:
-        """ChannelSender adapter for the approval notification path.
-
-        SECURITY CONTRACT — ``conversation_id`` MUST come from a
-        tenant-scoped DB lookup that the caller has already trusted
-        (in practice: ``ApprovalRequest.conversation_id`` from a row
-        the engine fetched via ``get_approval_request(tenant_id=...)``,
-        OR a conversation_id rotated through
-        ``NotificationTargetResolver`` which the engine bound to the
-        request's tenant). The ``get_conversation_for_notification``
-        lookup below is intentionally cross-tenant (no GUC), so a
-        forged or mis-routed conversation_id would happily resolve
-        to *another* tenant's chat and we would publish the approval
-        prompt there.
-
-        Adding a defence-in-depth ``conv.tenant_id == request.tenant_id``
-        check here would require threading the request's tenant
-        through ChannelSender — left as a follow-up rather than
-        widened in this PR. Until then: callers must not pass an
-        unvalidated conversation_id (e.g. from user input) to this
-        sender.
-        """
-
-        async def send_to_conversation(
-            self, conversation_id: str, text: str
-        ) -> None:
-            conv = await _pg_get_conv(conversation_id)
-            if conv is None:
-                logger.warning(
-                    "approval notification: conversation not found",
-                    conversation_id=conversation_id,
-                )
-                return
-            cw = _state.coworkers.get(conv.coworker_id)
-            await _send_via_coworker(cw, conv.channel_chat_id, text)
-
-        async def send_approval_card(
-            self,
-            conversation_id: str,
-            card: ApprovalCardPayload,
-        ) -> None:
-            """v6.1 §P2b.1 — deliver an interactive approval card.
-
-            Resolves the conversation to a binding/gateway and asks
-            the gateway to render the card natively (Telegram inline
-            buttons). Gateways that have not opted in keep the
-            historical text behaviour by falling back through
-            :meth:`send_to_conversation`. This adapter therefore
-            preserves the dispatcher contract:
-            :func:`deliver_approval_card_or_text` sees that the
-            orchestrator sender implements the card method, and the
-            gateway-level capability check happens here where we
-            actually know which channel will deliver the message.
-            """
-            conv = await _pg_get_conv(conversation_id)
-            if conv is None:
-                logger.warning(
-                    "approval card: conversation not found",
-                    conversation_id=conversation_id,
-                )
-                return
-            cw = _state.coworkers.get(conv.coworker_id)
-            if cw is None:
-                # No live coworker means we cannot identify a binding;
-                # fall back to the text path so the approver still hears
-                # something (the message will degrade gracefully to a
-                # plain reply via the scan-all-coworkers branch in
-                # ``_send_via_coworker``).
-                body = card.text_fallback
-                if card.approval_url and card.approval_url not in body:
-                    body = f"{body}\n  review: {card.approval_url}"
-                await _send_via_coworker(None, conv.channel_chat_id, body)
-                return
-            channel_type = _get_channel_type_for_conv(cw, conv)
-            binding = cw.channel_bindings.get(channel_type)
-            gw = _gateways.get(channel_type)
-            send_card = (
-                getattr(gw, "send_approval_card", None)
-                if gw is not None
-                else None
-            )
-            if binding is not None and send_card is not None:
-                await send_card(binding.id, conv.channel_chat_id, card)
-                return
-            # Gateway has no native card method (Slack today, future
-            # channels until they opt in): degrade to plain text +
-            # Web deep-link so the approver still has a path forward.
-            body = card.text_fallback
-            if card.approval_url and card.approval_url not in body:
-                body = f"{body}\n  review: {card.approval_url}"
-            await _send_via_coworker(cw, conv.channel_chat_id, body)
-
-    resolver = NotificationTargetResolver(
-        get_conversations_for_user_and_coworker=_convs_for_user_and_cw,
-        get_conversation=_pg_get_conv,
-        webui_base_url=os.environ.get("WEBUI_BASE_URL") or None,
-    )
-    approval_engine = ApprovalEngine(
-        publisher=_transport.js,
-        channel_sender=_OrchestratorChannelSender(),
-        resolver=resolver,
-    )
-    ipc_deps.set_approval_engine(approval_engine)
-    # v6.1 §P2b.1: wire the engine into the Telegram CallbackQuery
-    # path. The router slot is module-level on
-    # ``rolemesh.channels.telegram_gateway`` so all _BotInstance
-    # callbacks pick up the same engine without each constructor
-    # needing to know about it.
-    from rolemesh.channels.telegram_gateway import (
-        set_approval_decision_router as _set_telegram_decision_router,
-    )
-
-    _set_telegram_decision_router(approval_engine)
-
-    # V2 P1.1: thread the approval engine through to SafetyEngine so
-    # require_approval verdicts actually produce human-in-the-loop
-    # decision surfaces instead of just landing in the audit table.
-    # The safety engine was instantiated earlier in start_subscribers
-    # (without the approval dep because that module isn't constructed
-    # yet at that point); patching the attribute post-hoc keeps
-    # ordering minimal and avoids re-threading construction.
-    if _safety_engine is not None:
-        _safety_engine._approval_handler = approval_engine  # type: ignore[attr-defined]
-
-    from rolemesh.approval.executor import ApprovalWorker
-    from rolemesh.approval.expiry import run_approval_maintenance_loop
-
-    approval_worker = ApprovalWorker(
-        js=_transport.js,
-        channel_sender=_OrchestratorChannelSender(),
-    )
-    await approval_worker.start()
-
-    # V2 P1.1: 24-hour TTL on safety_decisions.approval_context.
-    # Runs alongside approval maintenance — separate loops because the
-    # two touch different tables and should fail independently.
+    # Safety Framework background maintenance loop.
     from rolemesh.safety.maintenance import run_safety_maintenance_loop
 
     safety_maintenance_stop = asyncio.Event()
     safety_maintenance_task = asyncio.create_task(
         run_safety_maintenance_loop(stop_event=safety_maintenance_stop)
-    )
-
-    approval_maintenance_stop = asyncio.Event()
-    approval_maintenance_task = asyncio.create_task(
-        run_approval_maintenance_loop(
-            approval_engine, stop_event=approval_maintenance_stop
-        )
-    )
-
-    # Cancel-for-job cascade: agent containers publish on StoppedEvent
-    # (see docs/backend-stop-contract.md §8). We fan those out through
-    # the engine so each pending approval for the aborted job gets
-    # status=cancelled + an audit row.
-    async def _on_cancel_for_job(msg: Any) -> None:
-        try:
-            jid = msg.subject.rsplit(".", 1)[-1]
-        except Exception:  # noqa: BLE001 — defensive, subject format is fixed
-            await msg.ack()
-            return
-        try:
-            await approval_engine.cancel_for_job(jid)
-        except Exception as exc:  # noqa: BLE001 — never let handler death leak
-            logger.warning(
-                "approval cancel_for_job handler failed",
-                job_id=jid,
-                error=str(exc),
-            )
-        with contextlib.suppress(Exception):
-            await msg.ack()
-
-    cancel_sub = await _transport.js.subscribe(
-        "approval.cancel_for_job.*",
-        durable="orch-approval-cancel",
-        cb=_on_cancel_for_job,
-        manual_ack=True,
     )
 
     ipc_tasks = await _start_nats_ipc_subscriptions(_transport, ipc_deps)
@@ -2054,17 +1817,10 @@ async def main() -> None:
         with contextlib.suppress(Exception):
             await sub.unsubscribe()  # type: ignore[union-attr]
 
-    approval_maintenance_stop.set()
     safety_maintenance_stop.set()
-    with contextlib.suppress(Exception):
-        await cancel_sub.unsubscribe()
-    approval_maintenance_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await approval_maintenance_task
     safety_maintenance_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await safety_maintenance_task
-    await approval_worker.stop()
     # V2 P0.3: shut down the safety RPC server and its thread pool so
     # nats-py can tear down the subscription cleanly and in-flight
     # sync checks do not block process exit.
@@ -2150,48 +1906,10 @@ class _TrustedCoworkerRec:
 
 
 class _IpcDepsImpl:
-    """Concrete IpcDeps backed by OrchestratorState.
-
-    The approval engine is attached lazily via set_approval_engine() so
-    deployments without ApprovalEngine fall through to no-op handlers —
-    keeps the approval module zero-impact when it is not wired up.
-    """
-
-    def __init__(self) -> None:
-        # ApprovalEngine type is imported lazily in main() to avoid the
-        # module-level import cycle (approval.engine imports db.pg which
-        # imports main-adjacent types).
-        self._approval_engine: object | None = None
-
-    def set_approval_engine(self, engine: object | None) -> None:
-        self._approval_engine = engine
+    """Concrete IpcDeps backed by OrchestratorState."""
 
     async def send_message(self, jid: str, text: str) -> None:
         await _send_via_coworker(None, jid, text)
-
-    async def on_proposal(
-        self, data: dict[str, object], *, tenant_id: str, coworker_id: str
-    ) -> None:
-        if self._approval_engine is None:
-            logger.warning(
-                "submit_proposal received but approval engine is not wired"
-            )
-            return
-        await self._approval_engine.handle_proposal(  # type: ignore[attr-defined]
-            data, tenant_id=tenant_id, coworker_id=coworker_id
-        )
-
-    async def on_auto_intercept(
-        self, data: dict[str, object], *, tenant_id: str, coworker_id: str
-    ) -> None:
-        if self._approval_engine is None:
-            logger.warning(
-                "auto_approval_request received but approval engine is not wired"
-            )
-            return
-        await self._approval_engine.handle_auto_intercept(  # type: ignore[attr-defined]
-            data, tenant_id=tenant_id, coworker_id=coworker_id
-        )
 
     async def on_tasks_changed(self) -> None:
         if _transport is None:

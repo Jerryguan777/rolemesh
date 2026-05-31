@@ -11,7 +11,7 @@ If this is your first time reading the codebase, start here. Each module section
 Most agent platforms today fall into one of two camps:
 
 - **Closed SaaS** (Claude Projects, Devin, ChatGPT Teams) — easy to use, but you don't own the data, you can't run on-prem, and the agent has no way to live inside your team's existing channels.
-- **Single-tenant libraries** (LangChain, AutoGPT, CrewAI) — you own the code, but you have to build everything else yourself: tenant isolation, sandboxing, channel integration, credential management, audit, approval gates.
+- **Single-tenant libraries** (LangChain, AutoGPT, CrewAI) — you own the code, but you have to build everything else yourself: tenant isolation, sandboxing, channel integration, credential management, audit.
 
 Neither shape fits when you want an AI coworker that handles **real company data**, **talks in your team's channels**, and **doesn't exfiltrate credentials**. RoleMesh exists for that gap: it is self-hosted, AGPL-licensed, multi-tenant from the database up, and sandboxed by architecture rather than by bolt-on filters.
 
@@ -25,8 +25,7 @@ The original code line started as [NanoClaw](https://github.com/qwibitai/nanocla
 2. **Sandboxed by architecture, not by bolt-on filters.** Three independent layers (container hardening + content safety pipeline + network egress chokepoint) — each layer assumes the others might fail.
 3. **Two interchangeable agent runtimes.** Per-coworker choice between Claude SDK and Pi (the open-source, multi-provider runtime ported from pi-mono). Switch backends without rewriting tools, channels, or the orchestrator.
 4. **Multiple human channels.** WebUI, Telegram, and Slack out of the box, behind a common channel-gateway protocol so adding a new one (Teams, Discord, …) is a localized change.
-5. **Real human-approval flow.** Goes beyond chat: the agent can take real actions (refunds, price updates, access grants) but a policy can route any tool call into a human-approval gate before it executes.
-6. **Per-coworker capability surface.** Each coworker gets its own MCP tools, skills, system prompt, and permission profile — so one tenant can have an "Operations Bot" that schedules tasks but cannot delegate to other agents, while another tenant has a "Manager Bot" that does both.
+5. **Per-coworker capability surface.** Each coworker gets its own MCP tools, skills, system prompt, and permission profile — so one tenant can have an "Operations Bot" that schedules tasks but cannot delegate to other agents, while another tenant has a "Manager Bot" that does both.
 
 ---
 
@@ -42,7 +41,7 @@ The diagram shows one tenant's worth of components. In a real deployment, the or
 
 ### Orchestrator (`src/rolemesh/main.py`)
 
-The central process. Owns the NATS connections, the Postgres pools, the channel gateways, the scheduler, the safety RPC server, the approval engine, and the agent-spawning loop. Every other module either runs inside the orchestrator process or is reached over NATS / HTTP from it.
+The central process. Owns the NATS connections, the Postgres pools, the channel gateways, the scheduler, the safety RPC server, and the agent-spawning loop. Every other module either runs inside the orchestrator process or is reached over NATS / HTTP from it.
 
 The orchestrator is **stateless beyond its NATS + DB connections** — restarting it does not affect running agent containers (durable JetStream consumers replay missed messages on reconnect; orphan containers are cleaned up by name prefix `rolemesh-` on next boot).
 
@@ -82,15 +81,9 @@ Every agent has two kinds of tools:
 
 ### Hooks system
 
-A unified `HookHandler` protocol bridges Claude SDK's hooks (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `PreCompact`, `Stop`) and Pi's extension events (`tool_call`, `tool_result`, `session_before_compact`). Audit, DLP, transcript-archive, approval, and observability handlers are all written once against the unified protocol — they fire on whichever backend the coworker happens to use.
+A unified `HookHandler` protocol bridges Claude SDK's hooks (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `PreCompact`, `Stop`) and Pi's extension events (`tool_call`, `tool_result`, `session_before_compact`). Audit, DLP, transcript-archive, and observability handlers are all written once against the unified protocol — they fire on whichever backend the coworker happens to use.
 
 → `docs/hooks-architecture.md`
-
-### Approval module
-
-Policy-driven human-in-the-loop gate for high-risk MCP tool calls. The container-side hook intercepts tool calls that match a policy, suspends them, and waits for an `approval.decided.{id}` event published by either the WebUI's REST decide endpoint or by an automatic approver. Designed so a deployment with **no policies** is bit-identical to a build without the approval module — zero overhead when nobody configured it.
-
-→ `docs/approval-architecture.md`
 
 ### Safety framework
 
@@ -141,9 +134,9 @@ The WebUI shows real-time progress events (`container_starting`, `running`, `too
 Postgres 16 with Row-Level Security on every tenant-scoped table. Two pool architecture:
 
 - `rolemesh_app` — `NOBYPASSRLS`, used by all business-logic queries. RLS-enforced; a `SET LOCAL rolemesh.tenant_id` GUC scopes every query.
-- `rolemesh_system` — `BYPASSRLS`, used only by schema migrations, system-wide cleanup, and the safety / approval RPC paths that legitimately need cross-tenant reads. Calls are explicit (`tenant_conn` vs `admin_conn`), so the difference is visible at every call site.
+- `rolemesh_system` — `BYPASSRLS`, used only by schema migrations, system-wide cleanup, and the safety RPC paths that legitimately need cross-tenant reads. Calls are explicit (`tenant_conn` vs `admin_conn`), so the difference is visible at every call site.
 
-Schema lives in `src/rolemesh/db/schema.py`; per-entity CRUD is split into `db/{tenant,user,coworker,chat,task,skill,approval,safety}.py`.
+Schema lives in `src/rolemesh/db/schema.py`; per-entity CRUD is split into `db/{tenant,user,coworker,chat,task,skill,safety}.py`.
 
 → `docs/multi-tenant-architecture.md`
 
@@ -176,7 +169,7 @@ NATS (with JetStream + KV) replaces all three with one system, and adds:
 - Durable consumers, so an orchestrator restart replays missed messages instead of dropping them.
 - A clean wire-format shape — JSON over named subjects, easy to inspect with the NATS CLI.
 
-The same NATS server also carries WebUI ↔ orchestrator (`web-ipc`), approval signals (`approval-ipc`), and several internal RPCs (`egress.*`, `safety.*`, `orchestrator.agent.lifecycle`).
+The same NATS server also carries WebUI ↔ orchestrator (`web-ipc`) and several internal RPCs (`egress.*`, `safety.*`, `orchestrator.agent.lifecycle`).
 
 → `docs/nats-ipc-architecture.md`
 
@@ -190,7 +183,7 @@ This is the third independent safety layer — orthogonal to container hardening
 
 ### 4. Two interchangeable agent backends
 
-Locking into one LLM framework was unacceptable: vendor pricing, rate limits, and feature roadmaps all become single points of failure. The `AgentBackend` protocol abstracts the SDK so the rest of the system (orchestrator, channels, NATS protocol, MCP tools, approval gate) is backend-agnostic.
+Locking into one LLM framework was unacceptable: vendor pricing, rate limits, and feature roadmaps all become single points of failure. The `AgentBackend` protocol abstracts the SDK so the rest of the system (orchestrator, channels, NATS protocol, MCP tools) is backend-agnostic.
 
 The two backends differ in mechanics but not in observable behavior — Claude SDK uses preemptive cancellation (`Task.cancel()`), Pi uses cooperative cancellation (`asyncio.Event`); the **Stop contract** (`docs/backend-stop-contract.md`) documents the four observable behaviors any backend must deliver, regardless of how it implements them internally.
 
@@ -213,8 +206,6 @@ Each layer is designed assuming the others have failed:
 | **Content pipeline** (`safety/safety-framework.md`) | Malicious prompts, PII leaks in outputs, jailbreaks | Prompt injection that bypasses the pipeline still cannot run a privileged container syscall |
 | **Container hardening** (`safety/container-hardening.md`) | Sandbox escape, host filesystem access, capability abuse | A compromised agent that escapes the container still has no internet route |
 | **Network egress** (`egress/deployment.md`) | Data exfiltration, C2 callback, credential theft via DNS | The gateway's per-tenant allowlist + credential proxy means tokens never reach the agent process |
-
-Plus **human-approval flow** (`approval-architecture.md`) as an orthogonal "judgment" layer — for cases where the agent has every legitimate permission but the operator wants a human to look at this specific action before it runs.
 
 → `docs/safety/attack-simulation-matrix.md` tracks every modeled attack against these three layers with the corresponding test.
 
@@ -246,12 +237,11 @@ After step 6, the codebase was forked from NanoClaw and renamed to RoleMesh (pro
 11. **Hooks.** Unified hook system across Claude SDK and Pi. See `docs/hooks-architecture.md`.
 12. **Event stream.** Real-time progress events to the WebUI. See `docs/event-stream-architecture.md`.
 13. **Steering.** Stop button + follow-up-while-running (true mid-turn steering deferred). See `docs/steering-architecture.md` and `docs/backend-stop-contract.md`.
-14. **Approval.** Policy-gated human-in-the-loop for high-risk MCP calls. See `docs/approval-architecture.md`.
-15. **Safety stack.** Three layers — container hardening, content safety framework, network egress control. See `docs/safety/container-hardening.md`, `docs/safety/safety-framework.md`, `docs/egress/deployment.md`.
-16. **RLS.** Postgres Row-Level Security on every tenant-scoped table; dual-pool architecture. See `docs/multi-tenant-architecture.md`.
-17. **Skills.** Per-coworker markdown skill folders, projected per-spawn. See `docs/skills-architecture.md`.
-18. **Evaluation.** `rolemesh-eval` CLI based on Inspect AI; reuses the production `ContainerAgentExecutor`.
-19. **Observability.** OpenTelemetry tracer + W3C trace-context propagation across NATS subjects (in progress).
+14. **Safety stack.** Three layers — container hardening, content safety framework, network egress control. See `docs/safety/container-hardening.md`, `docs/safety/safety-framework.md`, `docs/egress/deployment.md`.
+15. **RLS.** Postgres Row-Level Security on every tenant-scoped table; dual-pool architecture. See `docs/multi-tenant-architecture.md`.
+16. **Skills.** Per-coworker markdown skill folders, projected per-spawn. See `docs/skills-architecture.md`.
+17. **Evaluation.** `rolemesh-eval` CLI based on Inspect AI; reuses the production `ContainerAgentExecutor`.
+18. **Observability.** OpenTelemetry tracer + W3C trace-context propagation across NATS subjects (in progress).
 
 The split matters when reading the older code or older docs: anything dated before phase 2 may still talk about NanoClaw, and the IPC + container abstraction designs (`nats-ipc-architecture.md`, `agent-executor-and-container-runtime.md`) describe phase-1 work that pre-dates the rename.
 
@@ -287,10 +277,9 @@ Grouped by topic. Every doc focuses on the *why* — the alternatives considered
 - [`steering-architecture.md`](steering-architecture.md) — Stop button + follow-up-while-running
 - [`skills-architecture.md`](skills-architecture.md) — Per-coworker skill folders, per-spawn projection
 
-### Tools and human-in-the-loop
+### Tools
 
 - [`external-mcp-architecture.md`](external-mcp-architecture.md) — Credential proxy + token vault for external MCP servers
-- [`approval-architecture.md`](approval-architecture.md) — Policy-gated approval flow
 
 ### Safety
 

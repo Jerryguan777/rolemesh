@@ -323,131 +323,21 @@ async def test_coworkers_model_id_fk_rejects_dangling_uuid() -> None:
 
 
 # ---------------------------------------------------------------------------
-# v6.1 §P2.3 — approval_default_mode dropped + source CHECK widened
+# tenants.approval_default_mode dropped (approval subsystem removed)
 # ---------------------------------------------------------------------------
 
 
 async def test_tenants_approval_default_mode_column_dropped() -> None:
-    """T2a (Unit 1 §P2.3 invariant): the tenants table no longer carries
-    ``approval_default_mode``. Future writers must not rely on it; the
+    """The tenants table no longer carries ``approval_default_mode``
+    (it was removed together with the approval subsystem). The
     migration ``ALTER TABLE tenants DROP COLUMN IF EXISTS …`` runs at
-    schema setup time.
-
-    If a future change re-adds the column without first removing this
-    test, the new feature should be explicitly justified against
-    v6.1's "Case A collapse" design — adding an escape hatch is a
-    design choice, not a maintenance task.
+    schema setup time; this test pins that the column stays gone.
     """
     cols = await _columns("tenants")
     assert "approval_default_mode" not in cols, (
-        f"tenants.approval_default_mode should be dropped per v6.1 §P2.3; "
+        f"tenants.approval_default_mode should stay dropped; "
         f"present columns: {sorted(cols)}"
     )
-
-
-async def test_approval_requests_source_check_accepts_auto_execute() -> None:
-    """T2a.3 schema invariant: the v6.1 widened CHECK admits the new
-    'auto_execute' value alongside the prior three. Inserting via
-    asyncpg directly bypasses the engine but exercises the constraint.
-
-    A regression where the CHECK was not widened would surface here as
-    asyncpg.CheckViolationError before any test hitting the engine
-    runs.
-    """
-    seed = await _seed_for_message(slug_tag="src-check")
-    pool = _get_admin_pool()
-    async with pool.acquire() as conn:
-        # Must not raise: 'auto_execute' is in the new CHECK list.
-        await conn.execute(
-            """
-            INSERT INTO approval_requests (
-                tenant_id, coworker_id, conversation_id,
-                user_id, job_id, mcp_server_name,
-                actions, action_hashes, rationale,
-                source, status, resolved_approvers, expires_at
-            ) VALUES (
-                $1::uuid, $2::uuid, $3::uuid,
-                $4::uuid, $5, $6,
-                $7::jsonb, $8::text[], $9,
-                $10, $11, $12::uuid[], now() + interval '5 minutes'
-            )
-            """,
-            seed["tenant_id"], seed["coworker_id"], seed["conversation_id"],
-            seed["user_id"], "job-1", "srv-1",
-            "[]", [], None,
-            "auto_execute", "pending", [seed["user_id"]],
-        )
-
-        # And a value outside the CHECK still raises — proves we did
-        # not accidentally widen the CHECK to "anything goes".
-        with pytest.raises(asyncpg.CheckViolationError):
-            await conn.execute(
-                """
-                INSERT INTO approval_requests (
-                    tenant_id, coworker_id, conversation_id,
-                    user_id, job_id, mcp_server_name,
-                    actions, action_hashes, rationale,
-                    source, status, resolved_approvers, expires_at
-                ) VALUES (
-                    $1::uuid, $2::uuid, $3::uuid,
-                    $4::uuid, $5, $6,
-                    $7::jsonb, $8::text[], $9,
-                    $10, $11, $12::uuid[], now() + interval '5 minutes'
-                )
-                """,
-                seed["tenant_id"], seed["coworker_id"], seed["conversation_id"],
-                seed["user_id"], "job-2", "srv-1",
-                "[]", [], None,
-                "not_a_real_source", "pending", [seed["user_id"]],
-            )
-
-
-async def test_approval_default_mode_reversal_sql_is_valid_on_clean_schema() -> None:
-    """T2a.5: the reversal SQL we left as a comment in db/schema.py
-    must apply cleanly against the current schema and re-enforce the
-    same constraint. Encoded here so a refactor that bit-rots the
-    reversal note breaks the test rather than going undetected.
-    """
-    pool = _get_admin_pool()
-    async with pool.acquire() as conn:
-        # Apply the reversal exactly as documented in db/schema.py.
-        await conn.execute(
-            "ALTER TABLE tenants ADD COLUMN approval_default_mode TEXT "
-            "DEFAULT 'auto_execute' CHECK (approval_default_mode IN ("
-            "'auto_execute', 'require_approval', 'deny'))"
-        )
-        try:
-            # Column is back and defaulted.
-            cols = await _columns("tenants")
-            assert "approval_default_mode" in cols
-
-            # Insert a fresh tenant and assert default lands.
-            new_id = await conn.fetchval(
-                "INSERT INTO tenants (name, slug) "
-                "VALUES ($1, $2) RETURNING id",
-                "rev",
-                f"rev-{uuid.uuid4().hex[:6]}",
-            )
-            mode = await conn.fetchval(
-                "SELECT approval_default_mode FROM tenants WHERE id = $1::uuid",
-                new_id,
-            )
-            assert mode == "auto_execute"
-
-            # The CHECK still rejects bogus values — proves the
-            # documented SQL actually attaches the constraint.
-            with pytest.raises(asyncpg.CheckViolationError):
-                await conn.execute(
-                    "UPDATE tenants SET approval_default_mode = 'invalid_mode' "
-                    "WHERE id = $1::uuid",
-                    new_id,
-                )
-        finally:
-            # Leave the schema in the post-v6.1 state for downstream
-            # tests in the same session.
-            await conn.execute(
-                "ALTER TABLE tenants DROP COLUMN IF EXISTS approval_default_mode"
-            )
 
 
 async def test_coworkers_model_id_fk_accepts_seeded_model() -> None:

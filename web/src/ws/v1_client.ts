@@ -62,10 +62,6 @@ export type RunCompletedEvent =
   components['schemas']['WsServerEventRunCompleted'];
 export type RunErrorEvent =
   components['schemas']['WsServerEventRunError'];
-export type ApprovalRequiredEvent =
-  components['schemas']['WsServerEventApprovalRequired'];
-export type ApprovalResolvedEvent =
-  components['schemas']['WsServerEventApprovalResolved'];
 
 export type ConnectionStatus = WsConnectionStatus;
 
@@ -331,17 +327,6 @@ export class V1WsClient extends WsClientBase<ConnectionStatus> {
    *  with the server protocol; not currently wired to a UI button. */
   sendCancel(runId: string): void {
     this.rawSend({ type: 'request.cancel', run_id: runId });
-  }
-
-  /** Send a `request.approval` frame. Used by the approvals UI (03a). */
-  sendApproval(approvalId: string, decision: 'approve' | 'deny', note?: string): void {
-    const frame: Record<string, unknown> = {
-      type: 'request.approval',
-      approval_id: approvalId,
-      decision,
-    };
-    if (note) frame.note = note;
-    this.rawSend(frame);
   }
 
   private rawSend(frame: Record<string, unknown>): void {

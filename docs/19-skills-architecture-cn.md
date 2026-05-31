@@ -252,7 +252,7 @@ bind mount 是只读的，即便 agent 的工具（Bash、Edit）尝试改 skill
 2. **per-spawn 目录** —— 每个 job 一个唯一前缀；跨 spawn 不共享 skill staging 目录。
 3. **三层租户隔离** —— 应用层 `WHERE tenant_id`、两张表上的 RLS 策略，以及 `skills` 表上的跨租户 trigger 校验 `coworker_id` 属于同租户。
 4. **路径穿越双层拦截** —— `CHECK` 约束在写入时拒绝绝对路径、`..`、反斜杠；投射器在物化时再校验 `realpath(target).startswith(skill_root)`。
-5. **正文是数据，不是代码** —— RoleMesh 不执行 skill 内容。agent 读 skill 之后做的任何事情都通过既有工具表面（Bash、Edit、MCP）出口，由既有 safety framework 和 approval pipeline 管控。
+5. **正文是数据，不是代码** —— RoleMesh 不执行 skill 内容。agent 读 skill 之后做的任何事情都通过既有工具表面（Bash、Edit、MCP）出口，由既有 safety framework 管控。
 
 mutation REST 接口由与 `/api/admin/agents` 其它接口同源的 `AdminUser` 依赖把关。Skill 管理是 admin 级别的操作；普通用户无法改动 agent 的行为形态。
 

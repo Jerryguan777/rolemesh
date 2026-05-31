@@ -222,7 +222,7 @@ async def test_admission_corrects_conv_user_id_after_identity_handover(
 
     Pre-F1 behaviour (``if conv.user_id is None``) would have
     silently left conv.user_id = A and run B's request under A —
-    audit attribution + Phase-2 self-approval bypass.
+    breaking audit attribution.
     """
     s = await _build_state("identity-handover")
     # B is the user that admission will resolve to.

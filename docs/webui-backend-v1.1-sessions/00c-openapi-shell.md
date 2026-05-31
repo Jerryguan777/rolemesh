@@ -74,7 +74,7 @@
 - 新建 `web/src/components/app-shell.ts`：
   - Lit element `<rm-app-shell>`
   - 默认 slot 给 main content；命名 slot `sidebar-extra` / `topbar-extra` 给页面扩展
-  - sidebar 项目按设计 §6.1 列：Chat / Coworkers / MCP / Models / Skills / Credentials / Bindings / Approvals / Safety
+  - sidebar 项目按设计 §6.1 列：Chat / Coworkers / MCP / Models / Skills / Credentials / Bindings / Safety
   - 未实现的页面 router 进去显示 "Coming soon — Phase X" 占位
 - 改 hash router（保留现有方案，不引 React Router）：
   - 一个集中的 `web/src/router.ts` 把 hash → component class 映射
@@ -187,7 +187,7 @@ POST  /api/v1/runs/{id}/cancel               (409 = 已终态)
 **Typed client 用法约定（给 01a 用）**：
 - 所有新 endpoint 必须**先**改 yaml、跑 `npm run openapi:gen`、commit 生成的 `types.ts`；然后在 `web/src/api/client.ts` 里加对应方法。一个端点一个方法；不要折腾运行时 path-builder。
 - Pydantic 一侧：每个新 endpoint 加 `response_model=` 指向 `webui.schemas_v1` 里对应的 model。在 `tests/test_openapi_contract.py` 里加一个 `Backend`-风格的 yaml/Pydantic `required` 集合相等测试。这是廉价的回归保险，加一个 endpoint 大概 5 行测试。
-- 错误响应**必须**用 `ErrorResponse`（schemas_v1）即 `{code, message, details?}`；handler 抛 `HTTPException` 时把这个塞进 `detail` 字段（FastAPI 默认把 detail 当 body 顶层"detail"，需要自己 wrap——这块到 01a 实际 wire approval / coworker DELETE 409 时再决定确切 helper 函数）。
+- 错误响应**必须**用 `ErrorResponse`（schemas_v1）即 `{code, message, details?}`；handler 抛 `HTTPException` 时把这个塞进 `detail` 字段（FastAPI 默认把 detail 当 body 顶层"detail"，需要自己 wrap——这块到 01a 实际 wire coworker DELETE 409 时再决定确切 helper 函数）。
 
 **Shell 子路由 outlet 怎么挂（给 01c 用）**：
 - 默认全用 `<rm-router-outlet>`。如果 Phase 1+ 某个页面要 sub-tab（例如设计 §6.3 C `#/coworkers/:id/{overview,skills,...}`），**不要**新建一个 outlet——在 page component 内部消化 hash 后缀。`web/src/router.ts` 的 longest-prefix 匹配机制已经验证（hash `#/coworkers/abc` 正确解析为 `coworkers` route）。
@@ -198,7 +198,7 @@ POST  /api/v1/runs/{id}/cancel               (409 = 已终态)
 ### Live UI smoke 结果（2026-05-20 后补）
 后续在同一台机器上把 Postgres / NATS / orchestrator 真起起来跑了一遍 Playwright 驱动的 smoke，全部通过：
 
-- App-shell 渲染 + sidebar 9 项顺序 + Phase tag 都对（Chat / Coworkers P1 / MCP servers P2 / Models P2 / Skills P3 / Credentials P2 / Bindings P2 / Approvals P3 / Safety）
+- App-shell 渲染 + sidebar 项顺序 + Phase tag 都对（Chat / Coworkers P1 / MCP servers P2 / Models P2 / Skills P3 / Credentials P2 / Bindings P2 / Safety）
 - chat 走 `ADMIN_BOOTSTRAP_TOKEN` fast-path 直接 WS 接入：发消息 → 收到 verbatim 回复；orchestrator 端 `Agent output chars=N` 落账
 - sidebar 切到 `#/skills` 渲染 `<rm-coming-soon label="Skills" phase="Phase 3">`；active 项 `bg-brand/10` + `aria-current="page"`；topbar 对 chat 隐藏、对其它页显示——和 §6.2 设计一致
 - conversation 切换：sub-sidebar 点旧 conversation，url `chat_id` 跟着改、历史消息正确加载、WS 不掉

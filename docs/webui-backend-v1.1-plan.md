@@ -11,7 +11,7 @@
 | 0（防雷基建 + migration + 脚手架）| 3 | 8-11 | ~2500-3500 |
 | 1（chat 主路径）| 3 | 6-8 | ~3000-4000 |
 | 2（配置生态 + tools 下线 stage 1+2）| 3 | 8-10 | ~3500-4500 |
-| 3（approvals + skills per-tenant）| 2 | 5-7 | ~2000-2500 |
+| 3（skills per-tenant）| 2 | 5-7 | ~2000-2500 |
 | 3+（drop tools 列 — 独立 session）| 1 | 1 | ~100 |
 | 4（safety UI 搬迁）| 1 | 2-3 | ~800-1200 |
 | **合计** | **13** | **30-40** | **12k-16k** |
@@ -35,9 +35,7 @@ Phase 2   02a (models + credentials + MCP) <--+
               v
           02c (credential_proxy user-mode + fake-vault e2e)
               |
-Phase 3   03a (approvals to v1 + multi-user smoke) <--+
-              v
-          03b (skills per-tenant + UI)
+Phase 3   03b (skills per-tenant + UI + multi-user smoke)
               |
           (Phase 2 实跑一段时间后)
               v
@@ -59,8 +57,7 @@ Phase 4   04  (safety UI to v1)
 | 02a | Models + Credentials + MCP CRUD | done | 2026-05-21 | 5 commits on feat/ui; CredentialVault primitive + BYTEA schema + endpoints + UI; INV-VAULT-1/2/3 pinned |
 | 02b | `coworker.tools` 一次性下线（greenfield） | done | 2026-05-21 | 1 commit on feat/ui; drop column + 9 reader sites switched + `list_coworker_mcp_configs` helper + `web.coworker.mcp_changed` subscriber wired |
 | 02c | (retired) credential_proxy user-mode + fake-vault e2e | retired | 2026-05-21 | 反 over-engineering 第三次：0 caller，整条链路推迟到 OIDC 分支单独 session |
-| 03a | Approvals 迁 v1 + 多 user smoke | done | 2026-05-21 | 3 commits on feat/ui; /api/v1/approval-policies + /api/v1/approvals + WS event.approval.{required,resolved} + queue page + chat-panel inline bridge; INV-4 + INV-7 + RLS pinned (158 tests) |
-| 03b | Skills per-tenant 迁移 + UI | done | 2026-05-21 | 4 commits on feat/ui; drop `skills.coworker_id` + reader/writer cutover (PR 1) + `Skill.created_by` → `created_by_user_id` (PR 2) + `/api/v1/skills/*` + INV-5 lint + `web.coworker.skills_changed` subscriber (PR 3) + `<rm-skills-page>` + `<rm-skill-detail-page>` + `<rm-coworker-skills-tab>` (PR 4) |
+| 03b | Skills per-tenant 迁移 + UI + 多 user smoke | done | 2026-05-21 | 4 commits on feat/ui; drop `skills.coworker_id` + reader/writer cutover (PR 1) + `Skill.created_by` → `created_by_user_id` (PR 2) + `/api/v1/skills/*` + INV-5 lint + `web.coworker.skills_changed` subscriber (PR 3) + `<rm-skills-page>` + `<rm-skill-detail-page>` + `<rm-coworker-skills-tab>` (PR 4) |
 | 03+ | (retired) drop `coworkers.tools` 列 | retired | 2026-05-21 | greenfield 吸收：tools → 02b；skills.coworker_id → 03b |
 | 04 | Safety UI 迁 v1 | done | 2026-05-21 | 3 commits on feat/ui; 6 v1 GET endpoints (rules / checks / decisions + audit) + frontend read switch to typed ApiClient (writes + CSV stay admin per design §3 Phase 4) + admin GET Sunset / Deprecation / Link headers (sunset 2026-11-17); 21 integration tests + 7 contract tests + 7 vitest routing tests |
 

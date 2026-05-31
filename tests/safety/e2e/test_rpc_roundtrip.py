@@ -13,7 +13,7 @@ catches regressions those miss:
 
 Skips automatically when NATS is not reachable — CI without the dev
 stack sees no false failures; local runs with docker-compose up
-pick it up. Same pattern as ``tests/approval/e2e/conftest.py``.
+pick it up.
 """
 
 from __future__ import annotations

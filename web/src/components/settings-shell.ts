@@ -33,7 +33,6 @@ import {
   iconBook,
   iconChevronDown,
   iconChip,
-  iconClipboardCheck,
   iconClose,
   iconHome,
   iconKey,
@@ -53,7 +52,6 @@ import './skills-page.js';
 import './models-page.js';
 import './credentials-page.js';
 import './safety-rules-page.js';
-import './approvals-page.js';
 import './appearance-page.js';
 import './coming-soon.js';
 import './skill-detail-page.js';
@@ -138,12 +136,6 @@ const NAV_GROUPS: NavGroup[] = [
         label: 'Safety rules',
         icon: () => iconShield(16),
         render: () => html`<rm-safety-rules-page></rm-safety-rules-page>`,
-      },
-      {
-        slug: 'approval-policies',
-        label: 'Approval policies',
-        icon: () => iconClipboardCheck(16),
-        render: () => html`<rm-approvals-page></rm-approvals-page>`,
       },
     ],
   },

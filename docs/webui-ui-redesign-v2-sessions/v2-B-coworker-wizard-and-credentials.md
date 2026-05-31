@@ -43,7 +43,7 @@ v2 唯一有真新业务逻辑的 session：
 ## 概念定位
 
 - Wizard 是浮在 Coworkers 页上的对话框形态，不是新路由 —— `#/manage/coworkers` 仍是 list；wizard 是 modal overlay
-- Wizard draft state **完全在 `<rm-coworker-wizard>` 父组件内**——`<rm-wizard>` primitive 无内部 state（v2-A 落地，与 `<rm-inline-approval>` 同模式）
+- Wizard draft state **完全在 `<rm-coworker-wizard>` 父组件内**——`<rm-wizard>` primitive 无内部 state（v2-A 落地，与 `<rm-message-*>` 同模式）
 - Credential dialog 与 Wizard 是兄弟而非父子——wizard 触发 dialog 时**保持 wizard mounted**，dialog 关闭后 wizard 收到 refresh 信号重 fetch credentials
 - Models page provider grouping helper 同时给 wizard step 3 + Models page 用——单一来源
 
@@ -94,9 +94,9 @@ export type DialogCloseReason = 'x' | 'backdrop' | 'esc' | 'programmatic';
 </rm-dialog>
 ```
 
-### `icons.ts` 8 个可用
+### `icons.ts` 可用
 
-`iconActivity / iconApprovals / iconSettings / iconChevronDown / iconPlus / iconSearch / iconClose / iconLogout`——**本 session 不要造新 icon**。如果 wizard 内某 step 真需要新 icon（如 model 卡片角标 backend logo），加进 icons.ts 让 v2-C 也能复用。
+`iconActivity / iconSettings / iconChevronDown / iconPlus / iconSearch / iconClose / iconLogout`——**本 session 不要造新 icon**。如果 wizard 内某 step 真需要新 icon（如 model 卡片角标 backend logo），加进 icons.ts 让 v2-C 也能复用。
 
 ### tokens.css 关键 vars
 
@@ -252,7 +252,7 @@ export type DialogCloseReason = 'x' | 'backdrop' | 'esc' | 'programmatic';
 
 ## Out of scope
 
-- ❌ **Activity shell / Approvals popover**（v2-C；v2-A 已落 activity-shell 最小占位）
+- ❌ **Activity shell**（v2-C；v2-A 已落 activity-shell 最小占位）
 - ❌ **MCP per-tool binding UI**（locked decision #9；wizard step 4 整服务器绑定即可）
 - ❌ **`agent_role` / `max_concurrent` 暴露**（locked decision #10/13）
 - ❌ **Wizard 编辑现有 coworker**（v3；本 session 只 create flow）
@@ -260,7 +260,7 @@ export type DialogCloseReason = 'x' | 'backdrop' | 'esc' | 'programmatic';
 - ❌ **重写 v1.1 chat-panel / app-shell / 其它业务组件**（v2-A locked）
 - ❌ **fix coworker switch 的 location.href reload trade-off**（v2-A Findings 提的；v3 单独 chore）
 - ❌ **Settings page 内卡片双层套**（v2-A Findings 提的；v2-C polish）
-- ❌ **Approval policy 编辑器** / **Safety rules 完整编辑** (locked decision #7 #8)
+- ❌ **Safety rules 完整编辑** (locked decision #7)
 - ❌ **新依赖引入**（form lib / animation / editor）
 
 ## Open questions
@@ -344,8 +344,8 @@ export type DialogCloseReason = 'x' | 'backdrop' | 'esc' | 'programmatic';
 
 ### 对 v2-C 的影响
 
-- **icons.ts 没增加新 icon**——保持 8 个不变（spec 要求 unless really cross-session 复用）。v2-C 如果需要 activity / approvals popover 的新 icon，独立追加。
-- **`<rm-coworker-wizard>` 公开的 refresh API + sibling event 模式**：v2-C 的 activity / approvals popover 如果要类似 inline 补 credential 模式（unlikely），可以照抄这套 host-mediated event + refresh 方法。
+- **icons.ts 没增加新 icon**——保持原集不变（spec 要求 unless really cross-session 复用）。v2-C 如果需要 activity 的新 icon，独立追加。
+- **`<rm-coworker-wizard>` 公开的 refresh API + sibling event 模式**：v2-C 的 activity 画面如果要类似 inline 补 credential 模式（unlikely），可以照抄这套 host-mediated event + refresh 方法。
 - **v1.1 `<rm-coworkers-page>` 已加 wizard host**：list/edit/delete 路径 0 退化，但 v2-C 触碰 coworkers-page 时要小心 wizard / credential-dialog / mcp-server-dialog 三个 sibling 都挂着，state graph 比之前复杂。
 - **partial-commit banner UX**：本 session 把 banner 留在 review step 内；v2-C 可以考虑挪到 wizard 的固定 banner 区。**当前实现已经足够工作但不优雅。**
 - **`location.href` redirect**：wizard create 成功后还是用 `location.href` reload（沿用 v2-A），不动；v3 chore 真修。

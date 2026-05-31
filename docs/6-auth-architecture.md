@@ -396,5 +396,3 @@ Schema migration mechanics (`is_admin → agent_role` backfill, default-tenant c
 | `agent_delegate` enforcement | Schema only | Multi-agent delegation protocol not yet defined |
 | Agent `visibility` field | Not started | `public` / `restricted` visibility for non-admin users |
 | Multi-IdP support | Structural readiness only | `OIDCConfig` + provider key are instance-level; registry not built |
-
-(Approval workflow has been implemented separately — see [`approval-architecture.md`](approval-architecture.md) — and is no longer on this list.)

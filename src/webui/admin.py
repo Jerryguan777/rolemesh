@@ -4,15 +4,13 @@ from __future__ import annotations
 
 import uuid as _uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import StreamingResponse
 
 from rolemesh import db
-from rolemesh.approval.engine import ApprovalEngine, ConflictError, ForbiddenError
-from rolemesh.approval.enum_translate import http_action_to_outcome
 from rolemesh.auth.bootstrap_actor import resolve_actor_user_id
 from rolemesh.auth.permissions import AgentPermissions
 from rolemesh.auth.provider import AuthenticatedUser
@@ -37,13 +35,6 @@ from webui.schemas import (
     AgentResponse,
     AgentSummary,
     AgentUpdate,
-    ApprovalAuditEntryResponse,
-    ApprovalDecisionRequest,
-    ApprovalPolicyCreate,
-    ApprovalPolicyResponse,
-    ApprovalPolicyUpdate,
-    ApprovalRequestDetailResponse,
-    ApprovalRequestResponse,
     AssignRequest,
     BindingCreate,
     BindingResponse,
@@ -71,7 +62,6 @@ from webui.schemas import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from rolemesh.approval.types import ApprovalAuditEntry, ApprovalPolicy, ApprovalRequest
     from rolemesh.core.types import ChannelBinding, Conversation, Coworker, ScheduledTask, Skill, Tenant, User
     from rolemesh.safety.types import Rule as SafetyRule
 
@@ -81,29 +71,7 @@ AdminUser = Annotated[AuthenticatedUser, Depends(require_manage_agents)]
 UserManager = Annotated[AuthenticatedUser, Depends(require_manage_users)]
 AuthedUser = Annotated[AuthenticatedUser, Depends(get_current_user)]
 
-# The process-wide ApprovalEngine handle lives in
-# :mod:`webui.v1.approval_engine_registry` so the v1 decide endpoint
-# can resolve the same instance without dragging admin schemas into
-# the v1 import graph. ``set_approval_engine`` here is preserved as
-# a thin re-export so the existing bootstrap call sites in
-# :mod:`webui.main` keep working.
-from webui.v1.approval_engine_registry import (
-    get_approval_engine as _get_engine,
-)
-from webui.v1.approval_engine_registry import (
-    set_approval_engine,
-)
-
-# Re-export so :mod:`webui.main` and existing tests keep finding it
-# at :func:`webui.admin.set_approval_engine`.
-__all__ = ["router", "set_approval_engine", "set_mcp_publisher"]
-
-
-def _require_engine() -> ApprovalEngine:
-    engine = _get_engine()
-    if engine is None:
-        raise HTTPException(status_code=503, detail="Approval engine not configured")
-    return engine
+__all__ = ["router", "set_mcp_publisher"]
 
 
 # Module-level NATS client used to publish ``egress.mcp.changed``
@@ -775,270 +743,6 @@ async def delete_task(
 
 
 # ---------------------------------------------------------------------------
-# Approval: policies (admin+)
-# ---------------------------------------------------------------------------
-
-
-def _policy_to_response(p: ApprovalPolicy) -> ApprovalPolicyResponse:
-    return ApprovalPolicyResponse(
-        id=p.id,
-        tenant_id=p.tenant_id,
-        coworker_id=p.coworker_id,
-        mcp_server_name=p.mcp_server_name,
-        tool_name=p.tool_name,
-        condition_expr=p.condition_expr,
-        approver_user_ids=p.approver_user_ids,
-        notify_conversation_id=p.notify_conversation_id,
-        auto_expire_minutes=p.auto_expire_minutes,
-        post_exec_mode=p.post_exec_mode,
-        enabled=p.enabled,
-        priority=p.priority,
-        created_at=p.created_at,
-        updated_at=p.updated_at,
-    )
-
-
-@router.get("/approval-policies", response_model=list[ApprovalPolicyResponse])
-async def list_approval_policies_ep(
-    user: AdminUser,
-    coworker_id: str | None = None,
-    enabled: bool | None = None,
-) -> list[ApprovalPolicyResponse]:
-    rows = await db.list_approval_policies(
-        user.tenant_id, coworker_id=coworker_id, enabled=enabled
-    )
-    return [_policy_to_response(p) for p in rows]
-
-
-@router.post(
-    "/approval-policies",
-    response_model=ApprovalPolicyResponse,
-    status_code=201,
-)
-async def create_approval_policy_ep(
-    body: ApprovalPolicyCreate,
-    user: AdminUser,
-) -> ApprovalPolicyResponse:
-    if body.coworker_id is not None:
-        # Guard against cross-tenant policy creation: a tenant admin must
-        # not be able to attach a policy to a coworker they don't own.
-        await _get_agent_or_404(body.coworker_id, user.tenant_id)
-    p = await db.create_approval_policy(
-        tenant_id=user.tenant_id,
-        coworker_id=body.coworker_id,
-        mcp_server_name=body.mcp_server_name,
-        tool_name=body.tool_name,
-        condition_expr=body.condition_expr,
-        approver_user_ids=body.approver_user_ids,
-        notify_conversation_id=body.notify_conversation_id,
-        auto_expire_minutes=body.auto_expire_minutes,
-        post_exec_mode=body.post_exec_mode,
-        enabled=body.enabled,
-        priority=body.priority,
-    )
-    return _policy_to_response(p)
-
-
-@router.get("/approval-policies/{policy_id}", response_model=ApprovalPolicyResponse)
-async def get_approval_policy_ep(
-    policy_id: str,
-    user: AdminUser,
-) -> ApprovalPolicyResponse:
-    p = await db.get_approval_policy(policy_id, tenant_id=user.tenant_id)
-    if p is None:
-        raise HTTPException(status_code=404, detail="Policy not found")
-    return _policy_to_response(p)
-
-
-@router.patch(
-    "/approval-policies/{policy_id}", response_model=ApprovalPolicyResponse
-)
-async def update_approval_policy_ep(
-    policy_id: str,
-    body: ApprovalPolicyUpdate,
-    user: AdminUser,
-) -> ApprovalPolicyResponse:
-    existing = await db.get_approval_policy(policy_id, tenant_id=user.tenant_id)
-    if existing is None:
-        raise HTTPException(status_code=404, detail="Policy not found")
-    updated = await db.update_approval_policy(
-        policy_id,
-        tenant_id=user.tenant_id,
-        mcp_server_name=body.mcp_server_name,
-        tool_name=body.tool_name,
-        condition_expr=body.condition_expr,
-        approver_user_ids=body.approver_user_ids,
-        notify_conversation_id=body.notify_conversation_id,
-        auto_expire_minutes=body.auto_expire_minutes,
-        post_exec_mode=body.post_exec_mode,
-        enabled=body.enabled,
-        priority=body.priority,
-    )
-    if updated is None:
-        raise HTTPException(status_code=404, detail="Policy not found")
-    return _policy_to_response(updated)
-
-
-@router.delete("/approval-policies/{policy_id}", status_code=204)
-async def delete_approval_policy_ep(
-    policy_id: str,
-    user: AdminUser,
-) -> None:
-    existing = await db.get_approval_policy(policy_id, tenant_id=user.tenant_id)
-    if existing is None:
-        raise HTTPException(status_code=404, detail="Policy not found")
-    await db.delete_approval_policy(policy_id, tenant_id=user.tenant_id)
-
-
-# ---------------------------------------------------------------------------
-# Approval: requests (any authenticated user can list their own;
-# admins see the full tenant)
-# ---------------------------------------------------------------------------
-
-
-def _request_to_response(r: ApprovalRequest) -> ApprovalRequestResponse:
-    return ApprovalRequestResponse(
-        id=r.id,
-        tenant_id=r.tenant_id,
-        coworker_id=r.coworker_id,
-        conversation_id=r.conversation_id,
-        policy_id=r.policy_id,
-        user_id=r.user_id,
-        job_id=r.job_id,
-        mcp_server_name=r.mcp_server_name,
-        actions=r.actions,
-        action_hashes=r.action_hashes,
-        rationale=r.rationale,
-        source=r.source,
-        status=r.status,
-        post_exec_mode=r.post_exec_mode,
-        resolved_approvers=r.resolved_approvers,
-        requested_at=r.requested_at,
-        expires_at=r.expires_at,
-        created_at=r.created_at,
-        updated_at=r.updated_at,
-    )
-
-
-def _audit_to_response(e: ApprovalAuditEntry) -> ApprovalAuditEntryResponse:
-    return ApprovalAuditEntryResponse(
-        id=e.id,
-        request_id=e.request_id,
-        action=e.action,
-        actor_user_id=e.actor_user_id,
-        note=e.note,
-        metadata=e.metadata,
-        created_at=e.created_at,
-    )
-
-
-@router.get("/approvals", response_model=list[ApprovalRequestResponse])
-async def list_approvals_ep(
-    user: AuthedUser,
-    status: str | None = None,
-    coworker_id: str | None = None,
-) -> list[ApprovalRequestResponse]:
-    rows = await db.list_approval_requests(
-        user.tenant_id, status=status, coworker_id=coworker_id
-    )
-    return [_request_to_response(r) for r in rows]
-
-
-@router.get(
-    "/approvals/{request_id}", response_model=ApprovalRequestDetailResponse
-)
-async def get_approval_ep(
-    request_id: str,
-    user: AuthedUser,
-) -> ApprovalRequestDetailResponse:
-    req = await db.get_approval_request(request_id, tenant_id=user.tenant_id)
-    if req is None:
-        raise HTTPException(status_code=404, detail="Approval not found")
-    audit = await db.list_approval_audit(request_id, tenant_id=user.tenant_id)
-    return ApprovalRequestDetailResponse(
-        **_request_to_response(req).model_dump(),
-        audit_log=[_audit_to_response(e) for e in audit],
-    )
-
-
-@router.get(
-    "/approvals/{request_id}/audit-log",
-    response_model=list[ApprovalAuditEntryResponse],
-)
-async def get_approval_audit_ep(
-    request_id: str,
-    user: AuthedUser,
-) -> list[ApprovalAuditEntryResponse]:
-    req = await db.get_approval_request(request_id, tenant_id=user.tenant_id)
-    if req is None:
-        raise HTTPException(status_code=404, detail="Approval not found")
-    rows = await db.list_approval_audit(request_id, tenant_id=user.tenant_id)
-    return [_audit_to_response(r) for r in rows]
-
-
-def _sanitize_note(note: str | None) -> str | None:
-    """Trim whitespace and strip ASCII/C1 control characters.
-
-    Pydantic already enforces max_length=1000; we still strip control
-    characters here because a future Markdown-rendering channel could
-    interpret e.g. \\r\\n as a heading break or \\x1b as an escape
-    sequence. Keeping the filter at the REST boundary means stored
-    notes are clean without a downstream channel-by-channel sanitizer.
-    """
-    if note is None:
-        return None
-    cleaned = "".join(
-        c for c in note if c == "\n" or c == "\t" or (0x20 <= ord(c) < 0x7F) or ord(c) > 0xA0
-    ).strip()
-    return cleaned or None
-
-
-@router.post(
-    "/approvals/{request_id}/decide",
-    response_model=ApprovalRequestResponse,
-)
-async def decide_approval_ep(
-    request_id: str,
-    body: ApprovalDecisionRequest,
-    user: AuthedUser,
-) -> ApprovalRequestResponse:
-    engine = _require_engine()
-    req = await db.get_approval_request(request_id, tenant_id=user.tenant_id)
-    if req is None:
-        raise HTTPException(status_code=404, detail="Approval not found")
-    actor = await resolve_actor_user_id(user.tenant_id, user.user_id)
-    # INV-7: translate the HTTP wire enum into the engine outcome at
-    # this boundary so engine code never sees a wire literal. The
-    # Pydantic regex already constrains ``body.action`` to
-    # ``approve|reject``; ``http_action_to_outcome`` raises
-    # ``ValueError`` on any drift, which propagates as 500 — a
-    # surface we *want* to break loudly rather than silently fall
-    # back to "approved".
-    try:
-        outcome = http_action_to_outcome(body.action)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    try:
-        updated = await engine.handle_decision(
-            request_id=request_id,
-            tenant_id=user.tenant_id,
-            outcome=outcome,
-            user_id=actor,
-            note=_sanitize_note(body.note),
-        )
-    except ForbiddenError as exc:
-        raise HTTPException(
-            status_code=403, detail="User is not an authorised approver"
-        ) from exc
-    except ConflictError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Request already {exc.current_status}",
-        ) from exc
-    return _request_to_response(updated)
-
-
-# ---------------------------------------------------------------------------
 # Safety: rules (admin+)
 # ---------------------------------------------------------------------------
 
@@ -1497,7 +1201,7 @@ async def get_safety_decision_ep(
     response: Response,
     user: AdminUser,
 ) -> dict[str, object]:
-    """Full decision detail including approval_context when present.
+    """Full safety decision detail.
 
     Returns 404 for cross-tenant lookup (not 403) — we don't leak UUID
     existence across tenants.

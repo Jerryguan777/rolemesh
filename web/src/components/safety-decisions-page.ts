@@ -134,9 +134,8 @@ export class SafetyDecisionsPage extends LitElement {
   private async openDetail(row: SafetyDecision): Promise<void> {
     try {
       // Re-fetch to pick up fields the list view does not project
-      // (full ``findings`` metadata, ``approval_context`` for
-      // require_approval rows). v1 derives tenant_id from auth so
-      // the URL has no tenant segment.
+      // (full ``findings`` metadata). v1 derives tenant_id from auth
+      // so the URL has no tenant segment.
       this.selected = await getApiClient().getSafetyDecision(row.id);
     } catch (err) {
       this.error = err instanceof Error ? err.message : String(err);
@@ -315,19 +314,6 @@ export class SafetyDecisionsPage extends LitElement {
                   </tbody>
                 </table>
               `}
-          ${d.approval_context
-            ? html`
-                <h4 class="font-semibold text-sm mt-4 mb-2">
-                  Approval context
-                  <span class="text-xs text-gray-500 font-normal">
-                    (cleared 24h after row creation)
-                  </span>
-                </h4>
-                <pre class="bg-surface-1 dark:bg-d-surface-1 p-2 text-xs overflow-auto">
-${JSON.stringify(d.approval_context, null, 2)}</pre
-                >
-              `
-            : nothing}
         </div>
       </div>
     `;

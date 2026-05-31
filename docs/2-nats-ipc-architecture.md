@@ -2,7 +2,7 @@
 
 This document describes how RoleMesh's Orchestrator and container Agents communicate using NATS. It covers the problem with the original approach, why NATS was chosen, the 6-channel protocol design, and the NATS primitives used for each channel.
 
-> **Project lineage.** RoleMesh started as a Python rewrite of [NanoClaw](https://github.com/qwibitai/nanoclaw); the move from file-based IPC to NATS happened during that rewrite, so the historical sections below talk about the original NanoClaw approach being replaced. Subjects added later (`interrupt`, `safety_events`, plus the `web-ipc` / `approval-ipc` streams) are RoleMesh-era additions on top of the same NATS bus.
+> **Project lineage.** RoleMesh started as a Python rewrite of [NanoClaw](https://github.com/qwibitai/nanoclaw); the move from file-based IPC to NATS happened during that rewrite, so the historical sections below talk about the original NanoClaw approach being replaced. Subjects added later (`interrupt`, `safety_events`, plus the `web-ipc` stream) are RoleMesh-era additions on top of the same NATS bus.
 
 ## Background: Why Not Files or stdin/stdout?
 
@@ -76,7 +76,7 @@ The Orchestrator and Agent communicate over six logical channels. Each channel h
                   Agent reads via MCP tools
 ```
 
-Channel 3 carries three distinct sub-signals (follow-ups, stop, shutdown). Beyond these six channels, RoleMesh added a `safety_events` audit subject on the same `agent-ipc` stream, plus several non-agent NATS namespaces (`web.>`, `approval.*`, `egress.*`) that are documented separately — see "Subject Naming Convention" below for the full inventory.
+Channel 3 carries three distinct sub-signals (follow-ups, stop, shutdown). Beyond these six channels, RoleMesh added a `safety_events` audit subject on the same `agent-ipc` stream, plus several non-agent NATS namespaces (`web.>`, `egress.*`) that are documented separately — see "Subject Naming Convention" below for the full inventory.
 
 ### Channel 1: Initial Input
 
@@ -91,7 +91,6 @@ Before starting the container, the Orchestrator writes the Agent's initial confi
 - **Per-coworker config** — `assistant_name`, `system_prompt`, `role_config`
 - **Permissions** — a 4-field dict; see `auth-architecture.md`
 - **External MCP** — `mcp_servers`; see `external-mcp-architecture.md`
-- **Approval module** — `approval_policies`; see `approval-architecture.md`
 - **Safety framework** — `safety_rules` + `slow_check_specs`; see `safety/safety-framework.md`
 
 For each module-specific group, "absent on this run" is encoded by `None`, so the container completely skips registering that module's hook when no policy applies — the IPC contract makes "module disabled" zero-cost.
@@ -233,18 +232,17 @@ The JetStream stream `agent-ipc` captures all subjects matching `agent.*.(result
 In addition to the `agent.*` namespace described above, RoleMesh's NATS bus also carries:
 
 - `web.>` (`web-ipc` stream) — WebUI traffic between FastAPI and the orchestrator
-- `approval.decided.*` / `approval.cancel_for_job.*` (`approval-ipc` stream) — Approval module worker queue and Stop-cascade
 - `egress.{rules,identity,mcp}.snapshot.request` — request-reply RPCs the egress gateway calls into the orchestrator at boot
 - `egress.mcp.changed`, `safety.rule.changed` — fire-and-forget broadcasts for hot-reloading caches in the gateway and agent containers
 - `orchestrator.agent.lifecycle` — agent container started/stopped lifecycle events
 
-Each of these is documented by its owning module (`webui-architecture.md`, `approval-architecture.md`, `safety/safety-framework.md`, `egress/deployment.md`) — they are separate concerns that happen to share the same NATS server.
+Each of these is documented by its owning module (`webui-architecture.md`, `safety/safety-framework.md`, `egress/deployment.md`) — they are separate concerns that happen to share the same NATS server.
 
 ## NATS Infrastructure
 
 ### JetStream Streams
 
-The orchestrator manages one stream for agent IPC; two more streams (`web-ipc`, `approval-ipc`) live alongside it on the same NATS server but are owned by the WebUI and Approval modules respectively — they're documented in those modules.
+The orchestrator manages one stream for agent IPC; one more stream (`web-ipc`) lives alongside it on the same NATS server but is owned by the WebUI module — it's documented in that module.
 
 ```python
 StreamConfig(
@@ -281,7 +279,7 @@ The Orchestrator creates two durable JetStream consumers for agent IPC fan-in:
 - `orch-messages` — `agent.*.messages` (Channel 4)
 - `orch-tasks` — `agent.*.tasks` (Channel 5)
 
-Durable consumers survive Orchestrator restarts; unprocessed messages are replayed on reconnection. The Safety and Approval modules register additional durable consumers of their own (e.g. `orch-safety-events`, `orch-approval-cancel`) — they're documented in those modules.
+Durable consumers survive Orchestrator restarts; unprocessed messages are replayed on reconnection. The Safety module registers additional durable consumers of its own (e.g. `orch-safety-events`) — they're documented in that module.
 
 Channels 2 (results) and 3 (follow-ups + interrupt) use ephemeral subscriptions scoped to a specific `job_id` — created when a container starts, unsubscribed when it exits. These don't need durability because they're tied to a single container's lifecycle. The shutdown signal uses Core NATS request-reply, so it has no consumer at all.
 

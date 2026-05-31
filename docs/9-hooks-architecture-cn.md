@@ -1,6 +1,6 @@
 # 统一 hook 系统架构
 
-本文档解释 RoleMesh 的统一 hook 系统——这套机制让审计、DLP、对话归档、审批、安全与可观测性模块能够观察并拦截 agent 活动，覆盖两个 agent backend（Claude SDK 与 Pi），而不必耦合到任意一个 backend 的原生 hook API。
+本文档解释 RoleMesh 的统一 hook 系统——这套机制让审计、DLP、对话归档、安全与可观测性模块能够观察并拦截 agent 活动，覆盖两个 agent backend（Claude SDK 与 Pi），而不必耦合到任意一个 backend 的原生 hook API。
 
 目标是记录这套设计形态背后的*原因*：哪些备选方案被拒绝、我们必须抹平哪些 backend 间的不对称，以及这套系统旨在捕获哪些静默 bug。
 
@@ -77,7 +77,6 @@ Claude SDK 的 `PostToolUse` hook 只支持 `additionalContext`（追加到 agen
                        application-defined handlers
                 ┌──────────────────────────────────────────┐
                 │  TranscriptArchiveHandler  (built-in)    │
-                │  ApprovalHandler            (built-in)   │
                 │  SafetyHandler              (built-in)   │
                 │  (future) DLPHandler                     │
                 │  (future) AuditHandler                   │
@@ -122,7 +121,7 @@ Claude SDK 的 `PostToolUse` hook 只支持 `additionalContext`（追加到 agen
  └─────────────────────────┘      └──────────────────────────────┘
 ```
 
-`ApprovalHandler` 和 `SafetyHandler` 是 hook 系统的两个最大消费者——两者都通过 `PreToolUse` 对调用进行门控或阻断。两者各有独立的架构文档（[`approval-architecture.md`](approval-architecture.md)、[`safety/safety-framework.md`](safety/safety-framework.md)）；本文档讲的是它们共享的**机制**。
+`SafetyHandler` 是 hook 系统的最大消费者——它通过 `PreToolUse` 对调用进行门控或阻断。它有独立的架构文档（[`safety/safety-framework.md`](safety/safety-framework.md)）；本文档讲的是它所依赖的**机制**。
 
 ### 文件布局
 
@@ -133,7 +132,6 @@ src/agent_runner/
     registry.py                  # HookRegistry + HookHandler protocol
     handlers/
       transcript_archive.py
-      approval.py
   safety/                        # safety pipeline hooks (separate package)
   claude_backend.py              # owns _build_hook_callbacks + Stop emit
   pi_backend.py                  # owns _build_bridge_extension + Stop emit
@@ -366,5 +364,4 @@ hook 系统有四层测试；每一层捕获不同类别的 bug。
 
 - [`8-switchable-agent-backend.md`](8-switchable-agent-backend.md) —— `AgentBackend` 协议、为什么有两个 backend、Pi 特有的坑
 - [`backend-stop-contract.md`](backend-stop-contract.md) —— 跨 backend 的完整 abort/关停语义
-- [`approval-architecture.md`](approval-architecture.md) —— `ApprovalHandler`：审批模块如何使用 `PreToolUse`
 - [`safety/safety-framework.md`](safety/safety-framework.md) —— 通过 `PreToolUse` 等触发的安全管线检查

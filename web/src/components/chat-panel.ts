@@ -25,8 +25,6 @@ import type { Conversation, Coworker, Me, Message } from '../api/client.js';
 import { AgentClient } from '../services/agent-client.js';
 import { getStoredToken } from '../services/oidc-auth.js';
 import { V1WsClient, type ServerEvent, type ConnectionStatus } from '../ws/v1_client.js';
-import type { InlineApprovalStatus } from './inline-approval.js';
-import './inline-approval.js';
 
 interface AgentStatusState {
   /** Mirrored from the legacy status frame so the progress line keeps
@@ -61,22 +59,6 @@ export class ChatPanel extends LitElement {
 
   @state() messages: ChatMessage[] = [];
   @state() connected = false;
-  // Inline approval cards anchored to the current conversation. The
-  // panel renders one card per approval below the message list; it's
-  // additive — channel-based notifications from notification.py keep
-  // working independently. Keyed by approval_id so a resolved event
-  // updates the right card without re-rendering the others.
-  @state() private approvals: Map<
-    string,
-    {
-      approvalId: string;
-      toolName: string;
-      mcpServer: string;
-      args: Record<string, unknown>;
-      status: InlineApprovalStatus;
-      actorName: string;
-    }
-  > = new Map();
   @state() private me: Me | null = null;
   /** Cached display name of the active coworker — used by the welcome
    *  state ("What should the {name} work on?"). Lazy-fetched on mount;
@@ -156,10 +138,8 @@ export class ChatPanel extends LitElement {
   }
 
   private async bootstrap(): Promise<void> {
-    // Load identity early so the inline-approval card can decide
-    // whether the current user is in resolved_approvers. A failure
-    // here just means the cards always render read-only — the
-    // server still gates decide() with 403.
+    // Load identity early so the welcome state can greet the user by
+    // name. A failure here just falls back to a generic greeting.
     try {
       this.me = await this.api.getMe();
     } catch {
@@ -223,9 +203,6 @@ export class ChatPanel extends LitElement {
     this.runState = 'idle';
     this.runTerminal = false;
     this.activeRunId = null;
-    // Switching conversations drops inline approval cards — they're
-    // anchored to a specific conversation_id on the WS.
-    this.approvals = new Map();
 
     // v1 client owns streaming / cancel
     this.v1 = new V1WsClient({
@@ -364,66 +341,6 @@ export class ChatPanel extends LitElement {
         this.clearStoppingTimer();
         this.clearCancellingTimer();
         this.clearRunningWatchdog();
-        break;
-      }
-      case 'event.approval.required': {
-        // Engine emits this when a new pending approval lands on
-        // this conversation. Spawn an inline card so the approver
-        // (and the requester) can see it without leaving chat.
-        const raw = e as Record<string, unknown>;
-        const approvalId =
-          typeof raw.approval_id === 'string' ? raw.approval_id : '';
-        if (!approvalId) break;
-        const summary =
-          (raw.summary && typeof raw.summary === 'object'
-            ? (raw.summary as Record<string, unknown>)
-            : {}) as Record<string, unknown>;
-        const toolName =
-          typeof summary.tool_name === 'string' ? summary.tool_name : '';
-        const mcpServer =
-          typeof summary.mcp_server_name === 'string'
-            ? summary.mcp_server_name
-            : '';
-        const args = (summary.args ?? {}) as Record<string, unknown>;
-        const next = new Map(this.approvals);
-        next.set(approvalId, {
-          approvalId,
-          toolName,
-          mcpServer,
-          args,
-          status: 'pending',
-          actorName: '',
-        });
-        this.approvals = next;
-        break;
-      }
-      case 'event.approval.resolved': {
-        // Engine has already mapped engine outcome → WS wire enum
-        // (approve / deny / expired / cancelled). Update the
-        // matching card; if we never saw the .required event
-        // (page just loaded mid-flow) silently ignore — the user
-        // can refresh.
-        const raw = e as Record<string, unknown>;
-        const approvalId =
-          typeof raw.approval_id === 'string' ? raw.approval_id : '';
-        const decision =
-          typeof raw.decision === 'string' ? raw.decision : '';
-        if (!approvalId) break;
-        const existing = this.approvals.get(approvalId);
-        if (!existing) break;
-        const status: InlineApprovalStatus =
-          decision === 'approve'
-            ? 'approved'
-            : decision === 'deny'
-              ? 'denied'
-              : decision === 'expired'
-                ? 'expired'
-                : decision === 'cancelled'
-                  ? 'cancelled'
-                  : 'unknown';
-        const next = new Map(this.approvals);
-        next.set(approvalId, { ...existing, status });
-        this.approvals = next;
         break;
       }
       default:
@@ -719,7 +636,6 @@ export class ChatPanel extends LitElement {
             <div class="max-w-[720px] mx-auto w-full">
               ${this.messages.length === 0 ? this.renderEmpty() : ''}
               <rm-message-list .messages=${this.messages}></rm-message-list>
-              ${this.renderApprovalCards()}
               ${this.messages.length > 0 ? html`<div class="h-8"></div>` : ''}
             </div>
           </div>
@@ -749,36 +665,6 @@ export class ChatPanel extends LitElement {
             </div>
           </div>
         </div>
-      </div>
-    `;
-  }
-
-  private renderApprovalCards() {
-    if (this.approvals.size === 0) return '';
-    const meId = this.me?.user_id ?? '';
-    // Iteration order is insertion order, so the oldest pending
-    // request renders first. Resolved cards stay around so the
-    // user can read the outcome after the WS event landed; a
-    // future polish could auto-fade them after N seconds.
-    return html`
-      <div class="px-4">
-        <ul class="flex flex-col gap-2 my-3">
-          ${Array.from(this.approvals.values()).map(
-            (a) => html`
-              <li class="list-none">
-                <rm-inline-approval
-                  approval-id=${a.approvalId}
-                  tool-name=${a.toolName}
-                  mcp-server=${a.mcpServer}
-                  .args=${a.args}
-                  status=${a.status}
-                  actor-name=${a.actorName}
-                  ?can-decide=${!!meId}
-                ></rm-inline-approval>
-              </li>
-            `,
-          )}
-        </ul>
       </div>
     `;
   }

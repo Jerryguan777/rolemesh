@@ -236,8 +236,8 @@ async def delete_channel_identity(
     owner's stamp on the conv row — and every subsequent admission
     short-circuits the "if conv.user_id is None" backfill, so the
     agent runs B's request under A's identity. That's an
-    audit-attribution + Phase-2 self-approval bypass; clearing the
-    conv stamp here closes the gap at unbind time. The admission
+    audit-attribution bug; clearing the conv stamp here closes the
+    gap at unbind time. The admission
     side adds a second layer (see main.py's lazy-backfill condition).
 
     Tenant + user filter on the DELETE so a guess at someone else's

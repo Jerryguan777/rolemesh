@@ -313,7 +313,7 @@ async def test_bootstrap_multi_user_ticket_carries_real_alice_uuid() -> None:
     (literal); the multi-user spec promotes alice/bob to real
     UUID rows via ``ensure_bootstrap_user_row``. The ticket must
     carry that real UUID so the WS handshake can attribute traffic
-    to a real principal — which the 03a approval flow needs.
+    to a real principal.
     """
     tid, _ = await _make_tenant_and_user("auth-mu")
     conv_id = await _seed_conv(tid)

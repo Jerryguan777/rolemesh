@@ -263,7 +263,7 @@ async def test_get_rule_returns_404_for_malformed_uuid() -> None:
 async def test_get_rule_returns_404_cross_tenant() -> None:
     """Tenant A asking for tenant B's rule_id gets 404, not 403 —
     the v1 surface deliberately doesn't leak UUID existence across
-    tenants (same convention as decisions detail and approvals).
+    tenants (same convention as decisions detail).
     """
     a, _ = await _make_user("xa")
     b, _ = await _make_user("xb")

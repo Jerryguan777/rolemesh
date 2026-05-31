@@ -90,7 +90,7 @@
 
 - ❌ Coworker 创建向导完整 UI —— 留 02a
 - ❌ 详情页 tabs (overview/skills/mcp/bindings/...) —— Phase 2+
-- ❌ Approvals / Skills / Credentials 页面 —— 留对应 Phase
+- ❌ Skills / Credentials 页面 —— 留对应 Phase
 - ❌ **合并旧 `/ws/chat` 与新 `/api/v1/conversations/{id}/stream` 两个 WS endpoint** —— Stop / Cancel 双语义当前各走一条；统一方案（让 SDK interrupt 也走新 endpoint）涉及 backend 协议扩展，留下游 session 单独处理
 
 ## Open questions
@@ -168,8 +168,6 @@
 - **02c (credential_proxy user-mode + fake-vault e2e)**：
   - `<rm-reauth-banner>` 已经挂在 `<rm-app-shell>` 顶部，监听 `rm-reauth-required` window 事件。02c 真把 `event.run.requires_reauth` 接到 v1 stream 时，`chat-panel.ts` 现有的 dispatch（`window.dispatchEvent(new CustomEvent('rm-reauth-required', ...))`）就直接生效；banner UI 不用动。
   - dev hook `window.__forceReauth()` 已可控；02c QA 不用等到真后端触发就能验银幕。
-
-- **03a (Approvals to v1)**：`V1WsClient.sendApproval(approvalId, decision, note?)` 已实现并 wire 了 `request.approval` 帧；03a 只需做 approval UI 组件 + 订阅未来的 `event.approval.*`（如果设计要加）。
 
 - **04 (Safety UI to v1)**：lint allowlist 的三个文件就是 04 的迁移清单（`safety-rules-page` / `safety-decisions-page` / `safety-admin-client`）；04 完成后把三行从 allowlist 删掉，再跑 lint 验证。
 

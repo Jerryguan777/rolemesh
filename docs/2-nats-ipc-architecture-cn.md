@@ -2,7 +2,7 @@
 
 本文档描述 RoleMesh 的 orchestrator（Orchestrator）和容器内的 Agent 如何通过 NATS 进行通信。内容涵盖原始方案存在的问题、为何选择 NATS、6 通道协议的设计，以及每个通道使用的 NATS 原语。
 
-> **项目谱系。** RoleMesh 起源于对 [NanoClaw](https://github.com/qwibitai/nanoclaw) 的 Python 重写；从基于文件的 IPC 迁移到 NATS 就是在那次重写中完成的，因此下文的历史章节谈论的是被替换掉的最初 NanoClaw 方案。后期添加的 subject（`interrupt`、`safety_events`，以及 `web-ipc` / `approval-ipc` 流）则属于 RoleMesh 时期在同一条 NATS 总线上的扩展。
+> **项目谱系。** RoleMesh 起源于对 [NanoClaw](https://github.com/qwibitai/nanoclaw) 的 Python 重写；从基于文件的 IPC 迁移到 NATS 就是在那次重写中完成的，因此下文的历史章节谈论的是被替换掉的最初 NanoClaw 方案。后期添加的 subject（`interrupt`、`safety_events`，以及 `web-ipc` 流）则属于 RoleMesh 时期在同一条 NATS 总线上的扩展。
 
 ## 背景：为什么不用文件或 stdin/stdout？
 
@@ -76,7 +76,7 @@ Orchestrator 与 Agent 通过六条逻辑通道通信。每条通道有清晰的
                   Agent reads via MCP tools
 ```
 
-通道 3 承载三种不同的子信号（追加消息、停止、关停）。除了这六条通道之外，RoleMesh 还在同一个 `agent-ipc` 流上添加了一个 `safety_events` 审计 subject，并新增了几个非 agent 的 NATS 命名空间（`web.>`、`approval.*`、`egress.*`），它们各自在别处文档化 —— 完整清单见下文 "Subject Naming Convention"。
+通道 3 承载三种不同的子信号（追加消息、停止、关停）。除了这六条通道之外，RoleMesh 还在同一个 `agent-ipc` 流上添加了一个 `safety_events` 审计 subject，并新增了几个非 agent 的 NATS 命名空间（`web.>`、`egress.*`），它们各自在别处文档化 —— 完整清单见下文 "Subject Naming Convention"。
 
 ### 通道 1：初始输入
 
@@ -91,7 +91,6 @@ Orchestrator 与 Agent 通过六条逻辑通道通信。每条通道有清晰的
 - **每 coworker 配置** —— `assistant_name`、`system_prompt`、`role_config`
 - **权限** —— 一个 4 字段的 dict；详见 `auth-architecture.md`
 - **外部 MCP** —— `mcp_servers`；详见 `external-mcp-architecture.md`
-- **审批模块** —— `approval_policies`；详见 `approval-architecture.md`
 - **Safety 框架** —— `safety_rules` + `slow_check_specs`；详见 `safety/safety-framework.md`
 
 对每一组与模块绑定的字段，"本次运行不存在"用 `None` 表示，于是当没有任何策略适用时，容器会完全跳过该模块的 hook 注册 —— IPC 契约让"模块禁用"的开销为零。
@@ -233,18 +232,17 @@ JetStream 流 `agent-ipc` 抓取所有匹配 `agent.*.(results|input|interrupt|m
 除了上文描述的 `agent.*` 命名空间之外，RoleMesh 的 NATS 总线上还跑着：
 
 - `web.>`（`web-ipc` 流）—— FastAPI 与 orchestrator 之间的 WebUI 流量
-- `approval.decided.*` / `approval.cancel_for_job.*`（`approval-ipc` 流）—— 审批模块的 worker 队列与 Stop 级联
 - `egress.{rules,identity,mcp}.snapshot.request` —— egress 网关在启动时调用 orchestrator 的请求-应答 RPC
 - `egress.mcp.changed`、`safety.rule.changed` —— fire-and-forget 广播，用于在网关与 agent 容器内热加载缓存
 - `orchestrator.agent.lifecycle` —— agent 容器的启动/停止生命周期事件
 
-它们各自由所属模块文档化（`webui-architecture.md`、`approval-architecture.md`、`safety/safety-framework.md`、`egress/deployment.md`）—— 它们属于各自独立的关注点，只是恰好共用同一台 NATS server。
+它们各自由所属模块文档化（`webui-architecture.md`、`safety/safety-framework.md`、`egress/deployment.md`）—— 它们属于各自独立的关注点，只是恰好共用同一台 NATS server。
 
 ## NATS 基础设施
 
 ### JetStream 流
 
-orchestrator 为 agent IPC 维护一个流；另外两个流（`web-ipc`、`approval-ipc`）与它共存于同一台 NATS server，但分别由 WebUI 和审批模块拥有 —— 它们在各自模块的文档中描述。
+orchestrator 为 agent IPC 维护一个流；另一个流（`web-ipc`）与它共存于同一台 NATS server，但由 WebUI 模块拥有 —— 它在该模块的文档中描述。
 
 ```python
 StreamConfig(
@@ -281,7 +279,7 @@ Orchestrator 为 agent IPC fan-in 创建了两个 durable JetStream consumer：
 - `orch-messages` —— `agent.*.messages`（通道 4）
 - `orch-tasks` —— `agent.*.tasks`（通道 5）
 
-Durable consumer 能在 Orchestrator 重启后存活；尚未处理的消息会在重连后被重放。Safety 与审批模块各自注册了自己的 durable consumer（例如 `orch-safety-events`、`orch-approval-cancel`）—— 它们在各自模块的文档中描述。
+Durable consumer 能在 Orchestrator 重启后存活；尚未处理的消息会在重连后被重放。Safety 模块注册了自己的 durable consumer（例如 `orch-safety-events`）—— 它们在该模块的文档中描述。
 
 通道 2（结果）和通道 3（追加消息 + 中断）使用按 `job_id` 范围限定的临时订阅 —— 容器启动时创建，退出时取消订阅。这些订阅不需要持久性，因为它们与单个容器的生命周期绑定。关停信号走 Core NATS 请求-应答，因此根本没有 consumer。
 

@@ -7,8 +7,7 @@
 //
 // The wrapper is a primitive: it has no business logic, no draft
 // state, no API calls. Parents drive `open` and listen for `@close`.
-// This mirrors the v1.1 `<rm-inline-approval>` model — small, slot-
-// driven, parent-controlled.
+// It is small, slot-driven, and parent-controlled.
 //
 // Slots:
 //   default — body content

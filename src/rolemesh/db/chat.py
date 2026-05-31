@@ -375,13 +375,11 @@ async def get_conversation(conversation_id: str, *, tenant_id: str) -> Conversat
 async def get_conversation_for_notification(conversation_id: str) -> Conversation | None:
     """Look up a conversation by id alone, intentionally cross-tenant.
 
-    System path. Called from the approval notification fan-out
-    (``_OrchestratorChannelSender`` and ``NotificationTargetResolver``)
-    where the only inputs are a ``conversation_id`` resolved by the
-    engine from an ``ApprovalRequest`` it already trusts. The
-    ``ChannelSender`` protocol carries no tenant context, so this
-    function exists as the explicit, named admin escape rather than
-    silently bypassing tenant scoping.
+    System path. Used by orchestrator notification fan-out paths where
+    the only input is a ``conversation_id`` resolved from a row the
+    caller already trusts, and no tenant context is threaded through.
+    This function exists as the explicit, named admin escape rather
+    than silently bypassing tenant scoping.
 
     DO NOT use this from REST handlers — use the tenant-scoped
     ``get_conversation`` for any path where the conversation_id can

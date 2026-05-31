@@ -83,10 +83,8 @@ def _decision_row_to_response(row: dict[str, object]) -> SafetyDecision:
 
     ``findings`` arrives as ``list[dict]``; each entry has the
     ``code``/``severity``/``message`` triple plus optional metadata.
-    ``approval_context`` is absent in the list projection (helper
-    omits the column to keep the SELECT narrow) and present in the
-    detail projection — using ``row.get`` rather than indexing means
-    one branch handles both shapes.
+    Using ``row.get`` rather than indexing means one branch handles
+    both the list and detail projections.
     """
     raw_findings = row.get("findings") or []
     findings: list[SafetyFinding] = []
@@ -122,9 +120,6 @@ def _decision_row_to_response(row: dict[str, object]) -> SafetyDecision:
         findings=findings,
         context_digest=str(row.get("context_digest", "") or ""),
         context_summary=str(row.get("context_summary", "") or ""),
-        approval_context=row.get("approval_context") if isinstance(
-            row.get("approval_context"), dict
-        ) else None,
         created_at=str(row.get("created_at", "") or ""),
     )
 
@@ -324,7 +319,7 @@ async def get_decision(
     decision_id: str,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> SafetyDecision:
-    """One decision detail row including ``approval_context``.
+    """One safety decision detail row.
 
     Cross-tenant lookups return 404 (not 403). A malformed UUID
     surfaces as 404 too so guess probes return the same shape

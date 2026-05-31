@@ -1,13 +1,12 @@
 // WsClientBase — shared lifecycle for ticket-authed WebSocket clients.
 //
-// Why this exists: `V1WsClient` (conversation streaming) and
-// `UserApprovalsClient` (user-scoped approvals) historically duplicated
-// ~80% of the same plumbing — exponential-backoff reconnect, a
-// `generation` guard so an in-flight ticket fetch that lost a race to
-// a `disconnect()` doesn't stamp a fresh socket onto a torn-down
-// client, and a tiny status state machine. Two copies in lockstep is
-// two reconnect bugs waiting to drift. This base owns the lifecycle;
-// subclasses fill in the three subclass-specific seams:
+// Why this exists: ticket-authed WS clients such as `V1WsClient`
+// (conversation streaming) share ~80% of the same plumbing —
+// exponential-backoff reconnect, a `generation` guard so an in-flight
+// ticket fetch that lost a race to a `disconnect()` doesn't stamp a
+// fresh socket onto a torn-down client, and a tiny status state
+// machine. This base owns the lifecycle; subclasses fill in the three
+// subclass-specific seams:
 //
 //   * `fetchTicket()` — POST whichever ws-ticket endpoint
 //   * `buildWsUrl(ticket)` — assemble the per-client WS URL
@@ -22,9 +21,7 @@
 // `connectionChannel` string and the base publishes `true` on open /
 // `false` on close. Callers that don't want to participate in the
 // aggregate dot pass `undefined` (V1WsClient currently routes through
-// `ConnectionState`; UserApprovalsClient does not — its socket
-// breaking should NOT turn the top-bar dot red because that dot
-// reflects the chat stream, not the approvals fanout).
+// `ConnectionState` so the top-bar dot reflects the chat stream).
 
 import { connectionState, type ConnectionState } from './connection-state.js';
 

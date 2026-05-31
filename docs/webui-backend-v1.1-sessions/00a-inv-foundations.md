@@ -113,7 +113,7 @@
 
 ### PR 4 — `_bootstrap_actor_user_id()` helper + INV-4 pinned test
 
-**Background**：audit 表（`approval_audit_log.actor_user_id` / `safety_rules_audit.actor_user_id`）写入时 user 可能是 bootstrap 字面量，不能直接做 FK。
+**Background**：audit 表（`safety_rules_audit.actor_user_id`）写入时 user 可能是 bootstrap 字面量，不能直接做 FK。
 
 - 新建 `src/rolemesh/auth/bootstrap_actor.py`：
   ```python
@@ -153,7 +153,7 @@
 
 ### PR 5 — `BOOTSTRAP_USERS` env multi-user map + upsert users
 
-**Background**：设计 §5.2.1 方案 A。bootstrap fast-path 当前只产 `user_id="bootstrap"`，Phase 3 approval 多 user 不够用。
+**Background**：设计 §5.2.1 方案 A。bootstrap fast-path 当前只产 `user_id="bootstrap"`，Phase 3 多 user 场景不够用。
 
 - 改 `src/webui/auth.py:authenticate_ws()`：
   - 读 env `BOOTSTRAP_USERS`（JSON 数组），形如：
@@ -287,13 +287,10 @@
   现有单测 `tests/container/test_docker_runtime.py::test_cleanup_orphans`
   也跟着改了。`tests/container/test_startup_order.py` 用 `AsyncMock`
   打 stub，未做 args 断言，不需要改。
-* **PR4 范围扩展**：除了文档列出的 safety create/update/delete 三处，
-  approval decide endpoint (`webui.admin.decide_approval_ep`) 也在 audit
-  写入路径上——`engine.handle_decision(user_id=...)` 最终落到
-  `decide_approval_request_full` 的 `actor_user_id` 列。已统一改成在
-  REST handler 边界 resolve 后再传入 engine。如果将来 engine 也从
-  channel 路径直接被调用，那条路径的 `user_id` 已是真实 UUID（无 bootstrap），
-  无需再过 helper。
+* **PR4 范围**：文档列出的 safety create/update/delete 三处都在 audit
+  写入路径上，`actor_user_id` 列已统一改成在 REST handler 边界 resolve 后
+  再传入下游。如果将来下游也从 channel 路径直接被调用，那条路径的
+  `user_id` 已是真实 UUID（无 bootstrap），无需再过 helper。
 * **PR5 多 user fast-path**：在 `webui.authenticate_ws` 中把多 user 路径
   **排在** legacy `ADMIN_BOOTSTRAP_TOKEN` 之前；同时配置两者时多 user 拿到的
   身份更丰富，更符合 §5.2.1 的意图。Spec 引用不存在的 tenant slug 选择
@@ -339,10 +336,6 @@
   请走 `from_dict_filter_unknown` 而不是直接 `cls(**d)`，否则 pinned test 不会
   抓到（test 只覆盖现有 dataclass）。考虑把这一行 lint 化（grep `cls\(\*\*` 在
   `ipc/`）。
-* **03a Approvals**：BOOTSTRAP_USERS 路径已落地，新 user 都拿到真实 UUID，
-  approval decide 不再需要单独处理 bootstrap literal。但**用 BOOTSTRAP_USERS
-  跑的 user 也要插 `approval.actor_user_id`**——helper 会 short-circuit 返回原
-  UUID，已 OK。
 
 ### 全套测试回归状态
 

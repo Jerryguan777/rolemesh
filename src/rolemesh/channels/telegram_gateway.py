@@ -8,16 +8,12 @@ token, so each coworker's conversation lookup can match independently.
 from __future__ import annotations
 
 import contextlib
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING
 
 import asyncpg
-import telegram.error
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     Application,
-    CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
     filters,
@@ -34,8 +30,6 @@ from rolemesh.core.logger import get_logger
 from rolemesh.db import (
     consume_link_token,
     create_channel_identity,
-    get_channel_binding_for_bot_token,
-    resolve_user_from_channel_sender,
     update_channel_binding_bot_username,
 )
 
@@ -43,7 +37,6 @@ if TYPE_CHECKING:
     from telegram import Bot, Update
     from telegram.ext import ContextTypes
 
-    from rolemesh.approval.notification import ApprovalCardPayload
     from rolemesh.channels.gateway import MessageCallback
     from rolemesh.core.types import ChannelBinding
 
@@ -54,16 +47,6 @@ _MAX_LENGTH = 4096
 # telegram-bot-api rarely delivers normal messages from a channel but
 # the type set is what the design specifies.
 _GROUP_CHAT_TYPES = ("group", "supergroup", "channel")
-
-# v6.1 §P2b.1 — InlineKeyboardButton callback_data prefixes for the
-# approval card. Each callback_data is ``"apr:<uuid>"`` or
-# ``"rej:<uuid>"`` and is therefore 40 bytes — well under Telegram's
-# 64-byte limit. Keep the prefixes 4-byte-fixed so the inbound
-# handler can slice ``data[4:]`` without re-parsing.
-_APPROVE_CALLBACK_PREFIX = "apr:"
-_REJECT_CALLBACK_PREFIX = "rej:"
-_APPROVE_BUTTON_LABEL = "✅ Approve"
-_REJECT_BUTTON_LABEL = "❌ Reject"
 
 
 async def _short_circuit_group(update: Update) -> bool:
@@ -161,305 +144,6 @@ async def _send_telegram_message(bot: Bot, chat_id: str | int, text: str) -> Non
         await bot.send_message(chat_id, text, parse_mode=ParseMode.MARKDOWN)
     except Exception:  # noqa: BLE001
         await bot.send_message(chat_id, text)
-
-
-# ---------------------------------------------------------------------------
-# v6.1 §P2b.1 — CallbackQuery → engine.handle_decision plumbing
-# ---------------------------------------------------------------------------
-
-# Approver-facing edit text. Kept short because Telegram replaces the
-# original card body, so the user sees the new text where the buttons
-# used to be — we want it to read as the outcome at a glance.
-_DECISION_APPROVED_TEXT = "✅ Approved"
-_DECISION_REJECTED_TEXT = "❌ Rejected"
-_DECISION_ALREADY_TEXT = "This approval has already been decided."
-_DECISION_NOT_LINKED_TEXT = (
-    "⚠️ Your Telegram account is not linked to RoleMesh. "
-    "Open the Web app → Settings → Connected channels to link, "
-    "then retry."
-)
-_DECISION_FORBIDDEN_TEXT = (
-    "⚠️ You are not authorised to decide this approval."
-)
-_DECISION_UNKNOWN_TENANT_TEXT = (
-    "⚠️ This bot is not configured for any tenant — please reach out "
-    "to your administrator."
-)
-_DECISION_NO_ENGINE_TEXT = (
-    "⚠️ The approval engine is not available right now. Please retry "
-    "from the Web inbox."
-)
-_DECISION_FAILED_TEXT = (
-    "⚠️ Could not record this decision. Please retry from the Web inbox."
-)
-
-
-class ApprovalDecisionRouter(Protocol):
-    """Subset of :class:`rolemesh.approval.engine.ApprovalEngine` that the
-    Telegram CallbackQuery path actually needs.
-
-    Kept narrow so the gateway does not pin the entire engine surface;
-    a future "routes by tenant to a sharded engine" wrapper can satisfy
-    the same Protocol without leaking gateway concerns into the engine.
-    """
-
-    async def handle_decision(
-        self,
-        *,
-        request_id: str,
-        tenant_id: str,
-        outcome: str,
-        user_id: str,
-        note: str | None = None,
-    ) -> Any: ...
-
-
-# Module-level registry for the engine. The Telegram gateway is
-# constructed during main.py startup BEFORE the approval engine is
-# instantiated (the engine depends on the channel sender adapter that
-# in turn fans out via the gateway). The CallbackQueryHandler is
-# registered when ``_BotInstance.start()`` runs, also before the
-# engine exists. We therefore resolve the engine lazily inside the
-# handler via this registry, which the main bootstrap sets via
-# :func:`set_approval_decision_router` once construction completes.
-#
-# Holding the engine on a module-level slot rather than a class attr
-# keeps the gateway free of an "engine" field that almost every
-# constructor call doesn't need, and makes the lookup uniform across
-# multiple ``_BotInstance`` objects (one per Telegram token).
-_decision_router: ApprovalDecisionRouter | None = None
-
-
-def set_approval_decision_router(
-    router: ApprovalDecisionRouter | None,
-) -> None:
-    """Bind the approval engine to the Telegram callback path.
-
-    Called from :mod:`rolemesh.main` after the :class:`ApprovalEngine`
-    is constructed. Passing ``None`` clears the binding — used by tests
-    that need to assert the no-engine fallback message.
-    """
-    global _decision_router
-    _decision_router = router
-
-
-def _parse_callback_data(data: str) -> tuple[str, str] | None:
-    """Parse ``apr:<request_id>`` / ``rej:<request_id>``.
-
-    Returns ``(outcome, request_id)`` where outcome is one of
-    ``"approved"`` / ``"rejected"`` (the engine outcome string —
-    :func:`ApprovalEngine.handle_decision` validates exactly these).
-    Any other payload returns ``None`` so the handler ignores it
-    silently (Telegram delivers callback queries for any button the
-    bot has ever sent in any chat; we must not error on unknown
-    payloads or we'd spam the audit log).
-    """
-    if data.startswith(_APPROVE_CALLBACK_PREFIX):
-        return ("approved", data[len(_APPROVE_CALLBACK_PREFIX):])
-    if data.startswith(_REJECT_CALLBACK_PREFIX):
-        return ("rejected", data[len(_REJECT_CALLBACK_PREFIX):])
-    return None
-
-
-@dataclass(frozen=True)
-class _DecisionDispatchResult:
-    """Result of routing one CallbackQuery through the engine.
-
-    Carries the wire text the handler will edit back into the original
-    card (or send as a new message if the edit fails) plus a ``kind``
-    label that tests assert on without coupling to the user-facing
-    string.
-    """
-
-    kind: str
-    edit_text: str
-
-
-async def dispatch_telegram_callback_decision(
-    *,
-    bot_token: str,
-    sender_id: str,
-    callback_data: str,
-) -> _DecisionDispatchResult:
-    """Route a Telegram CallbackQuery to the approval engine.
-
-    All policy decisions for the callback path live here so the
-    PTB-bound handler stays a thin adapter and the cross-tenant
-    invariant (S5: tenant must come from the bot, not the sender) is
-    testable without a live Telegram Application.
-
-    Tenant resolution order (DO NOT reorder):
-
-    1. ``bot_token`` → ``channel_bindings`` → ``tenant_id``. This is
-       the bot's own credential; it cannot be spoofed by the
-       attacker. If multiple coworkers share the token, any of their
-       bindings yields the same tenant.
-    2. ``(tenant_id, "telegram", sender_id)`` → ``user_id``. The
-       Phase 1 reverse lookup, **scoped to the tenant we just
-       resolved**. A sender_id linked in a different tenant must not
-       be accepted here — that would let a user in tenant A decide
-       approvals in tenant B simply by linking the same Telegram
-       account to both.
-
-    The function never raises; the handler edits the returned text
-    and we leave engine state untouched on any failure.
-    """
-    parsed = _parse_callback_data(callback_data)
-    if parsed is None:
-        # Unknown payload — leave the card visible. The handler
-        # already acknowledged the click, so the user sees no further
-        # message; this is the right behaviour for stray clicks the
-        # gateway cannot interpret.
-        return _DecisionDispatchResult(kind="ignored", edit_text="")
-    outcome, request_id = parsed
-
-    binding = await get_channel_binding_for_bot_token(bot_token)
-    if binding is None:
-        logger.warning(
-            "telegram_callback_unknown_bot_token",
-            request_id=request_id,
-        )
-        return _DecisionDispatchResult(
-            kind="no_tenant", edit_text=_DECISION_UNKNOWN_TENANT_TEXT
-        )
-    tenant_id = binding.tenant_id
-
-    user_id = await resolve_user_from_channel_sender(
-        tenant_id, "telegram", sender_id
-    )
-    if not user_id:
-        logger.info(
-            "telegram_callback_unlinked_sender",
-            tenant_id=tenant_id,
-            sender_id=sender_id,
-        )
-        return _DecisionDispatchResult(
-            kind="not_linked", edit_text=_DECISION_NOT_LINKED_TEXT
-        )
-
-    router = _decision_router
-    if router is None:
-        # Race window: orchestrator started polling before the engine
-        # was wired. Falls through to "retry on Web" so the user has
-        # an out, and we log so an oncall can see what's missing.
-        logger.error(
-            "telegram_callback_engine_unwired",
-            tenant_id=tenant_id,
-            request_id=request_id,
-        )
-        return _DecisionDispatchResult(
-            kind="no_engine", edit_text=_DECISION_NO_ENGINE_TEXT
-        )
-
-    try:
-        await router.handle_decision(
-            request_id=request_id,
-            tenant_id=tenant_id,
-            outcome=outcome,
-            user_id=user_id,
-        )
-    except Exception as exc:  # noqa: BLE001 — engine errors surface as wire text
-        # The engine maps "already decided" / "not approver" to typed
-        # exceptions; we identify them by class name so the gateway
-        # does not need to import ConflictError / ForbiddenError
-        # (which would create a module-import cycle gateway →
-        # approval.engine → notification → gateway).
-        name = type(exc).__name__
-        if name == "ConflictError":
-            return _DecisionDispatchResult(
-                kind="conflict", edit_text=_DECISION_ALREADY_TEXT
-            )
-        if name == "ForbiddenError":
-            return _DecisionDispatchResult(
-                kind="forbidden", edit_text=_DECISION_FORBIDDEN_TEXT
-            )
-        logger.warning(
-            "telegram_callback_decide_failed",
-            request_id=request_id,
-            tenant_id=tenant_id,
-            error=str(exc),
-            exc_type=name,
-        )
-        return _DecisionDispatchResult(
-            kind="failed", edit_text=_DECISION_FAILED_TEXT
-        )
-
-    return _DecisionDispatchResult(
-        kind=outcome,
-        edit_text=_DECISION_APPROVED_TEXT
-        if outcome == "approved"
-        else _DECISION_REJECTED_TEXT,
-    )
-
-
-async def _handle_approval_callback(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """PTB :class:`CallbackQueryHandler` for the approval card buttons.
-
-    Stays a thin adapter over :func:`dispatch_telegram_callback_decision`
-    so the decision-routing logic is testable without a live PTB
-    Application:
-
-    1. Ack the query within Telegram's 10s window — non-ack means the
-       button keeps spinning forever on the user's client.
-    2. Edit the card to show the outcome. On
-       :class:`telegram.error.BadRequest` (old message / permissions
-       changed / identical text) we fall back to a fresh message so
-       the user still hears the result.
-    """
-    query = update.callback_query
-    if query is None:
-        return
-    # Always ack so the spinner stops, regardless of whether we end up
-    # editing or sending fresh. Telegram silently times out the
-    # callback if we wait past ~10s, which manifests as a stuck button
-    # on the client — even ignoring unknown payloads must ack.
-    with contextlib.suppress(Exception):
-        await query.answer()
-
-    data = query.data or ""
-    sender_id = (
-        str(query.from_user.id) if query.from_user is not None else ""
-    )
-
-    bot_token = context.bot.token if context.bot is not None else ""
-    result = await dispatch_telegram_callback_decision(
-        bot_token=bot_token,
-        sender_id=sender_id,
-        callback_data=data,
-    )
-    if result.kind == "ignored" or not result.edit_text:
-        # Unknown callback payload — already ack'd; nothing more to do.
-        return
-
-    message = query.message
-    edited = False
-    if message is not None:
-        try:
-            await query.edit_message_text(result.edit_text)
-            edited = True
-        except telegram.error.BadRequest as exc:
-            logger.info(
-                "telegram_callback_edit_fallback",
-                reason=str(exc),
-                kind=result.kind,
-            )
-    if not edited and message is not None:
-        # ``message.chat`` is populated for both ``Message`` and the
-        # ``InaccessibleMessage`` variant of ``MaybeInaccessibleMessage``
-        # (only ``Message.chat_id`` is type-narrowed, so reaching for
-        # ``.chat.id`` instead keeps the narrowing-tolerant fallback in
-        # both branches).
-        try:
-            await context.bot.send_message(
-                chat_id=message.chat.id, text=result.edit_text
-            )
-        except Exception:
-            logger.exception(
-                "telegram_callback_fallback_send_failed",
-                kind=result.kind,
-            )
 
 
 class _BotInstance:
@@ -614,14 +298,6 @@ class _BotInstance:
         app.add_handler(CommandHandler("chatid", _cmd_chatid))
         app.add_handler(CommandHandler("ping", _cmd_ping))
 
-        # v6.1 §P2b.1: approval button decisions arrive via Telegram
-        # CallbackQuery. The handler is module-level (not a closure)
-        # so it can be exercised without a live Application, and it
-        # resolves the approval engine lazily through
-        # ``_decision_router`` because the engine is constructed
-        # *after* the gateway during orchestrator startup.
-        app.add_handler(CallbackQueryHandler(_handle_approval_callback))
-
         async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.error("Telegram bot error", error=str(context.error))
 
@@ -675,56 +351,6 @@ class _BotInstance:
                     await _send_telegram_message(self._app.bot, chat_id, text[i : i + _MAX_LENGTH])
         except Exception:
             logger.exception("Failed to send Telegram message", chat_id=chat_id)
-
-    async def send_approval_card(
-        self, chat_id: str, card: ApprovalCardPayload
-    ) -> None:
-        """Send an approval card as a single Telegram message with two
-        InlineKeyboardButtons (v6.1 §P2b.1).
-
-        Body text uses ``card.text_fallback`` so non-button channels
-        (Slack, plain text) share the same summary and the renderer is
-        consistent across surfaces. We deliberately do NOT set
-        ``parse_mode`` here: Markdown rendering on attacker-controlled
-        rationales (which flow into the summary) could be abused to
-        smuggle hidden URLs into the button label area; plain text is
-        safer and the buttons themselves carry the action affordance.
-        """
-        if self._app is None:
-            return
-        keyboard = InlineKeyboardMarkup(
-            [
-                [
-                    InlineKeyboardButton(
-                        _APPROVE_BUTTON_LABEL,
-                        callback_data=f"{_APPROVE_CALLBACK_PREFIX}{card.request_id}",
-                    ),
-                    InlineKeyboardButton(
-                        _REJECT_BUTTON_LABEL,
-                        callback_data=f"{_REJECT_CALLBACK_PREFIX}{card.request_id}",
-                    ),
-                ]
-            ]
-        )
-        body = card.text_fallback
-        if card.approval_url and card.approval_url not in body:
-            body = f"{body}\n  review: {card.approval_url}"
-        # Telegram rejects message bodies > 4096 chars. Approval cards
-        # carry a one-line summary plus a URL so they are nowhere near
-        # the limit in practice, but we still clip defensively rather
-        # than throw away the buttons by splitting the message.
-        if len(body) > _MAX_LENGTH:
-            body = body[: _MAX_LENGTH - 1] + "…"
-        try:
-            await self._app.bot.send_message(
-                chat_id, body, reply_markup=keyboard
-            )
-        except Exception:
-            logger.exception(
-                "Failed to send Telegram approval card",
-                chat_id=chat_id,
-                request_id=card.request_id,
-            )
 
     async def set_typing(self, chat_id: str, is_typing: bool) -> None:
         """Send typing indicator."""
@@ -814,24 +440,6 @@ class TelegramGateway:
         bot = self._bots_by_token.get(token)
         if bot:
             await bot.send_message(chat_id, text)
-
-    async def send_approval_card(
-        self, binding_id: str, chat_id: str, card: ApprovalCardPayload
-    ) -> None:
-        """Send an approval card (v6.1 §P2b.1) via the binding's bot.
-
-        Routes by ``binding_id`` so coworkers that share a Telegram
-        token still attribute the card to the right bot conversation.
-        """
-        token = self._binding_to_token.get(binding_id)
-        if token is None:
-            logger.warning(
-                "No token for binding (approval card)", binding_id=binding_id
-            )
-            return
-        bot = self._bots_by_token.get(token)
-        if bot:
-            await bot.send_approval_card(chat_id, card)
 
     async def set_typing(self, binding_id: str, chat_id: str, is_typing: bool) -> None:
         """Send typing indicator via the correct bot."""

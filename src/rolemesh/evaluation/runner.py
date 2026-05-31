@@ -2,7 +2,7 @@
 
 Reuses the production ``ContainerAgentExecutor`` rather than rolling a
 parallel orchestrator. The price is a few zero-config noop paths inside
-the executor (approval/safety hook chains stay unwired, EC-2 lifecycle
+the executor (the safety hook chain stays unwired, EC-2 lifecycle
 publishes are suppressed when EC is off, an empty ``container-*.log``
 gets written per run). The benefit is that any improvement to the
 production container path — including tool wiring, MCP rewriting,

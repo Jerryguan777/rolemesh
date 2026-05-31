@@ -3,8 +3,8 @@
 Design ref: §5.2.1 (alternative A). The single ``ADMIN_BOOTSTRAP_TOKEN``
 path stays untouched for backward compat; this module adds a second
 fast-path triggered by ``BOOTSTRAP_USERS`` (a JSON-encoded list of
-specs) so Phase 3 approval workflows that need multiple distinct
-identities don't have to stand up an IdP.
+specs) so workflows that need multiple distinct identities don't
+have to stand up an IdP.
 
 Spec shape (one element per token):
 
