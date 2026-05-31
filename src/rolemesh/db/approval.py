@@ -260,6 +260,7 @@ async def create_approval_request(
     policy_id: str | None = None,
     user_id: str | None = None,
     action_summary: str | None = None,
+    request_id: str | None = None,
 ) -> ApprovalRequest:
     """Insert a ``pending`` approval request and return it.
 
@@ -267,31 +268,65 @@ async def create_approval_request(
     source of truth for what gets approved, not a live re-read of the tool
     call. ``user_id`` is the approver (the task creator). A ``None``
     approver is persisted as-is so the caller can fail closed on it.
+
+    ``request_id`` lets the caller pin the row's primary key. The container
+    mints the ``request_id`` it blocks on (§3.1) *before* the orchestrator
+    persists, and the decision relay routes back by that same id (§3.2), so the
+    row id MUST equal the container's request_id — otherwise the approve/reject
+    relay could never find the awaiting call. Left ``None`` (e.g. S1 CRUD
+    tests) the DB default mints a fresh id.
     """
     async with tenant_conn(tenant_id) as conn:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO approval_requests (
-                tenant_id, coworker_id, conversation_id, policy_id, user_id,
-                job_id, mcp_server_name, action, action_summary, expires_at
+        if request_id is not None:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO approval_requests (
+                    id, tenant_id, coworker_id, conversation_id, policy_id,
+                    user_id, job_id, mcp_server_name, action, action_summary,
+                    expires_at
+                )
+                VALUES (
+                    $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid,
+                    $6::uuid, $7, $8, $9::jsonb, $10, $11
+                )
+                RETURNING *
+                """,
+                request_id,
+                tenant_id,
+                coworker_id,
+                conversation_id,
+                policy_id,
+                user_id,
+                job_id,
+                mcp_server_name,
+                json.dumps(action),
+                action_summary,
+                expires_at,
             )
-            VALUES (
-                $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid,
-                $6, $7, $8::jsonb, $9, $10
+        else:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO approval_requests (
+                    tenant_id, coworker_id, conversation_id, policy_id, user_id,
+                    job_id, mcp_server_name, action, action_summary, expires_at
+                )
+                VALUES (
+                    $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid,
+                    $6, $7, $8::jsonb, $9, $10
+                )
+                RETURNING *
+                """,
+                tenant_id,
+                coworker_id,
+                conversation_id,
+                policy_id,
+                user_id,
+                job_id,
+                mcp_server_name,
+                json.dumps(action),
+                action_summary,
+                expires_at,
             )
-            RETURNING *
-            """,
-            tenant_id,
-            coworker_id,
-            conversation_id,
-            policy_id,
-            user_id,
-            job_id,
-            mcp_server_name,
-            json.dumps(action),
-            action_summary,
-            expires_at,
-        )
     assert row is not None
     return _record_to_request(row)
 

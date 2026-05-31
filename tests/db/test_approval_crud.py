@@ -197,6 +197,28 @@ async def test_create_request_round_trips_action_and_null_approver() -> None:
     assert fetched.action_summary == "charge $500"
 
 
+async def test_create_request_pins_explicit_id() -> None:
+    # The container mints the request_id it blocks on (§3.1) and the decision
+    # relay routes back by that id (§3.2), so a passed request_id MUST become
+    # the row's primary key — otherwise approve/reject could never find the
+    # awaiting call.
+    t = await _tenant_with_coworker("A")
+    rid = str(uuid.uuid4())
+    req = await create_approval_request(
+        tenant_id=t["tenant_id"], coworker_id=t["coworker_id"], job_id="job-1",
+        mcp_server_name="stripe", action={"tool_name": "charge", "params": {}},
+        expires_at=_future(), user_id=t["user_id"], request_id=rid,
+    )
+    assert req.id == rid
+    fetched = await get_approval_request(rid, tenant_id=t["tenant_id"])
+    assert fetched is not None and fetched.id == rid
+    # The relay path resolves by that same id.
+    resolved = await resolve_approval_request(
+        rid, tenant_id=t["tenant_id"], status="approved", decided_by=t["user_id"],
+    )
+    assert resolved is not None and resolved.status == "approved"
+
+
 async def test_resolve_is_first_wins_idempotent() -> None:
     # The §8 decision race: a late approve click vs a timeout-expiry. Only the
     # first transition out of 'pending' may take effect; the second sees no

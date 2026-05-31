@@ -33,6 +33,8 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from rolemesh.channels.gateway import ChannelGateway
+    from rolemesh.db.approval import ApprovalRequest
+    from rolemesh.orchestration.approval_coordinator import ApprovalCoordinator
     from rolemesh.safety.engine import SafetyEngine
 
 from rolemesh.agent import (
@@ -63,7 +65,6 @@ from rolemesh.core.config import (
     CREDENTIAL_PROXY_PORT,
     EGRESS_GATEWAY_IMAGE,
     GLOBAL_MAX_CONTAINERS,
-    IDLE_TIMEOUT,
     NATS_URL,
     POLL_INTERVAL,
     TIMEZONE,
@@ -254,6 +255,12 @@ _safety_engine: SafetyEngine | None = None
 # at module scope so shutdown can tear them down cleanly.
 _safety_rpc_server: object | None = None
 _safety_thread_pool: object | None = None
+
+# HITL approval coordinator (docs/21-hitl-approval-plan.md §8). Created when the
+# NATS subscriptions start; owns the orchestrator-side idle suspend/resume,
+# expiry sweep, and restart recovery. None until startup so importing this
+# module without full startup stays cheap.
+_approval_coordinator: ApprovalCoordinator | None = None
 
 
 async def _handle_agent_message_ipc(data: dict[str, object]) -> None:
@@ -842,17 +849,13 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
 
     logger.info("Processing messages", coworker=config.name, message_count=len(missed_messages))
 
-    idle_handle: asyncio.TimerHandle | None = None
-
     def _reset_idle_timer() -> None:
-        nonlocal idle_handle
-        if idle_handle is not None:
-            idle_handle.cancel()
-        loop = asyncio.get_running_loop()
-        idle_handle = loop.call_later(
-            IDLE_TIMEOUT / 1000.0,
-            lambda: _queue.request_shutdown(conversation_id),
-        )
+        # Idle-timer ownership moved onto the GroupQueue (§8): the approval
+        # suspend path must cancel and later re-arm this exact timer from a NATS
+        # handler that cannot reach a closure-local TimerHandle.
+        # ``arm_idle_timer`` is a no-op while an approval is pending on this
+        # conversation, so a status/tool event mid-approval can't un-suspend it.
+        _queue.arm_idle_timer(conversation_id)
 
     # Set typing
     channel_type = _get_channel_type_for_conv(cw_state, conv)
@@ -1025,8 +1028,7 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
     if binding and gw:
         with contextlib.suppress(OSError, RuntimeError, TypeError, ValueError):
             await gw.set_typing(binding.id, conv.channel_chat_id, False)
-    if idle_handle is not None:
-        idle_handle.cancel()
+    _queue.cancel_idle_timer(conversation_id)
 
     if output == "error" or had_error:
         if output_sent_to_user:
@@ -1277,6 +1279,84 @@ async def _start_nats_ipc_subscriptions(transport: NatsTransport, deps: _IpcDeps
             await msg.ack()
 
     tasks.append(asyncio.create_task(_handle_safety_events()))
+
+    # HITL approval (docs/21-hitl-approval-plan.md §8). The container publishes
+    # ``approval_request`` when it blocks a gated MCP tool call and
+    # ``approval_cancel`` from its finally; the orchestrator suspends idle
+    # reaping for the bounded wait, persists the request, relays decisions on
+    # ``approval_decision``, and runs the expiry sweep + restart recovery. The
+    # ApprovalCoordinator holds the race-prone state machine; this block is just
+    # the NATS plumbing around it.
+    for consumer_name in ("orch-approval-request", "orch-approval-cancel"):
+        with contextlib.suppress(Exception):
+            await transport.js.delete_consumer("agent-ipc", consumer_name)
+
+    from rolemesh.orchestration.approval_coordinator import (
+        ApprovalCoordinator,
+        db_persistence,
+    )
+
+    def _resolve_tenant_for_coworker(coworker_id: str) -> str | None:
+        cw = _state.coworkers.get(coworker_id)
+        return cw.config.tenant_id if cw else None
+
+    async def _publish_approval_decision(
+        job_id: str, payload: dict[str, object]
+    ) -> None:
+        await transport.js.publish(
+            f"agent.{job_id}.approval_decision", json.dumps(payload).encode(),
+        )
+
+    async def _notify_approval_status(req: ApprovalRequest) -> None:
+        # Soft "⏳ waiting for approval" signal to the web UI (§8 suspend step 5).
+        # Telegram/Web decision intake and the hard-channel cards are S4; this is
+        # only the "we're waiting" status while the container is held.
+        if req.conversation_id:
+            await _emit_status_for_conversation(
+                req.conversation_id,
+                {
+                    "status": "awaiting_approval",
+                    "request_id": req.id,
+                    "action_summary": req.action_summary,
+                },
+            )
+
+    global _approval_coordinator
+    _approval_coordinator = ApprovalCoordinator(
+        queue=_queue,
+        persistence=db_persistence(),
+        resolve_tenant=_resolve_tenant_for_coworker,
+        publish_decision=_publish_approval_decision,
+        notify_status=_notify_approval_status,
+    )
+
+    approval_request_sub = await transport.js.subscribe(
+        "agent.*.approval_request", durable="orch-approval-request",
+    )
+    approval_cancel_sub = await transport.js.subscribe(
+        "agent.*.approval_cancel", durable="orch-approval-cancel",
+    )
+
+    async def _handle_approval_requests() -> None:
+        async for msg in approval_request_sub.messages:
+            try:
+                assert _approval_coordinator is not None
+                await _approval_coordinator.on_approval_request(json.loads(msg.data))
+            except Exception:
+                logger.exception("Error processing approval_request")
+            await msg.ack()
+
+    async def _handle_approval_cancels() -> None:
+        async for msg in approval_cancel_sub.messages:
+            try:
+                assert _approval_coordinator is not None
+                await _approval_coordinator.on_approval_cancel(json.loads(msg.data))
+            except Exception:
+                logger.exception("Error processing approval_cancel")
+            await msg.ack()
+
+    tasks.append(asyncio.create_task(_handle_approval_requests()))
+    tasks.append(asyncio.create_task(_handle_approval_cancels()))
 
     # V2 P0.3: Slow-check RPC server (agent.*.safety.detect). Uses core
     # NATS request-reply rather than JetStream — slow checks are
@@ -1805,6 +1885,13 @@ async def main() -> None:
     _queue.set_on_container_starting(_emit_container_starting_status)
     _web_gw.set_on_stop(_handle_web_stop)
     await _recover_pending_messages()
+
+    # HITL restart recovery (R2): re-adopt + re-suspend any approvals left
+    # pending by a previous orchestrator instance before the message loop starts
+    # reaping. Runs after the queue's callbacks are wired so re-armed idle timers
+    # resolve against a fully-configured queue.
+    if _approval_coordinator is not None:
+        await _approval_coordinator.recover_pending()
 
     await _message_loop(shutdown_event)
 

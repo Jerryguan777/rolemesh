@@ -347,6 +347,32 @@ class ContainerAgentExecutor:
             if specs:
                 slow_check_specs = specs
 
+        # HITL approval policy snapshot (docs/21-hitl-approval-plan.md §S2/§S3).
+        # Ship the tenant's enabled policies so the container's approval hook can
+        # match a gated MCP call locally without a DB round-trip. None when the
+        # tenant has no enabled policies, so the hook stays off the chain
+        # (mirrors safety_rules / slow_check_specs zero-cost-when-inactive).
+        # ``updated_at`` is serialised to ISO since AgentInitData.serialize is
+        # plain json.dumps; ``policies_from_snapshot`` parses it back.
+        from rolemesh.db.approval import list_approval_policies
+
+        approval_policies_snapshot: list[dict[str, object]] | None = None
+        enabled_policies = await list_approval_policies(tenant_id, enabled_only=True)
+        if enabled_policies:
+            approval_policies_snapshot = [
+                {
+                    "id": p.id,
+                    "tenant_id": p.tenant_id,
+                    "mcp_server_name": p.mcp_server_name,
+                    "tool_name": p.tool_name,
+                    "condition_expr": p.condition_expr,
+                    "enabled": p.enabled,
+                    "priority": p.priority,
+                    "updated_at": p.updated_at.isoformat(),
+                }
+                for p in enabled_policies
+            ]
+
         # Channel 1: Write initial input to KV before starting container
         kv_init = await self._transport.js.key_value("agent-init")
         agent_init = AgentInitData(
@@ -366,6 +392,7 @@ class ContainerAgentExecutor:
             mcp_servers=mcp_specs,
             safety_rules=safety_rules_dicts,
             slow_check_specs=slow_check_specs,
+            approval_policies=approval_policies_snapshot,
         )
         await kv_init.put(job_id, agent_init.serialize())
 
