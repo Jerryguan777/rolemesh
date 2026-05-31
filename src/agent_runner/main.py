@@ -143,6 +143,109 @@ def _create_backend(backend_name: str) -> Any:
 
 
 # ---------------------------------------------------------------------------
+def _usage_meta(event: BackendEvent) -> dict[str, Any] | None:
+    """Extract the wire-format ``usage`` payload from a backend event.
+
+    Centralizes the metadata key choice so all terminal event branches
+    stay in lock-step: status="success" / "error" / "stopped" /
+    "safety_blocked" all serialize usage under the same metadata key, and
+    consumers don't have to special-case per status. Returns None when the
+    event has no usage so legacy wire bytes stay byte-equal — see
+    ContainerOutput.to_dict for the rest of the no-op invariant.
+    """
+    usage = getattr(event, "usage", None)
+    if usage is None:
+        return None
+    return {"usage": usage.to_metadata()}
+
+
+def event_to_output(
+    event: BackendEvent, session_id: str | None
+) -> tuple[ContainerOutput | None, str | None]:
+    """Pure mapping from a backend event to ``(output_to_publish,
+    updated_session_id)``.
+
+    Single source of truth for the bridge's event translation. Side
+    effects (the NATS approval-cancel cascade on stop, logging) stay in
+    ``run_query_loop.on_event`` so this function can be exercised directly
+    in tests without a NATS connection — no inline re-implementation in the
+    test, which would just be a mirror that drifts.
+    """
+    if isinstance(event, ResultEvent):
+        if event.new_session_id:
+            session_id = event.new_session_id
+        return (
+            ContainerOutput(
+                status="success",
+                result=event.text,
+                new_session_id=session_id,
+                is_final=event.is_final,
+                metadata=_usage_meta(event),
+            ),
+            session_id,
+        )
+    if isinstance(event, RunningEvent):
+        return ContainerOutput(status="running", result=None), session_id
+    if isinstance(event, ToolUseEvent):
+        return (
+            ContainerOutput(
+                status="tool_use",
+                result=None,
+                metadata={"tool": event.tool, "input": event.input_preview},
+            ),
+            session_id,
+        )
+    if isinstance(event, StoppedEvent):
+        return (
+            ContainerOutput(
+                status="stopped",
+                result=None,
+                new_session_id=session_id,
+                metadata=_usage_meta(event),
+            ),
+            session_id,
+        )
+    if isinstance(event, SessionInitEvent):
+        return None, event.session_id
+    if isinstance(event, CompactionEvent):
+        return None, session_id
+    if isinstance(event, SafetyBlockEvent):
+        block_metadata: dict[str, Any] = {"stage": event.stage}
+        if event.rule_id is not None:
+            block_metadata["rule_id"] = event.rule_id
+        if event.usage is not None:
+            block_metadata["usage"] = event.usage.to_metadata()
+        # Deliberately new_session_id=None: Claude SDK fires SessionInit on
+        # SystemMessage(init) before any turn persists the session file, so
+        # forwarding the init-time SID makes next turn's --resume hit "No
+        # conversation found" and the container exit 1, looping the scheduler.
+        return (
+            ContainerOutput(
+                status="safety_blocked",
+                result=event.reason,
+                new_session_id=None,
+                metadata=block_metadata,
+            ),
+            session_id,
+        )
+    if isinstance(event, ErrorEvent):
+        # Deliberately new_session_id=None: the typical ErrorEvent is Claude
+        # CLI failing to resume a stale session, so init.session_id IS the
+        # dead id. Forwarding it makes the orchestrator re-persist the dead
+        # id -> next retry resumes the same dead id -> death loop.
+        return (
+            ContainerOutput(
+                status="error",
+                result=None,
+                new_session_id=None,
+                error=event.error,
+                metadata=_usage_meta(event),
+            ),
+            session_id,
+        )
+    return None, session_id
+
+
 # NATS bridge — runs a query and translates events to NATS publishes
 # ---------------------------------------------------------------------------
 
@@ -184,129 +287,26 @@ async def run_query_loop(
     # Track session ID from backend events
     session_id: str | None = init.session_id
 
-    def _usage_meta(event: BackendEvent) -> dict[str, Any] | None:
-        """Extract the wire-format ``usage`` payload from a backend event.
-
-        Centralizes the metadata key choice so all four event branches
-        below stay in lock-step: status="success" / "error" / "stopped"
-        / "safety_blocked" all serialize usage under the same metadata
-        key, and consumers don't have to special-case per status.
-        Returns None when the event has no usage so legacy wire bytes
-        stay byte-equal — see ContainerOutput.to_dict for the rest of
-        the no-op invariant.
-        """
-        usage = getattr(event, "usage", None)
-        if usage is None:
-            return None
-        return {"usage": usage.to_metadata()}
-
     async def on_event(event: BackendEvent) -> None:
         nonlocal session_id
-        if isinstance(event, ResultEvent):
-            if event.new_session_id:
-                session_id = event.new_session_id
-            metadata = _usage_meta(event)
-            await publish_output(
-                js, job_id,
-                ContainerOutput(
-                    status="success",
-                    result=event.text,
-                    new_session_id=session_id,
-                    is_final=event.is_final,
-                    metadata=metadata,
-                ),
-            )
-        elif isinstance(event, RunningEvent):
-            await publish_output(
-                js, job_id,
-                ContainerOutput(status="running", result=None),
-            )
-        elif isinstance(event, ToolUseEvent):
-            await publish_output(
-                js, job_id,
-                ContainerOutput(
-                    status="tool_use",
-                    result=None,
-                    metadata={"tool": event.tool, "input": event.input_preview},
-                ),
-            )
-        elif isinstance(event, StoppedEvent):
-            await publish_output(
-                js, job_id,
-                ContainerOutput(
-                    status="stopped",
-                    result=None,
-                    new_session_id=session_id,
-                    metadata=_usage_meta(event),
-                ),
-            )
-            # Approval cancel cascade. Best-effort publish — the approval
-            # stream may not exist at all in deployments without the
-            # approval module, and a failure here must not block the
-            # stop lifecycle. See docs/backend-stop-contract.md §8.
-            try:
-                await js.publish(
-                    f"approval.cancel_for_job.{job_id}", b""
-                )
-            except Exception as exc:  # noqa: BLE001 — cascade is best-effort
-                log(f"approval cancel cascade publish failed: {exc}")
-        elif isinstance(event, SessionInitEvent):
-            session_id = event.session_id
+        output, session_id = event_to_output(event, session_id)
+        if isinstance(event, SessionInitEvent):
             log(f"Session initialized: {session_id}")
         elif isinstance(event, CompactionEvent):
             log("Compaction event received")
-        elif isinstance(event, SafetyBlockEvent):
-            # Route through its own status so the orchestrator can skip
-            # the "store as assistant message" DB write and render the
-            # reason as a distinct UI bubble. ``result`` carries the
-            # human-readable reason (recorded in logs / Agent output
-            # telemetry) while metadata carries the structured fields
-            # the orchestrator matches on.
-            #
-            # Deliberately does NOT forward ``session_id``. Claude SDK's
-            # SessionInitEvent fires on SystemMessage(init) — before any
-            # user message is processed — but the session file is only
-            # persisted after a real turn completes. If we propagate the
-            # init-time SID to the orchestrator, next turn's ``--resume``
-            # hits "No conversation found" and the container exits 1,
-            # triggering the scheduler's retry loop indefinitely. Pi
-            # backend tracks session differently (session_file written
-            # eagerly) so this concern is Claude-specific.
-            block_metadata: dict[str, Any] = {"stage": event.stage}
-            if event.rule_id is not None:
-                block_metadata["rule_id"] = event.rule_id
-            if event.usage is not None:
-                block_metadata["usage"] = event.usage.to_metadata()
-            await publish_output(
-                js, job_id,
-                ContainerOutput(
-                    status="safety_blocked",
-                    result=event.reason,
-                    new_session_id=None,
-                    metadata=block_metadata,
-                ),
-            )
         elif isinstance(event, ErrorEvent):
             log(f"Backend error: {event.error}")
-            # Do NOT forward session_id on error. The typical ErrorEvent
-            # source is Claude CLI failing to resume a stale session
-            # ("No conversation found with session ID: ..."), in which
-            # case init.session_id IS the dead id we're trying to get
-            # rid of. Forwarding it causes orchestrator _wrapped to
-            # re-persist the dead id via set_session, creating a death
-            # loop: next retry reads the same dead id from DB, resume
-            # fails again, error fires again, id re-persisted. Same
-            # class of bug the safety_blocked handler above addresses.
-            await publish_output(
-                js, job_id,
-                ContainerOutput(
-                    status="error",
-                    result=None,
-                    new_session_id=None,
-                    error=event.error,
-                    metadata=_usage_meta(event),
-                ),
-            )
+        if output is not None:
+            await publish_output(js, job_id, output)
+        if isinstance(event, StoppedEvent):
+            # Approval cancel cascade. Best-effort publish — the approval
+            # stream may not exist in deployments without the approval
+            # module, and a failure here must not block the stop lifecycle.
+            # See docs/backend-stop-contract.md §8.
+            try:
+                await js.publish(f"approval.cancel_for_job.{job_id}", b"")
+            except Exception as exc:  # noqa: BLE001 — cascade is best-effort
+                log(f"approval cancel cascade publish failed: {exc}")
 
     # Build the unified hook registry. TranscriptArchiveHandler replaces
     # the Claude-specific in-line archive logic that used to live in
