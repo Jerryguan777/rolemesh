@@ -165,6 +165,8 @@ async def _init_test_database(
     _admin_pool = await asyncpg.create_pool(admin_url, min_size=1, max_size=3)
     async with _admin_pool.acquire() as conn:
         # Drop all tables for a clean slate
+        await conn.execute("DROP TABLE IF EXISTS approval_requests CASCADE")
+        await conn.execute("DROP TABLE IF EXISTS approval_policies CASCADE")
         await conn.execute("DROP TABLE IF EXISTS eval_runs CASCADE")
         await conn.execute("DROP TABLE IF EXISTS runs CASCADE")
         await conn.execute("DROP TABLE IF EXISTS coworker_skills CASCADE")

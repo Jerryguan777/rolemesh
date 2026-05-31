@@ -1172,6 +1172,74 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         "ON eval_runs (tenant_id, coworker_config_sha256)"
     )
 
+    # ----- HITL approval (docs/21-hitl-approval-plan.md §4) ---------------
+    # Tenant-scoped policy: which (mcp_server, tool) calls require a human
+    # approval, gated by a structured ``condition_expr`` (see §7 / the pure
+    # matcher in ``agent_runner.approval.policy``). ``tool_name = '*'`` is a
+    # server-wide wildcard. No coworker dimension — policy is tenant-level
+    # only (§2 scope redline).
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS approval_policies (
+            id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            tenant_id        UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            mcp_server_name  TEXT NOT NULL,
+            tool_name        TEXT NOT NULL,
+            condition_expr   JSONB NOT NULL DEFAULT '{"always": true}'::jsonb,
+            enabled          BOOLEAN NOT NULL DEFAULT TRUE,
+            priority         INTEGER NOT NULL DEFAULT 0,
+            created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+    """)
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_approval_policies_enabled "
+        "ON approval_policies (tenant_id, enabled)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_approval_policies_lookup "
+        "ON approval_policies (tenant_id, mcp_server_name, tool_name)"
+    )
+
+    # One row per approval decision request. The DB is authoritative; the
+    # orchestrator's in-memory suspend state is only a cache that restart
+    # recovery rebuilds from ``status='pending'`` rows (§8). No separate
+    # audit-log table — the decision lives on the row (``decided_by`` /
+    # ``note`` / ``decided_at``). ``policy_id`` is deliberately NOT a FK:
+    # a policy may be deleted while a historical request remains, exactly
+    # like ``safety_decisions.triggered_rule_ids``.
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS approval_requests (
+            id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            tenant_id        UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            coworker_id      UUID NOT NULL REFERENCES coworkers(id) ON DELETE CASCADE,
+            conversation_id  UUID REFERENCES conversations(id) ON DELETE SET NULL,
+            policy_id        UUID,
+            user_id          UUID REFERENCES users(id) ON DELETE SET NULL,
+            job_id           TEXT NOT NULL,
+            mcp_server_name  TEXT NOT NULL,
+            action           JSONB NOT NULL,
+            action_summary   TEXT,
+            status           TEXT NOT NULL DEFAULT 'pending'
+                CHECK (status IN ('pending', 'approved', 'rejected',
+                                  'expired', 'cancelled')),
+            decided_by       UUID REFERENCES users(id) ON DELETE SET NULL,
+            note             TEXT,
+            requested_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+            expires_at       TIMESTAMPTZ NOT NULL,
+            decided_at       TIMESTAMPTZ
+        )
+    """)
+    # Partial index: the expiry watcher + restart recovery only ever scan
+    # pending rows, so the index stays tiny even as decided rows accumulate.
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_approval_requests_pending "
+        "ON approval_requests (expires_at) WHERE status = 'pending'"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_approval_requests_job "
+        "ON approval_requests (job_id)"
+    )
+
     # Idempotent default tenant. OIDCAuthProvider._provision_tenant falls back
     # to slug='default' for single-tenant deployments where the IdP doesn't
     # carry a tenant claim. Without this row, the first OIDC login on a fresh
@@ -1316,6 +1384,12 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     await _enable_rls_on(conn, "runs")
     await _enable_rls_via_parent_coworker(conn, "coworker_mcp_servers")
     await _enable_rls_via_parent_coworker(conn, "coworker_skills")
+
+    # ----- HITL approval RLS (§4) -----------------------------------------
+    # Both tables carry their own ``tenant_id`` → standard single-predicate
+    # ``tenant_id = current_tenant_id()`` treatment.
+    await _enable_rls_on(conn, "approval_policies")
+    await _enable_rls_on(conn, "approval_requests")
 
 
 async def _enable_rls_via_parent_coworker(
