@@ -1941,6 +1941,34 @@ class _IpcDepsImpl:
             t.add_done_callback(_bg_tasks.discard)
 
 
+async def _persist_web_assistant_message(
+    conv: Conversation, sender_name: str, text: str
+) -> None:
+    """Persist an assistant message for a web conversation.
+
+    Web is the only channel whose chat history lives in our own
+    ``messages`` table — Telegram/Slack rely on the third-party
+    service to retain history. The interactive web path persists via
+    ``_process_conversation_messages`` above; this helper covers the
+    IPC-driven paths (scheduled tasks today, future cross-chat sends)
+    that bypass that loop. Without it, a scheduled-task reply to a
+    web conversation goes to NATS only — invisible on page reload,
+    and invisible to any WS that wasn't already connected at fire
+    time (``DeliverPolicy.NEW`` doesn't replay).
+    """
+    await db_store_message(
+        tenant_id=conv.tenant_id,
+        conversation_id=conv.id,
+        msg_id=str(uuid.uuid4()),
+        sender=sender_name,
+        sender_name=sender_name,
+        content=text,
+        timestamp=datetime.now(UTC).isoformat(),
+        is_from_me=True,
+        is_bot_message=True,
+    )
+
+
 async def _send_via_coworker(cw_state: CoworkerState | None, chat_id: str, text: str) -> None:
     """Send a message using a specific coworker's binding."""
     if cw_state:
@@ -1952,6 +1980,10 @@ async def _send_via_coworker(cw_state: CoworkerState | None, chat_id: str, text:
                     gw = _gateways.get(channel_type)
                     if gw:
                         await gw.send_message(binding.id, chat_id, text)
+                        if channel_type == "web":
+                            await _persist_web_assistant_message(
+                                conv.conversation, cw_state.config.name, text
+                            )
                 return
     # Fallback: scan all coworkers (for backward compat)
     for cw in _state.coworkers.values():
@@ -1963,6 +1995,10 @@ async def _send_via_coworker(cw_state: CoworkerState | None, chat_id: str, text:
                     gw = _gateways.get(channel_type)
                     if gw:
                         await gw.send_message(binding.id, chat_id, text)
+                        if channel_type == "web":
+                            await _persist_web_assistant_message(
+                                conv.conversation, cw.config.name, text
+                            )
                 return
     logger.warning("No channel for chat_id", chat_id=chat_id)
 
