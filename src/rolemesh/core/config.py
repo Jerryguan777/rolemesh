@@ -41,6 +41,28 @@ CONTAINER_TIMEOUT: int = int(os.environ.get("CONTAINER_TIMEOUT", "1800000"))
 CONTAINER_MAX_OUTPUT_SIZE: int = int(os.environ.get("CONTAINER_MAX_OUTPUT_SIZE", "10485760"))  # 10MB
 CREDENTIAL_PROXY_PORT: int = int(os.environ.get("CREDENTIAL_PROXY_PORT", "3001"))
 IDLE_TIMEOUT: int = int(os.environ.get("IDLE_TIMEOUT", "1800000"))  # 30 min
+
+# HITL tool approval (docs/21-hitl-approval-plan.md §5). The container's
+# approval-decision await and the DB row's ``expires_at`` share this single
+# bound. Default 5 min: the approver is the task creator (self-approval), so
+# decisions resolve in seconds-to-minutes, and a short hold keeps the
+# container-hold cost low.
+APPROVAL_TIMEOUT: int = int(os.environ.get("APPROVAL_TIMEOUT", "300000"))  # 5 min
+
+# Startup invariant (§5): the approval await must always fire before the
+# container watchdog floor ``max(config_timeout, IDLE_TIMEOUT + 30_000)``
+# (container_executor.py), so the watchdog can never pre-empt a pending
+# approval. A misconfigured deployment that breaks this must refuse to
+# start rather than silently kill containers mid-approval. Raised (not
+# ``assert``) so ``python -O`` cannot strip the guard.
+if APPROVAL_TIMEOUT >= IDLE_TIMEOUT + 30_000:
+    raise ValueError(
+        f"APPROVAL_TIMEOUT ({APPROVAL_TIMEOUT}) must be < IDLE_TIMEOUT "
+        f"({IDLE_TIMEOUT}) + 30_000; otherwise the container watchdog can "
+        "pre-empt a pending approval. Lower APPROVAL_TIMEOUT or raise "
+        "IDLE_TIMEOUT."
+    )
+
 MCP_PROXY_PREFIX: str = "mcp-proxy"
 MAX_CONCURRENT_CONTAINERS: int = max(1, int(os.environ.get("MAX_CONCURRENT_CONTAINERS", "5")))
 GLOBAL_MAX_CONTAINERS: int = max(1, int(os.environ.get("GLOBAL_MAX_CONTAINERS", "20")))
