@@ -502,6 +502,20 @@ async def stream(
                 await _handle_request_cancel(
                     ws=ws, frame=frame, payload=payload,
                 )
+            elif kind == "request.stop":
+                # Interrupt the currently-running agent turn for this
+                # conversation. The orchestrator's WebNatsGateway
+                # subscribes ``web.stop.*.*`` and identifies the
+                # target container from binding+chat (NOT from the
+                # frame payload — IDOR guard). The frame's optional
+                # ``run_id`` is advisory and only logged. Empty body
+                # matches the legacy publisher contract
+                # (webui/ws.py:232) so the orch-side receiver needs
+                # no changes for the v1 migration.
+                await js.publish(
+                    f"web.stop.{binding_id}.{conv.channel_chat_id}",
+                    b"{}",
+                )
             else:
                 await _send_event(
                     ws,

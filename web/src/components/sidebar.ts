@@ -1,6 +1,15 @@
 import { LitElement, html } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import type { ConversationSummary } from '../services/agent-client.js';
+
+/** UI-side conversation row used by the sidebar. Distinct from the v1
+ *  ``Conversation`` REST shape — the sidebar only needs three fields
+ *  for the date-grouped list. Inlined here after PR-B deleted the
+ *  legacy ``services/agent-client.ts`` that originally defined it. */
+export interface ConversationSummary {
+  chatId: string;
+  title: string;
+  updatedAt: string;
+}
 
 interface GroupedConversations {
   label: string;

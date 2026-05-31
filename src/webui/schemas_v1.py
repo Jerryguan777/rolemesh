@@ -832,6 +832,13 @@ WsServerEventModel = (
 )
 
 
+class WsClientFrameRequestStop(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["request.stop"]
+    # Advisory only — see openapi description for the IDOR rationale.
+    run_id: str | None = None
+
+
 class WsClientFrameRequestRun(BaseModel):
     model_config = ConfigDict(extra="forbid")
     type: Literal["request.run"]
@@ -848,6 +855,7 @@ class WsClientFrameRequestCancel(BaseModel):
 WsClientFrameModel = (
     WsClientFrameRequestRun
     | WsClientFrameRequestCancel
+    | WsClientFrameRequestStop
 )
 
 

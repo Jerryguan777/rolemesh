@@ -1,17 +1,16 @@
 // Chat panel — wired to the v1.1 protocol (session 01c).
 //
-// Two clients live side-by-side here, by design (§4.1 Stop vs Cancel
-// hard split):
-//
-//   * `V1WsClient` (`web/src/ws/v1_client.ts`) — owns streaming +
-//     reconnect + Cancel. All inbound rendering events flow from
-//     `event.run.*` frames here.
-//   * `AgentClient` (legacy `services/agent-client.ts`) — owns the
-//     Stop button. Its `stop()` sends `{type:"stop"}` over `/ws/chat`
-//     which triggers the SDK's `interrupt_current_turn`. **The two
-//     surfaces are NOT collapsible**: merging Stop into the v1 cancel
-//     endpoint would force every soft interrupt through a container
-//     cold-start, which is exactly the cost the SDK interrupt avoids.
+// Owns a single WS client (`V1WsClient`) that handles streaming,
+// reconnect, Cancel, and **Stop**. PR-B (2026-05-31) collapsed the
+// Stop path into the v1 `request.stop` client frame — the
+// orchestrator-side handler stayed on the legacy
+// `web.stop.{binding}.{chat}` NATS subject (subject reuse means
+// zero orch changes), but the SPA no longer maintains the second
+// WebSocket to the legacy `/ws/chat` endpoint. Design §4.1's Stop
+// vs Cancel hard split still holds — they remain semantically
+// distinct (Stop = soft interrupt, container stays warm; Cancel =
+// hard terminate). The split is now expressed inside the v1
+// protocol rather than across two endpoints.
 //
 // REST surface goes through the typed `ApiClient` — no admin-prefix
 // URL literals in this file (the `lint:no-admin-chat` script
@@ -22,7 +21,6 @@ import { customElement, state } from 'lit/decorators.js';
 
 import { getApiClient, ApiError } from '../api/client.js';
 import type { Conversation, Coworker, Me, Message } from '../api/client.js';
-import { AgentClient } from '../services/agent-client.js';
 import { getStoredToken } from '../services/oidc-auth.js';
 import { V1WsClient, type ServerEvent, type ConnectionStatus } from '../ws/v1_client.js';
 
@@ -50,10 +48,6 @@ export class ChatPanel extends LitElement {
   // v1 client: streaming + Cancel
   private v1: V1WsClient | null = null;
   private v1Unsubscribers: Array<() => void> = [];
-  // Legacy client: ONLY for the Stop button. Recreated when the
-  // coworker (agent_id) changes; not used for any other purpose.
-  private stopClient: AgentClient | null = null;
-  private stopClientUnsub?: () => void;
   private tokenRefreshHandler?: (e: Event) => void;
   private readonly api = getApiClient();
 
@@ -112,10 +106,6 @@ export class ChatPanel extends LitElement {
       const newToken = (e as CustomEvent<string>).detail;
       if (newToken) {
         this.api.setToken(newToken);
-        if (this.stopClient) {
-          this.stopClient.setToken(newToken);
-          this.stopClient.reconnect(this.activeConversationId ?? undefined);
-        }
         // The v1 client re-reads the token from session storage on
         // every ws-ticket call, so no explicit reconnect is needed.
       }
@@ -131,7 +121,6 @@ export class ChatPanel extends LitElement {
     this.clearCancellingTimer();
     this.clearRunningWatchdog();
     this.teardownV1();
-    this.teardownStopClient();
     if (this.tokenRefreshHandler) {
       window.removeEventListener('rm-token-refreshed', this.tokenRefreshHandler);
     }
@@ -198,7 +187,6 @@ export class ChatPanel extends LitElement {
   private async openConversation(conversationId: string): Promise<void> {
     if (!this.activeCoworkerId) return;
     this.teardownV1();
-    this.teardownStopClient();
     this.activeConversationId = conversationId;
     this.runState = 'idle';
     this.runTerminal = false;
@@ -215,10 +203,6 @@ export class ChatPanel extends LitElement {
     );
     void this.v1.connect();
 
-    // Legacy client only for Stop. Token comes from oidc-auth storage.
-    this.stopClient = new AgentClient(this.activeCoworkerId, getStoredToken() ?? '');
-    this.stopClient.connect(conversationId);
-
     await this.loadMessages(conversationId);
   }
 
@@ -227,13 +211,6 @@ export class ChatPanel extends LitElement {
     this.v1Unsubscribers = [];
     this.v1?.disconnect();
     this.v1 = null;
-  }
-
-  private teardownStopClient(): void {
-    this.stopClientUnsub?.();
-    this.stopClientUnsub = undefined;
-    this.stopClient?.disconnect();
-    this.stopClient = null;
   }
 
   private handleV1Status(s: ConnectionStatus): void {
@@ -459,19 +436,22 @@ export class ChatPanel extends LitElement {
     }
   }
 
-  /** Stop = soft interrupt of the current turn via the legacy
-   *  `{type:"stop"}` frame. Container stays alive; the next message
+  /** Stop = soft interrupt of the current turn via the v1
+   *  `request.stop` frame. Container stays alive; the next message
    *  is immediate. Design §4.1 — do NOT redirect this to Cancel. */
   private handleStop(): void {
     if (this.runState !== 'running') return;
-    if (!this.stopClient) return;
+    if (!this.v1) return;
     this.runState = 'stopping';
-    this.stopClient.stop();
+    this.v1.stop();
     this.clearStoppingTimer();
     this.stoppingTimer = setTimeout(() => {
       if (this.runState === 'stopping') {
-        // Legacy stream never sent the `stopped` ack. Best-effort
-        // recover to idle so the input isn't trapped.
+        // The orchestrator interrupts the container but doesn't
+        // currently emit an explicit `event.run.stopped` ack —
+        // event.run.error / completed land instead when the abort
+        // settles. Best-effort recover to idle so the input isn't
+        // trapped if neither frame arrives.
         this.runState = 'idle';
         this.runTerminal = true;
         this.agentStatus = null;
@@ -590,7 +570,6 @@ export class ChatPanel extends LitElement {
 
   private handleNewChat(): void {
     this.teardownV1();
-    this.teardownStopClient();
     this.activeConversationId = null;
     this.pendingNewChat = true;
     this.messages = [];

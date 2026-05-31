@@ -2821,13 +2821,34 @@ components:
         type: { type: string, enum: [request.cancel] }
         run_id: { type: string, format: uuid }
 
+    WsClientFrameRequestStop:
+      type: object
+      required: [type]
+      properties:
+        type: { type: string, enum: [request.stop] }
+        run_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            Advisory only — logged for traceability but not used for
+            routing. The orchestrator identifies the target container
+            from binding_id+chat_id (both pulled from the
+            authenticated handshake, NOT from any client payload —
+            IDOR guard, see webui/ws.py:228-231 for the original
+            legacy comment). The SPA may not know a run_id yet (race
+            between fast Stop click and the first event.run.started
+            echo); the field is therefore optional.
+
     # Client → server.
     WsClientFrame:
       oneOf:
         - $ref: '#/components/schemas/WsClientFrameRequestRun'
         - $ref: '#/components/schemas/WsClientFrameRequestCancel'
+        - $ref: '#/components/schemas/WsClientFrameRequestStop'
       discriminator:
         propertyName: type
         mapping:
           request.run: '#/components/schemas/WsClientFrameRequestRun'
           request.cancel: '#/components/schemas/WsClientFrameRequestCancel'
+          request.stop: '#/components/schemas/WsClientFrameRequestStop'

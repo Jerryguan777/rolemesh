@@ -329,6 +329,23 @@ export class V1WsClient extends WsClientBase<ConnectionStatus> {
     this.rawSend({ type: 'request.cancel', run_id: runId });
   }
 
+  /** Send a `request.stop` frame to interrupt the active turn.
+   *
+   *  Replaces the legacy `AgentClient.stop()` over `/ws/chat`. The
+   *  server publishes to `web.stop.{binding}.{chat}` (same NATS
+   *  subject the legacy path used) which the orchestrator's
+   *  WebNatsGateway translates to an interrupt on the active
+   *  container. The `run_id` argument is advisory — the orchestrator
+   *  identifies the target from the authenticated handshake
+   *  binding+chat, not from this field. Pass it anyway when known
+   *  so server-side logs can correlate. */
+  stop(): void {
+    this.rawSend({
+      type: 'request.stop',
+      run_id: this.activeRunId ?? undefined,
+    });
+  }
+
   private rawSend(frame: Record<string, unknown>): void {
     if (!this.ws || this.ws.readyState !== this.WebSocketCtor.OPEN) {
       // request.run isn't queued — replaying after reconnect would
