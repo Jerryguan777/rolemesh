@@ -21,7 +21,7 @@ import asyncpg
 
 from rolemesh.core.config import ADMIN_DATABASE_URL, DATABASE_URL
 from rolemesh.core.logger import get_logger
-from rolemesh.db.schema import _create_schema
+from rolemesh.db.schema import _create_schema, _seed_reference_data
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -216,6 +216,11 @@ async def _reset_test_data(
     Safe with the shared-pool optimization because ``tenant_conn`` sets the
     RLS GUC with ``is_local=true`` inside a transaction, so the tenant scope
     never leaks between tests on a reused connection.
+
+    Reference/seed rows (default tenant, platform model catalog) are
+    re-seeded after the truncate so a per-test reset matches what the old
+    drop-and-recreate path produced — TRUNCATE alone would leave the seeded
+    tables empty and break tests that read the platform catalog.
     """
     rows = await conn.fetch(
         "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
@@ -224,6 +229,7 @@ async def _reset_test_data(
         return
     tables = ", ".join(f'public."{r["tablename"]}"' for r in rows)
     await conn.execute(f"TRUNCATE {tables} RESTART IDENTITY CASCADE")
+    await _seed_reference_data(conn)
 
 
 async def _setup_test_database(

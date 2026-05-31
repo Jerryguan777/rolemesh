@@ -24,6 +24,60 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
+async def _seed_reference_data(
+    conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record],
+) -> None:
+    """Idempotent reference/seed rows: the default tenant and the
+    platform model catalog. Extracted from ``_create_schema`` so the
+    test harness can re-seed after a per-test ``TRUNCATE`` without
+    re-running the full DDL (see ``_pool._reset_test_data``). All
+    inserts use ``ON CONFLICT DO NOTHING`` so re-runs are safe."""
+    # Idempotent default tenant. OIDCAuthProvider._provision_tenant falls back
+    # to slug='default' for single-tenant deployments where the IdP doesn't
+    # carry a tenant claim. Without this row, the first OIDC login on a fresh
+    # database returns None and authentication fails opaquely.
+    await conn.execute(
+        """
+        INSERT INTO tenants (slug, name)
+        VALUES ('default', 'Default')
+        ON CONFLICT (slug) DO NOTHING
+        """
+    )
+
+    # ----- Platform models seed (v1.1 §2.1) -------------------------------
+    # Curated catalog of provider × model_id combinations the platform
+    # ships with. Each tuple is a ``(provider, model_id, model_family,
+    # display_name)``. The list is intentionally conservative: Claude
+    # entries match knowledge cutoff + agent compatibility (see
+    # ``rolemesh.core.backend_capabilities``); Bedrock entries use the
+    # ``us.anthropic.*`` cross-region inference profile pattern that
+    # Pi already expects via ``PI_MODEL_ID`` (see README §"Pi backend"
+    # and ``tests/agent/test_executor.py``); OpenAI / Google entries
+    # are placeholders to make the credential / Phase 2 selector UI
+    # rendering plausible — code paths that actually exercise these
+    # models live in Pi, not rolemesh, so they remain ``is_platform=
+    # TRUE`` and the catalog is the source of truth.
+    #
+    # ``ON CONFLICT DO NOTHING`` makes the seed idempotent against
+    # re-runs; rows are matched on the UNIQUE (provider, model_id)
+    # constraint.
+    _MODEL_SEED: list[tuple[str, str, str, str]] = [
+        ("anthropic", "claude-opus-4-7",            "claude", "Claude Opus 4.7"),
+        ("anthropic", "claude-sonnet-4-6",          "claude", "Claude Sonnet 4.6"),
+        ("anthropic", "claude-haiku-4-5-20251001",  "claude", "Claude Haiku 4.5"),
+        ("bedrock",   "us.anthropic.claude-sonnet-4-6", "claude", "Claude Sonnet 4.6 (Bedrock)"),
+        ("openai",    "gpt-4o",                     "gpt",    "GPT-4o"),
+        ("google",    "gemini-2.5-flash",           "gemini", "Gemini 2.5 Flash"),
+    ]
+    for provider, model_id, family, display in _MODEL_SEED:
+        await conn.execute(
+            "INSERT INTO models (provider, model_id, model_family, display_name) "
+            "VALUES ($1, $2, $3, $4) "
+            "ON CONFLICT (provider, model_id) DO NOTHING",
+            provider, model_id, family, display,
+        )
+
+
 async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record]) -> None:
     """Create tables and indexes.
 
@@ -1172,50 +1226,8 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         "ON eval_runs (tenant_id, coworker_config_sha256)"
     )
 
-    # Idempotent default tenant. OIDCAuthProvider._provision_tenant falls back
-    # to slug='default' for single-tenant deployments where the IdP doesn't
-    # carry a tenant claim. Without this row, the first OIDC login on a fresh
-    # database returns None and authentication fails opaquely.
-    await conn.execute(
-        """
-        INSERT INTO tenants (slug, name)
-        VALUES ('default', 'Default')
-        ON CONFLICT (slug) DO NOTHING
-        """
-    )
-
-    # ----- Platform models seed (v1.1 §2.1) -------------------------------
-    # Curated catalog of provider × model_id combinations the platform
-    # ships with. Each tuple is a ``(provider, model_id, model_family,
-    # display_name)``. The list is intentionally conservative: Claude
-    # entries match knowledge cutoff + agent compatibility (see
-    # ``rolemesh.core.backend_capabilities``); Bedrock entries use the
-    # ``us.anthropic.*`` cross-region inference profile pattern that
-    # Pi already expects via ``PI_MODEL_ID`` (see README §"Pi backend"
-    # and ``tests/agent/test_executor.py``); OpenAI / Google entries
-    # are placeholders to make the credential / Phase 2 selector UI
-    # rendering plausible — code paths that actually exercise these
-    # models live in Pi, not rolemesh, so they remain ``is_platform=
-    # TRUE`` and the catalog is the source of truth.
-    #
-    # ``ON CONFLICT DO NOTHING`` makes the seed idempotent against
-    # re-runs; rows are matched on the UNIQUE (provider, model_id)
-    # constraint.
-    _MODEL_SEED: list[tuple[str, str, str, str]] = [
-        ("anthropic", "claude-opus-4-7",            "claude", "Claude Opus 4.7"),
-        ("anthropic", "claude-sonnet-4-6",          "claude", "Claude Sonnet 4.6"),
-        ("anthropic", "claude-haiku-4-5-20251001",  "claude", "Claude Haiku 4.5"),
-        ("bedrock",   "us.anthropic.claude-sonnet-4-6", "claude", "Claude Sonnet 4.6 (Bedrock)"),
-        ("openai",    "gpt-4o",                     "gpt",    "GPT-4o"),
-        ("google",    "gemini-2.5-flash",           "gemini", "Gemini 2.5 Flash"),
-    ]
-    for provider, model_id, family, display in _MODEL_SEED:
-        await conn.execute(
-            "INSERT INTO models (provider, model_id, model_family, display_name) "
-            "VALUES ($1, $2, $3, $4) "
-            "ON CONFLICT (provider, model_id) DO NOTHING",
-            provider, model_id, family, display,
-        )
+    # Reference/seed data — see _seed_reference_data.
+    await _seed_reference_data(conn)
 
     # ----- RLS infrastructure (PR-B) ---------------------------------------
     # current_tenant_id() reads the per-connection GUC set by
