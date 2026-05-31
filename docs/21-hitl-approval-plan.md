@@ -385,3 +385,111 @@ MVP = S1–S4.
   convention); record the block-and-await vs old block-and-replay difference, the
   R1 finding, and the R2 recovery semantics.
 - **Exit:** cross-tenant isolation tests green; docs complete.
+
+## 11. Implementation outcomes (filled in as sessions landed)
+
+The feature shipped S1–S5 on `feat/hitl-approval-B`. This section consolidates
+the cross-session findings the plan asked each session to record, so the doc is
+self-contained for review and the eventual `main` merge.
+
+### 11.1 block-and-await vs the deleted block-and-replay (the core difference)
+
+| Aspect | Deleted v6.1 (block-and-replay) | This redesign (block-and-await) |
+|---|---|---|
+| Hook return on a gated call | `block=True` **immediately**; the agent's turn ends | `await`s the decision in place (≤ `APPROVAL_TIMEOUT`) |
+| Where the tool runs on approve | An out-of-band worker/executor **re-POSTs** the action later | The **same container, same turn** runs it; the agent gets the real result in its ReAct loop |
+| Agent's view of the result | Never sees it inside its own reasoning | Sees it inline and continues normally |
+| Moving parts | worker + executor + action-replay idempotency + audit-log trigger | none of these — one hook that blocks, one orchestrator coordinator |
+| Cost paid | none (turn ended) | a container is **held** ≤ `APPROVAL_TIMEOUT`; covered by the §8 suspend/reap machinery |
+
+The trade is deliberate: holding a container is the price of giving the agent a
+truthful, in-loop tool result instead of a detached replay. The §8 suspend /
+expiry / restart-recovery machinery is what makes that hold safe.
+
+### 11.2 R1 finding — does the post-approval tool call survive the block? (resolved, S2)
+
+**Conclusion: yes, in-process; one residual edge is environment-specific.**
+
+- The block is **cooperative** — the hook `await`s an `asyncio.Future`; the
+  event loop is never frozen, so MCP keepalives, NATS decision delivery, and
+  the idle/interrupt pollers keep ticking during the wait.
+- MCP connection lifecycle is **container/turn-scoped**, not per-call (Claude
+  registers `mcp_servers` for the whole `run_prompt`; Pi reuses
+  `McpServerConnection`s for the container lifetime). **Nothing in our code
+  closes an MCP connection during a block.**
+- **No container-held credential token ages out**: LLM creds are injected
+  per-request by the credential proxy (the container holds only
+  `ANTHROPIC_BASE_URL`, not a bearer); external MCP auth uses the static
+  per-request `X-RoleMesh-User-Id` header. There is no in-container token whose
+  validity lapses across a 5-min wait. (This is the one regression vs the old
+  model — which re-fetched creds at execution time — and it is closed.)
+- **Residual (not closeable by a unit test):** a *remote* MCP server or an
+  intermediary may drop an idle HTTP/SSE session during the block. The 5-min
+  timeout keeps the window short; mitigations if it proves real in staging:
+  lower `APPROVAL_TIMEOUT`, rely on transparent MCP client reconnect, or a
+  keepalive ping to gated servers. None are needed for correctness.
+- **"Tool failed after approval" UX:** there is no separate "approved-but-
+  failed" hard channel. A failed post-approval call surfaces through the
+  **normal tool-error path** (Claude `PostToolUseFailure`; Pi `tool_result`
+  with `is_error`) — the agent sees the error in-context and reports/retries.
+  A retry that re-hits the hook produces a **new** approval request.
+
+### 11.3 R2 recovery semantics — surviving an orchestrator restart (resolved, S3)
+
+`_groups` is in-memory and lost on restart, but an approval-held container
+**survives** the orchestrator, so recovery is more than reloading rows. On
+startup, `recover_pending()` scans `approval_requests WHERE status='pending'`
+(cross-tenant, via `admin_conn`) and for each row:
+
+- **Not expired** → `adopt_orphan_container` rebuilds a minimal active
+  `_GroupState`, **replays the suspend actions** (cancel idle handle, force
+  `idle_waiting=False`, `awaiting_approval[key].add`), restores the
+  `approval_decision` route (subject derived from the row's `job_id`), and
+  re-arms the expiry watcher. Without rebuilding `_GroupState` the re-adopted
+  container would be reaped immediately.
+- **Expired** → mark `expired` + fire the hard-channel notification.
+- The whole pass is **idempotent** across a double run.
+
+**Known ops caveat:** the default Docker runtime force-removes `rolemesh-`
+containers via `cleanup_orphans` in `_ensure_container_system_running` *before*
+recovery runs, so in that deployment the container to re-adopt is already gone.
+`recover_pending()` **degrades safely** there — the expiry watcher fires, the
+row is marked `expired`, and `_reap_adopted` clears the rebuilt state so the
+conversation is not wedged. The re-adoption path is correct for runtimes/configs
+that keep the container alive across a restart. (Tracked as an ops item, not an
+MVP blocker.)
+
+### 11.4 R4 (resolved, S4): two gate types, kept distinct
+
+Safety `require_approval` **stays a hard block and does not enter HITL**. HITL
+gates **only** tenant MCP-tool policy matches (the block-and-await hook). Pinned
+in code at the orchestrator MODEL_OUTPUT verdict branch
+(`verdict.action in ("block", "require_approval")`) and here. Do not merge them.
+
+## 12. S5 deliverables (this session)
+
+- **Policy CRUD REST** — `GET/POST /api/v1/approval-policies`,
+  `GET/PATCH/DELETE /api/v1/approval-policies/{id}` over the S1 `db/approval.py`
+  helpers; strictly tenant-scoped (RLS + explicit `WHERE tenant_id`). A
+  malformed `condition_expr` is rejected at the API (422) via a new pure
+  `validate_condition_expr` (the strict, write-time companion to the lenient,
+  fail-closed `evaluate_condition`).
+- **Pending-request read for web reconnect** — `GET /api/v1/approval-requests`
+  (optional `conversation_id` filter) returns only pending rows for the caller's
+  tenant; the projection exposes the tool name + summary, never the raw params.
+- **SPA approval card** — `rm-approval-card` renders `event.approval.requested`
+  (summary + ✅/❌), relays a tap via `V1WsClient.sendApprovalDecision`
+  (`request.approval_decision` frame; identity stamped server-side), and updates
+  in place on `event.approval.resolved`. On (re)connect the chat panel re-renders
+  in-flight cards from the REST read (the live push is fire-and-forget).
+- **Policy CRUD Web UI** — `rm-approval-policies-page` (under Settings →
+  Governance) with a structured §7 condition builder (`always` / a flat
+  `and`/`or` of `field op value` leaves). A stored expression too complex for
+  the flat builder opens read-only and is left untouched on save.
+- **Cross-tenant attack-sim (the S5 exit criterion)** — REST-layer tests prove a
+  tenant-A user wielding a tenant-B id gets a flat 404 on read/patch/delete (no
+  write, no existence oracle), list never leaks, the pending read is
+  tenant-scoped even under a foreign `conversation_id`, and a hostile body
+  cannot smuggle `tenant_id`/`id`. The DB-layer RLS + WHERE belts were already
+  proven in S1; this adds the HTTP layer above them.
+- **Docs** — this §11/§12 finalization + a `-cn.md` mirror.
