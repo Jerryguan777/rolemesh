@@ -67,6 +67,15 @@ class AgentInitData:
     # check behaviour). Each spec carries {check_id, version, stages,
     # cost_class, supported_codes, default_timeout_ms}.
     slow_check_specs: list[dict[str, object]] | None = None
+    # HITL approval policy snapshot (docs/21-hitl-approval-plan.md §S2). Each
+    # item is the dict form of an ``ApprovalPolicy``: {id, tenant_id,
+    # mcp_server_name, tool_name, condition_expr, enabled, priority,
+    # updated_at(iso8601)}. None / empty means "no approval gating this run" —
+    # the container does not register the approval hook (mirrors safety_rules).
+    # The orchestrator builds this from ``approval_policies`` rows; the
+    # container matches against it locally so a blocked MCP tool call needs no
+    # DB round-trip.
+    approval_policies: list[dict[str, object]] | None = None
 
     def serialize(self) -> bytes:
         return json.dumps(asdict(self)).encode()
