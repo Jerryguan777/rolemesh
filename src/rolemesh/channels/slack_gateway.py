@@ -24,7 +24,10 @@ def _slack_ts_to_iso(ts: str) -> str:
 
     try:
         return datetime.fromtimestamp(float(ts), tz=UTC).isoformat()
-    except (ValueError, OSError):
+    except (ValueError, OSError, OverflowError):
+        # OverflowError: an out-of-range epoch (e.g. a malformed many-digit
+        # Slack ts) raises "timestamp out of range for platform time_t",
+        # which is not a ValueError/OSError. Degrade to "" like the others.
         return ""
 
 
