@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 import asyncpg
 import nats
-from fastapi import FastAPI, Query, WebSocket
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -35,7 +35,7 @@ from rolemesh.db import (
     init_database,
     tenant_conn,
 )
-from webui import auth, ws
+from webui import auth
 from webui.admin import router as admin_router
 from webui.config import (
     CORS_ORIGINS,
@@ -80,8 +80,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             max_age=_STREAM_MAX_AGE_S,
         )
     )
-
-    ws.set_jetstream(js)
 
     # Initialize the shared DB pool (used by both admin API and web binding auth)
     await _init_db()
@@ -298,19 +296,6 @@ async def get_messages(
     return JSONResponse(result)
 
 
-@app.websocket("/ws/chat")
-async def websocket_chat(
-    websocket: WebSocket,
-    agent_id: str = "",
-    token: str = "",
-    chat_id: str = "",
-) -> None:
-    if not agent_id or not token:
-        await websocket.close(code=1008, reason="Missing agent_id or token")
-        return
-    await ws.handle_ws(websocket, agent_id, token, chat_id)
-
-
 # Admin API router (legacy /api/admin)
 app.include_router(admin_router)
 
@@ -326,9 +311,10 @@ from webui.v1.errors import install_error_handler  # noqa: E402
 install_error_handler(app)
 app.include_router(api_v1_router)
 
-# Mount the v1 WebSocket stream alongside the REST surface. The
-# legacy ``/ws/chat`` handler remains so existing SPA builds keep
-# working during the 01c migration window.
+# v1 WebSocket stream. PR-B (2026-05-31) removed the legacy
+# ``/ws/chat`` endpoint after migrating the Stop button into the v1
+# ``request.stop`` client frame — the SPA now uses a single WS per
+# chat-panel for both streaming and Stop.
 from webui.v1.ws_stream import register_routes as _register_v1_ws  # noqa: E402
 
 _register_v1_ws(app)

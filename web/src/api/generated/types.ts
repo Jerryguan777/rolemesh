@@ -1796,7 +1796,26 @@ export interface components {
             /** Format: uuid */
             run_id: string;
         };
-        WsClientFrame: components["schemas"]["WsClientFrameRequestRun"] | components["schemas"]["WsClientFrameRequestCancel"];
+        WsClientFrameRequestStop: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "request.stop";
+            /**
+             * Format: uuid
+             * @description Advisory only — logged for traceability but not used for
+             *     routing. The orchestrator identifies the target container
+             *     from binding_id+chat_id (both pulled from the
+             *     authenticated handshake, NOT from any client payload —
+             *     IDOR guard, see webui/ws.py:228-231 for the original
+             *     legacy comment). The SPA may not know a run_id yet (race
+             *     between fast Stop click and the first event.run.started
+             *     echo); the field is therefore optional.
+             */
+            run_id?: string | null;
+        };
+        WsClientFrame: components["schemas"]["WsClientFrameRequestRun"] | components["schemas"]["WsClientFrameRequestCancel"] | components["schemas"]["WsClientFrameRequestStop"];
     };
     responses: {
         /** @description Malformed request. */
