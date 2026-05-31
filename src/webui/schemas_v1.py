@@ -616,171 +616,6 @@ class Run(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Approvals (design §3 Phase 3 / §11 INV-4 + INV-7)
-# ---------------------------------------------------------------------------
-
-
-ApprovalPostExecMode = Literal["report"]
-ApprovalRequestStatus = Literal[
-    "pending",
-    "approved",
-    "rejected",
-    "expired",
-    "cancelled",
-    "skipped",
-    "executing",
-    "executed",
-    "execution_failed",
-    "execution_stale",
-]
-ApprovalRequestSource = Literal[
-    "proposal", "auto_intercept", "safety_require_approval"
-]
-ApprovalListScope = Literal["mine", "all"]
-ApprovalDecideAction = Literal["approve", "reject"]
-
-
-class ApprovalPolicy(BaseModel):
-    """Wire projection of an ``approval_policies`` row.
-
-    v6.1 §P2.4 (decision #2) — ``approver_user_ids`` is intentionally
-    NOT exposed on this projection. The DB column is preserved as a
-    seam for a future SoD-aware extension; the v6.1 engine routes
-    decisions to the requester (self-approval) and never reads the
-    column, so surfacing it on the API would mislead operators about
-    its effect.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    id: str
-    tenant_id: str
-    coworker_id: str | None = None
-    mcp_server_name: str
-    tool_name: str
-    condition_expr: dict[str, object]
-    notify_conversation_id: str | None = None
-    auto_expire_minutes: int = Field(ge=1, le=10080)
-    post_exec_mode: ApprovalPostExecMode
-    enabled: bool
-    priority: int = Field(ge=-1000, le=1000)
-    created_at: str
-    updated_at: str
-
-
-class ApprovalPolicyCreate(BaseModel):
-    """``POST /api/v1/approval-policies`` body.
-
-    v6.1 §P2.4 — ``approver_user_ids`` removed from the input
-    surface. The engine self-approves under v6.1; the DB column is
-    retained but not writable through the public API.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    mcp_server_name: str = Field(min_length=1)
-    tool_name: str = Field(min_length=1)
-    condition_expr: dict[str, object]
-    coworker_id: str | None = None
-    notify_conversation_id: str | None = None
-    auto_expire_minutes: int = Field(default=60, ge=1, le=10080)
-    post_exec_mode: ApprovalPostExecMode = "report"
-    enabled: bool = True
-    priority: int = Field(default=0, ge=-1000, le=1000)
-
-
-class ApprovalPolicyUpdate(BaseModel):
-    """``PATCH /api/v1/approval-policies/{id}`` body.
-
-    Every field is optional; ``model_fields_set`` discriminates
-    "leave alone" from "explicit clear". The DB helper accepts the
-    same shape and treats explicit ``None`` for nullable columns as
-    "clear".
-
-    v6.1 §P2.4 — ``approver_user_ids`` removed; see
-    :class:`ApprovalPolicyCreate` for the rationale.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    mcp_server_name: str | None = Field(default=None, min_length=1)
-    tool_name: str | None = Field(default=None, min_length=1)
-    condition_expr: dict[str, object] | None = None
-    notify_conversation_id: str | None = None
-    auto_expire_minutes: int | None = Field(default=None, ge=1, le=10080)
-    post_exec_mode: ApprovalPostExecMode | None = None
-    enabled: bool | None = None
-    priority: int | None = Field(default=None, ge=-1000, le=1000)
-
-
-class ApprovalRequest(BaseModel):
-    """Wire projection of an ``approval_requests`` row.
-
-    ``policy_id`` is nullable because (a) the proposal default-mode
-    path stores no policy, and (b) deleting a policy
-    ``SET NULL``-cascades into pending requests so they survive
-    a policy retraction (design §3 DELETE 语义).
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    id: str
-    tenant_id: str
-    coworker_id: str
-    conversation_id: str | None = None
-    policy_id: str | None = None
-    user_id: str
-    job_id: str
-    mcp_server_name: str
-    actions: list[dict[str, object]] = Field(default_factory=list)
-    action_hashes: list[str] = Field(default_factory=list)
-    rationale: str | None = None
-    source: ApprovalRequestSource
-    status: ApprovalRequestStatus
-    post_exec_mode: ApprovalPostExecMode
-    resolved_approvers: list[str] = Field(default_factory=list)
-    requested_at: str
-    expires_at: str
-    created_at: str
-    updated_at: str
-
-
-class ApprovalAuditEntry(BaseModel):
-    """Wire projection of an ``approval_audit_log`` row."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    id: str
-    request_id: str
-    action: str
-    actor_user_id: str | None = None
-    note: str | None = None
-    metadata: dict[str, object] = Field(default_factory=dict)
-    created_at: str
-
-
-class ApprovalRequestDetail(ApprovalRequest):
-    """``GET /api/v1/approvals/{id}`` body — request + inline audit_log."""
-
-    audit_log: list[ApprovalAuditEntry] = Field(default_factory=list)
-
-
-class ApprovalDecide(BaseModel):
-    """``POST /api/v1/approvals/{id}/decide`` body.
-
-    ``action`` is the HTTP wire enum (``approve``/``reject``).
-    The handler translates it via INV-7's
-    :func:`rolemesh.approval.enum_translate.http_action_to_outcome`;
-    engine code never sees the wire string.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    action: ApprovalDecideAction
-    note: str | None = Field(default=None, max_length=1000)
-
-
-# ---------------------------------------------------------------------------
 # Safety (design §3 Phase 4 — GET-only on v1; admin keeps writes)
 # ---------------------------------------------------------------------------
 
@@ -859,14 +694,7 @@ class SafetyFinding(BaseModel):
 
 
 class SafetyDecision(BaseModel):
-    """Wire projection of a ``safety_decisions`` row.
-
-    The list endpoint returns the same shape with ``approval_context``
-    elided (always ``None``) so list payloads stay small. The detail
-    endpoint surfaces ``approval_context`` for require_approval rows
-    within the 24-hour retention window (cleared by the retention
-    sweep — see ``cleanup_old_safety_approval_contexts``).
-    """
+    """Wire projection of a ``safety_decisions`` row."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -881,7 +709,6 @@ class SafetyDecision(BaseModel):
     findings: list[SafetyFinding] = Field(default_factory=list)
     context_digest: str
     context_summary: str
-    approval_context: dict[str, object] | None = None
     created_at: str
 
 
@@ -968,23 +795,6 @@ class WsServerEventRunError(BaseModel):
     details: dict[str, object] | None = None
 
 
-class WsServerEventApprovalRequired(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    type: Literal["event.approval.required"]
-    approval_id: str
-    run_id: str | None = None
-    summary: dict[str, object]
-
-
-class WsServerEventApprovalResolved(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    type: Literal["event.approval.resolved"]
-    approval_id: str
-    decision: Literal["approve", "deny", "expired", "cancelled"]
-    actor_user_id: str | None = None
-    note: str | None = None
-
-
 # Tagged union over ``type``. Pydantic v2's Field discriminator picks
 # the right member based on the literal value, giving validation
 # errors that name the offending field (rather than the generic
@@ -994,8 +804,6 @@ WsServerEventModel = (
     | WsServerEventRunToken
     | WsServerEventRunCompleted
     | WsServerEventRunError
-    | WsServerEventApprovalRequired
-    | WsServerEventApprovalResolved
 )
 
 
@@ -1012,18 +820,9 @@ class WsClientFrameRequestCancel(BaseModel):
     run_id: str
 
 
-class WsClientFrameRequestApproval(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    type: Literal["request.approval"]
-    approval_id: str
-    decision: Literal["approve", "deny"]
-    note: str | None = None
-
-
 WsClientFrameModel = (
     WsClientFrameRequestRun
     | WsClientFrameRequestCancel
-    | WsClientFrameRequestApproval
 )
 
 

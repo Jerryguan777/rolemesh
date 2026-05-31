@@ -31,7 +31,7 @@ RoleMesh 是一个面向 **coworker(AI agent)** 的平台。coworker 是**成品
         │ 门控 providers + families   ▼
         └───────────────────────▶  COWORKER  ◀──── 绑定的 skills(按 coworker、可启停)
                                       ▲   ▲
-                       绑定的 MCP ────┘   └───── 受 approval policies + safety rules 治理
+                       绑定的 MCP ────┘   └───── 受 safety rules 治理
                        servers(按 coworker、
                        enabled_tools 白名单)
 ```
@@ -49,7 +49,6 @@ RoleMesh 是一个面向 **coworker(AI agent)** 的平台。coworker 是**成品
 | **Credential** | `CredentialResponse` / `CredentialUpsert` | **每个 provider 一把。** Upsert body 是 `api_key`(+ 可选 `extras`,如 `api_base`/`region`)。key 在服务端加密、**永不回传** —— GET 只返回 `provider` + 时间戳。这是**解锁某 provider 模型的根依赖**。 |
 | **MCP server** | `MCPServer`(注册表)+ `CoworkerMCPBinding`(绑定) | 工具服务器。注册表是租户级(`/mcp-servers`);每个 coworker 通过 `/coworkers/{id}/mcp-servers` **绑定**其子集,带 `enabled_tools` 白名单(三态:`null`=全部、`[]`=全关、列表=允许清单)。 |
 | **Skill** | `Skill` / `SkillSummary` + `CoworkerSkillBinding` | 一个"指令 + 文件"的包。租户级目录(`/skills`);按 coworker 绑定。一个 skill = `SKILL.md`(始终存在、受保护)+ 一个 `files` map:`path → SkillFile{content, mime_type}`。 |
-| **Approval policy** | `ApprovalPolicy` | "哪些工具调用需要人来签字"。指向一个 `(mcp_server_name, tool_name)` 对,可选地限定到某个 `coworker_id`(`null` = 全部)。有 `condition_expr`、`priority`、`post_exec_mode`、审批人、过期时间。 |
 | **Safety rule** | `SafetyRule` + `SafetyCheck` / `SafetyDecision` | 确定性护栏。平台拥有 **checks**(`/safety/checks`,只读目录);租户从中**组合 rules**(`check_id` + config + stage + 作用域 + verdict)。fail = block。决策会被记录。*(见 §10.2。)* |
 | **Run** | `Run` | 一次 agent 执行(挂在某 conversation 上):`status`、`usage`、`error`、时间戳。 |
 
@@ -76,10 +75,9 @@ RoleMesh 是一个面向 **coworker(AI agent)** 的平台。coworker 是**成品
 
 - **Operate** —— 和 coworker 对话。在带 coworker 切换器的 **chat 外壳**里。
 - **Configure** —— 配置 coworker 及其零件。在一个统一的**管理外壳**里。
-- **Observe** —— 运行记录、安全决策、已处理的审批。在 **Activity**(只读)里。
+- **Observe** —— 运行记录、安全决策。在 **Activity**(只读)里。
 
-每个治理对象都有一对**孪生**:一个**规则**(configure)和一个**日志/队列**(observe)。例如:approval *policies*
-在外壳里;实时的 approval *队列*是顶栏 inbox,已处理日志在 Activity。safety *rules* 在外壳里;safety
+每个治理对象都有一对**孪生**:一个**规则**(configure)和一个**日志**(observe)。例如:safety *rules* 在外壳里;safety
 *decisions* 在 Activity。
 
 ### 统一的管理外壳("Settings"画面)
@@ -95,7 +93,6 @@ Building blocks          ← 零件
   · Credentials
 Governance
   · Safety rules
-  · Approval policies
 Workspace
   · General
   · Members
@@ -115,8 +112,7 @@ Account
 
 ### 顶栏(在 chat 外壳里)
 
-三个图标动作 + 一个租户 pill:**Activity**(脉冲)→ 观测画面;**Approvals**(对勾 + 角标)→ 实时队列
-popover(`GET /approvals`,通过 `POST /approvals/{id}/decide` 处理);**Settings**(齿轮)→ 管理外壳。
+两个图标动作 + 一个租户 pill:**Activity**(脉冲)→ 观测画面;**Settings**(齿轮)→ 管理外壳。
 左下角的**用户栏**向上弹出菜单,含 **Settings** 和 **Log out**。
 
 ### 一致性规则
@@ -143,7 +139,7 @@ popover(`GET /approvals`,通过 `POST /approvals/{id}/decide` 处理);**Settings
 | 5 | **Skills** | `GET /skills` | 一组 skill 绑定 → `POST /coworkers/{id}/skills/{skill_id}`。"+ New skill" 就地打开 skill 对话框。 |
 | 6 | **Review** | 草稿 | `POST /coworkers`(identity + engine + model),然后是第 4、5 步的绑定调用。新 coworker 以 `draft`/`paused` 出现在 roster 里,激活后转 active。 |
 
-> **Guardrails 不是向导的一步。** approval policies + safety rules 是租户级的(创建后再按 coworker 限定),
+> **Guardrails 不是向导的一步。** safety rules 是租户级的(创建后再按 coworker 限定),
 > 放在 Governance —— 硬塞进创建流程会让一个多数人会跳过的步骤占据过重的位置。新 coworker 继承租户默认。
 
 用户**感受到的**级联:选 Engine → 模型列表变化 → 若选中模型的 provider 没 key,就在那儿补上。两道门(引擎、凭据)
@@ -179,22 +175,19 @@ popover(`GET /approvals`,通过 `POST /approvals/{id}/decide` 处理);**Settings
 
 | 画面(重设计后) | 已有组件 | 主要端点 |
 |---|---|---|
-| Chat 外壳 + 切换器 | `rm-chat-panel`、`rm-message-*`、`rm-inline-approval`、`rm-sidebar` | `/coworkers`、`/coworkers/{id}/conversations`、`/conversations/{id}/messages`、WS ticket 走 `/auth/ws-ticket` |
+| Chat 外壳 + 切换器 | `rm-chat-panel`、`rm-message-*`、`rm-sidebar` | `/coworkers`、`/coworkers/{id}/conversations`、`/conversations/{id}/messages`、WS ticket 走 `/auth/ws-ticket` |
 | Coworkers(roster + 向导) | `rm-coworkers-page`(+ 新增 `rm-coworker-wizard`) | `GET/POST /coworkers`、`GET/PATCH/DELETE /coworkers/{id}`、`/coworkers/{id}/mcp-servers` 与 `/coworkers/{id}/skills` 下的绑定 |
 | MCP servers | `rm-mcp-servers-page`(+ `rm-mcp-server-dialog`) | `/mcp-servers`(注册表)CRUD |
 | Skills | `rm-skills-page`、`rm-skill-detail-page`(+ `rm-skill-dialog`) | `/skills` CRUD、`/skills/{id}/files/{path}` 逐文件 |
 | Models | `rm-models-page` | `GET /models` ⨯ `GET /tenant/credentials` ⨯ `GET /backends` |
 | Credentials | `rm-credentials-page`(+ `rm-credential-dialog`) | `GET /tenant/credentials`、`PUT/DELETE /tenant/credentials/{provider}` |
 | Governance · Safety rules | `rm-safety-rules-page` | `/safety/rules`(+ `/{id}/audit`)、`/safety/checks` |
-| Governance · Approval policies | *(新页)* | `/approval-policies` CRUD |
 | Activity · Runs | *(新增)* | `GET /runs/{id}`、`POST /runs/{id}/cancel`、run 事件走 WS |
 | Activity · Safety decisions | `rm-safety-decisions-page` | `GET /safety/decisions`(+ `/{id}`) |
-| Activity · Approval log | `rm-approvals-page`(已处理视图) | `GET /approvals`、`/{id}/audit-log` |
-| 顶栏 approvals inbox | `rm-approvals-page`(实时视图) | `GET /approvals`、`POST /approvals/{id}/decide` |
 
 **要应用的 IA delta:** 当前 `web/src/router.ts` 是**扁平** sidebar(Chat、Coworkers、MCP servers、Models、
-Skills、Credentials、Bindings、Approvals、Safety —— 全是顶层)。重设计引入:(a) 带 coworker 切换器的 chat 外壳、
-(b) Coworkers 置顶的分组管理外壳、(c) 作为独立 observe 画面的 Activity、(d) 顶栏 approvals inbox。路由可继续用
+Skills、Credentials、Bindings、Safety —— 全是顶层)。重设计引入:(a) 带 coworker 切换器的 chat 外壳、
+(b) Coworkers 置顶的分组管理外壳、(c) 作为独立 observe 画面的 Activity。路由可继续用
 hash;把管理路由嵌进一个外壳下(`#/manage/coworkers`、`#/manage/mcp-servers`、…),`#/activity/*` 保持独立。
 
 ---
@@ -202,8 +195,8 @@ hash;把管理路由嵌进一个外壳下(`#/manage/coworkers`、`#/manage/mcp-s
 ## 6. 原型省略、但实现里必须有的状态
 
 每个列表和表单的 loading / empty / error;乐观更新 + 失败回滚;凭据→模型的响应式交叉(任何地方加了 key,
-都要更新 Models + 向导模型步);每个请求带租户上下文;列表会增长处的分页(runs、decisions、approvals);
-Activity runs 和 approval inbox 用**实时**数据(WS,不是轮询,沿用已有的 `web/src/ws/v1_client.ts`)。
+都要更新 Models + 向导模型步);每个请求带租户上下文;列表会增长处的分页(runs、decisions);
+Activity runs 用**实时**数据(WS,不是轮询,沿用已有的 `web/src/ws/v1_client.ts`)。
 
 ---
 
@@ -227,7 +220,6 @@ v4 + Shadow DOM 摩擦)。每个画面用 Playwright 截图循环对着原型对
 | Skill 文件是自由文件名 | `files` 是 `path → SkillFile` map;`SKILL.md` **必填且受保护** | 预置 `SKILL.md`、禁止删除它、其余作为 `files` map 发送;编辑逐文件进行。 |
 | Models 是一个扁平的 enabled/disabled 列表 | `Model` 带 `provider`+`family`;可用性是算出来的(引擎门 + 凭据门) | 按 provider 分组,用 `/backends` + `/tenant/credentials` 算 ready/锁定。 |
 | "Engine" | `agent_backend` / `BackendName` = `claude` \| `pi` | "Engine" 是 UI 叫法;值是 `claude`(Claude Agent SDK)/ `pi`。 |
-| Approval policy 是个简单开关 | `ApprovalPolicy` 指向 `(mcp_server_name, tool_name)`、可选 `coworker_id`、有 `condition_expr`/`priority`/`post_exec_mode` | 围绕这个元组 + 作用域 + 条件来做策略编辑器。 |
 
 ---
 
@@ -268,11 +260,8 @@ v4 + Shadow DOM 摩擦)。每个画面用 Playwright 截图循环对着原型对
   + `stage` + `priority` + 可选 `coworker_id` 作用域;verdict 有 `allow` / `block` / `redact` / `warn` /
   `require_approval`。**所以 Safety rules 页是一个基于 check 目录的、可编辑的规则编排页,而非只读的 "enforced"
   列表。**(这把"平台所有、不可改"的说法收紧到 *check* 这一层。)
-- **Approval policy 编辑器。** `ApprovalPolicy` = `(mcp_server_name, tool_name)` + `condition_expr`(对象)
-  + `priority` + `post_exec_mode` + `approver_user_ids` + `notify_conversation_id` +
-  `auto_expire_minutes` + 可选 `coworker_id` 作用域。原型那个面板是占位级的;给真编辑器定个 v1 范围。
-- **MCP 绑定的粒度。** 契约支持按工具的 `enabled_tools` 白名单(三态)和按工具的 `tool_reversibility`
-  (自动批准覆盖)。向导只整服务器绑定(`enabled_tools = null` = 全开)。需拍板:v1 是否只做整服务器、per-tool 后置。
+- **MCP 绑定的粒度。** 契约支持按工具的 `enabled_tools` 白名单(三态)和按工具的 `tool_reversibility`。
+  向导只整服务器绑定(`enabled_tools = null` = 全开)。需拍板:v1 是否只做整服务器、per-tool 后置。
 - **`agent_role` / A2A 层级。** `agent_role` ∈ `{super_agent, agent}` 暗示有编排层级(super-agent 协调
   sub-agent)。扁平 roster 没表达它。需决定:UI 是否呈现这种层级、向导是否让用户选 `agent_role`。(扩展 §9。)
 - **Channel。** `ChannelType` = `web` / `telegram` / `slack`(注意:**没有** "feishu" —— 那是原型里的一个 MCP

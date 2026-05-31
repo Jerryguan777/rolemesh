@@ -1,6 +1,6 @@
 # 攻击模拟矩阵
 
-追踪针对 RoleMesh 三层防御（容器加固、内容安全管道、网络出向）以及审批和租户隔离面的所有建模攻击，并记录每项防御的当前状态。
+追踪针对 RoleMesh 三层防御（容器加固、内容安全管道、网络出向）以及租户隔离面的所有建模攻击，并记录每项防御的当前状态。
 
 本文档是与测试套件对齐的**快照**。权威状态保存在 `tests/attack_sim/` 和 `scripts/verify-hardening.sh` 中；如果此处的状态与测试结果不一致，以测试为准。本矩阵的用途在于指引方向——"我们建模了哪些攻击、本缺口属于哪一类、该防御设计要读哪份文档"。
 
@@ -13,7 +13,6 @@
 - [`15-safety-framework-architecture.md`](15-safety-framework-architecture.md) —— B4、C、D 类（内容检查）
 - [`16-egress-control-architecture.md`](16-egress-control-architecture.md) —— D4 以及 B 的部分（网络外泄）
 - [`6-auth-architecture.md`](6-auth-architecture.md)、[`4-multi-tenant-architecture.md`](4-multi-tenant-architecture.md) —— E 类
-- [`12-approval-architecture.md`](12-approval-architecture.md) —— F 类
 
 ---
 
@@ -92,26 +91,7 @@
 |---|---|---|---|---|
 | E1 | 在 NATS 负载中伪造 tenantId | Engine `_tenant_matches` 守卫 | `test_E_tenant_isolation::test_E1_*` | ✅ |
 | E2 | 伪造属于另一租户的 coworkerId | IPC 分发器使用源 coworker 的权威租户 | `test_E2_forged_coworker_id_dropped` | ✅ |
-| E3 | 通过 REST 跨租户读取审计 | `list_approval_requests` 按 `tenant_id` 过滤 | `test_E3_cross_tenant_audit_read_blocked` | ✅ |
-| E4 | 跨租户 `/decide` 调用 | REST 对 `req.tenant_id != user.tenant_id` 返回 404 | `test_E4_cross_tenant_decide_blocked` | ✅ |
-| E5 | 跨租户幂等键碰撞 | `<request_id>:<index>` 格式 | `test_E5_idempotency_keys_unique_across_tenants` | ✅ |
 | E6 | NATS subject 侧信道（A 读取 B 的任务） | NATS account-per-tenant（未实现） | `test_E6_nats_subject_sidechannel_isolation` | ❌ xfail（NATS ACL 缺口） |
-
----
-
-## F. 审批流滥用
-
-由 [`12-approval-architecture.md`](12-approval-architecture.md) 支撑。
-
-| ID | 攻击 | 防御 | 测试 | 状态 |
-|---|---|---|---|---|
-| F1 | 非审批人执行 decide | 原子 CAS 要求用户位于 `resolved_approvers` 中 → `ForbiddenError` | `test_F_approval_abuse::test_F1_*` | ✅ |
-| F2 | 并发 approve 竞争 | 原子 `pending → approved` CAS | `test_F2_concurrent_approve_wins_once` | ✅ |
-| F3 | 自我提权：编辑策略加入自己后审批 | 在请求创建时对 `resolved_approvers` 做快照 | `test_F3_self_promotion_cannot_reach_prior_pending` | ✅ |
-| F4 | NATS decided 事件重放 | Worker 的原子 `approved → executing` 申领 | `test_F4_decided_event_replay_does_not_double_execute` | ✅ |
-| F5 | MCP JSON-RPC 错误伪装成成功 | Worker 将 HTTP 200 + `body.error` 归类为失败 | `test_F5_jsonrpc_error_classified_as_failure` | ✅ |
-| F6 | Stop → proposal NATS 竞争 | 由过期循环回收孤儿 pending | `test_F6_stop_race_orphan_reaped_by_expiry` | 📝 documented limitation |
-| F7 | 并发 expire + approve | 两者均使用 `pending`-CAS；一方胜出 | `test_F7_expire_and_approve_race_wins_once` | ✅ |
 
 ---
 
@@ -124,7 +104,6 @@
 | G1 | 容器内 fork 炸弹 | PidsLimit 512 | 仅 runbook | 🔧 manual |
 | G2 | 死循环 agent | `CONTAINER_TIMEOUT` 30 分钟终止 | 仅 runbook | 🔧 manual |
 | G3 | 超大 `tool_input` 负载 | 管道检查保持线性 | `test_G_dos::test_G3_*` | ✅ |
-| G4 | 审批提议洪水 | 原子插入 + 按行的审计触发器 | `test_G4_approval_flood_does_not_corrupt_state` | ✅ |
 | G5 | 注册表查询风暴 | 基于 dict 的 O(1) 查找 | `test_G5_registry_lookup_is_constant_time` | ✅ |
 | G6 | 审计写入压力 | 每事件单次插入 | `test_G6_audit_write_pressure` | ✅ |
 
@@ -153,11 +132,10 @@
 | B. 密钥 | 10 | 1 | 1 | 1 |
 | C. Prompt 注入 | 7 | 0 | 3 | 0 |
 | D. 数据外泄 | 7 | 1 | 0 | 0 |
-| E. 租户隔离 | 5 | 1 | 0 | 0 |
-| F. 审批滥用 | 7 | 0 | 1 | 0 |
-| G. DoS | 4 | 0 | 0 | 2 |
+| E. 租户隔离 | 2 | 1 | 0 | 0 |
+| G. DoS | 3 | 0 | 0 | 2 |
 | H. 配置 | 8 | 0 | 0 | 1 |
-| **合计** | **60** | **3** | **5** | **10** |
+| **合计** | **49** | **3** | **4** | **10** |
 
 ---
 

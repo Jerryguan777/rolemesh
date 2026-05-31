@@ -482,7 +482,7 @@ class TestActionTranslationP02:
         )
         assert verdict is not None
         assert verdict.block is True
-        assert verdict.reason == "Awaiting approval"
+        assert verdict.reason == "Blocked by safety policy"
 
     @pytest.mark.asyncio
     async def test_pretool_warn_returns_none_but_audits(self) -> None:
@@ -606,7 +606,7 @@ class TestActionTranslationP02:
         )
         assert verdict is not None
         assert verdict.block is True
-        assert verdict.reason == "Awaiting approval"
+        assert verdict.reason == "Blocked by safety policy"
 
     # -- POST_TOOL_RESULT -----------------------------------------------
 

@@ -2,15 +2,14 @@
 
 Design §4 + §11 INV-6 says every terminal path UPDATEs
 ``runs.{status, completed_at, usage}`` via the lifecycle helper.
-This file parametrises the seven named wrappers in
+This file parametrises the named wrappers in
 :mod:`rolemesh.runs.terminators` and pins:
 
 * Each wrapper drives the row to the expected terminal status.
 * ``completed_at`` becomes non-null after the wrapper returns.
 * The ``error`` column carries the structured detail the wrapper
   is supposed to attach (path 2 carries the WS error code; path
-  5 carries the approval id; path 6 carries the exit code; path
-  7 carries the reauth reason).
+  6 carries the exit code; path 7 carries the reauth reason).
 * **Mutation guarantee** — a wrapper monkeypatched to no-op
   fails its row's assertion. This is what makes "every path
   writes" enforceable rather than aspirational.
@@ -43,7 +42,6 @@ from rolemesh.db import (
 from rolemesh.runs import (
     create_run,
     get_run,
-    terminate_run_via_approval_reject,
     terminate_run_via_container_crash,
     terminate_run_via_reauth_required,
     terminate_run_via_scheduled_completion,
@@ -142,16 +140,6 @@ ALL_PATHS: list[tuple[Any, str, dict[str, Any], str, Callable[[Any], None] | Non
         {"success": True, "usage": {"total_tokens": 3}},
         "completed",
         None,
-    ),
-    (
-        terminate_run_via_approval_reject,
-        "path5_approval_reject",
-        {"approval_id": "00000000-0000-0000-0000-000000000abc"},
-        "failed",
-        lambda err: (
-            err["code"] == "APPROVAL_REJECTED"
-            and err["approval_id"] == "00000000-0000-0000-0000-000000000abc"
-        ),
     ),
     (
         terminate_run_via_container_crash,

@@ -2,13 +2,12 @@
 //
 // Routes (hash-based, owned by this shell):
 //
-//   #/activity                     → index (two cards link out)
+//   #/activity                     → index (card links out)
 //   #/activity/safety-decisions    → v1.1 <rm-safety-decisions-page>
-//   #/activity/approvals           → v1.1 <rm-approvals-page mode="resolved">
 //
 // "Runs" tab is deliberately absent — locked decision #3 from the v2
-// session brief: per-run timeline is parked for v3. The two cards on
-// the index cover the audit surfaces operators actually ask for.
+// session brief: per-run timeline is parked for v3. The card on
+// the index covers the audit surface operators actually ask for.
 //
 // The shell is full-overlay (covers the chat under it). The header
 // owns the back-to-chat X and a tab bar that mirrors the active hash.
@@ -25,20 +24,17 @@
 import { LitElement, html, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import './approvals-page.js';
 import './safety-decisions-page.js';
 import {
   iconActivity,
-  iconApprovals,
   iconChevronRight,
   iconClose,
 } from './icons.js';
 
-type ActivityTab = 'index' | 'safety-decisions' | 'approvals';
+type ActivityTab = 'index' | 'safety-decisions';
 
 function tabFromHash(hash: string): ActivityTab {
   if (hash.startsWith('#/activity/safety-decisions')) return 'safety-decisions';
-  if (hash.startsWith('#/activity/approvals')) return 'approvals';
   return 'index';
 }
 
@@ -77,11 +73,9 @@ export class RmActivityShell extends LitElement {
 
   private goTab(tab: ActivityTab): void {
     const next =
-      tab === 'index'
-        ? '#/activity'
-        : tab === 'safety-decisions'
-          ? '#/activity/safety-decisions'
-          : '#/activity/approvals';
+      tab === 'safety-decisions'
+        ? '#/activity/safety-decisions'
+        : '#/activity';
     if (location.hash === next) return;
     location.hash = next;
   }
@@ -90,7 +84,6 @@ export class RmActivityShell extends LitElement {
     const items: { id: ActivityTab; label: string }[] = [
       { id: 'index', label: 'Overview' },
       { id: 'safety-decisions', label: 'Safety decisions' },
-      { id: 'approvals', label: 'Approval log' },
     ];
     return html`
       <div class="as-tabs" role="tablist" aria-label="Activity sections">
@@ -122,23 +115,8 @@ export class RmActivityShell extends LitElement {
           <span class="as-card-body">
             <span class="as-card-title">Safety decisions</span>
             <span class="as-card-sub">
-              Live audit of allow / block / approve verdicts across all
-              conversations on this tenant.
-            </span>
-          </span>
-          <span class="as-card-arrow">${iconChevronRight(18)}</span>
-        </button>
-        <button
-          class="as-card"
-          data-testid="activity-card-approvals"
-          @click=${() => this.goTab('approvals')}
-        >
-          <span class="as-card-icon">${iconApprovals(22)}</span>
-          <span class="as-card-body">
-            <span class="as-card-title">Approval log</span>
-            <span class="as-card-sub">
-              Past tool-call approvals — who decided, when, and the
-              context that triggered each request.
+              Live audit of allow / block / redact / warn verdicts across
+              all conversations on this tenant.
             </span>
           </span>
           <span class="as-card-arrow">${iconChevronRight(18)}</span>
@@ -152,9 +130,7 @@ export class RmActivityShell extends LitElement {
     const body =
       active === 'safety-decisions'
         ? html`<rm-safety-decisions-page></rm-safety-decisions-page>`
-        : active === 'approvals'
-          ? html`<rm-approvals-page mode="resolved"></rm-approvals-page>`
-          : this.renderIndex();
+        : this.renderIndex();
     return html`
       <style>
         rm-activity-shell {

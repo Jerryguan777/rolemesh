@@ -27,11 +27,6 @@ from fastapi.testclient import TestClient
 
 from webui.api_v1 import router
 from webui.schemas_v1 import (
-    ApprovalAuditEntry,
-    ApprovalDecide,
-    ApprovalPolicy,
-    ApprovalPolicyCreate,
-    ApprovalRequest,
     Backend,
     Conversation,
     CoworkerMCPBindingCreate,
@@ -358,117 +353,6 @@ def test_v1_coworker_mcp_binding_create_required_matches_pydantic_model() -> Non
     )
 
 
-def test_phase_3_approval_endpoints_are_present_in_yaml() -> None:
-    """03a session lands these v1 endpoints; the legacy
-    /api/admin/approval* surface stays for the 6-month
-    compatibility window (NOT listed here).
-    """
-    spec = _load_spec()
-    paths = set(spec["paths"].keys())  # type: ignore[union-attr]
-    expected = {
-        "/api/v1/approval-policies",
-        "/api/v1/approval-policies/{id}",
-        "/api/v1/approvals",
-        "/api/v1/approvals/{id}",
-        "/api/v1/approvals/{id}/audit-log",
-        "/api/v1/approvals/{id}/decide",
-    }
-    missing = expected - paths
-    assert not missing, f"yaml missing v1 approval endpoints: {sorted(missing)}"
-
-
-def test_v1_approval_policy_required_matches_pydantic_model() -> None:
-    spec = _load_spec()
-    yaml_required = set(_schema(spec, "ApprovalPolicy")["required"])  # type: ignore[arg-type]
-    py_required = {
-        name
-        for name, f in ApprovalPolicy.model_fields.items()
-        if f.is_required()
-    }
-    assert yaml_required == py_required, (
-        f"ApprovalPolicy.required drift: yaml={yaml_required} "
-        f"python={py_required}"
-    )
-
-
-def test_v1_approval_policy_create_required_matches_pydantic_model() -> None:
-    spec = _load_spec()
-    yaml_required = set(
-        _schema(spec, "ApprovalPolicyCreate")["required"]  # type: ignore[arg-type]
-    )
-    py_required = {
-        name
-        for name, f in ApprovalPolicyCreate.model_fields.items()
-        if f.is_required()
-    }
-    assert yaml_required == py_required, (
-        f"ApprovalPolicyCreate.required drift: yaml={yaml_required} "
-        f"python={py_required}"
-    )
-
-
-def test_v1_approval_request_required_matches_pydantic_model() -> None:
-    spec = _load_spec()
-    yaml_required = set(
-        _schema(spec, "ApprovalRequest")["required"]  # type: ignore[arg-type]
-    )
-    py_required = {
-        name
-        for name, f in ApprovalRequest.model_fields.items()
-        if f.is_required()
-    }
-    assert yaml_required == py_required, (
-        f"ApprovalRequest.required drift: yaml={yaml_required} "
-        f"python={py_required}"
-    )
-
-
-def test_v1_approval_audit_entry_required_matches_pydantic_model() -> None:
-    spec = _load_spec()
-    yaml_required = set(
-        _schema(spec, "ApprovalAuditEntry")["required"]  # type: ignore[arg-type]
-    )
-    py_required = {
-        name
-        for name, f in ApprovalAuditEntry.model_fields.items()
-        if f.is_required()
-    }
-    assert yaml_required == py_required, (
-        f"ApprovalAuditEntry.required drift: yaml={yaml_required} "
-        f"python={py_required}"
-    )
-
-
-def test_v1_approval_decide_required_matches_pydantic_model() -> None:
-    """INV-7 anchor: the wire-enum side of the translation must
-    stay closed. A drift here would let a new wire value land on
-    the API while the engine still maps a subset → silent dropped
-    decisions.
-    """
-    spec = _load_spec()
-    yaml_required = set(
-        _schema(spec, "ApprovalDecide")["required"]  # type: ignore[arg-type]
-    )
-    py_required = {
-        name
-        for name, f in ApprovalDecide.model_fields.items()
-        if f.is_required()
-    }
-    assert yaml_required == py_required, (
-        f"ApprovalDecide.required drift: yaml={yaml_required} "
-        f"python={py_required}"
-    )
-    yaml_enum = set(
-        _schema(spec, "ApprovalDecide")["properties"]["action"]["enum"]  # type: ignore[index]
-    )
-    from rolemesh.approval.enum_translate import _HTTP_ACTIONS
-
-    assert yaml_enum == set(_HTTP_ACTIONS), (
-        f"ApprovalDecide.action enum drift: yaml={yaml_enum} "
-        f"engine={set(_HTTP_ACTIONS)}"
-    )
-
-
 def test_phase_3_skills_endpoints_are_present_in_yaml() -> None:
     """03b session lands these v1 endpoints; the legacy
     /api/admin/agents/{id}/skills surface stays for the 6-month
@@ -674,14 +558,11 @@ _EXPECTED_SERVER_EVENTS: dict[str, str] = {
     "event.run.token": "WsServerEventRunToken",
     "event.run.completed": "WsServerEventRunCompleted",
     "event.run.error": "WsServerEventRunError",
-    "event.approval.required": "WsServerEventApprovalRequired",
-    "event.approval.resolved": "WsServerEventApprovalResolved",
 }
 
 _EXPECTED_CLIENT_FRAMES: dict[str, str] = {
     "request.run": "WsClientFrameRequestRun",
     "request.cancel": "WsClientFrameRequestCancel",
-    "request.approval": "WsClientFrameRequestApproval",
 }
 
 
@@ -767,8 +648,6 @@ def test_ws_server_event_pydantic_round_trips_each_member() -> None:
     from pydantic import TypeAdapter
 
     from webui.schemas_v1 import (
-        WsServerEventApprovalRequired,
-        WsServerEventApprovalResolved,
         WsServerEventRunCompleted,
         WsServerEventRunError,
         WsServerEventRunStarted,
@@ -779,9 +658,7 @@ def test_ws_server_event_pydantic_round_trips_each_member() -> None:
         WsServerEventRunStarted
         | WsServerEventRunToken
         | WsServerEventRunCompleted
-        | WsServerEventRunError
-        | WsServerEventApprovalRequired
-        | WsServerEventApprovalResolved,
+        | WsServerEventRunError,
         PField(discriminator="type"),
     ]
     adapter = TypeAdapter(union)
@@ -797,14 +674,6 @@ def test_ws_server_event_pydantic_round_trips_each_member() -> None:
         ),
         WsServerEventRunError(
             type="event.run.error", code="X", message="m",
-        ),
-        WsServerEventApprovalRequired(
-            type="event.approval.required",
-            approval_id="a", summary={"tool_name": "t"},
-        ),
-        WsServerEventApprovalResolved(
-            type="event.approval.resolved",
-            approval_id="a", decision="approve",
         ),
     ]
     for sample in samples:

@@ -41,7 +41,6 @@ vi.mock('../api/client.js', async () => {
       listCredentials: stub,
       listSkills: stub,
       listCoworkerSkills: stub,
-      listApprovals: stub,
       listSafetyRules: stub,
       listSafetyDecisions: stub,
       listTelegramLinks: stub,
@@ -133,7 +132,7 @@ describe('<rm-settings-shell>', () => {
     vi.clearAllMocks();
   });
 
-  // The 11 entries from the v2-A prompt. Each row is
+  // The 10 entries from the v2-A prompt. Each row is
   // `[slug, expectedTitle, expectedTagInDOM]` — the slot map is the
   // contract we're pinning. expectedTag is `null` for the two
   // coming-soon placeholders + appearance (also coming-soon-shaped
@@ -145,7 +144,6 @@ describe('<rm-settings-shell>', () => {
     ['models',             'Models',             'rm-models-page'],
     ['credentials',        'Credentials',        'rm-credentials-page'],
     ['safety',             'Safety rules',       'rm-safety-rules-page'],
-    ['approval-policies',  'Approval policies',  'rm-approvals-page'],
     ['general',            'General',            'rm-coming-soon'],
     ['members',            'Members',            'rm-coming-soon'],
     ['connected-channels', 'Connected channels', 'rm-connected-channels-page'],

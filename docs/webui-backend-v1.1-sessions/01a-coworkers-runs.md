@@ -166,7 +166,7 @@ raise_error_response(
 
 ### `web.coworker.restart` NATS topic 现状与实际 wiring
 
-**Grep 结果**：执行前**不存在**任何 `web.coworker.*` 监听端 — 现有 orchestrator 只订阅 `agent.*.*` / `approval.*` / `egress.mcp.changed`。
+**Grep 结果**：执行前**不存在**任何 `web.coworker.*` 监听端 — 现有 orchestrator 只订阅 `agent.*.*` / `egress.mcp.changed`。
 
 **本 session 添加的最小监听端**（设计 §7 强制）：
 
@@ -299,7 +299,7 @@ await js.publish("agent.<cid>.input", {... "run_id": run_id ...})  # NATS publis
 
 **未做（留 01b）**：
 - WS endpoint 本身、event 协议、reconnect 路径
-- run state machine 完整 INV-6 pinned test（枚举 WS / cancel / schedule / approval_reject / container_crash / reauth_required）
+- run state machine 完整 INV-6 pinned test（枚举 WS / cancel / schedule / container_crash / reauth_required）
 - conversations / messages CRUD endpoints（设计 §3 Phase 1 列表的剩余几个）
 
 ### Acceptance criteria verification

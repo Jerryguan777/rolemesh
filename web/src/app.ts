@@ -20,7 +20,6 @@ import './components/sidebar.js';
 import './components/reauth-banner.js';
 import './components/login-page.js';
 import './components/coming-soon.js';
-import './components/inline-approval.js';
 import './components/chat-shell.js';
 import './components/settings-shell.js';
 import './components/activity-shell.js';

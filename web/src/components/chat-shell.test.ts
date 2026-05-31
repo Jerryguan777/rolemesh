@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // <rm-chat-shell> — pins the contract that the shell exposes to
 // users:
-//   * 3 topbar icons each route to the correct hash / popover
+//   * topbar icons each route to the correct hash
 //   * coworker switcher popover lists every coworker and triggers
 //     a `location.href` navigation with the new ?agent_id
 //   * conversation row click navigates with a new ?chat_id
@@ -30,7 +30,6 @@ import {
 const listCoworkersSpy = vi.fn();
 const getMeSpy = vi.fn();
 const listConvsSpy = vi.fn();
-const listApprovalsSpy = vi.fn();
 const listMessagesSpy = vi.fn();
 const createConvSpy = vi.fn();
 const listModelsSpy = vi.fn();
@@ -45,7 +44,6 @@ vi.mock('../api/client.js', async () => {
       listCoworkers: listCoworkersSpy,
       getMe: getMeSpy,
       listCoworkerConversations: listConvsSpy,
-      listApprovals: listApprovalsSpy,
       listMessages: listMessagesSpy,
       createCoworkerConversation: createConvSpy,
       listModels: listModelsSpy,
@@ -57,90 +55,10 @@ vi.mock('../api/client.js', async () => {
 import { groupConversations, RmChatShell } from './chat-shell.js';
 import { connectionState } from '../ws/connection-state.js';
 import type {
-  ApprovalRequest,
   Conversation,
   Coworker,
   Me,
 } from '../api/client.js';
-import type { UserApprovalsClient } from '../ws/user_approvals_client.js';
-
-/** Build a pending ApprovalRequest the chat-shell will accept. The
- *  shell filters by `resolved_approvers.includes(me.user_id)`; the
- *  default `['u-1']` matches `ME` below so the row counts toward the
- *  badge. */
-function makeApproval(
-  id: string,
-  approvers: string[] = ['u-1'],
-  overrides: Partial<ApprovalRequest> = {},
-): ApprovalRequest {
-  return {
-    id,
-    tenant_id: 't1',
-    job_id: `job-${id}`,
-    mcp_server_name: 'fs',
-    coworker_id: 'cw-a',
-    conversation_id: 'conv-1',
-    user_id: 'u-2',
-    source: 'proposal',
-    post_exec_mode: 'report',
-    status: 'pending',
-    requested_at: '2026-05-23T00:00:00Z',
-    expires_at: '2026-05-24T00:00:00Z',
-    created_at: '2026-05-23T00:00:00Z',
-    updated_at: '2026-05-23T00:00:00Z',
-    actions: [{ tool_name: 'echo', params: {} }],
-    resolved_approvers: approvers,
-    ...overrides,
-  } as unknown as ApprovalRequest;
-}
-
-/** Minimal in-test double for UserApprovalsClient. Only implements
- *  the surface chat-shell actually reaches for — start(), stop(),
- *  the three subscribe methods — and exposes `emit*` so tests can
- *  drive event handlers without spinning up a real WS. */
-class FakeUserApprovalsClient {
-  required: ((e: unknown) => void)[] = [];
-  resolved: ((e: unknown) => void)[] = [];
-  status: ((s: string) => void)[] = [];
-  started = false;
-  stopped = false;
-  async start(): Promise<void> {
-    this.started = true;
-    for (const h of this.status) h('open');
-  }
-  stop(): void {
-    this.stopped = true;
-    for (const h of this.status) h('closed');
-  }
-  onRequired(h: (e: unknown) => void): () => void {
-    this.required.push(h);
-    return () => {
-      this.required = this.required.filter((x) => x !== h);
-    };
-  }
-  onResolved(h: (e: unknown) => void): () => void {
-    this.resolved.push(h);
-    return () => {
-      this.resolved = this.resolved.filter((x) => x !== h);
-    };
-  }
-  onStatus(h: (s: string) => void): () => void {
-    this.status.push(h);
-    return () => {
-      this.status = this.status.filter((x) => x !== h);
-    };
-  }
-  emitRequired(approvalId: string): void {
-    for (const h of this.required) {
-      h({ type: 'event.approval.required', approval_id: approvalId });
-    }
-  }
-  emitResolved(approvalId: string): void {
-    for (const h of this.resolved) {
-      h({ type: 'event.approval.resolved', approval_id: approvalId, decision: 'approve' });
-    }
-  }
-}
 
 const COWORKER_A: Coworker = {
   id: 'cw-a',
@@ -320,10 +238,10 @@ describe('groupConversations', () => {
 describe('<rm-chat-shell>', () => {
   let loc: LocationStub;
 
-  /** Global fetch stub — UserApprovalsClient calls `POST
-   *  /api/v1/auth/ws-ticket` on mount; happy-dom's real fetch makes a
-   *  TCP connection and times out. Returning 404 lets the client
-   *  resolve to `status='closed'` and the shell keeps rendering. */
+  /** Global fetch stub — the slotted chat-panel's WS clients reach for
+   *  `POST /api/v1/auth/ws-ticket` on mount; happy-dom's real fetch
+   *  makes a TCP connection and times out. Returning 404 lets the
+   *  client resolve to a closed socket and the shell keeps rendering. */
   let originalFetch: typeof globalThis.fetch;
 
   beforeEach(() => {
@@ -331,7 +249,6 @@ describe('<rm-chat-shell>', () => {
       listCoworkersSpy,
       getMeSpy,
       listConvsSpy,
-      listApprovalsSpy,
       listMessagesSpy,
       createConvSpy,
       listModelsSpy,
@@ -341,7 +258,6 @@ describe('<rm-chat-shell>', () => {
     listConvsSpy.mockResolvedValue([
       conv('c-1', 'Today thread', new Date()),
     ]);
-    listApprovalsSpy.mockResolvedValue([]);
     listMessagesSpy.mockResolvedValue([]);
     // Default: createCoworkerConversation produces a shell row the
     // tests can match by id. Individual tests override when they
@@ -589,109 +505,6 @@ describe('<rm-chat-shell>', () => {
       '[data-testid="topbar-settings"]',
     )!.click();
     expect(loc.hashAssignments).toEqual(['#/manage/coworkers']);
-  });
-
-  it('topbar Approvals button toggles the popover placeholder', async () => {
-    const el = await mountShell();
-    expect(el.querySelector('[data-menu="approvals"]')).toBeNull();
-    el.querySelector<HTMLButtonElement>(
-      '[data-testid="topbar-approvals"]',
-    )!.click();
-    await settle(el);
-    expect(el.querySelector('[data-menu="approvals"]')).not.toBeNull();
-    // Hash MUST NOT change — Approvals is a popover, not a route.
-    expect(loc.hashAssignments).toEqual([]);
-  });
-
-  it('hides the approvals badge when there are zero pending rows', async () => {
-    listApprovalsSpy.mockResolvedValue([]);
-    const el = await mountShell();
-    const apprBtn = el.querySelector<HTMLButtonElement>(
-      '[data-testid="topbar-approvals"]',
-    )!;
-    expect(apprBtn.querySelector('[data-testid="approvals-badge"]')).toBeNull();
-  });
-
-  it('shows the badge with the live count when approvals are pending', async () => {
-    // Two rows for the signed-in user. The shell must read .length
-    // off its own pendingApprovals state, not a hardcoded 0.
-    listApprovalsSpy.mockResolvedValue([
-      makeApproval('apr-1', ['u-1']),
-      makeApproval('apr-2', ['u-1']),
-    ]);
-    const el = await mountShell();
-    const badge = el.querySelector('[data-testid="approvals-badge"]');
-    expect(badge).not.toBeNull();
-    expect(badge?.textContent).toBe('2');
-  });
-
-  it('opening the popover renders <rm-approvals-popover> with the live rows', async () => {
-    listApprovalsSpy.mockResolvedValue([makeApproval('apr-9', ['u-1'])]);
-    const el = await mountShell();
-    el.querySelector<HTMLButtonElement>(
-      '[data-testid="topbar-approvals"]',
-    )!.click();
-    await settle(el);
-    const popover = el.querySelector('rm-approvals-popover');
-    expect(popover).not.toBeNull();
-    expect(popover?.querySelector('[data-testid="approval-row"]')).not.toBeNull();
-  });
-
-  it('renders a new card and bumps the badge on event.approval.required', async () => {
-    // v6.1 §P2.8 — T2a.11. A WS-delivered required event must end
-    // up rendered as a popover row. The shell intentionally
-    // refetches the list (so payload shape stays canonical); we
-    // pin both the refetch and the rendered row so a future
-    // refactor that drops one regresses loudly.
-    listApprovalsSpy.mockResolvedValue([]);
-    const fake = new FakeUserApprovalsClient();
-    const el = document.createElement('rm-chat-shell') as RmChatShell;
-    el.setApprovalsClient(fake as unknown as UserApprovalsClient);
-    document.body.appendChild(el);
-    await settle(el);
-    // No badge before the event.
-    expect(el.querySelector('[data-testid="approvals-badge"]')).toBeNull();
-    // Update the REST stub so the post-event refetch returns one row.
-    listApprovalsSpy.mockResolvedValueOnce([makeApproval('apr-new', ['u-1'])]);
-    fake.emitRequired('apr-new');
-    await settle(el);
-    // Badge appeared with count 1.
-    expect(
-      el.querySelector('[data-testid="approvals-badge"]')?.textContent,
-    ).toBe('1');
-    // Opening the popover renders the row.
-    el.querySelector<HTMLButtonElement>(
-      '[data-testid="topbar-approvals"]',
-    )!.click();
-    await settle(el);
-    const popover = el.querySelector('rm-approvals-popover');
-    expect(
-      popover?.querySelector('[data-approval-id="apr-new"]'),
-    ).not.toBeNull();
-  });
-
-  it('drops a row from the badge when an approval.resolved event fires', async () => {
-    // The chat-shell handles approval.resolved by splicing the row
-    // out locally so the badge updates instantly. Pinning this is
-    // important because the WS path is the entire reason we built a
-    // dedicated UserApprovalsClient in PR 1.
-    listApprovalsSpy.mockResolvedValue([
-      makeApproval('apr-1', ['u-1']),
-      makeApproval('apr-2', ['u-1']),
-    ]);
-    const fake = new FakeUserApprovalsClient();
-    const el = document.createElement('rm-chat-shell') as RmChatShell;
-    el.setApprovalsClient(fake as unknown as UserApprovalsClient);
-    document.body.appendChild(el);
-    await settle(el);
-    expect(el.querySelector('[data-testid="approvals-badge"]')?.textContent).toBe(
-      '2',
-    );
-    fake.emitResolved('apr-1');
-    await settle(el);
-    expect(el.querySelector('[data-testid="approvals-badge"]')?.textContent).toBe(
-      '1',
-    );
   });
 
   it('clicking a conversation row navigates with a new ?chat_id', async () => {

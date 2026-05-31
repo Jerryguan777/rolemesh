@@ -16,7 +16,6 @@ session  描述
 |---|---|---|
 | v2-A-foundations-and-shells.md | finalized | 详细 |
 | v2-B-coworker-wizard-and-credentials.md | DRAFT | stub，执行前 refresh |
-| v2-C-activity-approvals-polish.md | DRAFT | stub，执行前 refresh |
 
 ## Collapse note (2026-05-22)
 

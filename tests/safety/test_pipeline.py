@@ -712,8 +712,7 @@ class TestWarnChain:
 
 class TestRequireApproval:
     """require_approval short-circuits like block but carries the
-    distinct action string so orchestrator audit ingestion (P1.1)
-    can create an approval request out-of-band.
+    distinct action string so audit ingestion can record it.
     """
 
     @pytest.mark.asyncio

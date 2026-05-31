@@ -165,9 +165,9 @@ class Verdict:
     appropriate payload shape with the offending content rewritten.
     ``action="warn"`` uses ``appended_context`` to inject a string into
     the agent's follow-up context (hook bridge wires this up at V2).
-    ``action="require_approval"`` is a V2 concept and ignored by V1
-    pipeline (which treats it as block); V2 will rewrite to an approval
-    request event.
+    ``action="require_approval"`` is a verdict that blocks the turn —
+    the pipeline short-circuits on it exactly like ``block``. It is
+    kept as a distinct action for audit/reporting purposes.
     """
 
     action: Action = "allow"

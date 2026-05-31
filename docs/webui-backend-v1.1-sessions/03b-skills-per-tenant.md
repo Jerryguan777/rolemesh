@@ -29,14 +29,11 @@
 3. **02b Findings** —— greenfield 一次性切换的成熟模式（drop column + reader 切 + writer 改 + grep 验证清空），03b PR 1 直接照搬该模式
 4. **00a PR1 落地** —— `SKILL_MANIFEST_NAME` Python 常量 + `src/rolemesh/core/skills_consts_pin.py`
 5. **00b PR2 落地** —— `skills_tenant_name_unique UNIQUE (tenant_id, name)` 约束 + `skills.created_by` rename → `created_by_user_id`（**仅 DB 列名改了，Python/TS/OpenAPI 三层 PR 2 收敛**）
-6. **03a Findings § 3** —— `<rm-inline-approval>` 独立 component pattern（**仅作架构参考**，skills 不需要 inline 桥接 UI——见下"概念定位"）
-7. 现有 admin skills endpoints (`src/webui/admin.py:1680+`) —— `/api/admin/agents/{agent_id}/skills/*` 模式，本 session **保留兼容期**，新加 `/api/v1/skills/*` 平面命名
+6. 现有 admin skills endpoints (`src/webui/admin.py:1680+`) —— `/api/admin/agents/{agent_id}/skills/*` 模式，本 session **保留兼容期**，新加 `/api/v1/skills/*` 平面命名
 
 ## 概念定位：Skills 是静态配置，不需要 inline UI 桥接
 
-`<rm-inline-approval>`（03a 落地）解决的是"动态、需要决策的事件"——alice 等 bob 批准，agent 卡着。
-
-Skills 是**静态配置**——admin 配好 skill 后 agent 容器启动时投影到 tmpfs，运行期不变。不需要"chat 内联 skill 操作"UI。本 session 只做：
+Skills 是**静态配置**——admin 配好 skill 后 agent 容器启动时投影到 tmpfs，运行期不变。不需要"chat 内联 skill 操作"这类动态、需要实时决策的桥接 UI。本 session 只做：
 
 - `#/skills` flat 列表（看 / 编辑全 tenant skills）
 - `#/skills/:id` 文件树（编辑某 skill）
@@ -325,6 +322,6 @@ Python ↔ TS only, as locked. New `web/src/api/skill_constants.ts` re-exports `
 
 ### Impact on Phase 4 / v1.1 closeout
 
-03b was the last per-entity Phase 3 piece (approvals shipped in 03a). After this, **the only outstanding session is 04 (Safety UI migration)** — a UI-only migration since the safety engine + DB already live behind the legacy admin surface. Phase 4 (orchestration / WS lifecycle hardening) inherits the hot-reload pattern fully validated by 02b + 03b: subject naming, JetStream durable, publish fan-out, reload helper. Future sessions plugging new entities into the hot-reload mesh have a template.
+03b was the last per-entity Phase 3 piece. After this, **the only outstanding session is 04 (Safety UI migration)** — a UI-only migration since the safety engine + DB already live behind the legacy admin surface. Phase 4 (orchestration / WS lifecycle hardening) inherits the hot-reload pattern fully validated by 02b + 03b: subject naming, JetStream durable, publish fan-out, reload helper. Future sessions plugging new entities into the hot-reload mesh have a template.
 
 One yellow flag: the v1 catalog DELETE returns 409 with `details.coworker_ids` but the wire UI doesn't yet bulk-unbind from the catalog page. Today the admin has to walk into each coworker detail's skills tab to unbind. Acceptable for v1.1; queue a UX polish chore.

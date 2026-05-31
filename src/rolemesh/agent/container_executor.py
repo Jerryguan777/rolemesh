@@ -170,7 +170,7 @@ class ContainerAgentExecutor:
             # The inner ``_execute_after_setup`` explicitly cleans up
             # at each ``return`` for prompt disk reuse on the happy
             # paths, but exceptions raised by ``build_container_spec``,
-            # ``self._runtime.run``, the approval/safety loaders, or
+            # ``self._runtime.run``, the safety loader, or
             # any other line bypass those returns. ``cleanup_spawn_skills``
             # is idempotent, so duplicating with the inner calls is
             # harmless — this finally just guarantees no orphan dir
@@ -196,7 +196,7 @@ class ContainerAgentExecutor:
         public method can guarantee ``cleanup_spawn_skills(job_id)``
         runs on every exit path — including exceptions raised by
         ``build_container_spec``, ``self._runtime.run``, the
-        approval / safety loaders, or any other line in this body.
+        safety loader, or any other line in this body.
         The explicit ``cleanup_spawn_skills`` calls below remain so
         disk is reclaimed promptly on the happy paths; the outer
         finally only kicks in when something raises.
@@ -305,64 +305,9 @@ class ContainerAgentExecutor:
                 for tool_cfg in coworker_mcp_configs
             ]
 
-        # Load per-coworker approval policies. Passed to the container
-        # as plain dicts so agent_runner.approval.policy (pure, stdlib-
-        # only) can evaluate them without a DB import. None when no
-        # policies exist, which keeps ApprovalHookHandler off the hook
-        # chain in zero-impact deployments.
-        approval_policies_dicts: list[dict[str, object]] | None = None
-        try:
-            from rolemesh.db import get_enabled_policies_for_coworker
-
-            enabled = await get_enabled_policies_for_coworker(
-                tenant_id, inp.coworker_id
-            )
-            if enabled:
-                approval_policies_dicts = [p.to_dict() for p in enabled]
-        except Exception as exc:
-            # The DB is unreachable at job-start. Two operator-selectable
-            # responses:
-            #   APPROVAL_FAIL_MODE=closed (default) — refuse to start.
-            #     A DB outage must not silently let every tool call run
-            #     unsupervised; this matches the fail-close posture of
-            #     the hook layer itself.
-            #   APPROVAL_FAIL_MODE=open — start without approvals.
-            #     Legacy behaviour for deployments that prioritize agent
-            #     availability over approval coverage during incidents.
-            from rolemesh.core.config import APPROVAL_FAIL_MODE
-
-            if APPROVAL_FAIL_MODE == "open":
-                logger.warning(
-                    "approval: DB unreachable — starting agent in "
-                    "fail-open mode (APPROVAL_FAIL_MODE=open). All tool "
-                    "calls will run without approval checks until the "
-                    "DB recovers and the container restarts.",
-                    coworker_id=inp.coworker_id,
-                    error=str(exc),
-                )
-            else:
-                # Fail-closed but ALSO silent: the orchestrator does not
-                # actively notify the tenant owner/admin. Users see "agent
-                # not responding"; operators must have external log alerts
-                # wired up to this ERROR line to notice. Acceptable for
-                # self-hosted / small-team deployments; for multi-tenant
-                # SaaS add a health endpoint + active push (Prometheus
-                # counter + in-chat notice to the tenant owner).
-                # See docs/approval-architecture.md §Known Gaps
-                # "Silent fail-closed on DB outage".
-                logger.error(
-                    "approval: DB unreachable at job start — refusing "
-                    "to start agent (APPROVAL_FAIL_MODE=closed). Set "
-                    "APPROVAL_FAIL_MODE=open to permit fail-open "
-                    "startup.",
-                    coworker_id=inp.coworker_id,
-                    error=str(exc),
-                )
-                raise
-
-        # Load per-coworker safety rules. Same fail-mode contract as
-        # approval above (SAFETY_FAIL_MODE closed default refuses
-        # startup; open logs and starts with no rules). None when no
+        # Load per-coworker safety rules. SAFETY_FAIL_MODE closed
+        # default refuses startup; open logs and starts with no rules.
+        # None when no
         # rules exist, so SafetyHookHandler stays off the hook chain
         # in zero-config deployments. Implementation lives in
         # rolemesh.safety.loader so the fail-mode branch is testable
@@ -419,7 +364,6 @@ class ContainerAgentExecutor:
             system_prompt=inp.system_prompt,
             role_config=inp.role_config,
             mcp_servers=mcp_specs,
-            approval_policies=approval_policies_dicts,
             safety_rules=safety_rules_dicts,
             slow_check_specs=slow_check_specs,
         )

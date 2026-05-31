@@ -29,12 +29,7 @@
 //   - shell-owned: coworker list, conversation list (fetched once),
 //     menu/popover open flags, current user (`me`)
 //   - URL-owned: active coworker id, active conversation id
-//   - panel-owned: messages, runs, approvals, WebSocket lifecycle
-//
-// Approvals badge reflects `pendingApprovals.length` — initially
-// seeded from `/api/v1/approvals?scope=mine&status=pending`, then
-// kept live by `UserApprovalsClient` WS deltas (required → refetch,
-// resolved → drop locally). See `wireApprovalsClient()` below.
+//   - panel-owned: messages, runs, WebSocket lifecycle
 
 import { LitElement, html, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
@@ -42,7 +37,6 @@ import { customElement, state } from 'lit/decorators.js';
 import {
   ApiError,
   getApiClient,
-  type ApprovalRequest,
   type Conversation,
   type Coworker,
   type Me,
@@ -52,15 +46,12 @@ import {
   coworkerSubtitle,
   modelsByIdMap,
 } from '../services/coworker-label.js';
-import { UserApprovalsClient, type UserApprovalsStatus } from '../ws/user_approvals_client.js';
 import { connectionState } from '../ws/connection-state.js';
-import { clearToken, getStoredToken } from '../services/oidc-auth.js';
+import { clearToken } from '../services/oidc-auth.js';
 import './chat-panel.js';
 import './reauth-banner.js';
-import './approvals-popover.js';
 import {
   iconActivity,
-  iconApprovals,
   iconChevronDown,
   iconClose,
   iconLogout,
@@ -192,15 +183,7 @@ export class RmChatShell extends LitElement {
   @state() private bootstrapped = false;
   /** Which popover, if any, is open. Only one at a time to keep
    *  keyboard handling simple. */
-  @state() private openMenu: '' | 'coworker' | 'user' | 'approvals' = '';
-  /** Pending approvals where the signed-in user is an approver. Owned
-   *  here (not in the popover) because the badge needs the same count
-   *  whether the popover is open or not. Sorted newest-first. */
-  @state() private pendingApprovals: ApprovalRequest[] = [];
-  @state() private approvalsLoading = true;
-  /** Most recent UserApprovalsClient connection status — surfaced to
-   *  the popover so it can render a "stale" hint when WS is down. */
-  @state() private approvalsConn: UserApprovalsStatus = 'idle';
+  @state() private openMenu: '' | 'coworker' | 'user' = '';
   /** Sidebar conversation-list search. Toggled by the "Search
    *  conversations" button; clearing or closing restores the full
    *  list. Filtering is purely client-side over the already-fetched
@@ -209,10 +192,6 @@ export class RmChatShell extends LitElement {
   @state() private searchQuery = '';
 
   private readonly api = getApiClient();
-  private approvalsClient: UserApprovalsClient | null = null;
-  /** Unsubscribe handles from the approvals client. Set on mount,
-   *  cleared on unmount so the WS doesn't leak past the shell. */
-  private approvalsUnsubs: Array<() => void> = [];
   /** Unsubscribe handle for the ConnectionState subscription so the
    *  shell doesn't leak listeners across mount/unmount cycles. */
   private connStateUnsub: (() => void) | null = null;
@@ -222,17 +201,6 @@ export class RmChatShell extends LitElement {
     // <rm-reauth-banner> custom event bus keep working without
     // shadow-boundary plumbing.
     return this;
-  }
-
-  /** Test seam — pass a fake UserApprovalsClient in unit tests so we
-   *  don't have to stub `WebSocket` + `fetch` at the same time. The
-   *  production code path uses the default constructor. */
-  setApprovalsClient(client: UserApprovalsClient): void {
-    if (this.approvalsClient) {
-      this.teardownApprovals();
-    }
-    this.approvalsClient = client;
-    this.wireApprovalsClient();
   }
 
   override connectedCallback() {
@@ -267,15 +235,6 @@ export class RmChatShell extends LitElement {
     this.connStateUnsub = connectionState.subscribe((c) => {
       this.agentConnected = c;
     });
-    // Tests inject the client via setApprovalsClient() BEFORE attach;
-    // production code path lazily mints one here so we don't churn the
-    // unit-test stub.
-    if (!this.approvalsClient) {
-      this.approvalsClient = new UserApprovalsClient({
-        getToken: getStoredToken,
-      });
-      this.wireApprovalsClient();
-    }
   }
 
   override disconnectedCallback() {
@@ -284,7 +243,6 @@ export class RmChatShell extends LitElement {
     this.removeEventListener('agent-connection', this.onAgentConnection);
     this.connStateUnsub?.();
     this.connStateUnsub = null;
-    this.teardownApprovals();
   }
 
   private onAgentConnection = (e: Event) => {
@@ -293,68 +251,6 @@ export class RmChatShell extends LitElement {
       this.agentConnected = detail.connected;
     }
   };
-
-  private wireApprovalsClient(): void {
-    const c = this.approvalsClient;
-    if (!c) return;
-    this.approvalsUnsubs.push(
-      c.onStatus((s) => {
-        this.approvalsConn = s;
-      }),
-    );
-    this.approvalsUnsubs.push(
-      c.onRequired((e) => {
-        // The WS event lacks the full ApprovalRequest shape — when a
-        // new approval lands, refetch the list so we keep the same
-        // schema everywhere instead of half-populating rows from the
-        // event payload.
-        void this.refreshPendingApprovals();
-      }),
-    );
-    this.approvalsUnsubs.push(
-      c.onResolved((e) => {
-        const id = e.approval_id;
-        if (!id) return;
-        const next = this.pendingApprovals.filter((r) => r.id !== id);
-        // Only refetch when something actually moved — saves the round
-        // trip for events targeting approvals we never displayed.
-        if (next.length !== this.pendingApprovals.length) {
-          this.pendingApprovals = next;
-        }
-      }),
-    );
-    void c.start();
-    // REST fetch establishes the initial set; the WS only carries
-    // deltas after the socket opens. Without this we'd render an
-    // empty list until the first .required event fires.
-    void this.refreshPendingApprovals();
-  }
-
-  private teardownApprovals(): void {
-    for (const off of this.approvalsUnsubs) off();
-    this.approvalsUnsubs = [];
-    this.approvalsClient?.stop();
-    this.approvalsClient = null;
-  }
-
-  private async refreshPendingApprovals(): Promise<void> {
-    try {
-      const rows = await this.api.listApprovals({
-        scope: 'mine',
-        status: 'pending',
-      });
-      // Newest-first so the popover shows the most recent landings
-      // at the top. requested_at is ISO-8601 lexicographic.
-      rows.sort((a, b) => (a.requested_at < b.requested_at ? 1 : -1));
-      this.pendingApprovals = rows;
-    } catch (err) {
-      // Don't blow away an existing list on a transient failure — log
-      // and let the next event-triggered refresh recover.
-      console.warn('chat-shell: refreshPendingApprovals failed', err);
-    } finally {
-      this.approvalsLoading = false;
-    }
-  }
 
   private async bootstrap(): Promise<void> {
     // All three are independent — fire in parallel so first paint
@@ -602,25 +498,6 @@ export class RmChatShell extends LitElement {
 
   private openActivity = () => {
     location.hash = '#/activity';
-  };
-
-  private toggleApprovals = () => {
-    this.openMenu = this.openMenu === 'approvals' ? '' : 'approvals';
-  };
-
-  /** A row's decide button posts directly, then `rm-inline-approval`
-   *  emits `rm-approval-decided` which bubbles to us. The WS resolved
-   *  event will also fire and remove the row, but doing the refresh
-   *  here keeps the UI honest when WS is degraded. */
-  private onApprovalDecided = () => {
-    void this.refreshPendingApprovals();
-  };
-
-  /** Popover footer "View all" link wants the popover closed before
-   *  the route changes. The popover dispatches `rm-popover-navigate`
-   *  so we can clear `openMenu` without poking into its DOM. */
-  private onPopoverNavigate = () => {
-    this.openMenu = '';
   };
 
   private openSettings = () => {
@@ -1162,8 +1039,7 @@ export class RmChatShell extends LitElement {
           margin: 5px 4px;
         }
         rm-chat-shell .coswitch-wrap,
-        rm-chat-shell .userbar-wrap,
-        rm-chat-shell .approvals-wrap {
+        rm-chat-shell .userbar-wrap {
           position: relative;
         }
         /* Coworker menu pops out to the right of the switcher button
@@ -1179,67 +1055,11 @@ export class RmChatShell extends LitElement {
           min-width: 340px;
         }
         rm-chat-shell .cs-menu.user { bottom: 100%; left: 8px; right: 8px; min-width: auto; margin-bottom: 4px; }
-        rm-chat-shell .cs-menu.approvals {
-          top: 100%; right: 0; margin-top: 4px;
-          width: 360px;
-          padding: 0;
-        }
         rm-chat-shell .appr-empty {
           padding: 24px 14px;
           text-align: center;
           color: var(--rm-ink-3);
           font-size: 12.5px;
-        }
-        rm-chat-shell .appr-hd {
-          padding: 11px 14px;
-          border-bottom: 1px solid var(--rm-border);
-          font-size: var(--rm-text-sm);
-          font-weight: 600;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-        }
-        rm-chat-shell .appr-hd small {
-          font-weight: 400;
-          color: var(--rm-ink-3);
-        }
-        rm-chat-shell .appr-body {
-          max-height: 360px;
-          overflow-y: auto;
-        }
-        rm-chat-shell .appr-rows {
-          display: flex;
-          flex-direction: column;
-          gap: var(--rm-space-2);
-          padding: 10px;
-        }
-        rm-chat-shell .appr-row {
-          /* Inline-approval already carries its own border + padding;
-           * we just keep wrapper hooks so the popover can target it. */
-        }
-        rm-chat-shell .appr-ft {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: var(--rm-space-2);
-          padding: 9px 14px;
-          border-top: 1px solid var(--rm-border);
-          font-size: 12px;
-          color: var(--rm-ink-3);
-        }
-        rm-chat-shell .appr-overflow { color: var(--rm-ink-3); }
-        rm-chat-shell .appr-link {
-          color: var(--rm-accent);
-          text-decoration: none;
-          font-weight: 500;
-        }
-        rm-chat-shell .appr-link:hover { text-decoration: underline; }
-        rm-chat-shell .appr-stale {
-          padding: 8px 14px;
-          font-size: 11.5px;
-          color: var(--rm-warn-ink, var(--rm-ink-3));
-          background: var(--rm-warn-subtle, var(--rm-surface-2));
-          border-top: 1px solid var(--rm-border);
         }
         @keyframes rm-pop {
           from { opacity: 0; transform: translateY(4px); }
@@ -1364,23 +1184,6 @@ export class RmChatShell extends LitElement {
             title="Activity"
             @click=${this.openActivity}
           >${iconActivity(19)}</button>
-          <div class="approvals-wrap">
-            <button
-              class="cs-iconbtn"
-              data-testid="topbar-approvals"
-              data-menu-trigger="approvals"
-              aria-label="Pending approvals"
-              title="Pending approvals"
-              @click=${this.toggleApprovals}
-            >
-              ${iconApprovals(19)}
-              ${this.pendingApprovals.length > 0
-                ? html`<span class="bdg" data-testid="approvals-badge"
-                    >${this.pendingApprovals.length}</span>`
-                : nothing}
-            </button>
-            ${this.openMenu === 'approvals' ? this.renderApprovalsPanel() : nothing}
-          </div>
           <button
             class="cs-iconbtn"
             data-testid="topbar-settings"
@@ -1493,22 +1296,6 @@ export class RmChatShell extends LitElement {
           @click=${this.logout}
           style="color: var(--rm-bad);"
         >${iconLogout(15)} Log out</button>
-      </div>
-    `;
-  }
-
-  private renderApprovalsPanel(): TemplateResult {
-    return html`
-      <div class="cs-menu approvals" role="menu" data-menu="approvals">
-        <rm-approvals-popover
-          data-testid="approvals-popover"
-          .rows=${this.pendingApprovals}
-          .me=${this.me}
-          .loading=${this.approvalsLoading}
-          .connectionStatus=${this.approvalsConn}
-          @rm-approval-decided=${this.onApprovalDecided}
-          @rm-popover-navigate=${this.onPopoverNavigate}
-        ></rm-approvals-popover>
       </div>
     `;
   }

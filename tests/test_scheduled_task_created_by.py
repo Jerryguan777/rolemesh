@@ -251,8 +251,7 @@ async def test_process_task_ipc_with_empty_user_id_stores_null() -> None:
 async def test_run_task_stamps_agent_input_user_id_from_task() -> None:
     """T1.12 — ``_run_task`` constructs ``AgentInput`` with
     ``user_id=task.created_by_user_id``. A regression here would
-    leave Phase-2 self-approval thinking the task has no requester
-    (and silently route it down the owner-FYI E path).
+    leave the run with no attributed requester.
     """
     from rolemesh.orchestration.task_scheduler import _run_task
 

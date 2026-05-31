@@ -20,7 +20,6 @@ def pytest_collection_modifyitems(
 ) -> None:
     """Stamp every test under this directory with the ``e2e`` marker.
 
-    See ``tests/approval/e2e/conftest.py`` for the rationale.
     """
     for item in items:
         item.add_marker(pytest.mark.e2e)

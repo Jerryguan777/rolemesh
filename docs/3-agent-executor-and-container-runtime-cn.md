@@ -200,7 +200,7 @@ _executors = {
         │     → ContainerSpec   (with hardening + network fields filled in)
         │
         ├── Write AgentInitData to NATS KV "agent-init.{job_id}"
-        │     (carries permissions, mcp_servers, safety_rules, approval_policies, …)
+        │     (carries permissions, mcp_servers, safety_rules, …)
         │
         ├── runtime.run(spec)                    ← ContainerRuntime layer
         │     → ContainerHandle
@@ -211,7 +211,7 @@ _executors = {
         │
         ├── Start timeout watcher + stderr reader tasks
         │
-        ├── (Inside the container, hooks/safety/approval/skills run as the
+        ├── (Inside the container, hooks/safety/skills run as the
         │    LLM produces tool calls and outputs — orchestrator side just
         │    consumes events from NATS)
         │
@@ -224,7 +224,7 @@ _executors = {
 
 切分非常干净：任何调用 `runtime.*` 或 `handle.*` 的代码都属于 ContainerRuntime 层，其余（NATS、超时、日志、输出解析）都属于 AgentExecutor 层。
 
-容器*内部*运行的内容——hook 处理器、safety 流水线、approval 阀门、skill 加载、MCP 工具派发——分别由各自的文档说明 ([`hooks-architecture.md`](hooks-architecture.md)、[`safety/safety-framework.md`](safety/safety-framework.md)、[`approval-architecture.md`](approval-architecture.md)、[`skills-architecture.md`](skills-architecture.md)、[`external-mcp-architecture.md`](external-mcp-architecture.md))。从 executor 的视角看，它们只是 NATS 上的事件。
+容器*内部*运行的内容——hook 处理器、safety 流水线、skill 加载、MCP 工具派发——分别由各自的文档说明 ([`hooks-architecture.md`](hooks-architecture.md)、[`safety/safety-framework.md`](safety/safety-framework.md)、[`skills-architecture.md`](skills-architecture.md)、[`external-mcp-architecture.md`](external-mcp-architecture.md))。从 executor 的视角看，它们只是 NATS 上的事件。
 
 ---
 

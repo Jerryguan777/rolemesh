@@ -42,7 +42,7 @@ from .backend import (
     ToolUseEvent,
 )
 from .hooks import HookRegistry
-from .hooks.handlers import ApprovalHookHandler, TranscriptArchiveHandler
+from .hooks.handlers import TranscriptArchiveHandler
 from .tools.context import ToolContext
 
 if TYPE_CHECKING:
@@ -241,16 +241,6 @@ async def run_query_loop(
                     metadata=_usage_meta(event),
                 ),
             )
-            # Approval cancel cascade. Best-effort publish — the approval
-            # stream may not exist at all in deployments without the
-            # approval module, and a failure here must not block the
-            # stop lifecycle. See docs/backend-stop-contract.md §8.
-            try:
-                await js.publish(
-                    f"approval.cancel_for_job.{job_id}", b""
-                )
-            except Exception as exc:  # noqa: BLE001 — cascade is best-effort
-                log(f"approval cancel cascade publish failed: {exc}")
         elif isinstance(event, SessionInitEvent):
             session_id = event.session_id
             log(f"Session initialized: {session_id}")
@@ -315,22 +305,11 @@ async def run_query_loop(
     # backend's PreCompact event via the shared HookRegistry.
     hook_registry = HookRegistry()
     hook_registry.register(TranscriptArchiveHandler(assistant_name=init.assistant_name))
-    # Register ApprovalHookHandler only when policies are provided. An empty
-    # or missing approval_policies list means the approval module is inactive
-    # for this run, and we keep the hook chain untouched so behaviour stays
-    # bit-identical to pre-approval builds.
-    if init.approval_policies:
-        hook_registry.register(
-            ApprovalHookHandler(
-                policies=init.approval_policies,
-                tool_ctx=tool_ctx,
-            )
-        )
 
     # Register SafetyHookHandler only when rules are provided. An empty
     # or missing safety_rules list means the Safety Framework is
     # inactive for this run, preserving zero runtime cost for agents
-    # that do not have rules configured — same convention as approval.
+    # that do not have rules configured.
     # Guard logic lives in rolemesh.safety.loader so the registration
     # decision is unit-testable without a full container startup.
     from rolemesh.safety.loader import maybe_register_safety_handler

@@ -33,9 +33,6 @@ Wire-up status (2026-05-20, post 01b):
   calls :func:`terminate_run_via_user_cancel`.
 * Path 4 (scheduled) — code path *present* (wrapper callable
   from a Phase-2 scheduler), but no production caller wired yet.
-* Path 5 (approval reject) — wrapper present; the approval
-  engine in 03a will call it when a reject terminates the parent
-  run.
 * Path 6 (container crash) — wrapper present; the orchestrator
   container monitor calls it on a die event with non-zero exit.
 * Path 7 (user-mode MCP reauth) — wrapper present; the
@@ -58,7 +55,6 @@ __all__ = [
     "terminate_run_via_ws_error",
     "terminate_run_via_user_cancel",
     "terminate_run_via_scheduled_completion",
-    "terminate_run_via_approval_reject",
     "terminate_run_via_container_crash",
     "terminate_run_via_reauth_required",
 ]
@@ -125,28 +121,6 @@ async def terminate_run_via_scheduled_completion(
         status=status,
         usage=usage,
         error=error,
-        conn=conn,
-    )
-
-
-async def terminate_run_via_approval_reject(
-    *,
-    run_id: str,
-    approval_id: str,
-    conn: "asyncpg.Connection",
-) -> bool:
-    """INV-6 path 5 — an approval reject terminates the parent run.
-
-    The ``error`` body carries the originating ``approval_id`` so
-    the SPA can link the failed run back to the reject UI event.
-    """
-    return await update_run_terminal(
-        run_id=run_id,
-        status="failed",
-        error={
-            "code": "APPROVAL_REJECTED",
-            "approval_id": approval_id,
-        },
         conn=conn,
     )
 

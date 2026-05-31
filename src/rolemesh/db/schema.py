@@ -44,16 +44,8 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             created_at TIMESTAMPTZ DEFAULT now()
         )
     """)
-    # v6.1 §P2.3 — ``tenants.approval_default_mode`` dropped: Case A
-    # (no matching policy) now collapses to auto-allow + audit row
-    # stamped ``source='auto_execute'``. The old three-mode escape
-    # hatch is intentionally removed; default-deny posture will be
-    # reintroduced via a future allow-list policy primitive.
-    #
-    # REVERSAL (manual; not auto-run):
-    #   ALTER TABLE tenants ADD COLUMN approval_default_mode TEXT
-    #     DEFAULT 'auto_execute' CHECK (approval_default_mode IN
-    #     ('auto_execute', 'require_approval', 'deny'));
+    # ``tenants.approval_default_mode`` was removed with the approval
+    # subsystem. Drop the column if an earlier deployment created it.
     await conn.execute(
         "ALTER TABLE tenants DROP COLUMN IF EXISTS approval_default_mode"
     )
@@ -565,7 +557,7 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     """)
 
     # PR-D D10: backfill tenant_id on oidc_user_tokens so RLS can
-    # bind it. Same pattern PR #11 used on approval_audit_log:
+    # bind it. Standard in-place tenant_id backfill pattern:
     # ADD COLUMN nullable + UPDATE from parent + SET NOT NULL + FK
     # CASCADE + composite index + BEFORE-INSERT trigger to keep new
     # rows in sync with users.tenant_id without making every caller
@@ -934,274 +926,20 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         "ON link_tokens(expires_at) WHERE used_at IS NULL"
     )
 
-    # --- Approval module tables ---
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS approval_policies (
-            id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            tenant_id              UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-            coworker_id            UUID REFERENCES coworkers(id) ON DELETE CASCADE,
-            mcp_server_name        TEXT NOT NULL,
-            tool_name              TEXT NOT NULL,
-            condition_expr         JSONB NOT NULL,
-            approver_user_ids      UUID[] NOT NULL DEFAULT '{}',
-            notify_conversation_id UUID REFERENCES conversations(id) ON DELETE SET NULL,
-            auto_expire_minutes    INT DEFAULT 60,
-            post_exec_mode         TEXT NOT NULL DEFAULT 'report'
-                CHECK (post_exec_mode IN ('report')),
-            enabled                BOOLEAN DEFAULT TRUE,
-            priority               INT DEFAULT 0,
-            created_at             TIMESTAMPTZ DEFAULT now(),
-            updated_at             TIMESTAMPTZ DEFAULT now()
-        )
-    """)
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_approval_policies_tenant "
-        "ON approval_policies(tenant_id, enabled)"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_approval_policies_tool "
-        "ON approval_policies(tenant_id, mcp_server_name, tool_name) "
-        "WHERE enabled"
-    )
-
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS approval_requests (
-            id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            tenant_id          UUID NOT NULL REFERENCES tenants(id),
-            -- ON DELETE SET NULL (NOT CASCADE): approval_requests are
-            -- audit records — the "who approved what tool call when"
-            -- trail must survive coworker deletion for compliance.
-            -- Column made nullable so the SET NULL transition is legal
-            -- at the SQL level. Existing queries that filter by
-            -- coworker_id continue to work (rows with NULL just don't
-            -- match those queries — desired behaviour for "show
-            -- approvals for live coworkers").
-            coworker_id        UUID REFERENCES coworkers(id) ON DELETE SET NULL,
-            conversation_id    UUID REFERENCES conversations(id),
-            -- policy_id is nullable: proposals that do not match any policy
-            -- (short-circuit auto-executed path) keep NULL so the admin UI
-            -- and reporting queries can distinguish "policy X triggered
-            -- this" from "proposal was auto-executed because no policy
-            -- applied". ON DELETE SET NULL so disabling/deleting a policy
-            -- never orphans old requests.
-            policy_id          UUID REFERENCES approval_policies(id) ON DELETE SET NULL,
-            user_id            UUID NOT NULL REFERENCES users(id),
-            job_id             TEXT NOT NULL,
-            mcp_server_name    TEXT NOT NULL,
-            actions            JSONB NOT NULL,
-            action_hashes      TEXT[] NOT NULL,
-            rationale          TEXT,
-            source             TEXT NOT NULL
-                CHECK (source IN ('proposal', 'auto_intercept',
-                                  'safety_require_approval')),
-            status             TEXT NOT NULL DEFAULT 'pending'
-                CHECK (status IN (
-                    'pending', 'approved', 'rejected', 'expired', 'cancelled',
-                    'skipped', 'executing', 'executed',
-                    'execution_failed', 'execution_stale'
-                )),
-            post_exec_mode     TEXT NOT NULL DEFAULT 'report',
-            resolved_approvers UUID[] NOT NULL,
-            requested_at       TIMESTAMPTZ DEFAULT now(),
-            expires_at         TIMESTAMPTZ NOT NULL,
-            created_at         TIMESTAMPTZ DEFAULT now(),
-            updated_at         TIMESTAMPTZ DEFAULT now()
-        )
-    """)
-    # Migrate existing deployments: drop the NOT NULL if present.
-    await conn.execute(
-        "ALTER TABLE approval_requests ALTER COLUMN policy_id DROP NOT NULL"
-    )
-    # v6.1 §P2.3: widen the source CHECK to include
-    # ``auto_execute`` (Case A collapse — see ApprovalEngine
-    # .handle_proposal). Drop-then-add keeps the rollout in a
-    # single migration; older deployments lose either the V2 widen
-    # or the v6.1 widen on the same statement.
-    await conn.execute(
-        "ALTER TABLE approval_requests "
-        "DROP CONSTRAINT IF EXISTS approval_requests_source_check"
-    )
-    await conn.execute(
-        "ALTER TABLE approval_requests ADD CONSTRAINT "
-        "approval_requests_source_check CHECK ("
-        "source IN ('proposal', 'auto_intercept', "
-        "'safety_require_approval', 'auto_execute'))"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_approval_requests_tenant_status "
-        "ON approval_requests(tenant_id, status)"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_approval_requests_job "
-        "ON approval_requests(job_id) WHERE status = 'pending'"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_approval_requests_expires "
-        "ON approval_requests(status, expires_at) WHERE status = 'pending'"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_approval_requests_approved "
-        "ON approval_requests(status, updated_at) WHERE status = 'approved'"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_approval_requests_executing "
-        "ON approval_requests(status, updated_at) WHERE status = 'executing'"
-    )
-
-    # tenant_id is denormalised onto the audit row (the canonical value
-    # lives on approval_requests) so that cross-tenant audit reads can
-    # be rejected at the SQL layer without a JOIN. The trigger below
-    # copies tenant_id from the parent row on every INSERT, which is
-    # cheaper than the alternative of always joining at query time —
-    # audit reads happen on a hot REST path.
-    #
-    # The CREATE TABLE / column-add / backfill / SET NOT NULL block runs
-    # inside a transaction so that an in-place upgrade is atomic. Without
-    # this, a concurrent INSERT through the OLD trigger between
-    # ``ADD COLUMN`` and ``SET NOT NULL`` would leave a NULL-tenant row
-    # that fails the NOT NULL promotion. Single-instance startup makes
-    # the race unlikely, but multi-instance rolling deploys would hit it.
-    async with conn.transaction():
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS approval_audit_log (
-                id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                tenant_id     UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-                request_id    UUID NOT NULL REFERENCES approval_requests(id) ON DELETE CASCADE,
-                action        TEXT NOT NULL
-                    CHECK (action IN (
-                        'created', 'approved', 'rejected', 'expired', 'cancelled',
-                        'skipped', 'executing', 'executed',
-                        'execution_failed', 'execution_stale'
-                    )),
-                actor_user_id UUID REFERENCES users(id),
-                note          TEXT,
-                metadata      JSONB,
-                created_at    TIMESTAMPTZ DEFAULT now()
-            )
-        """)
-        # In-place upgrade for databases created before tenant_id was
-        # introduced. Add nullable → backfill from parent → set NOT NULL.
-        # Idempotent against repeat startups (ADD COLUMN IF NOT EXISTS
-        # short-circuits once the column exists; the UPDATE filters
-        # WHERE tenant_id IS NULL so backfilled rows are skipped).
-        await conn.execute(
-            "ALTER TABLE approval_audit_log "
-            "ADD COLUMN IF NOT EXISTS tenant_id UUID "
-            "REFERENCES tenants(id) ON DELETE CASCADE"
-        )
-        await conn.execute(
-            "UPDATE approval_audit_log al "
-            "SET tenant_id = ar.tenant_id "
-            "FROM approval_requests ar "
-            "WHERE al.request_id = ar.id AND al.tenant_id IS NULL"
-        )
-        await conn.execute(
-            "ALTER TABLE approval_audit_log "
-            "ALTER COLUMN tenant_id SET NOT NULL"
-        )
-        await conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_audit_log_request "
-            "ON approval_audit_log(request_id)"
-        )
-        # Composite index keeps tenant-scoped audit reads fast: index
-        # seek on (tenant_id, request_id) then sorted scan on created_at.
-        await conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_audit_log_tenant_request "
-            "ON approval_audit_log(tenant_id, request_id, created_at)"
-        )
-
-    # ---------------------------------------------------------------------
-    # Audit trigger: every INSERT or status-change UPDATE on
-    # approval_requests automatically appends an approval_audit_log row in
-    # the SAME transaction. This closes the two-step window where a crash
-    # between "UPDATE status" and "INSERT audit" could otherwise leave a
-    # ghost decision with no audit trail. The app layer can still add
-    # richer audit rows (e.g. with ``note`` or ``metadata.results``) via
-    # write_approval_audit — the trigger writes the minimal system row;
-    # the app layer then UPDATEs that row or writes a companion row with
-    # the extra payload.
-    #
-    # actor_user_id + note are passed through GUC session variables
-    # ``approval.actor_user_id`` / ``approval.note`` (set via ``SET LOCAL``
-    # inside the calling transaction). Unset GUCs → NULL, which is the
-    # right semantics for purely-system transitions (expiry / cancel /
-    # skipped / execute status bumps).
-    # ---------------------------------------------------------------------
-    await conn.execute("""
-        CREATE OR REPLACE FUNCTION _approval_write_audit_from_trigger()
-        RETURNS TRIGGER AS $$
-        DECLARE
-            v_actor TEXT;
-            v_actor_uuid UUID;
-            v_note TEXT;
-            v_meta TEXT;
-            v_meta_json JSONB;
-        BEGIN
-            -- Read the three optional GUC session variables. Missing ones
-            -- are treated as NULL. The GUCs are transaction-scoped (set
-            -- via set_config(..., true)), so they auto-clear after commit.
-            BEGIN
-                v_actor := current_setting('approval.actor_user_id', TRUE);
-            EXCEPTION WHEN OTHERS THEN v_actor := NULL; END;
-            BEGIN
-                v_note := current_setting('approval.note', TRUE);
-            EXCEPTION WHEN OTHERS THEN v_note := NULL; END;
-            BEGIN
-                v_meta := current_setting('approval.metadata', TRUE);
-            EXCEPTION WHEN OTHERS THEN v_meta := NULL; END;
-
-            IF v_actor IS NOT NULL AND v_actor <> '' THEN
-                BEGIN
-                    v_actor_uuid := v_actor::uuid;
-                EXCEPTION WHEN OTHERS THEN v_actor_uuid := NULL; END;
-            ELSE
-                v_actor_uuid := NULL;
-            END IF;
-
-            v_meta_json := COALESCE(NULLIF(v_meta, '')::jsonb, '{}'::jsonb);
-
-            IF TG_OP = 'INSERT' THEN
-                -- Every INSERT is a "created" row, attributed to the
-                -- caller (v_actor_uuid) when provided. tenant_id is
-                -- copied from the parent row so audit reads can filter
-                -- by tenant without a JOIN.
-                INSERT INTO approval_audit_log
-                    (tenant_id, request_id, action, actor_user_id, note, metadata)
-                VALUES
-                    (NEW.tenant_id, NEW.id, 'created', v_actor_uuid,
-                     NULLIF(v_note, ''), v_meta_json);
-                -- Rows created already in a terminal-ish state (e.g.
-                -- 'skipped' when resolve_approvers returned empty) need
-                -- a second audit row so the status transition is also
-                -- captured. The second row is attributed to the system
-                -- (NULL actor) because the transition was not a user
-                -- action — the same user who proposed could not have
-                -- chosen "skipped."
-                IF NEW.status <> 'pending' THEN
-                    INSERT INTO approval_audit_log
-                        (tenant_id, request_id, action, actor_user_id, note, metadata)
-                    VALUES
-                        (NEW.tenant_id, NEW.id, NEW.status, NULL, NULL, '{}'::jsonb);
-                END IF;
-            ELSIF TG_OP = 'UPDATE' AND NEW.status <> OLD.status THEN
-                INSERT INTO approval_audit_log
-                    (tenant_id, request_id, action, actor_user_id, note, metadata)
-                VALUES
-                    (NEW.tenant_id, NEW.id, NEW.status, v_actor_uuid,
-                     NULLIF(v_note, ''), v_meta_json);
-            END IF;
-            RETURN NEW;
-        END;
-        $$ LANGUAGE plpgsql;
-    """)
+    # --- Approval module REMOVED ---
+    # The human-approval subsystem was removed. Drop its tables, trigger,
+    # and function if a prior deployment created them, so upgraded
+    # databases retain no orphaned objects. ``require_approval`` remains a
+    # valid safety verdict (it now simply blocks the turn).
     await conn.execute(
         "DROP TRIGGER IF EXISTS trg_approval_audit ON approval_requests"
     )
-    await conn.execute("""
-        CREATE TRIGGER trg_approval_audit
-        AFTER INSERT OR UPDATE OF status ON approval_requests
-        FOR EACH ROW EXECUTE FUNCTION _approval_write_audit_from_trigger();
-    """)
+    await conn.execute(
+        "DROP FUNCTION IF EXISTS _approval_write_audit_from_trigger()"
+    )
+    await conn.execute("DROP TABLE IF EXISTS approval_audit_log CASCADE")
+    await conn.execute("DROP TABLE IF EXISTS approval_requests CASCADE")
+    await conn.execute("DROP TABLE IF EXISTS approval_policies CASCADE")
 
     # --- Safety Framework tables ---
     # Admin-managed rules that the container loads as a snapshot at job
@@ -1251,16 +989,10 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
         )
     """)
-    # V2 P1.1: require_approval verdicts need the original tool_name
-    # + tool_input so the approval UI can render a decision surface.
-    # This column is the ONLY place the full tool_input is retained
-    # (context_digest + context_summary deliberately truncate) — it is
-    # live for 24 h after the approval resolves, then zeroed by a
-    # cleanup task. Other verdict_actions (block, allow, warn, redact)
-    # leave this column NULL.
+    # ``approval_context`` was removed together with the approval
+    # subsystem. Drop the column if an earlier deployment created it.
     await conn.execute(
-        "ALTER TABLE safety_decisions "
-        "ADD COLUMN IF NOT EXISTS approval_context JSONB"
+        "ALTER TABLE safety_decisions DROP COLUMN IF EXISTS approval_context"
     )
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_safety_decisions_tenant_time "
@@ -1299,7 +1031,7 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         "ON safety_rules_audit (tenant_id, created_at DESC)"
     )
 
-    # Trigger function: same pattern as approval's. The caller sets
+    # Trigger function: the caller sets
     # a transaction-local GUC ``safety.actor_user_id`` so the trigger
     # can attribute the row without a second DML. Missing GUC → NULL
     # actor (system transition, e.g. bulk migration).
@@ -1555,9 +1287,6 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     # blast-radius. Per design, each table arrives in its own commit
     # so a single-table regression is trivially revertable via
     # ``ALTER TABLE <t> DISABLE ROW LEVEL SECURITY``.
-    await _enable_rls_on(conn, "approval_audit_log")  # D1 canary
-    await _enable_rls_on(conn, "approval_requests")    # D2
-    await _enable_rls_on(conn, "approval_policies")    # D3
     await _enable_rls_on(conn, "safety_rules")         # D4 (safety triplet)
     await _enable_rls_on(conn, "safety_decisions")
     await _enable_rls_on(conn, "safety_rules_audit")

@@ -254,7 +254,7 @@ Five layers, none of them sufficient alone:
 2. **Per-spawn directory** — each job gets a unique prefix; no cross-spawn sharing of the skill staging area.
 3. **Three-layer tenant isolation** — app-level `WHERE tenant_id`, RLS policy on both tables, and a cross-tenant trigger on `skills` validating that `coworker_id` belongs to the same tenant.
 4. **Path traversal blocked twice** — `CHECK` constraint rejects absolute paths, `..`, and backslashes at write time; the projector re-validates `realpath(target).startswith(skill_root)` at materialization.
-5. **Body is data, not code** — RoleMesh does not execute skill content. Anything the agent does after reading a skill goes through the existing tool surface (Bash, Edit, MCP), gated by the existing safety framework and approval pipeline.
+5. **Body is data, not code** — RoleMesh does not execute skill content. Anything the agent does after reading a skill goes through the existing tool surface (Bash, Edit, MCP), gated by the existing safety framework.
 
 The mutation REST surface is gated by the same `AdminUser` dependency the rest of `/api/admin/agents` uses. Skill management is an admin-grade operation; regular users cannot reshape an agent's behavior.
 

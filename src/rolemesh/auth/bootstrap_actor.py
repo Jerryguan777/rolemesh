@@ -1,8 +1,8 @@
 """Resolve the actor user UUID used in audit-FK writes.
 
-Audit tables (``approval_audit_log.actor_user_id``,
-``safety_rules_audit.actor_user_id``) declare a UUID FK to
-``users(id)``. The web layer's ``AuthenticatedUser.user_id`` can be:
+Audit tables (e.g. ``safety_rules_audit.actor_user_id``) declare a
+UUID FK to ``users(id)``. The web layer's
+``AuthenticatedUser.user_id`` can be:
 
 * a real UUID (an authenticated, persisted user); or
 * the literal string ``"bootstrap"`` — the in-memory pseudo-user the

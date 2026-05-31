@@ -44,7 +44,7 @@ No single point is fatal, but stacked they form the well-known consensus that "r
 
 ### Alternative A — Stay on Raw runc, Rely Entirely on Application-Layer Defense
 
-Add prompt defenses in agent code ("do not execute dangerous commands"), tool allowlists, approval workflow. Touch nothing at the container layer.
+Add prompt defenses in agent code ("do not execute dangerous commands"), tool allowlists, blocking safety rules. Touch nothing at the container layer.
 
 **Pros**: Zero deployment change, zero compatibility risk.
 
@@ -238,7 +238,7 @@ Startup order is pinned in `tests/container/test_startup_order.py` so future ref
 ### Explicitly Out of Scope (belongs to other layers or later work)
 
 - **Egress proxy / URL allowlist** → Egress Control module
-- **Per-request access control / approval** → Safety Framework / Approval module
+- **Per-request access control** → Safety Framework
 - **DNS exfiltration defense** → Egress Control module
 - **Firecracker / Kata** → V2 candidate
 - **Runtime threat detection (Falco)** → Monitoring layer

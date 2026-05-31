@@ -29,26 +29,6 @@ export function iconActivity(size = 19): SVGTemplateResult {
   `;
 }
 
-/** Approvals — clipboard checkmark. v2 topbar Approvals popover. */
-export function iconApprovals(size = 19): SVGTemplateResult {
-  return svg`
-    <svg
-      width=${size}
-      height=${size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="1.8"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M9 11l3 3L22 4"/>
-      <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
-    </svg>
-  `;
-}
-
 /** Settings — gear. v2 topbar + settings shell sidebar entry. */
 export function iconSettings(size = 19): SVGTemplateResult {
   return svg`
@@ -256,18 +236,6 @@ export function iconShield(size = 16): SVGTemplateResult {
     <svg width=${size} height=${size} viewBox="0 0 24 24" fill="none"
       stroke="currentColor" stroke-width="1.8" aria-hidden="true">
       <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-    </svg>
-  `;
-}
-
-/** Approval policies — clipboard check (same shape as iconApprovals
- *  but at the 16/1.8 weight of the nav rail). */
-export function iconClipboardCheck(size = 16): SVGTemplateResult {
-  return svg`
-    <svg width=${size} height=${size} viewBox="0 0 24 24" fill="none"
-      stroke="currentColor" stroke-width="1.8" aria-hidden="true">
-      <path d="M9 11l3 3L22 4"/>
-      <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
     </svg>
   `;
 }

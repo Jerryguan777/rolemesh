@@ -374,47 +374,6 @@ describe('V1WsClient — cancel + reauth banner hooks', () => {
     expect(second).toEqual({ ok: false, alreadyTerminal: true });
   });
 
-  it('routes approval events through the same bus (engine-emitted forwards)', async () => {
-    // ws_stream.py forwards `event.approval.required` /
-    // `event.approval.resolved` over the same socket on the design §4
-    // protocol. The TS union must keep these types narrowable so
-    // subscribers do not have to fall back to `ServerEventBase` and
-    // lose autocomplete on `approval_id` / `decision`.
-    const { fn: fetchFn } = makeFetch({
-      '/api/v1/auth/ws-ticket': () =>
-        new Response(JSON.stringify({ ticket: 't', expires_in_s: 60 }), {
-          status: 200,
-        }),
-    });
-    const WS = makeMockWebSocket();
-    const client = new V1WsClient(
-      { conversationId: 'conv-A', getToken: () => null },
-      { fetch: fetchFn, WebSocket: WS as unknown as typeof WebSocket },
-    );
-    await client.connect();
-    const inst = openMock(WS);
-    const required: ServerEvent[] = [];
-    const resolved: ServerEvent[] = [];
-    client.onEvent('event.approval.required', (e) => required.push(e));
-    client.onEvent('event.approval.resolved', (e) => resolved.push(e));
-    deliver(inst, {
-      type: 'event.approval.required',
-      approval_id: 'apr-1',
-      run_id: 'run-1',
-      summary: { tool_name: 'refund', args: { id: 7 } },
-    });
-    deliver(inst, {
-      type: 'event.approval.resolved',
-      approval_id: 'apr-1',
-      decision: 'approve',
-      actor_user_id: 'u-bob',
-    });
-    expect(required).toHaveLength(1);
-    expect(resolved).toHaveLength(1);
-    expect((required[0] as { approval_id: string }).approval_id).toBe('apr-1');
-    expect((resolved[0] as { decision: string }).decision).toBe('approve');
-  });
-
   it('forwards an unknown event.type to the * subscriber for forward-compat', async () => {
     // PR23 removed `event.run.requires_reauth` from the contract
     // (backend never emitted it). The client's behavior for unknown

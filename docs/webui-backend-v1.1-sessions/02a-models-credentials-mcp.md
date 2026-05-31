@@ -137,9 +137,9 @@
 
 ### CredentialVault 与 audit log
 
-- **没有**在 PUT/DELETE 时落 audit log。理由：v1.1 范围内 `audit_log` 表是 approval-专用的（schema §approval），credential 写入没有现成的 audit 表可用；为 02a 单独立一张 audit 表是 scope creep
+- **没有**在 PUT/DELETE 时落 audit log。理由：v1.1 范围内 credential 写入没有现成的 audit 表可用；为 02a 单独立一张 audit 表是 scope creep
 - PUT credential 走 `logger.info("PUT credential", ..., body=sanitize_for_log(...))`——`api_key` 字段被替换成 `<redacted>`，作为日志层的最小留痕
-- 真正想审计 credential 变更时，独立 chore：复用现有 `approval_audit_log` 表结构 + 新 actor_action 枚举值（`tenant_credential_put` / `tenant_credential_delete`），不在本 session
+- 真正想审计 credential 变更时，独立 chore：复用现有 `safety_rules_audit` 表结构 + 新 actor_action 枚举值（`tenant_credential_put` / `tenant_credential_delete`），不在本 session
 
 ### `mcp_servers.auth_mode` 默认值最终选择
 

@@ -227,7 +227,7 @@ async def test_delete_channel_identity_nulls_corresponding_conv_user_id() -> Non
     the prior owner's stamp on the conv row; the admission layer's
     ``if conv.user_id is None`` short-circuit then never re-stamps,
     and the agent ends up running B's request under A's identity —
-    breaks audit attribution and Phase-2 self-approval.
+    breaks audit attribution.
     """
     import json
     tid, uid = await _seed_user("nullify-conv")

@@ -14,7 +14,6 @@ the policy itself.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import asyncpg
@@ -23,7 +22,6 @@ import pytest
 from rolemesh.db import (
     _get_pool,
     admin_conn,
-    create_approval_request,
     create_channel_binding,
     create_conversation,
     create_coworker,
@@ -67,7 +65,13 @@ async def app_pool(pg_url: str) -> AsyncGenerator[asyncpg.Pool[asyncpg.Record], 
 
 
 async def _two_tenants_full() -> dict[str, dict[str, str]]:
-    """Build two complete chains so we have approval_requests to query."""
+    """Build two complete chains so we have tenant-scoped rows to query.
+
+    The ``conversations`` row at the end of each chain is the vehicle
+    the RLS assertions below select / count against — any RLS-enabled
+    tenant table would do; conversations is convenient because the
+    chain already has to create one.
+    """
     out: dict[str, dict[str, str]] = {}
     for tag in ("A", "B"):
         t = await create_tenant(name=f"T{tag}", slug=f"rls-{tag.lower()}-{uuid.uuid4().hex[:6]}")
@@ -88,21 +92,11 @@ async def _two_tenants_full() -> dict[str, dict[str, str]]:
             tenant_id=t.id, coworker_id=cw.id, channel_binding_id=b.id,
             channel_chat_id=str(uuid.uuid4()),
         )
-        req = await create_approval_request(
-            tenant_id=t.id, coworker_id=cw.id, conversation_id=conv.id,
-            policy_id=None, user_id=u.id, job_id=f"j-{uuid.uuid4().hex[:8]}",
-            mcp_server_name="erp",
-            actions=[{"tool_name": "refund", "params": {}}],
-            action_hashes=[uuid.uuid4().hex],
-            rationale="t", source="proposal", status="pending",
-            resolved_approvers=[u.id],
-            expires_at=datetime.now(UTC) + timedelta(hours=1),
-        )
         out[tag] = {
             "tenant_id": t.id,
             "user_id": u.id,
             "coworker_id": cw.id,
-            "request_id": req.id,
+            "conversation_id": conv.id,
         }
     return out
 
@@ -129,7 +123,7 @@ async def test_app_role_select_blocked_across_tenant(
             a["tenant_id"],
         )
         rows = await conn.fetch(
-            "SELECT * FROM approval_requests WHERE tenant_id = $1::uuid",
+            "SELECT * FROM conversations WHERE tenant_id = $1::uuid",
             b["tenant_id"],
         )
     assert rows == [], (
@@ -155,12 +149,12 @@ async def test_app_role_insert_blocked_across_tenant(
             (asyncpg.InsufficientPrivilegeError, asyncpg.CheckViolationError)
         ):
             await conn.execute(
-                "INSERT INTO approval_audit_log "
-                "(request_id, tenant_id, action) "
-                "VALUES ($1::uuid, $2::uuid, $3)",
-                a["request_id"],  # valid request id, but...
-                b["tenant_id"],   # ...wrong tenant_id
-                "noop",
+                "INSERT INTO safety_decisions "
+                "(tenant_id, stage, verdict_action) "
+                "VALUES ($1::uuid, $2, $3)",
+                b["tenant_id"],   # wrong tenant_id while bound to A
+                "input_prompt",
+                "allow",
             )
 
 
@@ -173,9 +167,9 @@ async def test_unset_guc_returns_empty(
     enforces."""
     await _two_tenants_full()
     async with app_pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM approval_requests")
+        rows = await conn.fetch("SELECT * FROM conversations")
     assert rows == [], (
-        "RLS fail-closed broken: unset GUC returned rows from approval_requests"
+        "RLS fail-closed broken: unset GUC returned rows from conversations"
     )
 
 
@@ -187,7 +181,7 @@ async def test_admin_pool_bypasses_rls() -> None:
     await _two_tenants_full()
     async with admin_conn() as conn:
         rows = await conn.fetch(
-            "SELECT DISTINCT tenant_id FROM approval_requests"
+            "SELECT DISTINCT tenant_id FROM conversations"
         )
     assert len({str(r["tenant_id"]) for r in rows}) >= 2, (
         "admin_conn should see rows from both tenants"
@@ -217,7 +211,7 @@ async def test_guc_does_not_leak_across_acquires(
     async with app_pool.acquire() as conn:
         assert await conn.fetchval("SELECT current_tenant_id()") is None
         rows = await conn.fetch(
-            "SELECT * FROM approval_requests WHERE tenant_id = $1::uuid",
+            "SELECT * FROM conversations WHERE tenant_id = $1::uuid",
             a["tenant_id"],
         )
         assert rows == [], (
@@ -236,7 +230,6 @@ async def test_force_rls_keeps_owner_under_policy(
     forgot FORCE on table X". Verify pg_class.relrowsecurity AND
     pg_class.relforcerowsecurity are both true on every tenant table."""
     expected = [
-        "approval_audit_log", "approval_requests", "approval_policies",
         "safety_rules", "safety_decisions", "safety_rules_audit",
         "scheduled_tasks", "task_run_logs",
         "messages", "conversations", "sessions",

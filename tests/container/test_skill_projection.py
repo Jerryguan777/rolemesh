@@ -517,7 +517,7 @@ async def test_outer_finally_cleans_up_on_exception(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """If ``_execute_after_setup`` raises (any line — projection,
-    spec build, runtime spawn, approval loader…), the ``execute``
+    spec build, runtime spawn…), the ``execute``
     wrapper's ``finally`` must still call ``cleanup_spawn_skills``.
     Otherwise an exception path leaks the spawn dir until the orphan
     cleaner sweeps it on a much later schedule.

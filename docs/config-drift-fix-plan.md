@@ -36,7 +36,7 @@ v1.1 02a 给 multi-tenant credential 加了 schema + Fernet vault primitive；v2
 | 消息总线 | `NATS_URL` | 同上 |
 | App master secret | `CREDENTIAL_VAULT_KEY` / `ROLEMESH_TOKEN_SECRET` / `WS_TICKET_SECRET` | 用于解 DB 中 BYTEA 的密钥本身——必须先于 DB 存在；k8s Secret 注入 |
 | Dev bootstrap | `ADMIN_BOOTSTRAP_TOKEN` / `BOOTSTRAP_USERS` | dev/CI only；per-process identity |
-| Feature mode | `AUTH_MODE` / `APPROVAL_FAIL_MODE` / `SAFETY_FAIL_MODE` | per-deployment 行为开关 |
+| Feature mode | `AUTH_MODE` / `SAFETY_FAIL_MODE` | per-deployment 行为开关 |
 | Container infra | `CONTAINER_BACKEND` / `CONTAINER_IMAGE` / `CONTAINER_MAX_*` / `CONTAINER_NETWORK_NAME` / `IDLE_TIMEOUT` | 单 deployment 容器 runtime 配置 |
 | Web infra | `WEB_UI_HOST` / `WEB_UI_PORT` / `WEB_UI_DIST` / `WEBUI_BASE_URL` / `CORS_ORIGINS` | 单 deployment networking |
 | Egress infra | `EGRESS_GATEWAY_*` / `EGRESS_UPSTREAM_DNS` / `CREDENTIAL_PROXY_HOST` / `CREDENTIAL_PROXY_PORT` | 单 deployment egress |
@@ -58,12 +58,10 @@ v1.1 02a 给 multi-tenant credential 加了 schema + Fernet vault primitive；v2
 | Skills 目录 | `skills` + `skill_files` | per-tenant skill 包 | ✅ |
 | Coworker ↔ MCP 绑定 | `coworker_mcp_servers` | enabled_tools 三态 | ✅ |
 | Coworker ↔ Skill 绑定 | `coworker_skills` | enabled | ✅ |
-| Approval policies | `approval_policies` | 治理 | ✅ |
 | Safety rules | `safety_rules` | 护栏 | ✅ |
 | Channel bindings | `channel_bindings` | per-coworker bot_token（**明文 JSONB**，已知技术债，独立 chore）| ⚠️ tech debt |
 | OIDC tokens | `oidc_user_tokens` | Fernet 加密 refresh/access | ✅ |
 | Runs | `runs` | run lifecycle | ✅ |
-| Approval audit | `approval_audit_log` | audit FK | ✅ |
 
 ### 2.3 关键判据
 

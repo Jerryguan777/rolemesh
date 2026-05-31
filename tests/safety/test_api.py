@@ -1,6 +1,6 @@
 """REST API tests for /api/admin/safety/rules endpoints.
 
-Mirrors tests/approval/test_api.py structure. Focuses on:
+Focuses on:
   - CRUD happy path (create + list + get + patch + delete)
   - server-side validation: unknown check_id, unsupported stage,
     malformed config all reject with 400

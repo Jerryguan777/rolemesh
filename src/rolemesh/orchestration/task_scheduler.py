@@ -226,9 +226,7 @@ async def _run_task(
                 conversation_id=conversation_id,
                 # v6.1 §P1.7 — recover the creator identity onto the
                 # turn. NULL ``created_by_user_id`` falls back to the
-                # empty default so the Phase-2 approval edge path
-                # (E-path / owner FYI) can detect it without a magic
-                # sentinel.
+                # empty default.
                 user_id=task.created_by_user_id or "",
             ),
             lambda container_name, job_id: deps.on_process(

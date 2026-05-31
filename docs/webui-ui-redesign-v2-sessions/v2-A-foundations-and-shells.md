@@ -17,10 +17,10 @@ v2 最大一个 session——把整套视觉地基 + IA 重组一次性完成：
 1. **Design tokens** from prototype `:root`（cream + terracotta + Fraunces + Hanken）
 2. **`<rm-dialog>` + `<rm-wizard>` primitive**（无逻辑壳，parent-controlled state）
 3. **Router 嵌套化**：`#/`（chat shell）/ `#/manage/*`（Settings shell）/ `#/activity/*`（v2-C 占位）
-4. **`<rm-chat-shell>`**：左 sidebar 含 coworker 切换器 + 历史会话；中间 chat-panel；顶栏 3 图标 (Activity / Approvals / Settings) + tenant pill
+4. **`<rm-chat-shell>`**：左 sidebar 含 coworker 切换器 + 历史会话；中间 chat-panel；顶栏 2 图标 (Activity / Settings) + tenant pill
 5. **`<rm-settings-shell>`**：分组 sidebar (Coworkers / Building blocks / Governance / Workspace / Account)；11 个内嵌页全部 slot 进去并做 cosmetic reskin
 
-**v1.1 现有业务组件全部保留**——chat-panel / safety pages / approvals page / coworkers page / mcp / models / credentials / skills 都 slot 进新 shell。本 session 后 chat + 配置全栈视觉切到 v2，**功能完全等价于 v1.1**（除 URL 略变）。
+**v1.1 现有业务组件全部保留**——chat-panel / safety pages / coworkers page / mcp / models / credentials / skills 都 slot 进新 shell。本 session 后 chat + 配置全栈视觉切到 v2，**功能完全等价于 v1.1**（除 URL 略变）。
 
 ## Required reading
 
@@ -37,7 +37,7 @@ v2 最大一个 session——把整套视觉地基 + IA 重组一次性完成：
 
 ## 概念定位
 
-- Primitive (`<rm-dialog>` / `<rm-wizard>`) 与 v1.1 `<rm-inline-approval>` 同模式：清晰边界 + parent-controlled state + 无业务逻辑
+- Primitive (`<rm-dialog>` / `<rm-wizard>`) 与 v1.1 `<rm-message-*>` 同模式：清晰边界 + parent-controlled state + 无业务逻辑
 - 视觉对照"大致语言一致"——颜色 token / 字体 / 卡片样式 match prototype；spacing/margin 差几 px 不算回归
 - v1.1 业务组件**全部保留运行**——chat-panel 等 0 触碰，slot 进新 shell 即可
 - 11 个 settings 页只做**cosmetic reskin**（卡片包一层 / 颜色变量替换硬编码）—— 业务逻辑、API 调用、表单字段 0 改
@@ -77,12 +77,11 @@ v2 最大一个 session——把整套视觉地基 + IA 重组一次性完成：
    - `#/models` → `#/manage/models`
    - `#/credentials` → `#/manage/credentials`
    - `#/skills` → `#/manage/skills`
-   - `#/approvals` → `#/manage/approval-policies`
    - `#/admin/safety/rules` → `#/manage/safety` （rules 与 decisions 在 v2 不在同一壳）
    - `#/admin/safety/decisions` → `#/activity/safety-decisions`
 3. **测试**：navigate 旧路径 → location.replace 触发 → 新路径生效
 
-### PR 3 — `<rm-chat-shell>` + 顶栏 3 图标 + coworker 切换器
+### PR 3 — `<rm-chat-shell>` + 顶栏 2 图标 + coworker 切换器
 
 **Goal**：`#/` 路径下渲染新 chat shell；功能等价于 v1.1 chat。
 
@@ -91,12 +90,11 @@ v2 最大一个 session——把整套视觉地基 + IA 重组一次性完成：
 1. **`web/src/components/chat-shell.ts`**：
    - 左 sidebar (240px)：logo / 当前 coworker 卡片 (含切换 button) / "+ New chat" / 搜索框 / 历史会话列表（Today / Yesterday / Earlier 分组）/ 底部 user pill (menu: Settings / Log out)
    - 中间 main：直接渲染 v1.1 `<rm-chat-panel>`，所有 props 透传
-   - 顶栏右：Activity icon (脉冲 svg) / Approvals icon (checkmark + badge) / Settings icon (gear) / tenant pill (`acme-corp · prod`)
+   - 顶栏右：Activity icon (脉冲 svg) / Settings icon (gear) / tenant pill (`acme-corp · prod`)
    - 视觉对照原型 `.shell` / `.sb` / `.main` / `.tbar` class
 2. **Coworker 切换器** popover：点 sidebar 顶部当前 coworker 卡片 → 弹列表 (`GET /api/v1/coworkers`) + 每行 click 切换 + 底部 "Manage coworkers…" link (`#/manage/coworkers`)
-3. **顶栏 3 图标动作**：
+3. **顶栏 2 图标动作**：
    - Activity → `router push #/activity` (v2-C 之前用 `<rm-coming-soon>`)
-   - Approvals → 点开 placeholder popover (v2-C 真做实时；本 session 显示 "Coming v2-C" + badge hardcode 0)
    - Settings → `router push #/manage/coworkers`
 4. **tenant pill**：`GET /api/v1/me` 拿 tenant 名 + hardcode `prod`（v3 加 backend env field）
 5. **历史会话分组**：按 `messages.created_at` 用 user local timezone 分 Today / Yesterday / Earlier
@@ -107,7 +105,7 @@ v2 最大一个 session——把整套视觉地基 + IA 重组一次性完成：
    - 切 conversation chat-panel 收到新 conv id
    - 底部 user pill 弹 menu
 
-### PR 4 — `<rm-settings-shell>` + 11 页 slot + sidebar 分组
+### PR 4 — `<rm-settings-shell>` + 页 slot + sidebar 分组
 
 **Goal**：`#/manage/*` 路径下渲染新 settings shell；11 个内嵌页全部 v1.1 现有组件 slot 进去 + cosmetic reskin。
 
@@ -124,7 +122,6 @@ v2 最大一个 session——把整套视觉地基 + IA 重组一次性完成：
        · Credentials
      GOVERNANCE
        · Safety rules
-       · Approval policies
      WORKSPACE
        · General  ← 新建 placeholder
        · Members  ← 新建 placeholder
@@ -133,14 +130,13 @@ v2 最大一个 session——把整套视觉地基 + IA 重组一次性完成：
      ```
    - 右侧 main：渲染当前选中的 page
    - 顶栏可选：返 chat 按钮（X 在右上）
-2. **11 页 slot**：每页都是 v1.1 现有组件 + 一层 padding/卡片样式 wrapper：
+2. **页 slot**：每页都是 v1.1 现有组件 + 一层 padding/卡片样式 wrapper：
    - `#/manage/coworkers` → `<rm-coworkers-page>` (v1.1 03b)
    - `#/manage/mcp-servers` → `<rm-mcp-servers-page>` (v1.1 02a)
    - `#/manage/skills` → `<rm-skills-page>` (v1.1 03b)
    - `#/manage/models` → `<rm-models-page>` (v1.1 02a)
    - `#/manage/credentials` → `<rm-credentials-page>` (v1.1 02a)
    - `#/manage/safety` → `<rm-safety-rules-page>` (v1.1 04，已在 v2 admin allowlist 内)
-   - `#/manage/approval-policies` → 复用 v1.1 现有的 approvals page placeholder OR `<rm-coming-soon>`（v1.1 没真做这页）
    - `#/manage/general` → 新建 `<rm-coming-soon label="General" phase="v3">`
    - `#/manage/members` → 同上 placeholder
    - `#/manage/appearance` → 真做（system theme card + dark mode 跟随系统 readonly display）
@@ -149,7 +145,7 @@ v2 最大一个 session——把整套视觉地基 + IA 重组一次性完成：
 5. **pinned tests**：
    - settings sidebar entry click 各跳对 page
    - 当前选中 entry 高亮
-   - 11 页都能渲染不抛
+   - 各页都能渲染不抛
 6. **lint**：新加 `web/scripts/lint-flat-route.mjs` 检查前端无对扁平 hash 的硬链接
 
 ### PR 5 (可选) — 收尾 + 文档约定
@@ -166,13 +162,13 @@ v2 最大一个 session——把整套视觉地基 + IA 重组一次性完成：
 - [ ] `<rm-dialog>` + `<rm-wizard>` 单测全绿
 - [ ] Router 嵌套化 + 8 个旧扁平路径 redirect 工作
 - [ ] `<rm-chat-shell>` 渲染：coworker 切换器 / chat-panel slot / 顶栏 3 图标 / tenant pill
-- [ ] `<rm-settings-shell>` 渲染：分组 sidebar + 11 页全部能进去
+- [ ] `<rm-settings-shell>` 渲染：分组 sidebar + 各页全部能进去
 - [ ] **v1.1 chat 行为不退化**：浏览器开 web → 发消息 / token stream / Stop / Cancel / reconnect 全工作（颜色变了但功能完整）
-- [ ] **v1.1 各 settings page 内交互不退化**：safety rules 还能看；approvals page 还能进；MCP server 还能 CRUD；coworker 还能创建（用 v1.1 现有创建 UI——wizard 是 v2-B）
+- [ ] **v1.1 各 settings page 内交互不退化**：safety rules 还能看；MCP server 还能 CRUD；coworker 还能创建（用 v1.1 现有创建 UI——wizard 是 v2-B）
 - [ ] dark mode 跟系统切换 colors 变
 - [ ] `npm test` + `npm run build` 全绿
 - [ ] OpenAPI codegen freshness check 仍绿
-- [ ] 手动 smoke：完整 chat 流程 + 顶栏 3 图标点 + Settings 11 页 navigate + dark mode 切
+- [ ] 手动 smoke：完整 chat 流程 + 顶栏 2 图标点 + Settings 各页 navigate + dark mode 切
 - [ ] 更新 `docs/webui-ui-redesign-v2-plan.md` 状态表
 
 ## Out of scope（明确不做）
@@ -181,10 +177,9 @@ v2 最大一个 session——把整套视觉地基 + IA 重组一次性完成：
 - ❌ **Coworker 详情编辑页 wizard**（v2-B；本 session 用 v1.1 现有）
 - ❌ **Models page provider grouping + credential 交叉**（v2-B 落 helper；本 session 用 v1.1 现有）
 - ❌ **Activity 真内容**（v2-C；本 session `#/activity` 用 `<rm-coming-soon>` 占位）
-- ❌ **Approvals popover 真实时**（v2-C；本 session 占位 popover + badge 0）
 - ❌ **Safety rules 完整编辑器**（locked decision #7，永远只做 read-only list；本 session reskin 即可）
 - ❌ **Credential per-provider extras**（v2-B；本 session 用 v1.1 现有单 api_key 表单）
-- ❌ **删除 v1.1 任何业务组件**（chat-panel / safety pages / approvals page 等 0 触碰）
+- ❌ **删除 v1.1 任何业务组件**（chat-panel / safety pages 等 0 触碰）
 - ❌ **新依赖引入**（state mgmt / animation / form lib / 编辑器库）
 - ❌ **重写现有 Tailwind 用法**（v2-C polish 才统一）
 
@@ -201,10 +196,9 @@ v2 最大一个 session——把整套视觉地基 + IA 重组一次性完成：
 
 仍需 session 内决策：
 
-1. **顶栏 Approvals badge 占位值**：hardcode 0 vs 调 GET 一次（无 WS）—— 推荐前者（v2-C 一起做实时，避免双实现）
-2. **历史会话分组时区**：user local 还是 server tz —— 推荐 user local (`new Date().toLocaleDateString()`)
-3. **`<rm-settings-shell>` 顶栏返 chat button** 位置：右上 X 还是左上 < 箭头 —— 看原型实际
-4. **"Manage coworkers…" 在 chat shell 切换器**：popover 内的 link，还是单独的 button —— 看原型
+1. **历史会话分组时区**：user local 还是 server tz —— 推荐 user local (`new Date().toLocaleDateString()`)
+2. **`<rm-settings-shell>` 顶栏返 chat button** 位置：右上 X 还是左上 < 箭头 —— 看原型实际
+3. **"Manage coworkers…" 在 chat shell 切换器**：popover 内的 link，还是单独的 button —— 看原型
 
 ## Pitfalls
 
@@ -212,11 +206,11 @@ v2 最大一个 session——把整套视觉地基 + IA 重组一次性完成：
 - **CSS 变量必须穿透 shadow boundary** —— `:host { color: var(--rm-ink-primary) }`，不要硬编码颜色字面量
 - **`<dialog>` backdrop 是 `::backdrop` 伪元素** —— 不要 element 上加 backdrop div
 - **Router redirect 用 `location.replace`** 不要 `location.assign`（避免 browser back button 卡在旧路径）
-- **`<rm-wizard>` draft state 由父组件管** —— primitive 0 内部 state；这是与 v1.1 inline-approval 同模式
+- **`<rm-wizard>` draft state 由父组件管** —— primitive 0 内部 state；这是与 v1.1 `<rm-message-*>` 同模式
 - **不要做 portal / teleport 模拟** —— 原生 `<dialog>` 浏览器免费处理 stacking
-- **11 页 reskin 只动样式 wrapper** —— 业务组件内部任何 logic / API call / 表单 schema 触碰都是 reject
+- **页 reskin 只动样式 wrapper** —— 业务组件内部任何 logic / API call / 表单 schema 触碰都是 reject
 - **chat shell 历史会话列表数据源** —— `GET /api/v1/coworkers/{id}/conversations`；与 v1.1 chat-panel 内的 sub-sidebar 共享数据；可能需要 lift state 到 shell（如果 chat-panel 内已 fetch，复用结果而不双 fetch）
-- **顶栏 3 icon svg** 抽 `icons.ts` —— v2-B / v2-C 都会复用
+- **顶栏 icon svg** 抽 `icons.ts` —— v2-B / v2-C 都会复用
 - **`<rm-coming-soon>` 占位** 沿用 v1.1 00c 落的（不要新做）
 - **dark mode test** 手动跑 system 切换；自动测试覆盖不到这条
 - **新 v2 组件别用 Tailwind** —— 走 tokens.css；保持 v2 一致
@@ -261,7 +255,7 @@ v2 最大一个 session——把整套视觉地基 + IA 重组一次性完成：
 
 | Page | 改动范围 |
 |---|---|
-| coworkers / mcp-servers / models / credentials / skills / safety / approval-policies | **0 触碰**——`<rm-settings-shell>` 在外面套 padding + cream surface card；内部组件完全不改 |
+| coworkers / mcp-servers / models / credentials / skills / safety | **0 触碰**——`<rm-settings-shell>` 在外面套 padding + cream surface card；内部组件完全不改 |
 | general / members | 新建占位：复用现成的 `<rm-coming-soon label="..." phase=3>`，不写新组件 |
 | appearance | 新建轻组件 `<rm-appearance-page>`——只 readonly 显示 `prefers-color-scheme` 检测结果 + listen `MediaQueryList.change`，不存任何 user preference（保持 plan §13 locked: 不加 toggle） |
 
@@ -280,17 +274,13 @@ v2 最大一个 session——把整套视觉地基 + IA 重组一次性完成：
 - **`<rm-wizard>` primitive**：已 land + 6 个单元测试 pin 行为；v2-B 落 coworker wizard 时直接拿来用，无需重做。Wizard primitive 是 0 业务逻辑 shell：parent 控 draft state + `canAdvance` + `submit` 回调。
 - **`<rm-dialog>` primitive**：同样可复用——v2-B credential 编辑（per-provider extras）适合放进 `<rm-dialog>`。
 - **`<rm-coming-soon>` 复用 v1.1 原件**——无重复造；general / members 直接用 `<rm-coming-soon label="..." phase=3>`。
-- **`icons.ts`** 抽出 8 个 SVG icon factory（activity / approvals / settings / chevron / plus / search / close / logout）——v2-B / v2-C 共享。
+- **`icons.ts`** 抽出 SVG icon factory（activity / settings / chevron / plus / search / close / logout）——v2-B / v2-C 共享。
 
 ### Coworker / Conversation 切换走 location.href reload
 
 v1.1 `<rm-chat-panel>` 只在 constructor 读 URL params，没有 reactive URL 监听。chat-shell 切换 coworker 或 conversation 时用 `location.href = ...` 触发整页 reload——chat-panel 重新 mount + 重新读 URL。Trade-off：UX 上有一次 reload 抖动；好处：零触碰 chat-panel。
 
 如果 v3 想消除 reload，需要 lift conversation state 上 shell——估算 4-6 小时改动，不在 v2 scope。
-
-### Approvals badge 占位值锁定
-
-顶栏 Approvals icon 的 badge 写死 `approvalsBadge = 0`，不发 GET 请求。理由（plan locked decision #5）：v2-C 一起做实时 popover + 实时 badge，避免"v2-A 假装实现 + v2-C 真实现"的双系统。当前 badge 不显示（< 1 时被 nothing 短路），用户视觉上看不到这个 placeholder。
 
 ### 历史会话分组时区
 

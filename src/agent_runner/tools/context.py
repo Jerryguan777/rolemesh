@@ -34,8 +34,8 @@ class ToolContext:
     coworker_id: str
     conversation_id: str
     # Identity of the user whose turn the agent is executing. Passed through
-    # to MCP calls via X-RoleMesh-User-Id and recorded on approval requests
-    # so the approval path can attribute the proposal to the originating user.
+    # to MCP calls via X-RoleMesh-User-Id so downstream systems can attribute
+    # the call to the originating user.
     user_id: str = ""
     # True when this turn is a scheduled-task fire (vs. an interactive
     # turn). The send_message tool stamps this on its IPC payload so the

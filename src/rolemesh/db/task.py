@@ -36,7 +36,7 @@ async def create_task(task: ScheduledTask) -> None:
     ``task.created_by_user_id`` lands on the DB row directly (v6.1
     §P1.7). The orchestrator-side scheduler reads it back when the
     task fires so the run's ``AgentInput.user_id`` carries the
-    originating user identity into the approval / audit chain.
+    originating user identity into the audit chain.
     """
     async with tenant_conn(task.tenant_id) as conn:
         await conn.execute(

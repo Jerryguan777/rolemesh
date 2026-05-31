@@ -1,5 +1,5 @@
-// WsClientBase — pin the shared lifecycle invariants that both
-// V1WsClient and UserApprovalsClient rely on:
+// WsClientBase — pin the shared lifecycle invariants that
+// ticket-authed clients such as V1WsClient rely on:
 //   * generation guard: an in-flight ticket fetch resolved AFTER a
 //     teardown must NOT open a fresh socket.
 //   * onclose drives a backoff reconnect; explicit teardown short-circuits it.

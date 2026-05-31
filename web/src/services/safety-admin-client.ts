@@ -83,7 +83,6 @@ export interface SafetyDecision {
   findings: SafetyFinding[];
   context_digest: string;
   context_summary: string;
-  approval_context?: Record<string, unknown> | null;
   created_at: string;
 }
 

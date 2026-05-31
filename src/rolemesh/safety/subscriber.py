@@ -97,9 +97,8 @@ class SafetyEventsSubscriber:
             return
 
         # Cross-check the claimed tenant_id against the authoritative
-        # record. Mirrors _tenant_matches in approval/engine.py — a
-        # buggy or malicious container must NOT be able to write audit
-        # rows against another tenant.
+        # record — a buggy or malicious container must NOT be able to
+        # write audit rows against another tenant.
         #
         # Note on ``claimed_tenant and ...`` — if the event omits
         # tenant_id entirely (empty string), this branch is skipped
@@ -132,9 +131,8 @@ class SafetyEventsSubscriber:
     async def on_message_bytes(self, data: bytes) -> None:
         """NATS transport entry point — decode JSON then validate.
 
-        Malformed JSON is dropped with a log. Same fail-safe contract
-        as approval: one bad message must not poison the subscriber
-        loop.
+        Malformed JSON is dropped with a log. Fail-safe contract: one
+        bad message must not poison the subscriber loop.
         """
         try:
             payload = json.loads(data)

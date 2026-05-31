@@ -24,7 +24,6 @@ const LEGACY_REDIRECTS: ReadonlyMap<string, string> = new Map([
   ['#/models',                   '#/manage/models'],
   ['#/credentials',              '#/manage/credentials'],
   ['#/skills',                   '#/manage/skills'],
-  ['#/approvals',                '#/manage/approval-policies'],
   ['#/admin/safety/rules',       '#/manage/safety'],
   ['#/admin/safety/decisions',   '#/activity/safety-decisions'],
 ]);

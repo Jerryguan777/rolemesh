@@ -1,8 +1,7 @@
 // @vitest-environment happy-dom
-// <rm-activity-shell> — pins the three-route layout:
-//   * `#/activity`                  → index (two cards)
+// <rm-activity-shell> — pins the two-route layout:
+//   * `#/activity`                  → index (one card)
 //   * `#/activity/safety-decisions` → <rm-safety-decisions-page>
-//   * `#/activity/approvals`        → <rm-approvals-page mode="resolved">
 //
 // We pin observable behaviour: which custom element gets slotted, which
 // hash a tab click writes, and whether the X button returns to `#/`.
@@ -16,12 +15,10 @@ vi.mock('../api/client.js', async () => {
   const actual = await vi.importActual<typeof import('../api/client.js')>(
     '../api/client.js',
   );
-  const stub = vi.fn().mockResolvedValue([]);
   const single = vi.fn().mockResolvedValue(null);
   return {
     ...actual,
     getApiClient: () => ({
-      listApprovals: stub,
       getMe: single,
     }),
   };
@@ -94,7 +91,7 @@ describe('<rm-activity-shell>', () => {
     vi.clearAllMocks();
   });
 
-  it('renders the index (two cards, no inner page) at #/activity', async () => {
+  it('renders the index (card, no inner page) at #/activity', async () => {
     loc = stubHash('#/activity');
     const el = await mount();
     const body = el.querySelector('[data-testid="activity-body"]');
@@ -102,32 +99,14 @@ describe('<rm-activity-shell>', () => {
     expect(
       el.querySelector('[data-testid="activity-card-safety-decisions"]'),
     ).not.toBeNull();
-    expect(
-      el.querySelector('[data-testid="activity-card-approvals"]'),
-    ).not.toBeNull();
-    // Index renders neither child page.
+    // Index renders no child page.
     expect(el.querySelector('rm-safety-decisions-page')).toBeNull();
-    expect(el.querySelector('rm-approvals-page')).toBeNull();
   });
 
   it('renders <rm-safety-decisions-page> at #/activity/safety-decisions', async () => {
     loc = stubHash('#/activity/safety-decisions');
     const el = await mount();
     expect(el.querySelector('rm-safety-decisions-page')).not.toBeNull();
-    expect(el.querySelector('rm-approvals-page')).toBeNull();
-  });
-
-  it('renders <rm-approvals-page mode="resolved"> at #/activity/approvals', async () => {
-    // The mode prop is the contract between activity-shell and the
-    // log surface — a switch back to mode='pending' here would put
-    // the chat-shell popover and the activity log in a fight over
-    // who shows pending rows. Pin the value.
-    loc = stubHash('#/activity/approvals');
-    const el = await mount();
-    const page = el.querySelector('rm-approvals-page');
-    expect(page).not.toBeNull();
-    expect(page?.getAttribute('mode')).toBe('resolved');
-    expect(el.querySelector('rm-safety-decisions-page')).toBeNull();
   });
 
   it('clicking the Safety decisions index card navigates to #/activity/safety-decisions', async () => {
@@ -142,34 +121,22 @@ describe('<rm-activity-shell>', () => {
     expect(el.querySelector('rm-safety-decisions-page')).not.toBeNull();
   });
 
-  it('clicking the Approval log index card navigates to #/activity/approvals', async () => {
-    loc = stubHash('#/activity');
-    const el = await mount();
-    const card = el.querySelector<HTMLButtonElement>(
-      '[data-testid="activity-card-approvals"]',
-    );
-    card!.click();
-    await settle(el);
-    expect(loc.hashAssignments).toContain('#/activity/approvals');
-    expect(el.querySelector('rm-approvals-page')).not.toBeNull();
-  });
-
   it('tab bar switches via hash (URL is source of truth)', async () => {
     loc = stubHash('#/activity');
     const el = await mount();
-    const approvalsTab = el.querySelector<HTMLButtonElement>(
-      '[data-testid="activity-tab-approvals"]',
+    const safetyTab = el.querySelector<HTMLButtonElement>(
+      '[data-testid="activity-tab-safety-decisions"]',
     );
-    approvalsTab!.click();
+    safetyTab!.click();
     await settle(el);
-    expect(loc.hashAssignments).toContain('#/activity/approvals');
+    expect(loc.hashAssignments).toContain('#/activity/safety-decisions');
     expect(
       el.querySelector('[data-testid="activity-body"]')?.getAttribute('data-tab'),
-    ).toBe('approvals');
+    ).toBe('safety-decisions');
   });
 
   it('X button navigates back to chat (#/)', async () => {
-    loc = stubHash('#/activity/approvals');
+    loc = stubHash('#/activity/safety-decisions');
     const el = await mount();
     const back = el.querySelector<HTMLButtonElement>(
       '[data-testid="activity-back"]',

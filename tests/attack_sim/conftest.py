@@ -6,8 +6,7 @@ Each attack file picks its own integration level:
     ``build_container_spec`` / pydantic validators directly, no DB,
     no NATS. Fast (<1s/test).
 
-  * **Engine-level** (e.g. F. Approval, E. Tenant Isolation): uses
-    the real approval engine with a fake NATS publisher + fake
+  * **Engine-level** (e.g. G. DoS): uses a fake NATS publisher + fake
     channel sender, backed by a real testcontainers Postgres.
     Inherits the ``test_db`` fixture from repo-level conftest.
 
@@ -16,10 +15,9 @@ Each attack file picks its own integration level:
     Needs ``[safety-ml]`` extra installed for slow checks.
 
 We deliberately do NOT spin up a full orchestrator harness with NATS
-here (unlike tests/approval/e2e/). Attack simulations should be as
-cheap as possible so the full suite runs in <30s; wiring real NATS
-adds 10-30s per test for little incremental confidence —
-tests/approval/e2e already verifies the NATS path.
+here. Attack simulations should be as cheap as possible so the full
+suite runs in <30s; wiring real NATS adds 10-30s per test for little
+incremental confidence.
 """
 
 from __future__ import annotations
