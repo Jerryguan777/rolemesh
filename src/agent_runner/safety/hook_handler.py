@@ -1,8 +1,7 @@
 """HookHandler that runs the Safety pipeline on agent hook events.
 
 Registered in ``agent_runner.main`` only when ``init.safety_rules`` is
-non-empty — zero rules means zero runtime cost, mirroring the
-ApprovalHookHandler convention.
+non-empty — zero rules means zero runtime cost.
 
 Stage coverage:
 
@@ -24,10 +23,10 @@ Verdict translation (V2 P0.2):
                          expose a replace-result channel, the handler
                          emits ``appended_context`` with a withhold
                          notice instead.
-  - require_approval   → container side treats as block for this turn;
-                         the orchestrator's audit ingestion (P1.1) sees
-                         ``verdict_action=require_approval`` and creates
-                         the approval request out-of-band.
+  - require_approval   → treated identically to ``block``: the turn is
+                         refused. The orchestrator's audit ingestion
+                         records ``verdict_action=require_approval`` for
+                         reporting, but the runtime effect is a block.
   - redact             → PRE_TOOL_CALL replaces ``tool_input``.
                          POST_TOOL_RESULT falls back to appended_context
                          because the hook protocol cannot replace the
@@ -139,15 +138,8 @@ class SafetyHookHandler:
         )
 
         if verdict.action in ("block", "require_approval"):
-            # require_approval is a container-side block (the actual
-            # approval request creation happens orchestrator-side in
-            # P1.1 via the audit ingestion path). The agent sees a
-            # block either way.
-            reason = verdict.reason or (
-                "Awaiting approval"
-                if verdict.action == "require_approval"
-                else "Blocked by safety policy"
-            )
+            # require_approval blocks the turn identically to block.
+            reason = verdict.reason or "Blocked by safety policy"
             return ToolCallVerdict(block=True, reason=reason)
 
         if verdict.action == "redact":
@@ -190,11 +182,7 @@ class SafetyHookHandler:
             publisher=self._tool_ctx.publish,
         )
         if verdict.action in ("block", "require_approval"):
-            reason = verdict.reason or (
-                "Awaiting approval"
-                if verdict.action == "require_approval"
-                else "Blocked by safety policy"
-            )
+            reason = verdict.reason or "Blocked by safety policy"
             return UserPromptVerdict(block=True, reason=reason)
 
         if verdict.action == "redact":
@@ -257,16 +245,11 @@ class SafetyHookHandler:
         )
         # POST_TOOL_RESULT hook only exposes appended_context. Block,
         # require_approval, and redact all funnel through that same
-        # channel with distinct user-facing messages.
+        # channel. require_approval is treated identically to block.
         if verdict.action in ("block", "require_approval"):
-            verb = (
-                "Awaiting approval"
-                if verdict.action == "require_approval"
-                else "withheld by safety policy"
-            )
             return ToolResultVerdict(
                 appended_context=(
-                    f"[Tool result {verb}: "
+                    f"[Tool result withheld by safety policy: "
                     f"{verdict.reason or 'policy match'}]"
                 )
             )

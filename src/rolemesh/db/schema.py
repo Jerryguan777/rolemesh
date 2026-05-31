@@ -44,24 +44,125 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             created_at TIMESTAMPTZ DEFAULT now()
         )
     """)
-    # Approval module — per-tenant default behaviour when a proposal
-    # matches NO policy. Values:
-    #   'auto_execute'     — legacy: run the actions unsupervised
-    #                        (audit chain created→approved→executing→
-    #                        executed, all with system actor).
-    #   'require_approval' — create the request as ``skipped`` so an
-    #                        operator sees it but it does not run.
-    #                        Use when the tenant treats "no matching
-    #                        policy" as a config gap, not an allowlist.
-    #   'deny'             — create the request as ``rejected`` with a
-    #                        system note. Use when the tenant is in a
-    #                        deny-by-default posture.
+    # ``tenants.approval_default_mode`` was removed with the approval
+    # subsystem. Drop the column if an earlier deployment created it.
     await conn.execute(
-        "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS "
-        "approval_default_mode TEXT DEFAULT 'auto_execute' "
-        "CHECK (approval_default_mode IN ("
-        "'auto_execute', 'require_approval', 'deny'))"
+        "ALTER TABLE tenants DROP COLUMN IF EXISTS approval_default_mode"
     )
+
+    # ----- Platform model catalog (v1.1 §2.1) -----------------------------
+    # Tenant-agnostic; no RLS. ``is_platform`` is reserved for the v2
+    # extension where a tenant can register its own model (then FALSE
+    # for those rows). v1 only ships platform-curated entries.
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS models (
+            id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            provider        VARCHAR(50) NOT NULL,
+            model_id        VARCHAR(200) NOT NULL,
+            model_family    VARCHAR(50) NOT NULL,
+            display_name    VARCHAR(200) NOT NULL,
+            is_platform     BOOLEAN NOT NULL DEFAULT TRUE,
+            is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at      TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE (provider, model_id)
+        )
+    """)
+
+    # Tenant-scoped LLM credentials. ``credential_data`` BYTEA holds the
+    # Fernet-encrypted JSON payload ({"api_key": "sk-..."}) — see
+    # ``rolemesh.auth.credential_vault`` and design §8.1. The CREATE
+    # below already lands the BYTEA column on a fresh DB; the guarded
+    # DO block below rewrites a pre-greenfield dev DB that still has
+    # the legacy ``credential_ref TEXT`` shape. Both branches are
+    # idempotent.
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS tenant_model_credentials (
+            id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            tenant_id        UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            provider         VARCHAR(50) NOT NULL,
+            credential_data  BYTEA NOT NULL,
+            created_at       TIMESTAMPTZ DEFAULT NOW(),
+            updated_at       TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE (tenant_id, provider)
+        )
+    """)
+    # Greenfield migration: drop legacy ``credential_ref`` column and
+    # add ``credential_data`` if the pre-existing dev DB was created
+    # with the old shape. The design (§8.1) is explicit that the
+    # vault is not back-compat with the old plaintext-pointer column —
+    # any row stored under the old shape is unrecoverable, so we drop
+    # all rows along with the column. Tenants must re-PUT credentials.
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'tenant_model_credentials'
+                         AND column_name = 'credential_ref') THEN
+                DELETE FROM tenant_model_credentials;
+                ALTER TABLE tenant_model_credentials DROP COLUMN credential_ref;
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                           WHERE table_name = 'tenant_model_credentials'
+                             AND column_name = 'credential_data') THEN
+                ALTER TABLE tenant_model_credentials
+                    ADD COLUMN credential_data BYTEA NOT NULL;
+            END IF;
+        END $$
+    """)
+
+    # MCP server registry. ``tool_reversibility`` is a {tool_name: bool}
+    # map; an empty object means "no per-tool override, fall back to
+    # tenant default".
+    # MCP server registry.
+    # ``auth_mode`` carries the 'user' | 'service' | 'both' triple from
+    # design §2.1; the API surface requires the caller to pass it
+    # explicitly for clarity but the DB default is ``'service'`` so a
+    # bypass-RLS INSERT (migrations, smoke scripts) lands on the safest
+    # mode (server-managed credentials) rather than ``'user'`` which
+    # implies an end-user OIDC token round-trip.
+    # ``tool_reversibility`` is a {tool_name: bool} map; an empty
+    # object means "no per-tool override, fall back to tenant default".
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS mcp_servers (
+            id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            tenant_id           UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            name                VARCHAR(200) NOT NULL,
+            type                VARCHAR(50) NOT NULL,
+            url                 TEXT NOT NULL,
+            auth_mode           VARCHAR(50) NOT NULL DEFAULT 'service',
+            extra_headers       JSONB DEFAULT '{}',
+            tool_reversibility  JSONB DEFAULT '{}',
+            description         TEXT,
+            created_at          TIMESTAMPTZ DEFAULT NOW(),
+            updated_at          TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE (tenant_id, name)
+        )
+    """)
+    # Idempotent default for a pre-existing dev DB whose CREATE landed
+    # before the design said ``auth_mode`` should default.
+    await conn.execute(
+        "ALTER TABLE mcp_servers ALTER COLUMN auth_mode SET DEFAULT 'service'"
+    )
+    # The v1.1 design carried a ``credential_ref TEXT`` column intended
+    # as an indirection handle into an external secret store. The 02a
+    # envelope-encryption pivot retired that pattern for LLM credentials
+    # (see the ``tenant_model_credentials.credential_ref`` drop above)
+    # but the equivalent drop on ``mcp_servers`` was forgotten. The
+    # column never had a runtime consumer and is removed here. If MCP
+    # service-mode credentials are wired later, the storage shape
+    # deserves an explicit design decision rather than reviving an
+    # under-specified ``TEXT`` column.
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'mcp_servers'
+                         AND column_name = 'credential_ref') THEN
+                ALTER TABLE mcp_servers DROP COLUMN credential_ref;
+            END IF;
+        END $$
+    """)
+
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -69,6 +170,9 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             name TEXT NOT NULL,
             email TEXT,
             role TEXT DEFAULT 'member',
+            -- DEPRECATED (v6.1 §P1.2): kept as redundant display field;
+            -- linkage / lookup now go through ``user_channel_identities``.
+            -- Slated for removal once nothing reads it.
             channel_ids JSONB DEFAULT '{}',
             created_at TIMESTAMPTZ DEFAULT now()
         )
@@ -81,7 +185,6 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             folder TEXT NOT NULL,
             agent_backend TEXT DEFAULT 'claude',
             system_prompt TEXT,
-            tools JSONB DEFAULT '[]',
             container_config JSONB,
             max_concurrent INT DEFAULT 2,
             status TEXT DEFAULT 'active',
@@ -90,7 +193,13 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         )
     """)
 
-    # Migrate from roles table if it exists (Step 5 -> merged schema)
+    # Migrate from roles table if it exists (Step 5 -> merged schema).
+    # v1.1 §2.1 retired the inline ``tools`` JSONB column on coworkers;
+    # MCP configs now live in the ``coworker_mcp_servers`` junction +
+    # ``mcp_servers`` table. The roles migration below no longer
+    # backfills ``tools`` because the destination column no longer
+    # exists — legacy ``roles.tools`` rows are silently dropped (dev DB
+    # only; production schemas never carried this column).
     has_roles = await conn.fetchval("SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='roles')")
     if has_roles:
         has_role_id = await conn.fetchval(
@@ -101,17 +210,15 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             for col, default in [
                 ("agent_backend", "'claude'"),
                 ("system_prompt", "NULL"),
-                ("tools", "'[]'::jsonb"),
             ]:
                 await conn.execute(
                     f"ALTER TABLE coworkers ADD COLUMN IF NOT EXISTS {col} "
-                    f"{'JSONB' if col == 'tools' else 'TEXT'} DEFAULT {default}"
+                    f"TEXT DEFAULT {default}"
                 )
             await conn.execute("""
                 UPDATE coworkers SET
                     agent_backend = r.agent_backend,
-                    system_prompt = r.system_prompt,
-                    tools = r.tools
+                    system_prompt = r.system_prompt
                 FROM roles r WHERE coworkers.role_id = r.id
             """)
             await conn.execute("ALTER TABLE coworkers DROP COLUMN role_id")
@@ -120,6 +227,12 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     # The skill system is moving to dedicated `skills` / `skill_files` tables;
     # the old per-coworker JSONB list was never consumed by the runner.
     await conn.execute("ALTER TABLE coworkers DROP COLUMN IF EXISTS skills")
+    # v1.1 02b greenfield: drop the legacy ``tools`` JSONB column on
+    # any pre-existing dev DB. MCP configs live in the
+    # ``coworker_mcp_servers`` junction + ``mcp_servers`` table now;
+    # callers must seed mcp_servers and bind via the relation layer.
+    # Idempotent — a fresh testcontainer never had the column.
+    await conn.execute("ALTER TABLE coworkers DROP COLUMN IF EXISTS tools")
     # Rename legacy backend value: ``claude-code`` was the original name
     # before the Pi integration (commit c032db0) renamed it to ``claude``.
     # The alias was kept for back-compat; this idempotent UPDATE retires
@@ -153,6 +266,18 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         END $$
     """)
     await conn.execute("ALTER TABLE coworkers DROP COLUMN IF EXISTS is_admin")
+    # v1.1 §2.2: link coworkers to the platform model catalog and the
+    # creating user. Both NULLABLE — the model selector is wired in
+    # Phase 2 and audit FK (created_by_user_id) is the L6 nullable-on-
+    # bootstrap requirement; pre-Phase 2 rows simply have NULL here.
+    await conn.execute(
+        "ALTER TABLE coworkers "
+        "ADD COLUMN IF NOT EXISTS model_id UUID REFERENCES models(id)"
+    )
+    await conn.execute(
+        "ALTER TABLE coworkers "
+        "ADD COLUMN IF NOT EXISTS created_by_user_id UUID REFERENCES users(id)"
+    )
     # User-agent assignment table
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS user_agent_assignments (
@@ -167,28 +292,146 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_uaa_user ON user_agent_assignments(user_id)")
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_uaa_coworker ON user_agent_assignments(coworker_id)")
 
-    # Skills: per-coworker capability folders. SKILL.md (frontmatter +
-    # body) lives in the row keyed by ``path = 'SKILL.md'`` in
-    # ``skill_files``. Frontmatter is split between common (carries
-    # name/description for both runtimes) and backend-specific
-    # (Claude SDK or Pi loader). See docs/skills-architecture.md.
+    # Coworker <-> MCP server association (v1.1 §2.1). ``enabled_tools``
+    # = NULL means "all tools enabled" (the common case); an empty
+    # array ``'{}'`` means "all disabled" — semantically distinct, do
+    # not default to ``'{}'``. RLS is enforced transitively via
+    # ``coworkers.tenant_id`` (see ``_enable_rls_via_parent_coworker``).
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS coworker_mcp_servers (
+            coworker_id     UUID NOT NULL REFERENCES coworkers(id) ON DELETE CASCADE,
+            mcp_server_id   UUID NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
+            enabled_tools   TEXT[] DEFAULT NULL,
+            PRIMARY KEY (coworker_id, mcp_server_id)
+        )
+    """)
+
+    # Skills: per-tenant capability catalog (v1.1 03b greenfield).
+    # SKILL.md (frontmatter + body) lives in the row keyed by
+    # ``path = 'SKILL.md'`` in ``skill_files``. Frontmatter is split
+    # between common (carries name/description for both runtimes) and
+    # backend-specific (Claude SDK or Pi loader). See
+    # docs/skills-architecture.md. Coworker association is via the
+    # ``coworker_skills`` junction table.
+    # ``skills.name`` regex tightened to lowercase-kebab (see
+    # ``rolemesh.core.skills._SKILL_NAME_RE``) and forbids the two
+    # names the Claude runtime reserves (``anthropic``, ``claude``).
+    # On a fresh deploy the CREATE TABLE below already uses the new
+    # constraint; on an existing dev DB the ALTER block further down
+    # swaps the constraint in place.
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS skills (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-            coworker_id UUID NOT NULL REFERENCES coworkers(id) ON DELETE CASCADE,
-            name TEXT NOT NULL CHECK (name ~ '^[a-zA-Z][a-zA-Z0-9_-]{0,63}$'),
+            name TEXT NOT NULL CHECK (
+                name ~ '^[a-z0-9][a-z0-9-]{0,63}$'
+                AND name NOT IN ('anthropic', 'claude')
+            ),
             frontmatter_common JSONB NOT NULL DEFAULT '{}',
             frontmatter_backend JSONB NOT NULL DEFAULT '{}',
             enabled BOOLEAN NOT NULL DEFAULT TRUE,
             created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-            created_by UUID REFERENCES users(id) ON DELETE SET NULL,
-            UNIQUE (coworker_id, name)
+            created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL
         )
     """)
+    # Idempotent constraint swap for pre-existing dev DBs. The old
+    # CHECK constraint had the auto-generated name ``skills_name_check``
+    # (Postgres derives this from ``CHECK`` without explicit naming).
+    # Drop it if present and add the tightened one. Both branches are
+    # guarded so a fresh DB (no old constraint) or an already-migrated
+    # DB (new constraint present) is a no-op.
+    await conn.execute("""
+        DO $$
+        BEGIN
+            -- Drop the old constraint if its definition still
+            -- references the legacy ``[a-zA-Z]`` lead-anchored class
+            -- (the only way to discriminate from the new one without
+            -- hard-coding constraint-text comparisons).
+            IF EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'skills_name_check'
+                  AND conrelid = 'skills'::regclass
+                  AND pg_get_constraintdef(oid) LIKE '%a-zA-Z%'
+            ) THEN
+                ALTER TABLE skills DROP CONSTRAINT skills_name_check;
+            END IF;
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'skills_name_check'
+                  AND conrelid = 'skills'::regclass
+            ) THEN
+                ALTER TABLE skills ADD CONSTRAINT skills_name_check
+                    CHECK (
+                        name ~ '^[a-z0-9][a-z0-9-]{0,63}$'
+                        AND name NOT IN ('anthropic', 'claude')
+                    );
+            END IF;
+        END $$
+    """)
+    # v1.1 §2.2: greenfield rename of ``created_by`` -> ``created_by_user_id``.
+    # On a fresh testcontainer the CREATE TABLE above already uses the
+    # new name and this DO block is a no-op; on a pre-existing dev DB
+    # (created when the column was still ``created_by``) it renames in
+    # place. Both branches guarded so re-running the schema is safe.
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_name = 'skills'
+                         AND column_name = 'created_by')
+               AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                               WHERE table_name = 'skills'
+                                 AND column_name = 'created_by_user_id') THEN
+                ALTER TABLE skills RENAME COLUMN created_by TO created_by_user_id;
+            END IF;
+        END $$
+    """)
+    # v1.1 03b greenfield: drop the legacy ``skills.coworker_id`` column
+    # plus its companion index and the column-level UNIQUE (coworker_id,
+    # name) constraint. On a fresh testcontainer the CREATE TABLE above
+    # never defined them; on a pre-existing dev DB the ALTERs run once
+    # and become idempotent no-ops on subsequent schema.py invocations.
+    # Per-tenant skill identity is now (tenant_id, name) — enforced by
+    # ``skills_tenant_name_unique`` below — and coworker association is
+    # handled by ``coworker_skills``. Order matters: drop the column
+    # last (constraint + index reference it).
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'skills_coworker_id_name_key'
+            ) THEN
+                ALTER TABLE skills DROP CONSTRAINT skills_coworker_id_name_key;
+            END IF;
+        END $$
+    """)
+    await conn.execute("DROP INDEX IF EXISTS idx_skills_coworker")
     await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_skills_coworker ON skills(coworker_id, enabled)"
+        "ALTER TABLE skills DROP COLUMN IF EXISTS coworker_id"
+    )
+    # v1.1 §2.2: tenant-unique skill names. Now the sole identity
+    # constraint on the table (the old column-level UNIQUE
+    # (coworker_id, name) was dropped above as part of the per-tenant
+    # catalog cutover). Guarded DO block keeps the ADD CONSTRAINT
+    # idempotent across schema.py re-runs.
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'skills_tenant_name_unique'
+            ) THEN
+                ALTER TABLE skills
+                    ADD CONSTRAINT skills_tenant_name_unique
+                    UNIQUE (tenant_id, name);
+            END IF;
+        END $$
+    """)
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_skills_tenant_enabled "
+        "ON skills(tenant_id, enabled)"
     )
 
     # skill_files holds the file tree. Path validation: positive
@@ -211,38 +454,71 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         )
     """)
 
-    # SECURITY DEFINER trigger: prevents writing a skill whose
-    # ``coworker_id`` belongs to a different tenant than its own
-    # ``tenant_id``. Without DEFINER, the trigger would run RLS-bound
-    # on coworkers and would not be able to see a foreign tenant's
-    # coworker (cw_tenant comes back NULL), missing the attack.
-    # ``IS DISTINCT FROM`` handles NULL safely either way.
+    # v1.1 03b greenfield: the SECURITY DEFINER cross-tenant trigger on
+    # ``skills.coworker_id`` is moot now that the column is gone. The
+    # equivalent guard for the relation layer is enforced by
+    # ``coworker_skills``' RLS (transitive via the parent coworker) plus
+    # the ``coworker_skills_check_tenant`` trigger below. Drop the old
+    # trigger + function so they don't linger on pre-existing dev DBs.
+    await conn.execute(
+        "DROP TRIGGER IF EXISTS trg_skills_check_coworker_tenant ON skills"
+    )
+    await conn.execute(
+        "DROP FUNCTION IF EXISTS skills_check_coworker_tenant()"
+    )
+
+    # Coworker <-> skill association (v1.1 §2.1, made load-bearing in
+    # 03b). The skills catalog is per-tenant; this junction is what
+    # binds catalog rows to individual coworkers. ``enabled`` defaults
+    # TRUE so the common case (bind + project) is a single INSERT;
+    # toggling it lets a coworker disable a tenant-wide skill without
+    # touching the catalog row. RLS fires transitively via the parent
+    # ``coworkers.tenant_id`` (see _enable_rls_via_parent_coworker).
     await conn.execute("""
-        CREATE OR REPLACE FUNCTION skills_check_coworker_tenant()
+        CREATE TABLE IF NOT EXISTS coworker_skills (
+            coworker_id   UUID NOT NULL REFERENCES coworkers(id) ON DELETE CASCADE,
+            skill_id      UUID NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+            enabled       BOOLEAN NOT NULL DEFAULT TRUE,
+            PRIMARY KEY (coworker_id, skill_id)
+        )
+    """)
+    # SECURITY DEFINER trigger: reject inserts/updates where the skill
+    # and coworker live in different tenants. Both parents already
+    # enforce per-tenant RLS, but the junction sits between them and
+    # an admin-role caller (test pool or future bootstrap script) can
+    # bypass RLS — without this guard a forged (coworker_A, skill_B)
+    # pair could land. ``IS DISTINCT FROM`` handles NULL (foreign-key
+    # would catch dangling refs but bot tenants returning NULL still
+    # needs explicit rejection).
+    await conn.execute("""
+        CREATE OR REPLACE FUNCTION coworker_skills_check_tenant()
         RETURNS TRIGGER
         SECURITY DEFINER
         SET search_path = pg_catalog, public
         LANGUAGE plpgsql AS $func$
         DECLARE
             cw_tenant UUID;
+            sk_tenant UUID;
         BEGIN
             SELECT tenant_id INTO cw_tenant FROM coworkers WHERE id = NEW.coworker_id;
-            IF cw_tenant IS DISTINCT FROM NEW.tenant_id THEN
+            SELECT tenant_id INTO sk_tenant FROM skills WHERE id = NEW.skill_id;
+            IF cw_tenant IS DISTINCT FROM sk_tenant THEN
                 RAISE EXCEPTION
-                    'skills.coworker_id % belongs to a different tenant '
-                    '(or does not exist)', NEW.coworker_id;
+                    'coworker_skills tenant mismatch: coworker % vs skill %',
+                    NEW.coworker_id, NEW.skill_id;
             END IF;
             RETURN NEW;
         END
         $func$;
     """)
     await conn.execute(
-        "DROP TRIGGER IF EXISTS trg_skills_check_coworker_tenant ON skills"
+        "DROP TRIGGER IF EXISTS trg_coworker_skills_check_tenant "
+        "ON coworker_skills"
     )
     await conn.execute("""
-        CREATE TRIGGER trg_skills_check_coworker_tenant
-            BEFORE INSERT OR UPDATE OF coworker_id, tenant_id ON skills
-            FOR EACH ROW EXECUTE FUNCTION skills_check_coworker_tenant();
+        CREATE TRIGGER trg_coworker_skills_check_tenant
+            BEFORE INSERT OR UPDATE OF coworker_id, skill_id ON coworker_skills
+            FOR EACH ROW EXECUTE FUNCTION coworker_skills_check_tenant();
     """)
 
     # Password hash for future builtin auth
@@ -281,7 +557,7 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     """)
 
     # PR-D D10: backfill tenant_id on oidc_user_tokens so RLS can
-    # bind it. Same pattern PR #11 used on approval_audit_log:
+    # bind it. Standard in-place tenant_id backfill pattern:
     # ADD COLUMN nullable + UPDATE from parent + SET NOT NULL + FK
     # CASCADE + composite index + BEFORE-INSERT trigger to keep new
     # rows in sync with users.tenant_id without making every caller
@@ -344,6 +620,16 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             UNIQUE (coworker_id, channel_type)
         )
     """)
+    # v6.1 §P1.4: persist the platform-native bot handle (Telegram
+    # @username, Slack app name, ...) so the WebUI can construct the
+    # ``https://t.me/<bot>?start=<token>`` deep-link without an
+    # extra runtime hop to the platform. Populated by the gateway
+    # on bot connect (``bot.get_me().username``); nullable because
+    # the row is created before the gateway has talked to the
+    # platform.
+    await conn.execute(
+        "ALTER TABLE channel_bindings ADD COLUMN IF NOT EXISTS bot_username TEXT"
+    )
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS conversations (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -364,6 +650,33 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id)"
     )
 
+    # Runs (v1.1 §2.1). One row per agent invocation; WS streaming +
+    # cancel + scheduled paths all UPDATE ``status / completed_at /
+    # usage`` (INV-6, covered by 01b). ``error`` carries structured
+    # failure detail when status='failed'. ``awaiting_reauth`` is the
+    # user-mode MCP token-vault-stalled state (architecture preserved;
+    # not exercised under bootstrap fast-path).
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS runs (
+            id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            tenant_id       UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+            status          VARCHAR(20) NOT NULL,
+            started_at      TIMESTAMPTZ DEFAULT NOW(),
+            completed_at    TIMESTAMPTZ,
+            usage           JSONB,
+            error           JSONB
+        )
+    """)
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_runs_tenant_conv_started "
+        "ON runs (tenant_id, conversation_id, started_at DESC)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_runs_status "
+        "ON runs (tenant_id, status) WHERE status = 'running'"
+    )
+
     # --- Tables that exist in both legacy (Step 4) and new (Step 5) formats ---
     # Detect if legacy messages table exists (has chat_jid column).
     # If so, skip creating new-format tables — migration script will handle it.
@@ -377,15 +690,23 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             CREATE TABLE IF NOT EXISTS sessions (
                 conversation_id UUID PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,
                 tenant_id UUID NOT NULL REFERENCES tenants(id),
-                coworker_id UUID NOT NULL REFERENCES coworkers(id),
+                -- ON DELETE CASCADE: a session is the SDK/Pi resume-key
+                -- for a specific coworker container; deleting the coworker
+                -- makes the session pointer meaningless.
+                coworker_id UUID NOT NULL REFERENCES coworkers(id) ON DELETE CASCADE,
                 session_id TEXT NOT NULL
             )
         """)
+        # ``conversation_id`` FK uses ON DELETE CASCADE so a DELETE
+        # on conversations (design §3 "DELETE 语义") propagates to the
+        # message log. Without the cascade a v1 DELETE on a busy
+        # conversation would 500 on a FK violation — the schema, not
+        # the handler, is the right place to enforce the policy.
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS messages (
                 id TEXT NOT NULL,
                 tenant_id UUID NOT NULL REFERENCES tenants(id),
-                conversation_id UUID NOT NULL REFERENCES conversations(id),
+                conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
                 sender TEXT,
                 sender_name TEXT,
                 content TEXT,
@@ -398,6 +719,44 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         await conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(tenant_id, conversation_id, timestamp)"
         )
+    # Idempotent migration: upgrade the conversation_id FK to
+    # ON DELETE CASCADE on databases created before the v1.1 design
+    # locked the cascade in (legacy installs would otherwise 500 on
+    # DELETE /api/v1/conversations/{id} with FK violation). The
+    # constraint name is asyncpg's auto-generated default — we look
+    # it up rather than hard-coding so a schema rebuild that picks a
+    # different name doesn't break this migration.
+    await conn.execute(
+        """
+        DO $$
+        DECLARE
+            cname text;
+            current_action text;
+        BEGIN
+            SELECT con.conname,
+                   CASE con.confdeltype
+                       WHEN 'a' THEN 'NO ACTION'
+                       WHEN 'r' THEN 'RESTRICT'
+                       WHEN 'c' THEN 'CASCADE'
+                       WHEN 'n' THEN 'SET NULL'
+                       WHEN 'd' THEN 'SET DEFAULT'
+                   END
+              INTO cname, current_action
+              FROM pg_constraint con
+              JOIN pg_class rel ON rel.oid = con.conrelid
+              JOIN pg_class fkrel ON fkrel.oid = con.confrelid
+             WHERE rel.relname  = 'messages'
+               AND fkrel.relname = 'conversations'
+               AND con.contype   = 'f';
+            IF cname IS NOT NULL AND current_action <> 'CASCADE' THEN
+                EXECUTE 'ALTER TABLE messages DROP CONSTRAINT ' || quote_ident(cname);
+                EXECUTE 'ALTER TABLE messages ADD CONSTRAINT ' ||
+                        quote_ident(cname) ||
+                        ' FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE';
+            END IF;
+        END$$;
+        """
+    )
     # Token usage columns on messages — applied unconditionally (outside
     # the legacy branch above) so existing deployments running on the
     # already-migrated schema also get the new columns. Idempotent ADD
@@ -423,12 +782,27 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     await conn.execute(
         "ALTER TABLE messages ADD COLUMN IF NOT EXISTS model_id TEXT"
     )
+    # v1.1 §2.2: associate each message with the run that produced it.
+    # NULLABLE — Phase 1 (01a) wires the writer for new agent traffic;
+    # legacy rows and external/channel-only messages keep run_id NULL.
+    # FK is ON DELETE SET NULL conceptually but PG default is RESTRICT;
+    # ``runs`` itself ON DELETE CASCADEs from conversations so a run
+    # never outlives its conversation, and orphaned messages would
+    # already be gone via the conversations cascade.
+    await conn.execute(
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS run_id "
+        "UUID REFERENCES runs(id)"
+    )
     if not legacy_exists:
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS scheduled_tasks (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 tenant_id UUID NOT NULL REFERENCES tenants(id),
-                coworker_id UUID NOT NULL REFERENCES coworkers(id),
+                -- ON DELETE CASCADE: a scheduled task owns no execution
+                -- runtime — when its coworker is deleted there is no
+                -- agent to dispatch to. CASCADE keeps the scheduler
+                -- queue in sync with the live coworker set.
+                coworker_id UUID NOT NULL REFERENCES coworkers(id) ON DELETE CASCADE,
                 conversation_id UUID REFERENCES conversations(id),
                 prompt TEXT NOT NULL,
                 schedule_type TEXT NOT NULL,
@@ -457,264 +831,115 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         """)
         await conn.execute("CREATE INDEX IF NOT EXISTS idx_task_run_logs ON task_run_logs(task_id, run_at)")
 
-    # --- Approval module tables ---
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS approval_policies (
-            id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            tenant_id              UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-            coworker_id            UUID REFERENCES coworkers(id) ON DELETE CASCADE,
-            mcp_server_name        TEXT NOT NULL,
-            tool_name              TEXT NOT NULL,
-            condition_expr         JSONB NOT NULL,
-            approver_user_ids      UUID[] NOT NULL DEFAULT '{}',
-            notify_conversation_id UUID REFERENCES conversations(id) ON DELETE SET NULL,
-            auto_expire_minutes    INT DEFAULT 60,
-            post_exec_mode         TEXT NOT NULL DEFAULT 'report'
-                CHECK (post_exec_mode IN ('report')),
-            enabled                BOOLEAN DEFAULT TRUE,
-            priority               INT DEFAULT 0,
-            created_at             TIMESTAMPTZ DEFAULT now(),
-            updated_at             TIMESTAMPTZ DEFAULT now()
-        )
-    """)
+    # --- v6.1 §P1.7: per-task creator id for run-time user_id passthrough ---
+    # ON DELETE SET NULL keeps the row for audit; tasks must be soft-
+    # cancelled before the user is removed (see ``cancel_tasks_for_user``
+    # in db/task.py) so the scheduler's ``status = 'active'`` filter
+    # drops them before NULL ever reaches the run path. The SET-NULL +
+    # cancel-before-delete pairing is mandatory: NULL alone would
+    # leak through to ``AgentInput.user_id``.
     await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_approval_policies_tenant "
-        "ON approval_policies(tenant_id, enabled)"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_approval_policies_tool "
-        "ON approval_policies(tenant_id, mcp_server_name, tool_name) "
-        "WHERE enabled"
+        "ALTER TABLE scheduled_tasks "
+        "ADD COLUMN IF NOT EXISTS created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL"
     )
 
+    # --- v6.1 §P1.2: per-(user, platform, channel) identity linkage ---
+    # One-shot reset of legacy IM state before the new identity model
+    # comes online. Gated on ``user_channel_identities`` not existing
+    # yet so the cleanup runs at most once per DB. dev-only data per
+    # design §P1.3 ("dev data can be rebuilt"); production deployments
+    # will not have unlinked IM conversations to delete.
     await conn.execute("""
-        CREATE TABLE IF NOT EXISTS approval_requests (
-            id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            tenant_id          UUID NOT NULL REFERENCES tenants(id),
-            coworker_id        UUID NOT NULL REFERENCES coworkers(id),
-            conversation_id    UUID REFERENCES conversations(id),
-            -- policy_id is nullable: proposals that do not match any policy
-            -- (short-circuit auto-executed path) keep NULL so the admin UI
-            -- and reporting queries can distinguish "policy X triggered
-            -- this" from "proposal was auto-executed because no policy
-            -- applied". ON DELETE SET NULL so disabling/deleting a policy
-            -- never orphans old requests.
-            policy_id          UUID REFERENCES approval_policies(id) ON DELETE SET NULL,
-            user_id            UUID NOT NULL REFERENCES users(id),
-            job_id             TEXT NOT NULL,
-            mcp_server_name    TEXT NOT NULL,
-            actions            JSONB NOT NULL,
-            action_hashes      TEXT[] NOT NULL,
-            rationale          TEXT,
-            source             TEXT NOT NULL
-                CHECK (source IN ('proposal', 'auto_intercept',
-                                  'safety_require_approval')),
-            status             TEXT NOT NULL DEFAULT 'pending'
-                CHECK (status IN (
-                    'pending', 'approved', 'rejected', 'expired', 'cancelled',
-                    'skipped', 'executing', 'executed',
-                    'execution_failed', 'execution_stale'
-                )),
-            post_exec_mode     TEXT NOT NULL DEFAULT 'report',
-            resolved_approvers UUID[] NOT NULL,
-            requested_at       TIMESTAMPTZ DEFAULT now(),
-            expires_at         TIMESTAMPTZ NOT NULL,
-            created_at         TIMESTAMPTZ DEFAULT now(),
-            updated_at         TIMESTAMPTZ DEFAULT now()
-        )
-    """)
-    # Migrate existing deployments: drop the NOT NULL if present.
-    await conn.execute(
-        "ALTER TABLE approval_requests ALTER COLUMN policy_id DROP NOT NULL"
-    )
-    # V2 P1.1: widen the source CHECK to include safety-driven
-    # approval requests. Old deployments have the two-value CHECK;
-    # drop-then-add so the rollout is a single migration.
-    await conn.execute(
-        "ALTER TABLE approval_requests "
-        "DROP CONSTRAINT IF EXISTS approval_requests_source_check"
-    )
-    await conn.execute(
-        "ALTER TABLE approval_requests ADD CONSTRAINT "
-        "approval_requests_source_check CHECK ("
-        "source IN ('proposal', 'auto_intercept', "
-        "'safety_require_approval'))"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_approval_requests_tenant_status "
-        "ON approval_requests(tenant_id, status)"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_approval_requests_job "
-        "ON approval_requests(job_id) WHERE status = 'pending'"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_approval_requests_expires "
-        "ON approval_requests(status, expires_at) WHERE status = 'pending'"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_approval_requests_approved "
-        "ON approval_requests(status, updated_at) WHERE status = 'approved'"
-    )
-    await conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_approval_requests_executing "
-        "ON approval_requests(status, updated_at) WHERE status = 'executing'"
-    )
-
-    # tenant_id is denormalised onto the audit row (the canonical value
-    # lives on approval_requests) so that cross-tenant audit reads can
-    # be rejected at the SQL layer without a JOIN. The trigger below
-    # copies tenant_id from the parent row on every INSERT, which is
-    # cheaper than the alternative of always joining at query time —
-    # audit reads happen on a hot REST path.
-    #
-    # The CREATE TABLE / column-add / backfill / SET NOT NULL block runs
-    # inside a transaction so that an in-place upgrade is atomic. Without
-    # this, a concurrent INSERT through the OLD trigger between
-    # ``ADD COLUMN`` and ``SET NOT NULL`` would leave a NULL-tenant row
-    # that fails the NOT NULL promotion. Single-instance startup makes
-    # the race unlikely, but multi-instance rolling deploys would hit it.
-    async with conn.transaction():
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS approval_audit_log (
-                id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                tenant_id     UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-                request_id    UUID NOT NULL REFERENCES approval_requests(id) ON DELETE CASCADE,
-                action        TEXT NOT NULL
-                    CHECK (action IN (
-                        'created', 'approved', 'rejected', 'expired', 'cancelled',
-                        'skipped', 'executing', 'executed',
-                        'execution_failed', 'execution_stale'
-                    )),
-                actor_user_id UUID REFERENCES users(id),
-                note          TEXT,
-                metadata      JSONB,
-                created_at    TIMESTAMPTZ DEFAULT now()
-            )
-        """)
-        # In-place upgrade for databases created before tenant_id was
-        # introduced. Add nullable → backfill from parent → set NOT NULL.
-        # Idempotent against repeat startups (ADD COLUMN IF NOT EXISTS
-        # short-circuits once the column exists; the UPDATE filters
-        # WHERE tenant_id IS NULL so backfilled rows are skipped).
-        await conn.execute(
-            "ALTER TABLE approval_audit_log "
-            "ADD COLUMN IF NOT EXISTS tenant_id UUID "
-            "REFERENCES tenants(id) ON DELETE CASCADE"
-        )
-        await conn.execute(
-            "UPDATE approval_audit_log al "
-            "SET tenant_id = ar.tenant_id "
-            "FROM approval_requests ar "
-            "WHERE al.request_id = ar.id AND al.tenant_id IS NULL"
-        )
-        await conn.execute(
-            "ALTER TABLE approval_audit_log "
-            "ALTER COLUMN tenant_id SET NOT NULL"
-        )
-        await conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_audit_log_request "
-            "ON approval_audit_log(request_id)"
-        )
-        # Composite index keeps tenant-scoped audit reads fast: index
-        # seek on (tenant_id, request_id) then sorted scan on created_at.
-        await conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_audit_log_tenant_request "
-            "ON approval_audit_log(tenant_id, request_id, created_at)"
-        )
-
-    # ---------------------------------------------------------------------
-    # Audit trigger: every INSERT or status-change UPDATE on
-    # approval_requests automatically appends an approval_audit_log row in
-    # the SAME transaction. This closes the two-step window where a crash
-    # between "UPDATE status" and "INSERT audit" could otherwise leave a
-    # ghost decision with no audit trail. The app layer can still add
-    # richer audit rows (e.g. with ``note`` or ``metadata.results``) via
-    # write_approval_audit — the trigger writes the minimal system row;
-    # the app layer then UPDATEs that row or writes a companion row with
-    # the extra payload.
-    #
-    # actor_user_id + note are passed through GUC session variables
-    # ``approval.actor_user_id`` / ``approval.note`` (set via ``SET LOCAL``
-    # inside the calling transaction). Unset GUCs → NULL, which is the
-    # right semantics for purely-system transitions (expiry / cancel /
-    # skipped / execute status bumps).
-    # ---------------------------------------------------------------------
-    await conn.execute("""
-        CREATE OR REPLACE FUNCTION _approval_write_audit_from_trigger()
-        RETURNS TRIGGER AS $$
-        DECLARE
-            v_actor TEXT;
-            v_actor_uuid UUID;
-            v_note TEXT;
-            v_meta TEXT;
-            v_meta_json JSONB;
+        DO $$
         BEGIN
-            -- Read the three optional GUC session variables. Missing ones
-            -- are treated as NULL. The GUCs are transaction-scoped (set
-            -- via set_config(..., true)), so they auto-clear after commit.
-            BEGIN
-                v_actor := current_setting('approval.actor_user_id', TRUE);
-            EXCEPTION WHEN OTHERS THEN v_actor := NULL; END;
-            BEGIN
-                v_note := current_setting('approval.note', TRUE);
-            EXCEPTION WHEN OTHERS THEN v_note := NULL; END;
-            BEGIN
-                v_meta := current_setting('approval.metadata', TRUE);
-            EXCEPTION WHEN OTHERS THEN v_meta := NULL; END;
-
-            IF v_actor IS NOT NULL AND v_actor <> '' THEN
-                BEGIN
-                    v_actor_uuid := v_actor::uuid;
-                EXCEPTION WHEN OTHERS THEN v_actor_uuid := NULL; END;
-            ELSE
-                v_actor_uuid := NULL;
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_name = 'user_channel_identities'
+            ) THEN
+                DELETE FROM scheduled_tasks WHERE conversation_id IN (
+                    SELECT c.id FROM conversations c
+                    JOIN channel_bindings cb ON c.channel_binding_id = cb.id
+                    WHERE cb.channel_type IN ('telegram', 'slack')
+                );
+                DELETE FROM conversations WHERE channel_binding_id IN (
+                    SELECT id FROM channel_bindings
+                    WHERE channel_type IN ('telegram', 'slack')
+                );
             END IF;
-
-            v_meta_json := COALESCE(NULLIF(v_meta, '')::jsonb, '{}'::jsonb);
-
-            IF TG_OP = 'INSERT' THEN
-                -- Every INSERT is a "created" row, attributed to the
-                -- caller (v_actor_uuid) when provided. tenant_id is
-                -- copied from the parent row so audit reads can filter
-                -- by tenant without a JOIN.
-                INSERT INTO approval_audit_log
-                    (tenant_id, request_id, action, actor_user_id, note, metadata)
-                VALUES
-                    (NEW.tenant_id, NEW.id, 'created', v_actor_uuid,
-                     NULLIF(v_note, ''), v_meta_json);
-                -- Rows created already in a terminal-ish state (e.g.
-                -- 'skipped' when resolve_approvers returned empty) need
-                -- a second audit row so the status transition is also
-                -- captured. The second row is attributed to the system
-                -- (NULL actor) because the transition was not a user
-                -- action — the same user who proposed could not have
-                -- chosen "skipped."
-                IF NEW.status <> 'pending' THEN
-                    INSERT INTO approval_audit_log
-                        (tenant_id, request_id, action, actor_user_id, note, metadata)
-                    VALUES
-                        (NEW.tenant_id, NEW.id, NEW.status, NULL, NULL, '{}'::jsonb);
-                END IF;
-            ELSIF TG_OP = 'UPDATE' AND NEW.status <> OLD.status THEN
-                INSERT INTO approval_audit_log
-                    (tenant_id, request_id, action, actor_user_id, note, metadata)
-                VALUES
-                    (NEW.tenant_id, NEW.id, NEW.status, v_actor_uuid,
-                     NULLIF(v_note, ''), v_meta_json);
-            END IF;
-            RETURN NEW;
-        END;
-        $$ LANGUAGE plpgsql;
+        END $$
     """)
+
+    # ``user_channel_identities``: which (platform, channel_id) belongs
+    # to which user. ``channel_id`` is the platform-native sender id,
+    # normalised at the gateway (e.g. ``str(update.effective_user.id)``
+    # for Telegram so the format never depends on whether ``from.id``
+    # arrived as int vs str). UNIQUE (tenant_id, platform, channel_id)
+    # is the race guard: two concurrent ``/start`` requests cannot both
+    # link the same Telegram account.
+    #
+    # Per decision §2 row #13 there is NO ``UNIQUE (user_id, platform)``:
+    # one user can intentionally link multiple Telegram accounts (e.g.
+    # personal + work numbers).
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS user_channel_identities (
+            id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            tenant_id   UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            platform    TEXT NOT NULL,
+            channel_id  TEXT NOT NULL,
+            user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at  TIMESTAMPTZ DEFAULT now(),
+            UNIQUE (tenant_id, platform, channel_id)
+        )
+    """)
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_uci_user_platform "
+        "ON user_channel_identities(user_id, platform)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_uci_lookup "
+        "ON user_channel_identities(tenant_id, platform, channel_id)"
+    )
+
+    # ``link_tokens``: short-lived one-shot tokens that prove the user
+    # holding the WebUI session also controls the IM account that
+    # echoes the token back. Atomic consumption via
+    # ``UPDATE ... WHERE used_at IS NULL AND expires_at > now()
+    #            RETURNING ...`` (see ``db.channel_identity``); the
+    # check-and-mark is one statement so two concurrent ``/start``
+    # commands with the same token cannot both succeed.
+    #
+    # GC is intentionally not implemented (design §P1.2): the row
+    # volume is tiny and expired rows are harmless.
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS link_tokens (
+            token       TEXT PRIMARY KEY,
+            user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            tenant_id   UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+            platform    TEXT NOT NULL,
+            expires_at  TIMESTAMPTZ NOT NULL,
+            used_at     TIMESTAMPTZ,
+            created_at  TIMESTAMPTZ DEFAULT now()
+        )
+    """)
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_link_tokens_expiry "
+        "ON link_tokens(expires_at) WHERE used_at IS NULL"
+    )
+
+    # --- Approval module REMOVED ---
+    # The human-approval subsystem was removed. Drop its tables, trigger,
+    # and function if a prior deployment created them, so upgraded
+    # databases retain no orphaned objects. ``require_approval`` remains a
+    # valid safety verdict (it now simply blocks the turn).
     await conn.execute(
         "DROP TRIGGER IF EXISTS trg_approval_audit ON approval_requests"
     )
-    await conn.execute("""
-        CREATE TRIGGER trg_approval_audit
-        AFTER INSERT OR UPDATE OF status ON approval_requests
-        FOR EACH ROW EXECUTE FUNCTION _approval_write_audit_from_trigger();
-    """)
+    await conn.execute(
+        "DROP FUNCTION IF EXISTS _approval_write_audit_from_trigger()"
+    )
+    await conn.execute("DROP TABLE IF EXISTS approval_audit_log CASCADE")
+    await conn.execute("DROP TABLE IF EXISTS approval_requests CASCADE")
+    await conn.execute("DROP TABLE IF EXISTS approval_policies CASCADE")
 
     # --- Safety Framework tables ---
     # Admin-managed rules that the container loads as a snapshot at job
@@ -764,16 +989,10 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
         )
     """)
-    # V2 P1.1: require_approval verdicts need the original tool_name
-    # + tool_input so the approval UI can render a decision surface.
-    # This column is the ONLY place the full tool_input is retained
-    # (context_digest + context_summary deliberately truncate) — it is
-    # live for 24 h after the approval resolves, then zeroed by a
-    # cleanup task. Other verdict_actions (block, allow, warn, redact)
-    # leave this column NULL.
+    # ``approval_context`` was removed together with the approval
+    # subsystem. Drop the column if an earlier deployment created it.
     await conn.execute(
-        "ALTER TABLE safety_decisions "
-        "ADD COLUMN IF NOT EXISTS approval_context JSONB"
+        "ALTER TABLE safety_decisions DROP COLUMN IF EXISTS approval_context"
     )
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_safety_decisions_tenant_time "
@@ -812,7 +1031,7 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         "ON safety_rules_audit (tenant_id, created_at DESC)"
     )
 
-    # Trigger function: same pattern as approval's. The caller sets
+    # Trigger function: the caller sets
     # a transaction-local GUC ``safety.actor_user_id`` so the trigger
     # can attribute the row without a second DML. Missing GUC → NULL
     # actor (system transition, e.g. bulk migration).
@@ -965,6 +1184,39 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         """
     )
 
+    # ----- Platform models seed (v1.1 §2.1) -------------------------------
+    # Curated catalog of provider × model_id combinations the platform
+    # ships with. Each tuple is a ``(provider, model_id, model_family,
+    # display_name)``. The list is intentionally conservative: Claude
+    # entries match knowledge cutoff + agent compatibility (see
+    # ``rolemesh.core.backend_capabilities``); Bedrock entries use the
+    # ``us.anthropic.*`` cross-region inference profile pattern that
+    # Pi already expects via ``PI_MODEL_ID`` (see README §"Pi backend"
+    # and ``tests/agent/test_executor.py``); OpenAI / Google entries
+    # are placeholders to make the credential / Phase 2 selector UI
+    # rendering plausible — code paths that actually exercise these
+    # models live in Pi, not rolemesh, so they remain ``is_platform=
+    # TRUE`` and the catalog is the source of truth.
+    #
+    # ``ON CONFLICT DO NOTHING`` makes the seed idempotent against
+    # re-runs; rows are matched on the UNIQUE (provider, model_id)
+    # constraint.
+    _MODEL_SEED: list[tuple[str, str, str, str]] = [
+        ("anthropic", "claude-opus-4-7",            "claude", "Claude Opus 4.7"),
+        ("anthropic", "claude-sonnet-4-6",          "claude", "Claude Sonnet 4.6"),
+        ("anthropic", "claude-haiku-4-5-20251001",  "claude", "Claude Haiku 4.5"),
+        ("bedrock",   "us.anthropic.claude-sonnet-4-6", "claude", "Claude Sonnet 4.6 (Bedrock)"),
+        ("openai",    "gpt-4o",                     "gpt",    "GPT-4o"),
+        ("google",    "gemini-2.5-flash",           "gemini", "Gemini 2.5 Flash"),
+    ]
+    for provider, model_id, family, display in _MODEL_SEED:
+        await conn.execute(
+            "INSERT INTO models (provider, model_id, model_family, display_name) "
+            "VALUES ($1, $2, $3, $4) "
+            "ON CONFLICT (provider, model_id) DO NOTHING",
+            provider, model_id, family, display,
+        )
+
     # ----- RLS infrastructure (PR-B) ---------------------------------------
     # current_tenant_id() reads the per-connection GUC set by
     # tenant_conn(). Returns NULL when unset → policies of the form
@@ -1035,9 +1287,6 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     # blast-radius. Per design, each table arrives in its own commit
     # so a single-table regression is trivially revertable via
     # ``ALTER TABLE <t> DISABLE ROW LEVEL SECURITY``.
-    await _enable_rls_on(conn, "approval_audit_log")  # D1 canary
-    await _enable_rls_on(conn, "approval_requests")    # D2
-    await _enable_rls_on(conn, "approval_policies")    # D3
     await _enable_rls_on(conn, "safety_rules")         # D4 (safety triplet)
     await _enable_rls_on(conn, "safety_decisions")
     await _enable_rls_on(conn, "safety_rules_audit")
@@ -1054,6 +1303,49 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     await _enable_rls_on(conn, "skills")               # skills feature: standard tenant_id scope
     await _enable_rls_on_transitive_skill_files(conn)
     await _enable_rls_on(conn, "eval_runs")            # eval framework
+
+    # ----- v1.1 §2.1 RLS additions ---------------------------------------
+    # New tenant-scoped tables get the standard four-policy treatment.
+    # Junction tables that carry no tenant_id of their own (coworker_*
+    # pair tables) inherit RLS transitively via ``coworkers.tenant_id``.
+    # ``models`` is deliberately NOT enabled — it's a platform-level
+    # catalog and rolemesh_app needs unfiltered SELECT to render the
+    # model picker.
+    await _enable_rls_on(conn, "tenant_model_credentials")
+    await _enable_rls_on(conn, "mcp_servers")
+    await _enable_rls_on(conn, "runs")
+    await _enable_rls_via_parent_coworker(conn, "coworker_mcp_servers")
+    await _enable_rls_via_parent_coworker(conn, "coworker_skills")
+
+
+async def _enable_rls_via_parent_coworker(
+    conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record], table: str,
+) -> None:
+    """RLS for a junction table keyed transitively through ``coworkers.tenant_id``.
+
+    Used for ``coworker_mcp_servers`` / ``coworker_skills`` — pure
+    association tables with no ``tenant_id`` column of their own. The
+    EXISTS subquery is itself RLS-bound on ``coworkers`` so a
+    cross-tenant lookup sees zero parent rows and the join row is
+    hidden / write rejected. Mirrors the pattern documented in
+    ``_enable_rls_on_transitive_skill_files``.
+    """
+    await conn.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
+    await conn.execute(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
+    parent_check = (
+        f"EXISTS (SELECT 1 FROM coworkers "
+        f"WHERE coworkers.id = {table}.coworker_id "
+        f"AND coworkers.tenant_id = current_tenant_id())"
+    )
+    for op, body in (
+        ("SELECT", f"USING ({parent_check})"),
+        ("INSERT", f"WITH CHECK ({parent_check})"),
+        ("UPDATE", f"USING ({parent_check}) WITH CHECK ({parent_check})"),
+        ("DELETE", f"USING ({parent_check})"),
+    ):
+        policy = f"rls_{op.lower()}"
+        await conn.execute(f"DROP POLICY IF EXISTS {policy} ON {table}")
+        await conn.execute(f"CREATE POLICY {policy} ON {table} FOR {op} {body}")
 
 
 async def _enable_rls_on_transitive_skill_files(

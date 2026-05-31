@@ -39,19 +39,6 @@ class IpcDeps(Protocol):
     def send_message(self, jid: str, text: str) -> Awaitable[None]: ...
     def on_tasks_changed(self) -> Awaitable[None]: ...
 
-    # Approval module IPC targets. on_proposal handles an agent-initiated
-    # submit_proposal call; on_auto_intercept handles a PreToolUse hook
-    # block that needs approval wrapped around it. Both receive the
-    # TRUSTED tenant_id/coworker_id resolved by the IPC dispatcher from
-    # its in-memory coworker table — the NATS payload's claimed tenantId
-    # is only used as a consistency check, never trusted on its own.
-    def on_proposal(
-        self, data: dict[str, object], *, tenant_id: str, coworker_id: str
-    ) -> Awaitable[None]: ...
-    def on_auto_intercept(
-        self, data: dict[str, object], *, tenant_id: str, coworker_id: str
-    ) -> Awaitable[None]: ...
-
 
 async def process_task_ipc(
     data: dict[str, object],
@@ -138,6 +125,19 @@ async def process_task_ipc(
 
         conversation_id = str(data.get("conversationId", "")) or None
 
+        # v6.1 §P1.7: forward the originating user_id. The tool side
+        # (``agent_runner.tools.rolemesh_tools.schedule_task``) passes
+        # ``ctx.user_id``; bootstrap / system actors may legitimately
+        # leave it empty (no user behind the turn) — store NULL in
+        # that case so downstream code can distinguish "system" from
+        # "user X" rather than misattributing.
+        raw_user_id = data.get("userId")
+        created_by_user_id: str | None
+        if isinstance(raw_user_id, str) and raw_user_id:
+            created_by_user_id = raw_user_id
+        else:
+            created_by_user_id = None
+
         await create_task(
             ScheduledTask(
                 id=task_id,
@@ -151,6 +151,7 @@ async def process_task_ipc(
                 next_run=next_run,
                 status="active",
                 created_at=datetime.now(UTC).isoformat(),
+                created_by_user_id=created_by_user_id,
             )
         )
         logger.info(
@@ -249,25 +250,6 @@ async def process_task_ipc(
         await update_task(task_id_val, tenant_id=tenant_id, **updates)
         logger.info("Task updated via IPC", task_id=task_id_val, source_group=source_group, updates=updates)
         await deps.on_tasks_changed()
-
-    elif task_type == "submit_proposal":
-        # Approval authorization is evaluated inside ApprovalEngine against
-        # the resolved_approvers list on the generated request, not on the
-        # submitter's AgentPermissions — a low-permission agent may still
-        # propose if a policy exists. Pass the orchestrator-trusted
-        # tenant_id/coworker_id, not values from the message body.
-        await deps.on_proposal(
-            data, tenant_id=tenant_id, coworker_id=coworker_id
-        )
-
-    elif task_type == "auto_approval_request":
-        # The Hook already matched a policy; the orchestrator still
-        # revalidates (policy may have been disabled between snapshot and
-        # intercept) inside ApprovalEngine.handle_auto_intercept. Trusted
-        # IDs are passed explicitly — see on_proposal branch for why.
-        await deps.on_auto_intercept(
-            data, tenant_id=tenant_id, coworker_id=coworker_id
-        )
 
     else:
         logger.warning("Unknown IPC task type", type=task_type)

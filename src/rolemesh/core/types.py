@@ -67,9 +67,11 @@ class ContainerConfig:
 class McpServerConfig:
     """Per-coworker external MCP server configuration.
 
-    Stored in the coworker's `tools` JSONB field in the database.
-    The `url` is the actual MCP server URL on the host machine.
-    The `headers` are injected by the credential proxy when forwarding requests.
+    Persisted as one row in ``mcp_servers`` (tenant-scoped) plus a
+    ``coworker_mcp_servers`` junction row that binds it to a specific
+    coworker. The ``url`` is the actual MCP server URL on the host
+    machine. The ``headers`` are injected by the credential proxy when
+    forwarding requests.
 
     auth_mode controls how the MCP server is authenticated:
       * "user"    — forward the user's IdP access_token as Authorization
@@ -110,9 +112,6 @@ class Tenant:
     max_concurrent_containers: int = 5
     last_message_cursor: str | None = None  # TIMESTAMPTZ iso
     created_at: str = ""
-    # Approval module — default behaviour for proposals that do not
-    # match any enabled policy. See _create_schema comment.
-    approval_default_mode: str = "auto_execute"
 
 
 @dataclass
@@ -131,7 +130,13 @@ class User:
 
 @dataclass
 class Coworker:
-    """An AI coworker with own workspace, identity, and agent config."""
+    """An AI coworker with own workspace, identity, and agent config.
+
+    MCP server bindings are not stored here: see ``mcp_servers`` +
+    ``coworker_mcp_servers`` (read via ``list_coworker_mcp_configs``).
+    The orchestrator projects them onto :class:`CoworkerState` at
+    state-load time so downstream consumers don't have to re-query.
+    """
 
     id: str  # UUID
     tenant_id: str
@@ -139,13 +144,17 @@ class Coworker:
     folder: str
     agent_backend: str = "claude"
     system_prompt: str | None = None
-    tools: list[McpServerConfig] = field(default_factory=list)
     container_config: ContainerConfig | None = None
     max_concurrent: int = 2
     status: str = "active"
     created_at: str = ""
     agent_role: str = "agent"  # "super_agent" | "agent"
     permissions: AgentPermissions | None = None  # filled by __post_init__; always non-None after init
+    # Phase 1 (v1.1) — added so the /api/v1 surface can carry them
+    # through. NULLABLE on the DB side; legacy admin code that builds
+    # Coworker instances directly leaves them at None.
+    model_id: str | None = None
+    created_by_user_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.permissions is None:
@@ -168,23 +177,25 @@ class SkillFile:
 
 @dataclass
 class Skill:
-    """A per-coworker skill folder. ``frontmatter_common`` carries the
-    keys both backends accept (at least ``name`` and ``description``);
-    ``frontmatter_backend`` has the shape ``{"claude": {...}, "pi": {...}}``
-    for backend-specific overrides. ``files`` is keyed by relative path,
-    always contains ``SKILL.md``.
+    """A per-tenant catalog skill (v1.1 03b). ``frontmatter_common``
+    carries the keys both backends accept (at least ``name`` and
+    ``description``); ``frontmatter_backend`` has the shape
+    ``{"claude": {...}, "pi": {...}}`` for backend-specific overrides.
+    ``files`` is keyed by relative path, always contains ``SKILL.md``.
+
+    Coworker association lives in the ``coworker_skills`` junction
+    table — query it separately when you need a coworker's bindings.
     """
 
     id: str
     tenant_id: str
-    coworker_id: str
     name: str
     frontmatter_common: dict[str, object] = field(default_factory=dict)
     frontmatter_backend: dict[str, dict[str, object]] = field(default_factory=dict)
     enabled: bool = True
     created_at: str = ""
     updated_at: str = ""
-    created_by: str | None = None
+    created_by_user_id: str | None = None
     files: dict[str, SkillFile] = field(default_factory=dict)
 
 
@@ -199,6 +210,22 @@ class ChannelBinding:
     credentials: dict[str, str] = field(default_factory=dict)
     bot_display_name: str | None = None
     status: str = "active"
+    created_at: str = ""
+    # Platform-native bot handle (Telegram @username, Slack app
+    # name, ...). Populated by the gateway on connect — see
+    # ``rolemesh.db.chat.update_channel_binding_bot_username``.
+    bot_username: str | None = None
+
+
+@dataclass(frozen=True)
+class ChannelIdentity:
+    """A (user, platform, channel_id) link record (v6.1 §P1.2)."""
+
+    id: str  # UUID
+    tenant_id: str
+    user_id: str
+    platform: str
+    channel_id: str
     created_at: str = ""
 
 
@@ -290,8 +317,15 @@ class ScheduledTask:
     next_run: str | None = None
     last_run: str | None = None
     last_result: str | None = None
-    status: Literal["active", "paused", "completed"] = "active"
+    status: Literal["active", "paused", "completed", "cancelled"] = "active"
     created_at: str = ""
+    # v6.1 §P1.7 — RoleMesh user whose turn triggered the schedule.
+    # NULL on rows created before the migration; NULL after a hard
+    # ``DELETE FROM users`` (ON DELETE SET NULL on the FK). The
+    # scheduler stamps ``AgentInput.user_id`` from this field so a
+    # task's run-time turn carries the originating user identity
+    # into the audit machinery.
+    created_by_user_id: str | None = None
     # Legacy compat fields (deprecated)
     group_folder: str = ""
     chat_jid: str = ""

@@ -1,409 +1,637 @@
+// Chat panel — wired to the v1.1 protocol (session 01c).
+//
+// Owns a single WS client (`V1WsClient`) that handles streaming,
+// reconnect, Cancel, and **Stop**. PR-B (2026-05-31) collapsed the
+// Stop path into the v1 `request.stop` client frame — the
+// orchestrator-side handler stayed on the legacy
+// `web.stop.{binding}.{chat}` NATS subject (subject reuse means
+// zero orch changes), but the SPA no longer maintains the second
+// WebSocket to the legacy `/ws/chat` endpoint. Design §4.1's Stop
+// vs Cancel hard split still holds — they remain semantically
+// distinct (Stop = soft interrupt, container stays warm; Cancel =
+// hard terminate). The split is now expressed inside the v1
+// protocol rather than across two endpoints.
+//
+// REST surface goes through the typed `ApiClient` — no admin-prefix
+// URL literals in this file (the `lint:no-admin-chat` script
+// enforces this).
+
 import { LitElement, html } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
-import { AgentClient, type AgentStatus, type ConversationSummary, type ServerMessage } from '../services/agent-client.js';
+
+import { getApiClient, ApiError } from '../api/client.js';
+import type { Conversation, Coworker, Me, Message } from '../api/client.js';
+import { getStoredToken } from '../services/oidc-auth.js';
+import { V1WsClient, type ServerEvent, type ConnectionStatus } from '../ws/v1_client.js';
 
 interface AgentStatusState {
-  status: AgentStatus;
-  tool?: string;
-  input?: string;
+  /** Mirrored from the legacy status frame so the progress line keeps
+   *  rendering even though the new protocol does not carry the same
+   *  tool-use detail (yet). The v1 stream only surfaces token / done /
+   *  error frames; future granularity lands when the orchestrator
+   *  emits richer events. */
+  label: string;
 }
 
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'safety';
   content: string;
   streaming?: boolean;
-  // Populated when role === 'safety'. Stage is the pipeline stage the
-  // rule fired at (input_prompt / model_output / ...); rule_id is the
-  // UUID of the rule when present.
   safetyStage?: string;
   safetyRuleId?: string;
 }
 
+type RunState = 'idle' | 'running' | 'stopping' | 'cancelling';
+
 @customElement('rm-chat-panel')
 export class ChatPanel extends LitElement {
-  private client: AgentClient;
-  private unsubscribe?: () => void;
+  // v1 client: streaming + Cancel
+  private v1: V1WsClient | null = null;
+  private v1Unsubscribers: Array<() => void> = [];
   private tokenRefreshHandler?: (e: Event) => void;
+  private readonly api = getApiClient();
 
   @state() messages: ChatMessage[] = [];
-  @state() isStreaming = false;
   @state() connected = false;
-  @state() conversations: ConversationSummary[] = [];
-  @state() activeChatId: string | null = null;
+  @state() private me: Me | null = null;
+  /** Cached display name of the active coworker — used by the welcome
+   *  state ("What should the {name} work on?"). Lazy-fetched on mount;
+   *  null while loading or when no coworker is selected. */
+  @state() private activeCoworkerName: string | null = null;
+  @state() conversations: Conversation[] = [];
+  @state() activeConversationId: string | null = null;
+  @state() activeCoworkerId: string | null = null;
   @state() sidebarCollapsed: boolean;
   @state() pendingNewChat = false;
   @state() agentStatus: AgentStatusState | null = null;
-  // UI state machine: 'idle' | 'running' | 'stopping'
-  //  idle     — send button active, accepts new message
-  //  running  — stop button active, agent is working (new messages queued)
-  //  stopping — user clicked stop, waiting for server confirmation
-  //             (button disabled with spinner, auto-recovers after timeout)
-  @state() agentState: 'idle' | 'running' | 'stopping' = 'idle';
+  // `runState` is the union of both surfaces' state:
+  //   idle       — send button active
+  //   running    — agent producing tokens; Stop + Cancel both enabled
+  //   stopping   — user clicked Stop; waiting for legacy `stopped` ack
+  //   cancelling — user clicked Cancel; waiting for run to land
+  //                terminal via the v1 stream's error / completed frame
+  @state() runState: RunState = 'idle';
+  // The run_id of the currently-running invocation, populated from
+  // `event.run.started`. Cancel needs this to call REST.
+  @state() activeRunId: string | null = null;
+  // Sticky terminal flag — when the most recent run completed with
+  // status != running, both Stop and Cancel disable until a new send.
+  @state() runTerminal = false;
   private stoppingTimer: ReturnType<typeof setTimeout> | null = null;
-  // Watchdog while agentState='running'. Reset on every event; fires after
-  // RUNNING_WATCHDOG_MS of silence. Purpose: recover from the case where a
-  // WebSocket reconnect happens after the agent's 'done' event was already
-  // published — the NATS consumer uses DeliverPolicy.NEW and will never see
-  // it, so without this fallback the UI stays stuck on 'thinking' forever.
+  private cancellingTimer: ReturnType<typeof setTimeout> | null = null;
   private runningWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
   private static readonly RUNNING_WATCHDOG_MS = 120_000;
 
   constructor() {
     super();
     const params = new URLSearchParams(location.search);
-    const agentId = params.get('agent_id') || '';
-    // Token resolution priority: URL query param > sessionStorage (OIDC) > empty
-    const token = params.get('token') || sessionStorage.getItem('rm_id_token') || '';
-    this.activeChatId = params.get('chat_id');
-    this.client = new AgentClient(agentId, token);
+    this.activeCoworkerId = params.get('agent_id') || null;
+    this.activeConversationId = params.get('chat_id');
     this.sidebarCollapsed = localStorage.getItem('rm-sidebar-collapsed') === 'true';
   }
 
-  protected override createRenderRoot() { return this; }
+  protected override createRenderRoot() {
+    return this;
+  }
 
   override connectedCallback() {
     super.connectedCallback();
     this.style.display = 'flex';
     this.style.flexDirection = 'column';
     this.style.minHeight = '0';
-    // Fill the parent's resolved height so inner h-full works, and
-    // contain overflow here so the sidebar's conversation list and
-    // the messages area scroll independently instead of dragging the
-    // whole page with one shared scrollbar.
     this.style.height = '100%';
     this.style.overflow = 'hidden';
-    this.unsubscribe = this.client.subscribe((msg) => this.handleMessage(msg));
 
-    // React to background token refresh: update client token and reconnect WebSocket
     this.tokenRefreshHandler = (e: Event) => {
       const newToken = (e as CustomEvent<string>).detail;
       if (newToken) {
-        this.client.setToken(newToken);
-        this.client.reconnect(this.activeChatId ?? undefined);
+        this.api.setToken(newToken);
+        // The v1 client re-reads the token from session storage on
+        // every ws-ticket call, so no explicit reconnect is needed.
       }
     };
     window.addEventListener('rm-token-refreshed', this.tokenRefreshHandler);
 
-    if (this.activeChatId) {
-      // Restore conversation from URL
-      this.client.connect(this.activeChatId);
-      this.loadHistory(this.activeChatId);
-    } else {
-      // No active chat — connect for auth only, show placeholder
-      this.client.connect();
-    }
-
-    this.refreshConversations();
+    void this.bootstrap();
   }
 
   override disconnectedCallback() {
     super.disconnectedCallback();
     this.clearStoppingTimer();
+    this.clearCancellingTimer();
     this.clearRunningWatchdog();
-    this.unsubscribe?.();
+    this.teardownV1();
     if (this.tokenRefreshHandler) {
       window.removeEventListener('rm-token-refreshed', this.tokenRefreshHandler);
     }
-    this.client.disconnect();
   }
 
-  private async refreshConversations() {
-    this.conversations = await this.client.fetchConversations();
-  }
-
-  private async loadHistory(chatId: string) {
-    const history = await this.client.fetchMessages(chatId);
-    this.messages = history
-      .filter((m) => m.content.trim())
-      .map((m) => ({ role: m.role, content: m.content }));
-  }
-
-  private handleMessage(msg: ServerMessage) {
-    // Any inbound event while running means the turn is still alive — push
-    // the watchdog deadline out. Terminal events (done/error/stopped) clear
-    // it explicitly below.
-    if (this.agentState === 'running') {
-      this.resetRunningWatchdog();
+  private async bootstrap(): Promise<void> {
+    // Load identity early so the welcome state can greet the user by
+    // name. A failure here just falls back to a generic greeting.
+    try {
+      this.me = await this.api.getMe();
+    } catch {
+      this.me = null;
     }
-    switch (msg.type) {
-      case 'session':
-        this.connected = true;
-        if (msg.chatId) {
-          this.activeChatId = msg.chatId;
-          this.updateUrl();
+    if (!this.activeCoworkerId) {
+      // No coworker selected — render empty state; user must enter
+      // chat via the Coworkers route. Phase 1 keeps the legacy URL
+      // entry (`?agent_id=...`) working unchanged.
+      return;
+    }
+    // Best-effort lookup for the welcome state's "What should the
+    // {coworker} work on?" copy. Cheap small call; failure leaves
+    // the welcome on a generic "your coworker" fallback.
+    void this.loadActiveCoworkerName(this.activeCoworkerId);
+    await this.refreshConversations(this.activeCoworkerId);
+    if (this.activeConversationId) {
+      await this.openConversation(this.activeConversationId);
+    }
+  }
+
+  private async loadActiveCoworkerName(coworkerId: string): Promise<void> {
+    try {
+      const all: Coworker[] = await this.api.listCoworkers();
+      const match = all.find((c) => c.id === coworkerId);
+      this.activeCoworkerName = match?.name ?? null;
+    } catch {
+      this.activeCoworkerName = null;
+    }
+  }
+
+  private async refreshConversations(coworkerId: string): Promise<void> {
+    try {
+      this.conversations = await this.api.listCoworkerConversations(coworkerId);
+    } catch (err) {
+      console.warn('listCoworkerConversations failed', err);
+      this.conversations = [];
+    }
+  }
+
+  private async loadMessages(conversationId: string): Promise<void> {
+    try {
+      const msgs: Message[] = await this.api.listMessages(conversationId);
+      this.messages = msgs
+        .filter((m) => m.content.trim())
+        .map((m) => ({
+          role: m.role === 'assistant' ? 'assistant' : 'user',
+          content: m.content,
+        }));
+    } catch (err) {
+      console.warn('listMessages failed', err);
+      this.messages = [];
+    }
+  }
+
+  private async openConversation(conversationId: string): Promise<void> {
+    if (!this.activeCoworkerId) return;
+    this.teardownV1();
+    this.activeConversationId = conversationId;
+    this.runState = 'idle';
+    this.runTerminal = false;
+    this.activeRunId = null;
+
+    // v1 client owns streaming / cancel
+    this.v1 = new V1WsClient({
+      conversationId,
+      getToken: getStoredToken,
+    });
+    this.v1Unsubscribers.push(
+      this.v1.onEvent('*', (e) => this.handleV1Event(e)),
+      this.v1.onStatus((s) => this.handleV1Status(s)),
+    );
+    void this.v1.connect();
+
+    await this.loadMessages(conversationId);
+  }
+
+  private teardownV1(): void {
+    for (const off of this.v1Unsubscribers) off();
+    this.v1Unsubscribers = [];
+    this.v1?.disconnect();
+    this.v1 = null;
+  }
+
+  private handleV1Status(s: ConnectionStatus): void {
+    this.connected = s === 'open';
+  }
+
+  private handleV1Event(e: ServerEvent): void {
+    if (this.runState === 'running') this.resetRunningWatchdog();
+    switch (e.type) {
+      case 'event.run.started': {
+        const id = typeof e.run_id === 'string' ? e.run_id : null;
+        this.activeRunId = id;
+        this.runTerminal = false;
+        // Spawn the assistant placeholder bubble if the user just sent
+        // a message and no token has landed yet.
+        const last = this.messages[this.messages.length - 1];
+        const hasPlaceholder =
+          last?.role === 'assistant' && last.streaming === true;
+        if (!hasPlaceholder) {
+          this.messages = [
+            ...this.messages,
+            { role: 'assistant', content: '', streaming: true },
+          ];
+        }
+        this.agentStatus = { label: 'Thinking…' };
+        this.runState = 'running';
+        this.resetRunningWatchdog();
+        break;
+      }
+      case 'event.run.token': {
+        const delta = typeof (e as { delta?: unknown }).delta === 'string'
+          ? ((e as { delta: string }).delta)
+          : '';
+        this.agentStatus = null;
+        const last = this.messages[this.messages.length - 1];
+        if (last?.role === 'assistant' && last.streaming) {
+          this.messages = [
+            ...this.messages.slice(0, -1),
+            { ...last, content: last.content + delta },
+          ];
+        } else {
+          this.messages = [
+            ...this.messages,
+            { role: 'assistant', content: delta, streaming: true },
+          ];
         }
         break;
-      case 'thinking':
-        // Ignore duplicate thinking messages if already streaming
-        if (!this.isStreaming) {
-          this.messages = [...this.messages, { role: 'assistant', content: '', streaming: true }];
-          this.isStreaming = true;
-          // Only elevate idle → running. Don't overwrite a 'stopping' state.
-          if (this.agentState === 'idle') {
-            this.agentState = 'running';
-            this.resetRunningWatchdog();
+      }
+      case 'event.run.completed': {
+        this.finalizeStreamingBubble();
+        this.runState = 'idle';
+        this.runTerminal = true;
+        this.agentStatus = null;
+        this.clearStoppingTimer();
+        this.clearCancellingTimer();
+        this.clearRunningWatchdog();
+        if (this.activeCoworkerId) {
+          void this.refreshConversations(this.activeCoworkerId);
+        }
+        break;
+      }
+      case 'event.run.progress': {
+        // Per-turn progress label (tool_use / running / queued /
+        // container_starting). The orchestrator emits these on
+        // ``web.stream.* type=status``; legacy /ws/chat forwarded
+        // them, the v1 cutover dropped the branch, so until this
+        // handler landed the SPA stopped showing "Calling Read…"
+        // and similar phase indicators between event.run.started
+        // and the first event.run.token.
+        //
+        // Scope to the active run so a redelivered stale frame
+        // doesn't briefly flash a phase that already passed.
+        const progressRunId =
+          typeof (e as { run_id?: unknown }).run_id === 'string'
+            ? (e as { run_id: string }).run_id
+            : null;
+        if (progressRunId && progressRunId === this.activeRunId) {
+          this.agentStatus = { label: this.formatProgressLabel(e) };
+        }
+        break;
+      }
+      case 'event.message.appended': {
+        // Out-of-band agent push (today: scheduled-task reminder).
+        // Append as a new assistant bubble, mirroring how messages
+        // fetched from GET /messages on reload are rendered. Does
+        // NOT touch run state — these arrive outside any user run.
+        const content =
+          typeof (e as { content?: unknown }).content === 'string'
+            ? (e as { content: string }).content
+            : '';
+        if (content) {
+          this.messages = [
+            ...this.messages,
+            { role: 'assistant', content },
+          ];
+        }
+        break;
+      }
+      case 'event.run.error': {
+        const message =
+          typeof (e as { message?: unknown }).message === 'string'
+            ? (e as { message: string }).message
+            : 'error';
+        const code =
+          typeof (e as { code?: unknown }).code === 'string'
+            ? (e as { code: string }).code
+            : '';
+        const last = this.messages[this.messages.length - 1];
+        // Safety blocks are surfaced as a dedicated safety bubble so
+        // the reason is visually distinct from real assistant text.
+        if (code === 'SAFETY_BLOCKED') {
+          const details = (e as { details?: Record<string, unknown> }).details ?? {};
+          const safetyMsg: ChatMessage = {
+            role: 'safety',
+            content: message,
+            safetyStage:
+              typeof details.stage === 'string' ? details.stage : 'unknown',
+            safetyRuleId:
+              typeof details.rule_id === 'string' ? details.rule_id : undefined,
+          };
+          if (last?.role === 'assistant' && last.streaming && !last.content) {
+            this.messages = [...this.messages.slice(0, -1), safetyMsg];
+          } else {
+            this.messages = [...this.messages, safetyMsg];
+          }
+        } else {
+          if (last?.role === 'assistant' && last.streaming && !last.content) {
+            this.messages = [
+              ...this.messages.slice(0, -1),
+              { ...last, content: `**Error:** ${message}`, streaming: false },
+            ];
+          } else {
+            this.messages = [
+              ...this.messages,
+              { role: 'assistant', content: `**Error:** ${message}` },
+            ];
           }
         }
-        break;
-      case 'status':
-        if (msg.status === 'stopped') {
-          // Server confirmed the turn was aborted. Clear indicators and
-          // exit the 'stopping' transitional state. Don't touch messages
-          // array — any partial text remains visible in the last bubble.
-          this.clearStoppingTimer();
-          this.clearRunningWatchdog();
-          this.agentStatus = null;
-          this.agentState = 'idle';
-          this.isStreaming = false;
-          break;
-        }
-        // Progress indicator — overwrites prior status; cleared on text/done/error.
-        // Don't reset 'stopping' back to 'running' if a late progress event
-        // arrives after the user clicked Stop.
-        this.agentStatus = { status: msg.status, tool: msg.tool, input: msg.input };
-        if (this.agentState === 'idle') {
-          this.agentState = 'running';
-          this.resetRunningWatchdog();
-        }
-        break;
-      case 'text': {
-        // First text chunk means real output has begun — retire the status bar.
+        this.runState = 'idle';
+        this.runTerminal = true;
         this.agentStatus = null;
-        const last = this.messages[this.messages.length - 1];
-        if (last?.role === 'assistant' && last.streaming) {
-          this.messages = [
-            ...this.messages.slice(0, -1),
-            { ...last, content: last.content + msg.content },
-          ];
-        } else {
-          this.messages = [...this.messages, { role: 'assistant', content: msg.content, streaming: true }];
-        }
-        break;
-      }
-      case 'done': {
         this.clearStoppingTimer();
+        this.clearCancellingTimer();
         this.clearRunningWatchdog();
-        this.agentStatus = null;
-        const last = this.messages[this.messages.length - 1];
-        if (last?.role === 'assistant') {
-          this.messages = [...this.messages.slice(0, -1), { ...last, streaming: false }];
-        }
-        this.isStreaming = false;
-        this.agentState = 'idle';
-        this.refreshConversations();
         break;
       }
-      case 'error': {
-        this.clearStoppingTimer();
-        this.clearRunningWatchdog();
-        this.agentStatus = null;
-        const last = this.messages[this.messages.length - 1];
-        if (last?.role === 'assistant' && last.streaming && !last.content) {
-          this.messages = [
-            ...this.messages.slice(0, -1),
-            { ...last, content: `**Error:** ${msg.message}`, streaming: false },
-          ];
-        } else {
-          this.messages = [...this.messages, { role: 'assistant', content: `**Error:** ${msg.message}` }];
-        }
-        this.isStreaming = false;
-        this.agentState = 'idle';
+      default:
+        // PR23 removed the `event.run.requires_reauth` case — the
+        // backend never emitted it (the user-mode MCP path that would
+        // produce it remains gated on the OIDC branch). The reauth
+        // banner is still listenable via window.__forceReauth for
+        // dev/QA and will be re-wired when the engine starts emitting
+        // the event. Forward-compat: unknown event types are ignored.
         break;
-      }
-      case 'safety_blocked': {
-        // Safety layer intercepted the turn. Replace the empty placeholder
-        // assistant bubble (if one was spawned from the 'thinking' event)
-        // with a dedicated safety bubble so the reason is visually distinct
-        // from real assistant replies. A concurrent 'done' is still
-        // expected and handled normally.
-        const last = this.messages[this.messages.length - 1];
-        const safetyMsg: ChatMessage = {
-          role: 'safety',
-          content: msg.reason,
-          safetyStage: msg.stage,
-          safetyRuleId: msg.rule_id,
-        };
-        if (last?.role === 'assistant' && last.streaming && !last.content) {
-          this.messages = [...this.messages.slice(0, -1), safetyMsg];
-        } else {
-          this.messages = [...this.messages, safetyMsg];
-        }
-        this.agentStatus = null;
-        break;
-      }
     }
   }
 
-  private resetRunningWatchdog() {
+  /** Map an ``event.run.progress`` payload to the human-readable
+   *  string shown in the progress line. Unknown statuses fall back
+   *  to a "Working…" label rather than the raw kind so a new orch
+   *  progress type doesn't surface as e.g. ``compaction_started``
+   *  to end users. Keeping the map here (not in the protocol) lets
+   *  copy iterate without bumping the wire schema. */
+  private formatProgressLabel(e: ServerEvent): string {
+    const ev = e as {
+      status?: unknown;
+      tool?: unknown;
+    };
+    const status = typeof ev.status === 'string' ? ev.status : '';
+    const tool = typeof ev.tool === 'string' && ev.tool ? ev.tool : null;
+    switch (status) {
+      case 'running':
+        return 'Thinking…';
+      case 'tool_use':
+        return tool ? `Calling ${tool}…` : 'Calling tool…';
+      case 'container_starting':
+        return 'Starting container…';
+      case 'queued':
+        return 'Queued…';
+      default:
+        return 'Working…';
+    }
+  }
+
+  private finalizeStreamingBubble(): void {
+    const last = this.messages[this.messages.length - 1];
+    if (last?.role === 'assistant' && last.streaming) {
+      this.messages = [...this.messages.slice(0, -1), { ...last, streaming: false }];
+    }
+  }
+
+  private resetRunningWatchdog(): void {
     this.clearRunningWatchdog();
     this.runningWatchdogTimer = setTimeout(() => {
-      // No inbound events for ~2 minutes while running. Most likely the
-      // 'done' event was published during a WebSocket reconnect window and
-      // our NATS subscription (DeliverPolicy.NEW) missed it. Recover the
-      // UI so the user isn't trapped reloading the page. Any partial text
-      // already rendered stays visible.
-      if (this.agentState === 'running') {
-        this.agentState = 'idle';
+      if (this.runState === 'running') {
+        this.runState = 'idle';
+        this.runTerminal = true;
         this.agentStatus = null;
-        this.isStreaming = false;
-        const last = this.messages[this.messages.length - 1];
-        if (last?.role === 'assistant' && last.streaming) {
-          this.messages = [...this.messages.slice(0, -1), { ...last, streaming: false }];
-        }
+        this.finalizeStreamingBubble();
       }
       this.runningWatchdogTimer = null;
     }, ChatPanel.RUNNING_WATCHDOG_MS);
   }
 
-  private clearRunningWatchdog() {
+  private clearRunningWatchdog(): void {
     if (this.runningWatchdogTimer) {
       clearTimeout(this.runningWatchdogTimer);
       this.runningWatchdogTimer = null;
     }
   }
 
-  private handleStop() {
-    if (this.agentState !== 'running') return;
-    this.agentState = 'stopping';
-    this.client.stop();
-    // Fallback: if server never confirms (e.g. container crashed mid-abort),
-    // recover to idle after 10s so the UI doesn't wedge.
-    this.clearStoppingTimer();
-    this.stoppingTimer = setTimeout(() => {
-      if (this.agentState === 'stopping') {
-        this.agentState = 'idle';
-        this.agentStatus = null;
-        this.isStreaming = false;
-      }
-      this.stoppingTimer = null;
-    }, 10_000);
-  }
-
-  private clearStoppingTimer() {
+  private clearStoppingTimer(): void {
     if (this.stoppingTimer) {
       clearTimeout(this.stoppingTimer);
       this.stoppingTimer = null;
     }
   }
 
-  private renderStatusLine(s: AgentStatusState): string {
-    switch (s.status) {
-      case 'queued':
-        return 'Queued…';
-      case 'container_starting':
-        return 'Starting…';
-      case 'running':
-        return 'Thinking…';
-      case 'tool_use': {
-        const tool = s.tool || 'Tool';
-        return s.input ? `${tool} · ${s.input}` : tool;
-      }
-      case 'stopped':
-        // handleMessage clears agentStatus on 'stopped', so this branch
-        // is defensive — the bar shouldn't render in this state.
-        return 'Stopped';
+  private clearCancellingTimer(): void {
+    if (this.cancellingTimer) {
+      clearTimeout(this.cancellingTimer);
+      this.cancellingTimer = null;
     }
   }
 
-  private handleSend(e: CustomEvent<{ content: string }>) {
-    const { content } = e.detail;
-    if (!content.trim()) return;
+  /** Stop = soft interrupt of the current turn via the v1
+   *  `request.stop` frame. Container stays alive; the next message
+   *  is immediate. Design §4.1 — do NOT redirect this to Cancel. */
+  private handleStop(): void {
+    if (this.runState !== 'running') return;
+    if (!this.v1) return;
+    this.runState = 'stopping';
+    this.v1.stop();
+    this.clearStoppingTimer();
+    this.stoppingTimer = setTimeout(() => {
+      if (this.runState === 'stopping') {
+        // The orchestrator interrupts the container but doesn't
+        // currently emit an explicit `event.run.stopped` ack —
+        // event.run.error / completed land instead when the abort
+        // settles. Best-effort recover to idle so the input isn't
+        // trapped if neither frame arrives.
+        this.runState = 'idle';
+        this.runTerminal = true;
+        this.agentStatus = null;
+        this.finalizeStreamingBubble();
+      }
+      this.stoppingTimer = null;
+    }, 10_000);
+  }
 
-    // If pending new chat, generate chat_id and connect
-    if (this.pendingNewChat || !this.activeChatId) {
-      const newChatId = crypto.randomUUID();
-      this.activeChatId = newChatId;
-      this.pendingNewChat = false;
-      this.client.reconnect(newChatId);
-      this.updateUrl();
+  /** Cancel = hard tear-down of the agent container. Next message
+   *  pays cold-start. Design §4.1 — distinct from Stop. */
+  private async handleCancel(): Promise<void> {
+    if (!this.activeRunId) return;
+    if (this.runState !== 'running' && this.runState !== 'stopping') return;
+    this.runState = 'cancelling';
+    this.clearCancellingTimer();
+    this.cancellingTimer = setTimeout(() => {
+      if (this.runState === 'cancelling') {
+        // The orchestrator's UPDATE is the source of truth; if we
+        // never observe a terminal event, fall back to idle so the
+        // UI isn't wedged.
+        this.runState = 'idle';
+        this.runTerminal = true;
+        this.agentStatus = null;
+        this.finalizeStreamingBubble();
+      }
+      this.cancellingTimer = null;
+    }, 15_000);
+    try {
+      const r = this.v1
+        ? await this.v1.cancelRun(this.activeRunId)
+        : await this.api.cancelRun(this.activeRunId);
+      if (r.alreadyTerminal) {
+        // Already terminal — synthesise the UI transition immediately
+        // since no NATS publish happened (no event will arrive).
+        this.runState = 'idle';
+        this.runTerminal = true;
+        this.agentStatus = null;
+        this.finalizeStreamingBubble();
+        this.clearCancellingTimer();
+      }
+    } catch (err) {
+      console.warn('cancelRun failed', err);
+      if (err instanceof ApiError) {
+        this.messages = [
+          ...this.messages,
+          { role: 'assistant', content: `**Error:** cancel failed (${err.message})` },
+        ];
+      }
+      this.runState = 'running';
+      this.clearCancellingTimer();
+    }
+  }
+
+  private async handleSend(e: CustomEvent<{ content: string }>): Promise<void> {
+    const { content } = e.detail;
+    const text = content.trim();
+    if (!text || !this.activeCoworkerId) return;
+
+    // First send in a new conversation — create the conversation row
+    // server-side, then open the v1 stream against it.
+    if (this.pendingNewChat || !this.activeConversationId) {
+      try {
+        const conv = await this.api.createCoworkerConversation(
+          this.activeCoworkerId,
+          null,
+        );
+        this.pendingNewChat = false;
+        await this.openConversation(conv.id);
+        this.updateUrl();
+      } catch (err) {
+        console.warn('createCoworkerConversation failed', err);
+        this.messages = [
+          ...this.messages,
+          { role: 'assistant', content: '**Error:** could not create conversation' },
+        ];
+        return;
+      }
     }
 
-    // Follow-up mid-turn: finalize any still-streaming assistant bubble
-    // before inserting the user's new message. If the previous bubble is
-    // an empty placeholder (three-dot spinner from a 'thinking' event
-    // that hasn't yet received text), drop it — otherwise it becomes an
-    // orphan once the agent's text lands in a fresh bubble after the
-    // user message, and the spinner animates forever.
-    // If the previous bubble already has partial content, mark it as
-    // non-streaming (removes the blinking caret) so any remaining text
-    // from the original turn starts a new bubble instead of continuing
-    // into an outdated one.
+    // Mid-turn follow-up: finalize any in-flight assistant bubble so
+    // the new user message doesn't visually interleave with the old
+    // stream.
     const last = this.messages[this.messages.length - 1];
     if (last?.role === 'assistant' && last.streaming) {
       if (!last.content) {
         this.messages = this.messages.slice(0, -1);
       } else {
-        this.messages = [...this.messages.slice(0, -1), { ...last, streaming: false }];
+        this.messages = [
+          ...this.messages.slice(0, -1),
+          { ...last, streaming: false },
+        ];
       }
-      // Allow the next 'thinking' event to spawn a fresh placeholder.
-      this.isStreaming = false;
     }
 
-    this.messages = [...this.messages, { role: 'user', content }];
-    this.client.send(content);
+    this.messages = [...this.messages, { role: 'user', content: text }];
+    // Reset terminal flag so Stop/Cancel re-enable for the new run.
+    this.runTerminal = false;
+    this.runState = 'running';
+    this.agentStatus = { label: 'Thinking…' };
+    this.resetRunningWatchdog();
+    this.v1?.send(text);
   }
 
-  private handleSelectConversation(e: CustomEvent<{ chatId: string }>) {
-    const { chatId } = e.detail;
-    if (chatId === this.activeChatId) return;
-    this.activeChatId = chatId;
+  private async handleSelectConversation(e: CustomEvent<{ conversationId: string }>): Promise<void> {
+    const { conversationId } = e.detail;
+    if (conversationId === this.activeConversationId) return;
     this.pendingNewChat = false;
     this.messages = [];
-    this.isStreaming = false;
     this.agentStatus = null;
-    this.agentState = 'idle';
     this.clearStoppingTimer();
-    this.updateUrl();
-    this.client.reconnect(chatId);
-    this.loadHistory(chatId);
+    this.clearCancellingTimer();
+    this.updateUrl(conversationId);
+    await this.openConversation(conversationId);
   }
 
-  private handleNewChat() {
-    this.activeChatId = null;
+  private handleNewChat(): void {
+    this.teardownV1();
+    this.activeConversationId = null;
     this.pendingNewChat = true;
     this.messages = [];
-    this.isStreaming = false;
     this.agentStatus = null;
-    this.agentState = 'idle';
+    this.runState = 'idle';
+    this.runTerminal = false;
+    this.activeRunId = null;
     this.clearStoppingTimer();
-    this.updateUrl();
+    this.clearCancellingTimer();
+    this.updateUrl(null);
   }
 
-  private handleToggleSidebar() {
+  private handleToggleSidebar(): void {
     this.sidebarCollapsed = !this.sidebarCollapsed;
     localStorage.setItem('rm-sidebar-collapsed', String(this.sidebarCollapsed));
   }
 
-  private updateUrl() {
+  private updateUrl(conversationId?: string | null): void {
     const params = new URLSearchParams(location.search);
-    if (this.activeChatId) {
-      params.set('chat_id', this.activeChatId);
-    } else {
-      params.delete('chat_id');
-    }
-    const url = `${location.pathname}?${params.toString()}`;
-    history.replaceState(null, '', url);
+    const cid = conversationId === undefined ? this.activeConversationId : conversationId;
+    if (cid) params.set('chat_id', cid);
+    else params.delete('chat_id');
+    history.replaceState(null, '', `${location.pathname}?${params.toString()}`);
+  }
+
+  private get conversationSummaries() {
+    // The sidebar component currently consumes `{chatId, title,
+    // updatedAt}`. Map v1 `Conversation` rows into that shape until
+    // the sidebar is reworked (out of scope for 01c).
+    return this.conversations.map((c) => ({
+      chatId: c.id,
+      title: c.name ?? 'Conversation',
+      updatedAt: c.created_at,
+    }));
   }
 
   override render() {
+    const stopDisabled = this.runState !== 'running';
+    const cancelDisabled =
+      !this.activeRunId ||
+      this.runTerminal ||
+      this.runState === 'cancelling' ||
+      this.runState === 'idle';
     return html`
       <div class="flex h-full">
-        <!-- Sidebar -->
         <rm-sidebar
-          .conversations=${this.conversations}
-          .activeChatId=${this.activeChatId}
+          .conversations=${this.conversationSummaries}
+          .activeChatId=${this.activeConversationId}
           .collapsed=${this.sidebarCollapsed}
-          @select-conversation=${(e: CustomEvent) => this.handleSelectConversation(e)}
+          @select-conversation=${(e: CustomEvent) =>
+            void this.handleSelectConversation(
+              new CustomEvent('select-conversation', {
+                detail: { conversationId: e.detail.chatId },
+              }),
+            )}
           @new-chat=${this.handleNewChat}
           @toggle-sidebar=${this.handleToggleSidebar}
         ></rm-sidebar>
 
-        <!-- Main area -->
         <div class="flex-1 flex flex-col min-w-0">
-          <!-- Header -->
           <div class="shrink-0 flex items-center justify-between px-4 py-3 border-b border-surface-3 dark:border-d-surface-3">
             <div class="flex items-center gap-2">
-              <!-- Toggle sidebar -->
               <button
                 class="w-7 h-7 flex items-center justify-center rounded-lg text-ink-2 dark:text-d-ink-2 hover:bg-surface-2 dark:hover:bg-d-surface-2 transition-colors cursor-pointer"
                 @click=${this.handleToggleSidebar}
@@ -411,7 +639,6 @@ export class ChatPanel extends LitElement {
               >
                 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" viewBox="0 0 24 24"><path d="M3 12h18"/><path d="M3 6h18"/><path d="M3 18h18"/></svg>
               </button>
-              <!-- New chat (visible when sidebar collapsed) -->
               ${this.sidebarCollapsed ? html`
                 <button
                   class="w-7 h-7 flex items-center justify-center rounded-lg text-ink-2 dark:text-d-ink-2 hover:bg-surface-2 dark:hover:bg-d-surface-2 transition-colors cursor-pointer"
@@ -428,13 +655,26 @@ export class ChatPanel extends LitElement {
               </div>
               <span class="text-[14px] font-semibold text-ink-0 dark:text-d-ink-0">RoleMesh</span>
             </div>
-            <div class="flex items-center gap-1.5">
-              <span class="w-2 h-2 rounded-full ${this.connected ? 'bg-emerald-500' : 'bg-red-500'}"></span>
-              <span class="text-[11.5px] text-ink-3 dark:text-d-ink-3">${this.connected ? 'Connected' : 'Disconnected'}</span>
+            <div class="flex items-center gap-3">
+              <button
+                type="button"
+                class="text-[11.5px] px-2 py-1 rounded-md border transition-colors cursor-pointer
+                  ${cancelDisabled
+                    ? 'border-surface-3 dark:border-d-surface-3 text-ink-4 dark:text-d-ink-4 cursor-not-allowed'
+                    : 'border-red-300 dark:border-red-700 text-red-600 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/30'}"
+                ?disabled=${cancelDisabled}
+                title=${cancelDisabled
+                  ? 'Cancel run and release container — disabled (no active run)'
+                  : 'Cancel run and release container (next message starts fresh)'}
+                @click=${() => void this.handleCancel()}
+              >${this.runState === 'cancelling' ? 'Cancelling…' : 'Cancel'}</button>
+              <div class="flex items-center gap-1.5">
+                <span class="w-2 h-2 rounded-full ${this.connected ? 'bg-emerald-500' : 'bg-red-500'}"></span>
+                <span class="text-[11.5px] text-ink-3 dark:text-d-ink-3">${this.connected ? 'Connected' : 'Disconnected'}</span>
+              </div>
             </div>
           </div>
 
-          <!-- Messages -->
           <div class="flex-1 overflow-y-auto" id="scroll-area">
             <div class="max-w-[720px] mx-auto w-full">
               ${this.messages.length === 0 ? this.renderEmpty() : ''}
@@ -443,24 +683,24 @@ export class ChatPanel extends LitElement {
             </div>
           </div>
 
-          <!-- Status indicator — one-line transient progress above the input -->
           ${this.agentStatus ? html`
             <div class="shrink-0 px-4">
               <div class="max-w-[720px] mx-auto w-full flex items-center gap-2 py-1.5 text-[12px] text-ink-3 dark:text-d-ink-3">
                 <span class="w-1.5 h-1.5 rounded-full bg-brand animate-pulse"></span>
-                <span class="truncate">${this.renderStatusLine(this.agentStatus)}</span>
+                <span class="truncate">${this.agentStatus.label}</span>
               </div>
             </div>
           ` : ''}
 
-          <!-- Input -->
           <div class="shrink-0 pb-5 pt-2 px-4">
             <div class="max-w-[720px] mx-auto w-full">
               <rm-message-editor
-                .agentState=${this.agentState}
+                .agentState=${stopDisabled && this.runState !== 'stopping' ? 'idle' : this.runState === 'stopping' ? 'stopping' : 'running'}
                 .connected=${this.connected}
-                @send=${(e: CustomEvent) => this.handleSend(e)}
+                .canCancel=${!cancelDisabled}
+                @send=${(e: CustomEvent) => void this.handleSend(e)}
                 @stop=${() => this.handleStop()}
+                @request-cancel=${() => void this.handleCancel()}
               ></rm-message-editor>
               <div class="text-center mt-2.5 text-[11px] text-ink-3 dark:text-d-ink-3 select-none">
                 AI responses may be inaccurate. Verify important information.
@@ -472,19 +712,133 @@ export class ChatPanel extends LitElement {
     `;
   }
 
+  /** Time-of-day greeting. Hours are user-local. */
+  private greetingPrefix(): string {
+    const h = new Date().getHours();
+    if (h < 12) return 'Good morning';
+    if (h < 18) return 'Good afternoon';
+    return 'Good evening';
+  }
+
+  /** First word of `me.name` (falls back to email's local-part, or
+   *  "there" so the greeting still reads like a sentence). */
+  private firstName(): string {
+    if (this.me?.name) {
+      const w = this.me.name.trim().split(/\s+/)[0];
+      if (w) return w;
+    }
+    if (this.me?.email) return this.me.email.split('@')[0];
+    return 'there';
+  }
+
+  /** Send a prefilled message — used by the welcome chips. Synthesizes
+   *  the same `send` CustomEvent the message-editor would dispatch. */
+  private sendChip(text: string): void {
+    void this.handleSend(
+      new CustomEvent<{ content: string }>('send', {
+        detail: { content: text },
+      }),
+    );
+  }
+
   private renderEmpty() {
+    // No coworker selected — keep the old onboarding hint rather than
+    // a half-personalized greeting that lies about state.
+    if (!this.activeCoworkerId) {
+      return html`
+        <div class="rm-chat-empty rm-chat-empty--noop">
+          <p>Pick a coworker from Settings → Coworkers to start chatting.</p>
+        </div>
+      `;
+    }
+    const coworker = this.activeCoworkerName ?? 'your coworker';
+    // Four sample tasks lifted from prototype lines 441-444. They're
+    // intentionally generic ad-ops/finance/marketing prompts; a v3
+    // chore could swap in coworker-specific suggestions by reading
+    // the coworker's system_prompt.
+    const chips = [
+      "Analyze last week's ad ROAS",
+      'Draft a restock plan',
+      'Reconcile Q1 ledger',
+      'Write 3 listing variants',
+    ];
     return html`
-      <div class="px-4 pt-[20vh] pb-10 anim-fade">
-        <div class="text-center">
-          <div class="inline-flex items-center justify-center w-14 h-14 rounded-[16px] bg-gradient-to-br from-brand-light to-brand mb-5 shadow-[0_8px_24px_-6px_rgba(99,102,241,0.35)]">
-            <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24">
-              <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
-            </svg>
-          </div>
-          <h1 class="text-[22px] font-bold text-ink-0 dark:text-d-ink-0 tracking-[-0.03em] mb-1.5">RoleMesh</h1>
-          <p class="text-[13.5px] text-ink-2 dark:text-d-ink-2 max-w-sm mx-auto leading-relaxed">
-            Start a conversation with your AI coworker.
-          </p>
+      <style>
+        .rm-chat-empty {
+          flex: 1;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          text-align: center;
+          padding: 24px;
+          animation: rm-fade 0.18s ease both;
+        }
+        .rm-chat-empty h1 {
+          font-family: var(--rm-font-display);
+          font-weight: 400;
+          font-size: 32px;
+          letter-spacing: -0.01em;
+          margin: 0 0 8px;
+          color: var(--rm-ink);
+        }
+        .rm-chat-empty h1 em {
+          font-style: italic;
+          color: var(--rm-accent);
+        }
+        .rm-chat-empty .rm-chat-empty-sub {
+          color: var(--rm-ink-3);
+          margin: 0 0 22px;
+          font-size: 14.5px;
+        }
+        .rm-chat-empty .rm-chat-empty-sub b {
+          color: var(--rm-ink-2);
+          font-weight: 500;
+        }
+        .rm-chat-chips {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+          justify-content: center;
+          max-width: 440px;
+        }
+        .rm-chat-chip {
+          border: 1px solid var(--rm-border);
+          background: var(--rm-surface);
+          padding: 7px 13px;
+          border-radius: 99px;
+          font-size: 13px;
+          color: var(--rm-ink-2);
+          font-family: inherit;
+          cursor: pointer;
+          transition: var(--rm-transition);
+        }
+        .rm-chat-chip:hover {
+          border-color: var(--rm-accent);
+          color: var(--rm-ink);
+          transform: translateY(-1px);
+        }
+        .rm-chat-empty--noop p {
+          color: var(--rm-ink-3);
+          font-size: 14px;
+          margin: 0;
+        }
+      </style>
+      <div class="rm-chat-empty">
+        <h1>${this.greetingPrefix()}, <em>${this.firstName()}</em>.</h1>
+        <p class="rm-chat-empty-sub">
+          What should <b>${coworker}</b> work on?
+        </p>
+        <div class="rm-chat-chips">
+          ${chips.map(
+            (t) => html`<button
+              type="button"
+              class="rm-chat-chip"
+              data-testid="welcome-chip"
+              @click=${() => this.sendChip(t)}
+              ?disabled=${!this.connected}
+            >${t}</button>`,
+          )}
         </div>
       </div>
     `;

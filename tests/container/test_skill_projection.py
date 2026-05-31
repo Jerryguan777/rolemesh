@@ -33,7 +33,7 @@ from rolemesh.core.skills import SkillValidationError
 from rolemesh.core.types import SkillFile
 from rolemesh.db import (
     create_coworker,
-    create_skill,
+    create_skill_for_coworker as create_skill,
     create_tenant,
     get_coworker,
 )
@@ -517,7 +517,7 @@ async def test_outer_finally_cleans_up_on_exception(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """If ``_execute_after_setup`` raises (any line — projection,
-    spec build, runtime spawn, approval loader…), the ``execute``
+    spec build, runtime spawn…), the ``execute``
     wrapper's ``finally`` must still call ``cleanup_spawn_skills``.
     Otherwise an exception path leaks the spawn dir until the orphan
     cleaner sweeps it on a much later schedule.
@@ -760,3 +760,164 @@ async def test_projection_does_not_depend_on_cwd(monkeypatch: pytest.MonkeyPatch
         assert (Path(mount.host_path) / "c" / "SKILL.md").exists()
     finally:
         cleanup_spawn_skills(job_id)
+
+
+# ---------------------------------------------------------------------------
+# PR29: hot-reload refresh — re-project into existing spawn dirs
+# ---------------------------------------------------------------------------
+
+
+async def test_refresh_updates_skill_md_in_existing_spawn_dir() -> None:
+    """The bug PR29 fixed: editing a skill in DB left old bytes in the
+    spawn dir, so the container's bind-mounted view stayed stale. The
+    refresh function must rewrite the on-disk SKILL.md so subsequent
+    container reads see the new content.
+
+    Without this test a future refactor that turns refresh into a no-op
+    (or makes it operate on a different directory) would silently
+    re-open the bug.
+    """
+    from rolemesh.container.skill_projection import refresh_skills_for_coworker
+    from rolemesh.db import update_skill
+
+    tenant_id, coworker_id = await _make_coworker("rf1", agent_backend="pi")
+    coworker = await get_coworker(coworker_id, tenant_id=tenant_id)
+    assert coworker is not None
+    skill = await create_skill(
+        tenant_id=tenant_id, coworker_id=coworker_id, name="rf-skill",
+        frontmatter_common={"description": _GOOD_DESC},
+        frontmatter_backend={},
+        files={
+            "SKILL.md": SkillFile(path="SKILL.md", content="OLD BODY\n"),
+        },
+    )
+    # job_id format <folder>-<uuid_suffix> per container_executor's
+    # spawn naming; refresh discovers spawn dirs by this prefix.
+    job_id = f"{coworker.folder}-{uuid.uuid4().hex[:12]}"
+    try:
+        mount = await materialize_skills_for_spawn(
+            coworker, job_id, backend="pi",
+        )
+        assert mount is not None
+        md_path = Path(mount.host_path) / "rf-skill" / "SKILL.md"
+        # Pin the initial state — the bug we're guarding against would
+        # leave this exact content even after the DB update below.
+        assert "OLD BODY" in md_path.read_text()
+
+        # Edit the skill in DB (the wire-side PATCH path does the same
+        # update_skill call, then publishes the NATS event the
+        # subscriber would handle).
+        await update_skill(
+            skill.id,
+            tenant_id=tenant_id,
+            files={
+                "SKILL.md": SkillFile(path="SKILL.md", content="NEW BODY\n"),
+            },
+        )
+
+        updated = await refresh_skills_for_coworker(coworker, backend="pi")
+        assert updated == 1, "expected exactly one spawn dir to be touched"
+        new_content = md_path.read_text()
+        assert "NEW BODY" in new_content, (
+            "SKILL.md on disk must reflect the DB update; staleness here "
+            "is the exact bug PR29 fixed"
+        )
+        assert "OLD BODY" not in new_content, (
+            "old body must be fully replaced, not appended to"
+        )
+        # The projector re-runs serialize_skill_md so the body is
+        # wrapped in frontmatter delimiters — pin that the rewrite
+        # didn't strip the frontmatter block.
+        assert new_content.startswith("---\n")
+    finally:
+        cleanup_spawn_skills(job_id)
+
+
+async def test_refresh_removes_skill_dir_when_skill_disabled() -> None:
+    """If a skill was projected at spawn time but is later disabled
+    or removed from the coworker, the refresh must sweep it off disk
+    too — otherwise the agent keeps seeing the file and may still
+    invoke the skill from the description it cached earlier.
+    """
+    from rolemesh.container.skill_projection import refresh_skills_for_coworker
+    from rolemesh.db import update_skill
+
+    tenant_id, coworker_id = await _make_coworker("rf2", agent_backend="pi")
+    coworker = await get_coworker(coworker_id, tenant_id=tenant_id)
+    assert coworker is not None
+    skill = await create_skill(
+        tenant_id=tenant_id, coworker_id=coworker_id, name="to-be-dropped",
+        frontmatter_common={"description": _GOOD_DESC},
+        frontmatter_backend={},
+        files={"SKILL.md": SkillFile(path="SKILL.md", content="body\n")},
+    )
+    job_id = f"{coworker.folder}-{uuid.uuid4().hex[:12]}"
+    try:
+        mount = await materialize_skills_for_spawn(
+            coworker, job_id, backend="pi",
+        )
+        assert mount is not None
+        skill_dir = Path(mount.host_path) / "to-be-dropped"
+        assert skill_dir.exists()
+
+        # Disable the skill — the list_skills_for_coworker(enabled_only)
+        # call inside refresh will now exclude it.
+        await update_skill(skill.id, tenant_id=tenant_id, enabled=False)
+
+        await refresh_skills_for_coworker(coworker, backend="pi")
+        assert not skill_dir.exists(), (
+            "disabled skill must be removed from spawn dir, not left "
+            "behind for the agent to read"
+        )
+    finally:
+        cleanup_spawn_skills(job_id)
+
+
+async def test_refresh_only_touches_matching_spawn_dirs() -> None:
+    """Discovery is by folder-name prefix; two different coworkers
+    must not refresh each other's spawn dirs. Pinning this catches a
+    future bug where the prefix match gets too loose.
+    """
+    from rolemesh.container.skill_projection import refresh_skills_for_coworker
+
+    tenant_id_a, coworker_a_id = await _make_coworker("aa", agent_backend="pi")
+    tenant_id_b, coworker_b_id = await _make_coworker("bb", agent_backend="pi")
+    coworker_a = await get_coworker(coworker_a_id, tenant_id=tenant_id_a)
+    coworker_b = await get_coworker(coworker_b_id, tenant_id=tenant_id_b)
+    assert coworker_a is not None and coworker_b is not None
+
+    await create_skill(
+        tenant_id=tenant_id_a, coworker_id=coworker_a_id, name="only-a",
+        frontmatter_common={"description": _GOOD_DESC},
+        frontmatter_backend={},
+        files={"SKILL.md": SkillFile(path="SKILL.md", content="a\n")},
+    )
+    await create_skill(
+        tenant_id=tenant_id_b, coworker_id=coworker_b_id, name="only-b",
+        frontmatter_common={"description": _GOOD_DESC},
+        frontmatter_backend={},
+        files={"SKILL.md": SkillFile(path="SKILL.md", content="b\n")},
+    )
+
+    job_a = f"{coworker_a.folder}-{uuid.uuid4().hex[:12]}"
+    job_b = f"{coworker_b.folder}-{uuid.uuid4().hex[:12]}"
+    try:
+        mount_a = await materialize_skills_for_spawn(coworker_a, job_a, backend="pi")
+        mount_b = await materialize_skills_for_spawn(coworker_b, job_b, backend="pi")
+        assert mount_a is not None and mount_b is not None
+
+        # Mtime probe: capture B's file mtime, refresh A, ensure B's
+        # mtime is unchanged. (Reading content alone wouldn't catch a
+        # bug that re-wrote with identical bytes; mtime change is the
+        # precise signal that "B was touched".)
+        b_md = Path(mount_b.host_path) / "only-b" / "SKILL.md"
+        b_mtime_before = b_md.stat().st_mtime_ns
+
+        await refresh_skills_for_coworker(coworker_a, backend="pi")
+
+        assert b_md.stat().st_mtime_ns == b_mtime_before, (
+            "refreshing coworker A must not touch coworker B's spawn dir"
+        )
+    finally:
+        cleanup_spawn_skills(job_a)
+        cleanup_spawn_skills(job_b)

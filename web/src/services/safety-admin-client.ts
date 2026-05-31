@@ -12,7 +12,8 @@ export type SafetyStage =
   | 'pre_tool_call'
   | 'post_tool_result'
   | 'model_output'
-  | 'pre_compaction';
+  | 'pre_compaction'
+  | 'egress_request';
 
 export type SafetyVerdictAction =
   | 'allow'
@@ -82,7 +83,6 @@ export interface SafetyDecision {
   findings: SafetyFinding[];
   context_digest: string;
   context_summary: string;
-  approval_context?: Record<string, unknown> | null;
   created_at: string;
 }
 

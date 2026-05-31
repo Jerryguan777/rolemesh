@@ -52,6 +52,7 @@ class ExternalJwtProvider:
             kwargs: dict[str, object] = {
                 "algorithms": self._algorithms,
                 "options": options,
+                "leeway": 30,
             }
             if self._issuer:
                 kwargs["issuer"] = self._issuer

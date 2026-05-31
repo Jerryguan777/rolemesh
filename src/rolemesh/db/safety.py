@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from rolemesh.db._pool import admin_conn, tenant_conn
+from rolemesh.db._pool import tenant_conn
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -16,7 +16,6 @@ if TYPE_CHECKING:
 
 
 __all__ = [
-    "cleanup_old_safety_approval_contexts",
     "count_safety_decisions",
     "create_safety_rule",
     "delete_safety_rule",
@@ -126,7 +125,8 @@ async def get_safety_rule(
 ) -> SafetyRule | None:
     """Fetch a safety rule by id, scoped to ``tenant_id``.
 
-    See ``get_approval_policy`` for the tenant-filter rationale.
+    The tenant filter is part of the query (not a post-fetch check) so a
+    guessed UUID from another tenant returns None from the DB itself.
     """
     async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
@@ -174,8 +174,7 @@ async def list_safety_rules_for_coworker(
 ) -> list[SafetyRule]:
     """Rules applicable to a specific coworker (coworker-scoped OR tenant-wide).
 
-    Mirrors ``get_enabled_policies_for_coworker`` in the approval module:
-    only enabled rows are returned, and a NULL ``coworker_id`` means the
+    Only enabled rows are returned, and a NULL ``coworker_id`` means the
     rule applies to every coworker in the tenant.
     """
     async with tenant_conn(tenant_id) as conn:
@@ -349,18 +348,12 @@ async def insert_safety_decision(
     coworker_id: str | None = None,
     conversation_id: str | None = None,
     job_id: str | None = None,
-    approval_context: dict[str, Any] | None = None,
 ) -> str:
     """Write one audit row; return its id.
 
     Called by the safety_events subscriber for every decision the
     container publishes. Never raises on per-row validation — malformed
     inputs should be filtered upstream in ``SafetyEngine.handle_safety_event``.
-
-    ``approval_context`` is retained only for rows with
-    ``verdict_action='require_approval'``; for other actions the
-    caller passes None and the column stays NULL. See the 24-hour
-    cleanup task note in the ``safety_decisions`` schema block.
     """
     async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
@@ -368,13 +361,12 @@ async def insert_safety_decision(
             INSERT INTO safety_decisions (
                 tenant_id, coworker_id, conversation_id, job_id,
                 stage, verdict_action, triggered_rule_ids,
-                findings, context_digest, context_summary,
-                approval_context
+                findings, context_digest, context_summary
             )
             VALUES (
                 $1::uuid, $2::uuid, $3, $4,
                 $5, $6, $7::uuid[],
-                $8::jsonb, $9, $10, $11::jsonb
+                $8::jsonb, $9, $10
             )
             RETURNING id
             """,
@@ -388,7 +380,6 @@ async def insert_safety_decision(
             json.dumps(findings),
             context_digest,
             context_summary,
-            json.dumps(approval_context) if approval_context else None,
         )
     assert row is not None
     return str(row["id"])
@@ -483,44 +474,6 @@ async def stream_safety_decisions(
             yield chunk
 
 
-async def cleanup_old_safety_approval_contexts(
-    *,
-    retention_hours: int = 24,
-) -> int:
-    """Zero the ``approval_context`` column on decisions older than
-    ``retention_hours``. Returns the number of rows updated.
-
-    V2 P1.1 retention policy: ``approval_context`` is the one place the
-    full ``tool_input`` lives after the turn (all other audit fields
-    carry only a digest + short summary). Keeping it forever would
-    turn the audit table into a long-term PII sink. 24h is enough for
-    the approval decision to play out (auto-expire is 60 min by
-    default) and for operators to inspect via the admin UI; after
-    that we redact.
-
-    Uses ``created_at`` rather than the linked approval row's
-    resolution time. Simpler (no join), and the approval row has its
-    own history via ``approval_audit_log``, so nothing is lost by
-    clearing the safety-side copy.
-    """
-    async with admin_conn() as conn:
-        row = await conn.fetchval(
-            """
-            WITH cleared AS (
-                UPDATE safety_decisions
-                   SET approval_context = NULL
-                 WHERE verdict_action = 'require_approval'
-                   AND approval_context IS NOT NULL
-                   AND created_at < (now() - make_interval(hours => $1))
-                 RETURNING 1
-            )
-            SELECT COUNT(*) FROM cleared
-            """,
-            retention_hours,
-        )
-    return int(row or 0)
-
-
 async def get_safety_decision(
     decision_id: str, *, tenant_id: str
 ) -> dict[str, Any] | None:
@@ -544,15 +497,6 @@ async def get_safety_decision(
     findings = row["findings"]
     if isinstance(findings, str):
         findings = json.loads(findings) if findings else []
-    # asyncpg Record supports dict-like .get() via key access + default.
-    # Use getattr-like fallback to handle both pre-migration rows (no
-    # column) and post-migration rows uniformly.
-    try:
-        approval_ctx = row["approval_context"]
-    except KeyError:
-        approval_ctx = None
-    if isinstance(approval_ctx, str):
-        approval_ctx = json.loads(approval_ctx) if approval_ctx else None
     return {
         "id": str(row["id"]),
         "tenant_id": str(row["tenant_id"]),
@@ -565,7 +509,6 @@ async def get_safety_decision(
         "findings": findings if isinstance(findings, list) else [],
         "context_digest": row["context_digest"],
         "context_summary": row["context_summary"],
-        "approval_context": approval_ctx,
         "created_at": row["created_at"].isoformat() if row["created_at"] else "",
     }
 

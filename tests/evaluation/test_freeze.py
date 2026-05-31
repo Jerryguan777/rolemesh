@@ -7,10 +7,10 @@ Cover the contract:
   * unknown coworker → LookupError (RLS reduces wrong-tenant to
     not-found, which the CLI surfaces)
 
-Skills are seeded via the production ``create_skill`` / ``update_skill``
-helpers rather than raw SQL — that keeps the test honest against the
-same path admin REST and the orchestrator use, including the CHECK
-constraints and SECURITY DEFINER trigger.
+Skills are seeded via the production ``create_skill_for_coworker`` /
+``update_skill`` helpers rather than raw SQL — that keeps the test
+honest against the same path admin REST and the orchestrator use,
+including the CHECK constraints and the per-tenant catalog cutover.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ import pytest
 from rolemesh.core.types import SkillFile
 from rolemesh.db import (
     create_coworker,
-    create_skill,
+    create_skill_for_coworker,
     create_tenant,
     update_skill,
 )
@@ -36,8 +36,8 @@ async def _seed_skill(
     files: dict[str, str], frontmatter_common: dict | None = None,
     enabled: bool = True,
 ) -> str:
-    """Wrap ``create_skill`` with the test's flat ``{path: content}`` shape."""
-    skill = await create_skill(
+    """Wrap ``create_skill_for_coworker`` with the test's flat ``{path: content}`` shape."""
+    skill = await create_skill_for_coworker(
         tenant_id=tenant_id,
         coworker_id=coworker_id,
         name=name,

@@ -1,6 +1,6 @@
 """safety_rules_audit — rule-change audit trail (reflection #8).
 
-Approval has this, safety didn't. Compliance scenario: "Jan 3 admin
+Compliance scenario: "Jan 3 admin
 disabled the SSN rule, leak followed on Jan 4" must be reconstructable
 from DB alone. These tests pin:
 

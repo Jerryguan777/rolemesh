@@ -420,10 +420,21 @@ def build_container_spec(
     job_id: str,
     backend_config: AgentBackendConfig | None = None,
     coworker: Coworker | None = None,
+    pi_model_id_override: str | None = None,
 ) -> ContainerSpec:
     """Build a ContainerSpec from mounts and config.
 
     Merge order for resource limits: global default ← coworker override ← clamp to max.
+
+    ``pi_model_id_override`` (PR30): the Pi-format model string
+    (``<provider>/<model_id>``) the caller resolved from
+    ``coworker.model_id`` via the ``models`` table. When set, it
+    overrides whatever ``PI_MODEL_ID`` came from the host's .env at
+    module-load time. The override path also recomputes any Bedrock-
+    specific env (``AWS_BEARER_TOKEN_BEDROCK``, ``AWS_REGION``)
+    because switching providers means switching boto3 config too.
+    ``None`` keeps the legacy .env-default behavior for callers that
+    don't have a coworker context (evaluation CLI, etc.).
     """
     image = backend_config.image if backend_config else CONTAINER_IMAGE
 
@@ -471,8 +482,13 @@ def build_container_spec(
         "TZ": TIMEZONE,
         "NATS_URL": nats_url,
         "JOB_ID": job_id,
-        # Legacy: Claude backend reads ANTHROPIC_BASE_URL directly (no /proxy prefix)
-        "ANTHROPIC_BASE_URL": proxy_base,
+        # Per-provider proxy URL. The reverse proxy routes everything
+        # through ``/proxy/{provider}/`` since the legacy catch-all was
+        # deleted in the chore/config-db-truth credential refactor —
+        # without the suffix the SDK hits 404. Both Pi and Claude SDKs
+        # honour ANTHROPIC_BASE_URL and append ``/v1/messages`` etc., so
+        # the suffix flows through cleanly.
+        "ANTHROPIC_BASE_URL": f"{proxy_base}/proxy/anthropic",
         # Multi-provider proxy URLs for Pi backend (each SDK reads its own env var)
         "OPENAI_BASE_URL": f"{proxy_base}/proxy/openai",
         # Bedrock — boto3 honours ``BEDROCK_BASE_URL`` as ``endpoint_url``.
@@ -509,6 +525,33 @@ def build_container_spec(
             backend_config.extra_env, source=f"backend_config:{backend_config.name}",
         )
         env.update(filtered_backend_env)
+
+    # Per-coworker model override. backend_config.extra_env has the
+    # .env-derived default PI_MODEL_ID baked in at module-load time;
+    # recompute it (plus Bedrock boto3 placeholders if the override
+    # switches providers) so the UI's model picker actually reaches
+    # the container.
+    if (
+        pi_model_id_override is not None
+        and backend_config
+        and backend_config.name == "pi"
+    ):
+        from rolemesh.core.config import BEDROCK_DEFAULT_REGION
+
+        override_env: dict[str, str] = {"PI_MODEL_ID": pi_model_id_override}
+        if pi_model_id_override.startswith("amazon-bedrock/"):
+            override_env["AWS_BEARER_TOKEN_BEDROCK"] = (
+                "placeholder-proxy-replaces-this"
+            )
+            override_env["AWS_REGION"] = (
+                os.environ.get("AWS_REGION", "") or BEDROCK_DEFAULT_REGION
+            )
+        env.update(
+            _filter_env_allowlist(
+                override_env,
+                source=f"coworker_model:{pi_model_id_override}",
+            )
+        )
 
     # Resolve runtime UID/GID. The same pair drives both the `user` field
     # handed to Docker and the tmpfs owner in _default_tmpfs below; they

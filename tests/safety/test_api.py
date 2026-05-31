@@ -1,6 +1,6 @@
 """REST API tests for /api/admin/safety/rules endpoints.
 
-Mirrors tests/approval/test_api.py structure. Focuses on:
+Focuses on:
   - CRUD happy path (create + list + get + patch + delete)
   - server-side validation: unknown check_id, unsupported stage,
     malformed config all reject with 400
@@ -283,6 +283,133 @@ class TestListAndGet:
             # B should get 404, not 403, to avoid existence leak.
             r = await c_b.get(f"/api/admin/safety/rules/{rule_id}")
             assert r.status_code == 404
+
+
+class TestDeprecationHeaders:
+    """Six admin safety GET endpoints carry the deprecation triple
+    (Sunset / Deprecation / Link). The headers tell remaining
+    operator scripts to migrate to ``/api/v1/safety/*`` ahead of
+    the 2026-11-17 sunset date the 04 session locked in.
+    """
+
+    @pytest.mark.asyncio
+    async def test_all_six_get_endpoints_carry_deprecation_headers(
+        self,
+    ) -> None:
+        tid, uid, _ = await _seed()
+        app = _build_app(_authed_user(tid, uid))
+        async with _client(app) as c:
+            # Seed one rule + one decision so each endpoint has
+            # something to return without 404'ing past the header
+            # logic. The deprecation helper runs before any 404 in
+            # the source, but pinning happy-path responses keeps
+            # the test resilient to handler reordering.
+            r = await c.post(
+                "/api/admin/safety/rules",
+                json={
+                    "stage": "pre_tool_call",
+                    "check_id": "pii.regex",
+                    "config": {"patterns": {"SSN": True}},
+                },
+            )
+            rule_id = r.json()["id"]
+
+            paths = [
+                ("/api/admin/safety/rules", "/api/v1/safety/rules"),
+                (
+                    f"/api/admin/safety/rules/{rule_id}",
+                    f"/api/v1/safety/rules/{rule_id}",
+                ),
+                ("/api/admin/safety/checks", "/api/v1/safety/checks"),
+                (
+                    f"/api/admin/tenants/{tid}/safety/decisions",
+                    "/api/v1/safety/decisions",
+                ),
+                (
+                    f"/api/admin/tenants/{tid}/safety/rules/{rule_id}/audit",
+                    f"/api/v1/safety/rules/{rule_id}/audit",
+                ),
+            ]
+            for admin_path, successor in paths:
+                r = await c.get(admin_path)
+                assert r.status_code == 200, admin_path
+                assert (
+                    r.headers.get("Sunset")
+                    == "Tue, 17 Nov 2026 00:00:00 GMT"
+                ), admin_path
+                assert r.headers.get("Deprecation") == "true", admin_path
+                # Link must point at the v1 successor — clients can
+                # discover the upgrade target machine-readably.
+                link = r.headers.get("Link", "")
+                assert successor in link, (admin_path, link)
+                assert 'rel="successor-version"' in link, admin_path
+
+            # Decision-detail endpoint requires an actual decision
+            # row. Seed via the safety_events path? Skip — the
+            # helper is identical across the six, and the five
+            # above prove the wiring works. A separate test below
+            # pins the decision-detail header path with a synthesized
+            # row, mirroring the integration tests' approach.
+
+    @pytest.mark.asyncio
+    async def test_decision_detail_carries_deprecation_headers(
+        self,
+    ) -> None:
+        """Mirrors the helper's wiring on the decision-detail path
+        — the other five already share one helper call, but the
+        detail endpoint takes a different URL shape so it deserves
+        an independent pin against a future-handler refactor that
+        drops the call from this one specifically.
+        """
+        from rolemesh.db import insert_safety_decision
+
+        tid, uid, _ = await _seed()
+        decision_id = await insert_safety_decision(
+            tenant_id=tid,
+            stage="input_prompt",
+            verdict_action="allow",
+            triggered_rule_ids=[],
+            findings=[],
+            context_digest="d" * 16,
+            context_summary="t",
+        )
+        app = _build_app(_authed_user(tid, uid))
+        async with _client(app) as c:
+            r = await c.get(
+                f"/api/admin/tenants/{tid}/safety/decisions/{decision_id}"
+            )
+            assert r.status_code == 200
+            assert (
+                r.headers.get("Sunset")
+                == "Tue, 17 Nov 2026 00:00:00 GMT"
+            )
+            assert r.headers.get("Deprecation") == "true"
+            link = r.headers.get("Link", "")
+            assert f"/api/v1/safety/decisions/{decision_id}" in link
+
+    @pytest.mark.asyncio
+    async def test_safety_writes_do_not_carry_deprecation_headers(
+        self,
+    ) -> None:
+        """Writes (POST/PATCH/DELETE) stay on admin by design
+        (`/safety/rules` writes are intentionally admin-only). They
+        must NOT advertise a Sunset — that would steer operators to
+        a v1 endpoint that doesn't exist.
+        """
+        tid, uid, _ = await _seed()
+        app = _build_app(_authed_user(tid, uid))
+        async with _client(app) as c:
+            r = await c.post(
+                "/api/admin/safety/rules",
+                json={
+                    "stage": "pre_tool_call",
+                    "check_id": "pii.regex",
+                    "config": {"patterns": {"SSN": True}},
+                },
+            )
+            assert r.status_code == 201
+            assert "Sunset" not in r.headers
+            assert "Deprecation" not in r.headers
 
 
 class TestPatchAndDelete:

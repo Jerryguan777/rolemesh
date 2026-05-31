@@ -78,6 +78,7 @@ class OIDCAuthProvider:
                 algorithms=list(ALLOWED_ALGORITHMS),
                 issuer=disc.issuer,
                 audience=self._audience,
+                leeway=30,
             )
         except jwt.InvalidTokenError as exc:
             logger.debug("OIDC token validation failed", error=str(exc))

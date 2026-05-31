@@ -2,9 +2,9 @@
 
 This document explains RoleMesh's Safety Framework — a policy framework that lets administrators, without writing code, impose runtime detection and interception on an agent's inputs, tool calls, and outputs.
 
-It covers why this is a **framework** rather than a handful of hard-coded checks, which abstraction levels were considered and rejected, the design intent behind the Stage / Context / Check / Rule quartet, the relationship with the existing Approval module, and what V1 deliberately leaves out.
+It covers why this is a **framework** rather than a handful of hard-coded checks, which abstraction levels were considered and rejected, the design intent behind the Stage / Context / Check / Rule quartet, and what V1 deliberately leaves out.
 
-Target audience: developers adding new Checks (PII detectors, prompt-injection classifiers, egress rules, etc.), debugging why a rule did not fire, porting Safety to a new stage, or understanding "why not OPA/CEL." Prerequisite: [`13-safety-overview.md`](13-safety-overview.md) §2.4 / §2.5 / §2.7 / §2.8, [`12-approval-architecture.md`](12-approval-architecture.md).
+Target audience: developers adding new Checks (PII detectors, prompt-injection classifiers, egress rules, etc.), debugging why a rule did not fire, porting Safety to a new stage, or understanding "why not OPA/CEL." Prerequisite: [`13-safety-overview.md`](13-safety-overview.md) §2.4 / §2.5 / §2.7 / §2.8.
 
 ---
 
@@ -39,7 +39,6 @@ The Safety Framework exists to **abstract this work into a unified shape**, turn
 5. **Native multi-tenant isolation.** Every rule is enforced through `tenant_id`; `coworker_id=NULL` means tenant-wide; no cross-tenant inheritance allowed.
 6. **Data minimization.** The audit stores `context_digest` (SHA-256) + a short summary, **not the raw payload** — preventing PII from leaking through the audit table (see [`13-safety-overview.md`](13-safety-overview.md) §2.7).
 7. **Hot update (next-job-applies).** When an admin changes a rule, the next agent invocation picks up the new snapshot; in-flight jobs continue with the snapshot they started with — avoiding mid-flight behavior drift that is hard to debug.
-8. **Do not replace existing Approval.** Approval is one of Safety's "action types" (V2 bridges), not a swallow-and-rewrite of the existing approval state machine.
 
 ---
 
@@ -59,7 +58,7 @@ async def on_pre_tool_use(event):
 
 **Pros**: Straightforward, no abstraction layers.
 
-**Cons**: Scattered fail-modes, inconsistent audit, changing one detection may affect the hit order of another, adding a new detection means changing main flow. **Fundamentally conflicts with the "declarative policy" shape that [`12-approval-architecture.md`](12-approval-architecture.md) requires** — admins cannot configure rules without writing code.
+**Cons**: Scattered fail-modes, inconsistent audit, changing one detection may affect the hit order of another, adding a new detection means changing main flow. **Fundamentally conflicts with the "declarative policy" shape this framework targets** — admins cannot configure rules without writing code.
 
 **Rejected** — does not scale.
 
@@ -71,7 +70,7 @@ Write each rule as a Rego or CEL expression:
 deny[reason] {
     input.stage == "pre_tool_call"
     input.params.amount > 1000
-    reason := "amount exceeds threshold, approval required"
+    reason := "amount exceeds threshold, blocked"
 }
 ```
 
@@ -94,7 +93,7 @@ Plug into some open-source framework directly.
 
 **Cons**:
 - Their default scenario is "single-LLM application," not "multi-tenant agent orchestrator"
-- Audit / multi-tenancy / approval workflow / NATS IPC all need deep customization — you end up wrapping it anyway
+- Audit / multi-tenancy / NATS IPC all need deep customization — you end up wrapping it anyway
 - Locked to that framework's release cadence
 
 **Rejected** — building a 1500-LoC custom skeleton + adapting existing detector libraries (Presidio, LLM Guard, Lakera, OpenAI Moderation) is the more stable path.
@@ -106,7 +105,7 @@ Plug into some open-source framework directly.
 - **SafetyCheck** Protocol: each check class declares the stages it supports, its cost class, a stable Finding code set, and an optional pydantic config schema
 - **Rule** is a DB row: pick a check + configure its config + bind to a stage + bind to scope (tenant + optional coworker)
 
-**Pros**: All goals met; adding a capability = writing a Check class + registering one line; no DSL introduced; parallel to (rather than conflicting with) the existing Approval module.
+**Pros**: All goals met; adding a capability = writing a Check class + registering one line; no DSL introduced.
 
 **Selected.** This is the shape the rest of this document describes.
 
@@ -341,22 +340,6 @@ Container receives snapshot, immutable for the duration of the job
 
 ---
 
-## Relationship with the Existing Approval Module
-
-The Approval module described in [`12-approval-architecture.md`](12-approval-architecture.md) is **one Safety action type** — V2 bridges, **does not replace**:
-
-- The Approval module's state machine, human approval UX, approver resolution, batch approval workflow — all stay independent
-- When Safety V2 introduces `action="require_approval"`, the pipeline does not hold approval state, does not wait, does not poll; it is only the "originator" — it publishes a special NATS event, and the orchestrator side, on receipt, calls `ApprovalEngine.create_request(...)`
-- The container side just sees a `block` ("awaiting approval...")
-- After approval, the Approval module's existing execution loop handles it
-
-This **bridge-without-merge** design avoids:
-- Safety framework forking the approval engine
-- The approval workflow (already pinned by 14 E2E tests) being slowed by safety changes
-- "Policy" and "approval" semantics ending up in the same table
-
----
-
 ## V1 Implemented vs V2 To-Do
 
 ### V1 (merged on the `safety/framework` branch)
@@ -378,7 +361,6 @@ This **bridge-without-merge** design avoids:
 - Third-party adapter checks: `presidio.pii`, `llm_guard.prompt_injection`, `llm_guard.jailbreak`, `llm_guard.toxicity`, `openai_moderation`, `secret_scanner` (detect-secrets)
 - `rate_limit` check (per-tenant / per-tool counters)
 - `domain_allowlist` check (tool input URL allowlist — complementary to Egress Control)
-- `require_approval` action bridging the Approval module
 - Time-window scheduling (`active_hours` / `active_days`)
 - Audit CSV / Webhook export
 - Admin UI
@@ -386,7 +368,7 @@ This **bridge-without-merge** design avoids:
 ### Never
 
 - **CEL / Rego policy DSL** — see alternative B rejection
-- **Replace existing Approval / sender_allowlist / mount_security** — they continue to exist independently
+- **Replace existing sender_allowlist / mount_security** — they continue to exist independently
 - **Cross-tenant policy inheritance / template marketplace** — the antithesis of native multi-tenant isolation
 - **Self-hosted local GPU inference (Llama Guard, etc.)** — deployment cost too high, external APIs suffice
 
@@ -407,7 +389,6 @@ This **bridge-without-merge** design avoids:
 - **Container network isolation** → Container Hardening + Egress Control
 - **Mount path allowlist** → standalone `mount_security` module (neither V1 nor V2 migrates it in)
 - **Channel-message sender allowlist** → standalone `sender_allowlist` module (neither V1 nor V2 migrates it in)
-- **Approval workflow** → Approval module (Safety V2 bridges, does not merge)
 
 Keeping these outside the Safety Framework is because each is **a mature, independently-shaped subsystem** — folding them into the framework is over-abstraction. The Safety Framework solves the class of "**continuously-emerging new LLM-safety detections**."
 

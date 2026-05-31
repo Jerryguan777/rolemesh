@@ -6,14 +6,23 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "openapi:gen": "openapi-typescript ../contracts/openapi.yaml -o ./src/api/generated/types.ts",
+    "openapi:check": "openapi-typescript ../contracts/openapi.yaml -o /tmp/rm-openapi-types.ts && diff -u ./src/api/generated/types.ts /tmp/rm-openapi-types.ts",
+    "test": "vitest run",
+    "lint:no-admin-chat": "node scripts/lint-no-admin-chat.mjs",
+    "lint:flat-route": "node scripts/lint-flat-route.mjs",
+    "lint:tokens-only": "node scripts/lint-tokens-only.mjs"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.1",
+    "happy-dom": "^20.9.0",
     "lit": "^3.3",
     "marked": "^15",
+    "openapi-typescript": "^7.13.0",
     "tailwindcss": "^4",
     "typescript": "^5.7",
-    "vite": "^6"
+    "vite": "^6",
+    "vitest": "^4.1.7"
   }
 }

@@ -89,7 +89,14 @@ function parseJwtPayload(token: string): { exp?: number; [k: string]: unknown } 
 
 export function isTokenExpired(token: string): boolean {
   const payload = parseJwtPayload(token);
-  if (!payload || typeof payload.exp !== 'number') return true;
+  // Non-JWT tokens (bootstrap opaque bearers, BOOTSTRAP_USERS tokens)
+  // carry no client-side expiry; let the server be the source of
+  // truth. A revoked/wrong token will surface as a 401 on the next
+  // request, which `rm-auth-failed` already handles. Treating
+  // "no exp claim" as "expired" used to be defensible when only OIDC
+  // was supported, but with bootstrap modes in the auth-config
+  // matrix it locks legitimate dev/test sign-ins out of the SPA.
+  if (!payload || typeof payload.exp !== 'number') return false;
   return Date.now() / 1000 >= payload.exp - 30; // 30s clock skew margin
 }
 

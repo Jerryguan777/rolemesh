@@ -22,3 +22,5 @@ plan_*.md
 docs_bk/
 node_modules/
 web/dist/
+# Local run artifacts: smoke/orchestrator/webui logs, pids, tickets.
+.logs/

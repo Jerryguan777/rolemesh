@@ -199,6 +199,10 @@ async def update_user_access_token(
     access_token_expires_at: datetime,
 ) -> None:
     """Update only the cached access_token (after refresh)."""
+    # inv-1-ok: oidc_user_tokens.user_id is PRIMARY KEY; the parent
+    # users.tenant_id propagates via FK + the BEFORE-INSERT trigger
+    # ``trg_oidc_user_tokens_set_tenant``. UPDATE-by-user_id cannot
+    # cross tenants because (user_id) is unique globally.
     async with admin_conn() as conn:
         await conn.execute(
             """
@@ -219,6 +223,9 @@ async def update_user_refresh_token(
     refresh_token_encrypted: bytes,
 ) -> None:
     """Update only the refresh_token (after IdP rotation)."""
+    # inv-1-ok: see update_user_access_token — user_id is globally
+    # unique on oidc_user_tokens, so the tenant predicate would be
+    # redundant.
     async with admin_conn() as conn:
         await conn.execute(
             "UPDATE oidc_user_tokens SET refresh_token_encrypted = $1, updated_at = now() "
@@ -335,13 +342,26 @@ async def update_user(
 
 
 async def delete_user(user_id: str, *, tenant_id: str) -> bool:
-    """Delete a user by ID, scoped to ``tenant_id``."""
+    """Delete a user by ID, scoped to ``tenant_id``.
+
+    v6.1 §P1.8: scheduled tasks created by this user are soft-
+    cancelled in the same transaction. Without that, the
+    ``ON DELETE SET NULL`` on ``scheduled_tasks.created_by_user_id``
+    would leave the row's ``user_id`` NULL on an active task — the
+    next scheduler tick would then run it with a missing user.
+    Cancel-before-delete keeps the audit row but takes
+    the task out of the active queue first.
+    """
+    from rolemesh.db.task import cancel_tasks_for_user
+
     async with tenant_conn(tenant_id) as conn:
-        result = await conn.execute(
-            "DELETE FROM users WHERE id = $1::uuid AND tenant_id = $2::uuid",
-            user_id,
-            tenant_id,
-        )
+        async with conn.transaction():
+            await cancel_tasks_for_user(user_id, tenant_id, conn=conn)
+            result = await conn.execute(
+                "DELETE FROM users WHERE id = $1::uuid AND tenant_id = $2::uuid",
+                user_id,
+                tenant_id,
+            )
     return result == "DELETE 1"
 
 

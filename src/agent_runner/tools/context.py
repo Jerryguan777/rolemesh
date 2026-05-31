@@ -34,9 +34,20 @@ class ToolContext:
     coworker_id: str
     conversation_id: str
     # Identity of the user whose turn the agent is executing. Passed through
-    # to MCP calls via X-RoleMesh-User-Id and recorded on approval requests
-    # so the approval path can attribute the proposal to the originating user.
+    # to MCP calls via X-RoleMesh-User-Id so downstream systems can attribute
+    # the call to the originating user.
     user_id: str = ""
+    # True when this turn is a scheduled-task fire (vs. an interactive
+    # turn). The send_message tool stamps this on its IPC payload so the
+    # orchestrator's ``_handle_agent_message_ipc`` knows whether to forward
+    # the message to the channel gateway. Interactive turns already deliver
+    # the agent's reply through the natural-output path (``agent.*.results``
+    # → ``_on_output``), so forwarding send_message would double-send;
+    # scheduled-task turns have no equivalent natural-output delivery
+    # (``_run_task``'s ``_on_output`` only forwards when ``result`` is
+    # non-empty, but agents typically only call send_message and produce
+    # no final ``result``), so forwarding IS the only delivery path.
+    is_scheduled_task: bool = False
     # V2 P0.4: per-MCP-server reversibility maps. Keyed by server
     # registered name → {bare_tool_name: reversible}. Forwarded from
     # ``AgentInitData.mcp_servers[i].tool_reversibility`` so the hook

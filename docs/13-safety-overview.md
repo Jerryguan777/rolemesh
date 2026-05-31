@@ -20,7 +20,7 @@ A traditional service's input is data; an agent's input is both data and instruc
 
 ### 1.2 Non-Deterministic Behavior
 
-The same input may produce different tool-call sequences. You cannot reach high confidence by "covering all code paths" the way you can with a traditional service — behavior must be bounded by external observation (policy, approval, quota, audit).
+The same input may produce different tool-call sequences. You cannot reach high confidence by "covering all code paths" the way you can with a traditional service — behavior must be bounded by external observation (policy, quota, audit).
 
 ### 1.3 Tool Calls Have Real Side Effects
 
@@ -89,7 +89,7 @@ Industry: Cloudflare Workers isolates egress via the Fetch API; OpenAI Code Inte
 **Threats**: Agent calling high-risk tools (delete database, wire transfer, send email, `git push`).
 
 **Best practices**:
-- **Human-in-the-loop approval** — write operations, money, destructive actions require approval by default. Cursor, Claude Code, Devin all have variants of "dangerous-command interception"
+- **Blocking high-risk actions** — write operations, money, destructive actions are blocked by default. Cursor, Claude Code, Devin all have variants of "dangerous-command interception"
 - **Capability-based permissions** — per-agent tool allowlists, not shared API keys
 - **Policy-as-code** — OPA / Cedar evaluating `(principal, tool, params)`
 - **Two-person integrity** for production changes
@@ -124,7 +124,7 @@ Industry: Notion AI and Glean propagate strict document-level ACLs into RAG.
 **Threats**: Inability to trace events or replay agent decisions after the fact.
 
 **Best practices**:
-- **Complete trace** — prompt, tool call, tool result, approvals all persisted (immutable log)
+- **Complete trace** — prompt, tool call, tool result, safety decisions all persisted (immutable log)
 - **Structured logging + trace ID** spans requests end-to-end
 - **Tamper-evident** — hash chain / WORM storage
 - **PII / secret redaction** before write; audit stores digests rather than originals
@@ -165,7 +165,7 @@ A simplified layering picture:
 ├─────────────────────────────────────────────────────────┤
 │ Observability / SIEM (consume audit, alert, forensics)  │ ← Downstream
 ├─────────────────────────────────────────────────────────┤
-│ ★ Runtime Policy Framework (approval, PII, rate limit)  │ ← Safety Framework
+│ ★ Runtime Policy Framework (block, PII, rate limit)     │ ← Safety Framework
 ├─────────────────────────────────────────────────────────┤
 │ Foundational Capabilities (credential vault, OIDC, ...)  │ ← Called by policy
 ├─────────────────────────────────────────────────────────┤
@@ -215,7 +215,6 @@ See [`15-safety-framework-architecture.md`](15-safety-framework-architecture.md)
 - **Checks split into fast vs slow** — cheap checks run synchronously in the container; slow checks go via orchestrator-side RPC (V2)
 - **Audit stores digest, not raw payload** — prevents PII from leaking through the audit table
 - **Zero overhead** — no rules = no hook registration, performance identical to before
-- **Does not replace the existing Approval system** — Approval becomes one Safety action type (bridged in V2)
 
 **Shape**: Cross-cutting runtime layer. Every PRE_TOOL_CALL / INPUT_PROMPT event runs through a pipeline.
 
@@ -242,7 +241,7 @@ RoleMesh's three modules consistently follow these principles.
 
 ### 5.1 Fail-closed by Default
 
-When any control fails, any policy is unavailable, the gateway is unreachable — **everything is denied by default**, not silently downgraded to allow. Exceptions need an explicit env switch (e.g. `APPROVAL_FAIL_MODE=open`) and emit alerts.
+When any control fails, any policy is unavailable, the gateway is unreachable — **everything is denied by default**, not silently downgraded to allow. Exceptions need an explicit env switch (e.g. `SAFETY_FAIL_MODE=open`) and emit alerts.
 
 Reason: in agent security, "brief availability degradation" is far more acceptable than "silent security hole."
 
@@ -256,15 +255,15 @@ Each agent and each task is a fresh identity. Credentials are injected through a
 
 ### 5.4 Reversibility > Prevention
 
-Rollback beats perfect prevention. Prefer soft delete, versioning, approval workflows; do not chase "100% impossible to misuse," because that pursuit usually collapses usability.
+Rollback beats perfect prevention. Prefer soft delete, versioning, audit trails; do not chase "100% impossible to misuse," because that pursuit usually collapses usability.
 
 ### 5.5 Defense in Depth
 
-Sandbox + network + credentials + policy + approval + audit — **no single layer's failure is fatal**. That is precisely why Container Hardening / Safety Framework / Egress Control are three independent modules — any one with a flaw still leaves meaningful backstop.
+Sandbox + network + credentials + policy + audit — **no single layer's failure is fatal**. That is precisely why Container Hardening / Safety Framework / Egress Control are three independent modules — any one with a flaw still leaves meaningful backstop.
 
-### 5.6 Human Oversight at Consequential Steps
+### 5.6 Block Consequential Steps by Default
 
-Put humans in front of "irreversible / high-cost" decisions. The Approval module ([`12-approval-architecture.md`](12-approval-architecture.md)) serves precisely this principle.
+"Irreversible / high-cost" actions should not run unchecked. A safety rule can carry a blocking verdict (`require_approval`) so the framework stops the call before it executes rather than letting the agent proceed.
 
 ---
 

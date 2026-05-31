@@ -20,7 +20,6 @@ import rolemesh.bootstrap  # noqa: F401
 import asyncio
 import contextlib
 import json
-import os
 import re
 import signal
 import sys
@@ -59,8 +58,10 @@ from rolemesh.core.config import (
     AGENT_BACKEND_DEFAULT,
     ASSISTANT_NAME,
     CONTAINER_EGRESS_NETWORK_NAME,
+    CONTAINER_IMAGE,
     CONTAINER_NETWORK_NAME,
     CREDENTIAL_PROXY_PORT,
+    EGRESS_GATEWAY_IMAGE,
     GLOBAL_MAX_CONTAINERS,
     IDLE_TIMEOUT,
     NATS_URL,
@@ -70,7 +71,6 @@ from rolemesh.core.config import (
 from rolemesh.core.logger import get_logger
 from rolemesh.core.orchestrator_state import (
     ConversationState,
-    CoworkerConfig,
     CoworkerState,
     OrchestratorState,
 )
@@ -90,12 +90,11 @@ from rolemesh.db import (
     get_new_messages_for_conversations,
     get_tenant_by_slug,
     init_database,
+    list_coworker_mcp_configs,
     set_session,
     update_conversation_last_invocation,
+    update_conversation_user_id,
     update_tenant_message_cursor,
-)
-from rolemesh.db import (
-    get_conversations_for_coworker as pg_get_conversations_for_coworker,
 )
 from rolemesh.db import (
     store_message as db_store_message,
@@ -107,13 +106,14 @@ from rolemesh.orchestration.remote_control import (
 )
 from rolemesh.orchestration.router import format_messages, format_outbound
 from rolemesh.orchestration.task_scheduler import start_scheduler_loop
-from rolemesh.security.credential_proxy import register_mcp_server, set_token_vault, start_credential_proxy
-from rolemesh.security.sender_allowlist import (
-    is_sender_allowed,
-    is_trigger_allowed,
-    load_sender_allowlist,
-    should_drop_message,
+from rolemesh.auth.credential_vault import (
+    create_credential_vault_from_env,
+    get_credential_vault,
+    set_credential_vault,
 )
+from rolemesh.channels.admission import admit_telegram_1on1
+from rolemesh.egress.credentials import CredentialResolver
+from rolemesh.security.credential_proxy import register_mcp_server, set_token_vault, start_credential_proxy
 
 if TYPE_CHECKING:
     from rolemesh.container.runtime import ContainerRuntime
@@ -196,7 +196,14 @@ def _extract_usage(metadata: dict[str, object] | None) -> _UsageFields:
 
 
 def _coworker_from_state(cw_state: CoworkerState) -> Coworker:
-    """Build a full Coworker dataclass from runtime CoworkerState."""
+    """Build a full Coworker dataclass from runtime CoworkerState.
+
+    Must carry every field downstream consumers depend on. The
+    executor's PR30 model-resolution path reads ``model_id`` to look
+    up the coworker's model row and override PI_MODEL_ID at spawn
+    time — dropping it here silently routed back to the host .env
+    default, which is the bug Adam-on-gpt-4o-mini surfaced.
+    """
     c = cw_state.config
     return Coworker(
         id=c.id,
@@ -205,9 +212,27 @@ def _coworker_from_state(cw_state: CoworkerState) -> Coworker:
         folder=c.folder,
         agent_backend=c.agent_backend,
         system_prompt=c.system_prompt,
-        tools=c.tools,
+        container_config=c.container_config,
         max_concurrent=c.max_concurrent,
+        status=c.status,
+        created_at=c.created_at,
+        agent_role=c.agent_role,
+        permissions=c.permissions,
+        model_id=c.model_id,
+        created_by_user_id=c.created_by_user_id,
     )
+
+
+def _mcp_configs_from_state(coworker_id: str) -> list:
+    """Look up MCP configs cached on ``_state`` for the executor.
+
+    The executor uses this as its ``get_mcp_configs`` callable.
+    Returns an empty list when the coworker isn't in state (the
+    executor's ``_get_coworker`` branch already short-circuits in
+    that case, so we never actually feed it to the spec builder).
+    """
+    cw = _state.coworkers.get(coworker_id)
+    return list(cw.mcp_configs) if cw else []
 
 
 _transport: NatsTransport | None = None
@@ -231,37 +256,79 @@ _safety_rpc_server: object | None = None
 _safety_thread_pool: object | None = None
 
 
-def _handle_agent_message_ipc(data: dict[str, object]) -> None:
+async def _handle_agent_message_ipc(data: dict[str, object]) -> None:
     """Handle one ``agent.*.messages`` NATS publish from the send_message tool.
 
-    Current behaviour: log the attempt and drop. The send_message tool
-    publishes to this subject when the agent calls it, but the tool
-    hard-codes ``chatJid=ctx.chat_jid`` (``rolemesh_tools.py:169``)
-    — meaning it can only ever target the agent's current conversation.
-    That conversation's natural output (``agent.*.results`` → ``_on_output``)
-    already delivers the final reply, so forwarding this IPC to the
-    channel gateway a SECOND time resulted in duplicate user-visible
-    replies. Previously a race-prone string-match dedup (``_ipc_sent_texts``)
-    tried to suppress the duplicate; removing the forward here removes
-    the duplicate at the source.
+    Two delivery regimes share this subject:
 
-    If the send_message tool signature gains a target chat_jid parameter
-    in the future (for cross-chat notifications / scheduled-task inbox /
-    agent-to-agent messaging), this function grows a branch: forward to
-    ``_send_via_coworker`` only when ``data["chatJid"] !=`` the source
-    coworker's currently-processed conversation. Until then the handler
-    is strictly log-and-drop.
+    Interactive turns: the agent's reply already flows through the
+    natural-output path (``agent.*.results`` → ``_on_output`` →
+    ``send_stream_chunk`` / ``send_message`` on the channel gateway).
+    Path β (this handler) was historically forwarding the same text a
+    second time — every Claude AssistantMessage echoes the content it
+    passed to ``send_message``, so users saw doubles. Commit a67d3e6
+    removed that forward; interactive turns are still log-and-drop here.
+
+    Scheduled-task turns: ``_run_task``'s ``_on_output`` only forwards
+    when the agent produces a non-empty final ``result``. Agents
+    typically just call ``send_message`` for "remind me at T" prompts
+    and produce no separate result — so path α is empty for them.
+    Without a forward here their message vanishes. The tool now stamps
+    ``isScheduledTask`` on the payload so this handler can route only
+    those into ``_send_via_coworker``; interactive turns still drop.
+
+    Cross-chat targeting (one agent's send_message landing on another
+    coworker's conversation) is still not supported — the tool hard-
+    codes ``chatJid=ctx.chat_jid``, so the forward target is always
+    the source coworker's own conversation. A future cross-chat feature
+    would need a real target parameter AND a routing branch here.
     """
     if data.get("type") != "message":
         return
-    if not data.get("chatJid") or not data.get("text"):
+    chat_jid = data.get("chatJid")
+    text = data.get("text")
+    if not chat_jid or not text:
+        return
+
+    if not data.get("isScheduledTask"):
+        # Interactive turn: natural-output path is the source of
+        # truth (see a67d3e6). Drop the IPC echo to avoid doubles.
+        logger.info(
+            "Dropped send_message IPC (redundant with natural output path)",
+            chat_jid=chat_jid,
+            source_group=data.get("groupFolder", ""),
+            text_preview=str(text)[:80],
+        )
+        return
+
+    # Scheduled-task turn: forward to the channel gateway. Without
+    # this, ``_run_task``'s empty-``result`` path leaves the user
+    # with no delivery at all.
+    source_group = str(data.get("groupFolder", ""))
+    claimed_coworker_id = data.get("coworkerId")
+    cw_state: CoworkerState | None = None
+    if isinstance(claimed_coworker_id, str) and claimed_coworker_id:
+        cw_state = _state.coworkers.get(claimed_coworker_id)
+    if cw_state is None and source_group:
+        for tenant in _state.tenants.values():
+            cw_state = _state.get_coworker_by_folder(tenant.id, source_group)
+            if cw_state is not None:
+                break
+    if cw_state is None:
+        logger.warning(
+            "Cannot route scheduled-task send_message IPC — coworker unresolved",
+            chat_jid=chat_jid,
+            source_group=source_group,
+            claimed_coworker_id=claimed_coworker_id,
+        )
         return
     logger.info(
-        "Dropped send_message IPC (redundant with natural output path)",
-        chat_jid=data["chatJid"],
-        source_group=data.get("groupFolder", ""),
-        text_preview=str(data["text"])[:80],
+        "Forwarding scheduled-task send_message IPC",
+        chat_jid=chat_jid,
+        coworker=cw_state.config.name,
+        text_preview=str(text)[:80],
     )
+    await _send_via_coworker(cw_state, str(chat_jid), str(text))
 
 
 @dataclass(frozen=True)
@@ -303,9 +370,7 @@ async def _apply_model_output_safety(
       - Rule load failure → log, fail-open: text unchanged, no block.
       - Pipeline internal exception → fail-close: emit a generic block.
       - Block / require_approval verdict → emit a block with reason.
-        require_approval is downgraded to block for the user-facing
-        reply on MODEL_OUTPUT; the approval-request creation path is
-        a separate concern.
+        require_approval blocks the turn identically to block.
       - Redact verdict → text substituted from
         ``verdict.modified_payload["text"]``.
       - Warn verdict → text unchanged (warn is audit-only at this
@@ -406,22 +471,15 @@ async def _load_state() -> None:
         convs_by_coworker.setdefault(c.coworker_id, []).append(c)
 
     for cw in all_coworkers:
-        config = CoworkerConfig(
-            id=cw.id,
-            tenant_id=cw.tenant_id,
-            name=cw.name,
-            folder=cw.folder,
-            system_prompt=cw.system_prompt,
-            trigger_pattern=CoworkerConfig.build_trigger_pattern(cw.name),
-            agent_backend=cw.agent_backend,
-            container_image=None,
-            max_concurrent=cw.max_concurrent,
-            tools=cw.tools,
-            agent_role=cw.agent_role,
-            permissions=cw.permissions,
+        # Read the coworker's MCP bindings from the relation layer
+        # (``coworker_mcp_servers`` JOIN ``mcp_servers``). 02b dropped
+        # the inline JSONB column; ``list_coworker_mcp_configs`` is
+        # now the single source of truth for "what does this coworker
+        # have wired up".
+        mcp_configs = await list_coworker_mcp_configs(
+            cw.id, tenant_id=cw.tenant_id,
         )
-
-        cw_state = CoworkerState(config=config)
+        cw_state = CoworkerState.from_coworker(cw, mcp_configs=mcp_configs)
 
         # Load channel bindings
         for b in bindings_by_coworker.get(cw.id, []):
@@ -439,9 +497,9 @@ async def _load_state() -> None:
 
         _state.coworkers[cw.id] = cw_state
 
-    # Register MCP servers with the credential proxy
-    for cw in all_coworkers:
-        for tool_cfg in cw.tools:
+    # Register MCP servers with the credential proxy.
+    for cw_state in _state.coworkers.values():
+        for tool_cfg in cw_state.mcp_configs:
             parsed = urlparse(tool_cfg.url)
             origin = f"{parsed.scheme}://{parsed.netloc}"
             register_mcp_server(tool_cfg.name, origin, tool_cfg.headers, tool_cfg.auth_mode)
@@ -458,40 +516,134 @@ async def _load_state() -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _auto_create_telegram_1on1_conversation(
+    binding_id: str, chat_id: str, admitted_user_id: str
+) -> tuple[CoworkerState, ConversationState] | None:
+    """v6.1 §P1.5/§P1.6 — auto-create a Telegram 1:1 conversation
+    for an *already admitted* sender.
+
+    Counterpart of ``_auto_create_web_conversation``: the design's
+    "已关联→建 conv" implicit case. ``admission_user_id`` is the
+    resolved RoleMesh user_id from ``admit_telegram_1on1`` — passed
+    in so the row lands with ``user_id`` populated on first write
+    instead of needing the lazy-backfill UPDATE later.
+
+    Reset is one-shot (the §P1.3 cleanup wiped every legacy IM conv
+    on the first migration); without auto-create here, every linked
+    Telegram user's first message after relink would silently drop.
+    """
+    from rolemesh.db import (
+        get_channel_binding_by_id_admin,
+        get_conversation_by_binding_and_chat,
+    )
+
+    binding = await get_channel_binding_by_id_admin(binding_id)
+    if binding is None or binding.channel_type != "telegram":
+        return None
+    cw = _state.coworkers.get(binding.coworker_id)
+    if cw is None:
+        logger.warning(
+            "binding's coworker not in state; cannot route Telegram inbound",
+            binding_id=binding_id,
+            coworker_id=binding.coworker_id,
+        )
+        return None
+    if binding.channel_type not in cw.channel_bindings:
+        cw.channel_bindings[binding.channel_type] = binding
+
+    # get-or-create: the row may already exist if a previous inbound
+    # raced ahead, or if the channel chat reused a stale chat_id.
+    conv = await get_conversation_by_binding_and_chat(
+        binding_id, chat_id, tenant_id=cw.config.tenant_id
+    )
+    if conv is None:
+        conv = await create_conversation(
+            tenant_id=cw.config.tenant_id,
+            coworker_id=cw.config.id,
+            channel_binding_id=binding_id,
+            channel_chat_id=chat_id,
+            user_id=admitted_user_id,
+        )
+        logger.info(
+            "Auto-created Telegram 1:1 conversation",
+            coworker=cw.config.name,
+            chat_id=chat_id,
+            conversation_id=conv.id,
+            user_id=admitted_user_id,
+        )
+    conv_state = ConversationState(conversation=conv)
+    cw.conversations[conv.id] = conv_state
+    return cw, conv_state
+
+
 async def _auto_create_web_conversation(
     binding_id: str, chat_id: str
 ) -> tuple[CoworkerState, ConversationState] | None:
     """Auto-create a conversation for web channel (each browser tab gets a new chat_id)."""
-    # Find the coworker that owns this binding
+    # First: check coworkers whose ``channel_bindings`` cache already
+    # contains the binding (the startup-loaded path).
     for cw in _state.coworkers.values():
         for b in cw.channel_bindings.values():
             if b.id == binding_id and b.channel_type == "web":
-                # ws.py may have already created the conversation before the
-                # NATS message reaches the orchestrator. Check DB first to
-                # avoid a UniqueViolationError on (binding_id, chat_id).
-                conv = await get_conversation_by_binding_and_chat(
-                    binding_id, chat_id, tenant_id=cw.config.tenant_id
-                )
-                if conv is None:
-                    conv = await create_conversation(
-                        tenant_id=cw.config.tenant_id,
-                        coworker_id=cw.config.id,
-                        channel_binding_id=binding_id,
-                        channel_chat_id=chat_id,
-                        name=f"Web Chat {chat_id[:8]}",
-                        requires_trigger=False,
-                        user_id=None,
-                    )
-                conv_state = ConversationState(conversation=conv)
-                cw.conversations[conv.id] = conv_state
-                logger.info(
-                    "Auto-created web conversation",
-                    coworker=cw.config.name,
-                    chat_id=chat_id,
-                    conversation_id=conv.id,
-                )
-                return cw, conv_state
-    return None
+                return await _land_web_conversation(cw, binding_id, chat_id)
+
+    # Fallback: the binding row exists in DB but isn't in the in-memory
+    # CoworkerState cache yet. Happens when the v1 webui creates the
+    # binding via ``POST /api/v1/coworkers/{id}/conversations`` after
+    # the orchestrator has booted. We hot-load from DB so the inbound
+    # message doesn't get dropped — smoke caught this. The gateway
+    # already hot-loads its own ``_bindings`` dict (see
+    # ``WebNatsGateway._refresh_binding``); the missing piece is the
+    # coworker-side cache, which this fallback fills.
+    from rolemesh.db import get_channel_binding_by_id_admin
+
+    binding = await get_channel_binding_by_id_admin(binding_id)
+    if binding is None or binding.channel_type != "web":
+        return None
+    cw = _state.coworkers.get(binding.coworker_id)
+    if cw is None:
+        # Coworker not in state — would have been hot-loaded by the
+        # ``web.coworker.restart`` subscriber on CREATE, but if that
+        # event was missed we re-read here. Best-effort.
+        logger.warning(
+            "binding's coworker not in state; cannot route inbound",
+            binding_id=binding_id,
+            coworker_id=binding.coworker_id,
+        )
+        return None
+    cw.channel_bindings[binding.channel_type] = binding
+    return await _land_web_conversation(cw, binding_id, chat_id)
+
+
+async def _land_web_conversation(
+    cw: CoworkerState, binding_id: str, chat_id: str
+) -> tuple[CoworkerState, ConversationState]:
+    """Get-or-create + cache the conversation row for a web binding."""
+    # ws.py may have already created the conversation before the
+    # NATS message reaches the orchestrator. Check DB first to
+    # avoid a UniqueViolationError on (binding_id, chat_id).
+    conv = await get_conversation_by_binding_and_chat(
+        binding_id, chat_id, tenant_id=cw.config.tenant_id
+    )
+    if conv is None:
+        conv = await create_conversation(
+            tenant_id=cw.config.tenant_id,
+            coworker_id=cw.config.id,
+            channel_binding_id=binding_id,
+            channel_chat_id=chat_id,
+            name=f"Web Chat {chat_id[:8]}",
+            requires_trigger=False,
+            user_id=None,
+        )
+    conv_state = ConversationState(conversation=conv)
+    cw.conversations[conv.id] = conv_state
+    logger.info(
+        "Auto-created web conversation",
+        coworker=cw.config.name,
+        chat_id=chat_id,
+        conversation_id=conv.id,
+    )
+    return cw, conv_state
 
 
 async def _emit_status_for_conversation(conversation_id: str, payload: dict[str, object]) -> None:
@@ -552,11 +704,46 @@ async def _handle_incoming(
     is_group: bool,
 ) -> None:
     """Unified message handler for all channel gateways."""
+    # v6.1 §P1.5/§P1.6: For Telegram 1:1, gate admission BEFORE any
+    # conversation lookup. Otherwise an admitted sender whose first
+    # ever message arrives before a conv row exists (the common case
+    # right after the §P1.3 reset wiped legacy IM convs) would
+    # silently drop. The Telegram gateway already short-circuits
+    # groups, so ``is_group=False`` is the only realistic branch
+    # here; the explicit guard is belt-and-braces.
+    #
+    # ``binding`` lookup is admin_conn so this works even when the
+    # binding's CoworkerState cache is empty (the cache populates
+    # later via _auto_create_telegram_1on1_conversation).
+    admitted_user_id: str | None = None
+    if not is_group:
+        from rolemesh.db import get_channel_binding_by_id_admin
+
+        binding = await get_channel_binding_by_id_admin(binding_id)
+        if binding is not None and binding.channel_type == "telegram":
+            gateway = _gateways.get("telegram")
+            if gateway is not None:
+                admitted_user_id = await admit_telegram_1on1(
+                    tenant_id=binding.tenant_id,
+                    sender_channel_id=sender,
+                    gateway=gateway,
+                    binding_id=binding_id,
+                    chat_id=chat_id,
+                )
+                if admitted_user_id is None:
+                    return  # admission denied — guidance reply already sent
+
     # Find conversation
     result = _state.find_conversation_by_binding_and_chat(binding_id, chat_id)
     if not result:
         # Auto-create conversation for web channel (each browser tab = new chat_id)
         result = await _auto_create_web_conversation(binding_id, chat_id)
+        if not result and admitted_user_id is not None:
+            # v6.1 §P1.5/§P1.6: admitted Telegram 1:1 sender, no
+            # existing conv → create one stamped with their user_id.
+            result = await _auto_create_telegram_1on1_conversation(
+                binding_id, chat_id, admitted_user_id
+            )
         if not result:
             return
 
@@ -567,15 +754,27 @@ async def _handle_incoming(
     # Only store the message if it's relevant to THIS coworker:
     # - conversation doesn't require trigger (DM or admin), OR
     # - message content matches this coworker's trigger pattern
-    if is_group and conv.requires_trigger and not cw_state.config.trigger_pattern.search(text.strip()):
+    if is_group and conv.requires_trigger and not cw_state.trigger_pattern.search(text.strip()):
         return  # Not for this coworker — skip silently
 
-    # Sender allowlist check
-    cfg = load_sender_allowlist()
-    if should_drop_message(chat_id, cfg) and not is_sender_allowed(chat_id, sender, cfg):
-        if cfg.log_denied:
-            logger.debug("sender-allowlist: dropping message (drop mode)", chat_id=chat_id, sender=sender)
-        return
+    # v6.1 §P1.6 lazy backfill + §P1.4 identity-reassignment
+    # correction (defense-in-depth complement to the same-transaction
+    # NULL inside ``delete_channel_identity``):
+    #
+    # The original spec talked about backfilling NULL → user_id on
+    # legacy convs. The stronger condition ``conv.user_id !=
+    # admitted_user_id`` also catches the employee-handover case
+    # where A unbound and B re-linked the same channel between
+    # turns: even if a future bug in the unbind path forgot to NULL
+    # the conv stamp, the admission layer here re-stamps it to the
+    # currently-resolved user. The conv ``channel_binding_id`` is
+    # not channel_type-mixed (binding ids are stable per channel),
+    # so a cross-channel comparison can never trigger this branch.
+    if admitted_user_id is not None and conv.user_id != admitted_user_id:
+        await update_conversation_user_id(
+            conv.id, admitted_user_id, tenant_id=conv.tenant_id
+        )
+        conv.user_id = admitted_user_id
 
     # Store message
     await db_store_message(
@@ -621,10 +820,13 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
         return True
 
     if config.agent_role != "super_agent" and conv.requires_trigger:
-        allowlist_cfg = load_sender_allowlist()
+        # v6.1 §P1.5: the sender allowlist that used to gate non-self
+        # senders is gone (decision #14); the trigger pattern alone
+        # decides. For Telegram 1:1 ``requires_trigger`` is False by
+        # construction so this path only fires for Slack groups —
+        # which keep current behaviour.
         has_trigger = any(
-            config.trigger_pattern.search(m.content.strip())
-            and (m.is_from_me or is_trigger_allowed(conv.channel_chat_id, m.sender, allowlist_cfg))
+            cw_state.trigger_pattern.search(m.content.strip())
             for m in missed_messages
         )
         if not has_trigger:
@@ -971,7 +1173,7 @@ async def _start_nats_ipc_subscriptions(transport: NatsTransport, deps: _IpcDeps
     async def _handle_messages() -> None:
         async for msg in messages_sub.messages:
             try:
-                _handle_agent_message_ipc(json.loads(msg.data))
+                await _handle_agent_message_ipc(json.loads(msg.data))
                 await msg.ack()
             except Exception:
                 logger.exception("Error processing NATS IPC message")
@@ -1177,10 +1379,12 @@ async def _message_loop(shutdown_event: asyncio.Event) -> None:
 
                     if needs_trigger:
                         conv_messages = [msg for cid, msg in results if cid == conv_id]
-                        allowlist_cfg = load_sender_allowlist()
+                        # v6.1 §P1.5: trigger pattern alone — no
+                        # per-sender allowlist (see the parallel
+                        # branch in ``_process_conversation_messages``
+                        # for the same simplification).
                         has_trigger = any(
-                            config.trigger_pattern.search(m.content.strip())
-                            and (m.is_from_me or is_trigger_allowed(chat_id, m.sender, allowlist_cfg))
+                            cw_state.trigger_pattern.search(m.content.strip())
                             for m in conv_messages
                         )
                         if not has_trigger:
@@ -1282,7 +1486,14 @@ async def _ensure_container_system_running() -> None:
     if CONTAINER_NETWORK_NAME and hasattr(_runtime, "ensure_egress_network"):
         await _runtime.ensure_egress_network(CONTAINER_EGRESS_NETWORK_NAME)
 
-    await _runtime.cleanup_orphans("rolemesh-")
+    # INV-3: name prefix alone is not safe — a foreign container the
+    # user happens to name with "rolemesh-" could be killed. The image
+    # whitelist is the positive identity signal that says "we launched
+    # this one".
+    await _runtime.cleanup_orphans(
+        "rolemesh-",
+        allowed_images=frozenset({CONTAINER_IMAGE, EGRESS_GATEWAY_IMAGE}),
+    )
 
 
 async def _launch_egress_gateway_once_ready() -> None:
@@ -1347,7 +1558,10 @@ async def main() -> None:
 
     # Build one executor per backend.
     for cfg in (CLAUDE_CODE_BACKEND, PI_BACKEND):
-        _executors[cfg.name] = ContainerAgentExecutor(cfg, _runtime, _transport, _get_coworker)
+        _executors[cfg.name] = ContainerAgentExecutor(
+            cfg, _runtime, _transport, _get_coworker,
+            get_mcp_configs=_mcp_configs_from_state,
+        )
 
     if AGENT_BACKEND_DEFAULT not in _executors:
         logger.warning("Unknown ROLEMESH_AGENT_BACKEND=%r, falling back to 'claude'", AGENT_BACKEND_DEFAULT)
@@ -1355,16 +1569,23 @@ async def main() -> None:
 
     _queue = GroupQueue(transport=_transport, runtime=_runtime, orchestrator_state=_state)
 
-    # Host-side credential proxy: kept running for backward compatibility
-    # with operator tooling and so the `register_mcp_server` /
-    # `set_token_vault` wiring below has a sink to write to. Agents no
-    # longer reach this listener (the EC-1 agent bridge is Internal=true
-    # and agents resolve ``egress-gateway`` via Docker DNS instead), but
-    # the in-process dicts are still authoritative state that EC-2 will
-    # propagate into the gateway container. Leaving the host-side
-    # listener bound is the simplest compatibility shim during the PR-1
-    # → PR-2 transition; EC-2 removes this line entirely.
-    proxy_runner = await start_credential_proxy(CREDENTIAL_PROXY_PORT, PROXY_BIND_HOST)
+    # Install the per-process CredentialVault so the resolver below
+    # can decrypt rows from tenant_model_credentials. The webui process
+    # already installs its own; orchestrator and webui share the same
+    # CREDENTIAL_VAULT_KEY env var so the ciphertext written by one
+    # decrypts in the other.
+    set_credential_vault(create_credential_vault_from_env())
+    _credential_resolver = CredentialResolver(get_credential_vault())
+
+    # Host-side credential proxy: bound so the `register_mcp_server` /
+    # `set_token_vault` wiring below has a sink to write to. Agents
+    # reach the gateway container directly via Docker DNS, not this
+    # host listener.
+    proxy_runner = await start_credential_proxy(
+        CREDENTIAL_PROXY_PORT,
+        PROXY_BIND_HOST,
+        credential_resolver=_credential_resolver,
+    )
 
     # Gateway reachability is already enforced in
     # _ensure_container_system_running() via wait_for_gateway_ready. No
@@ -1416,142 +1637,12 @@ async def main() -> None:
 
     ipc_deps = _IpcDepsImpl()
 
-    # Approval engine: wired up unconditionally so all three IPC
-    # routes (proposal, auto_intercept, decision from REST) go through
-    # a single coherent state machine. The orchestrator code that sends
-    # notifications hands the engine a ChannelSender adapter that
-    # resolves conversation_id → binding_id+chat_id via the gateway
-    # fan-out.
-    from rolemesh.approval.engine import ApprovalEngine
-    from rolemesh.approval.notification import NotificationTargetResolver
-    from rolemesh.db import get_conversation_for_notification as _pg_get_conv
-
-    async def _convs_for_user_and_cw(user_id: str, coworker_id: str) -> list[str]:
-        # Find conversations this user can talk to this coworker in.
-        # A simple heuristic: conversations whose channel_binding_id
-        # belongs to this coworker AND whose user_id matches (set for
-        # web conversations) are candidates, sorted by
-        # last_agent_invocation. Falling back to all conversations for
-        # the coworker when user_id match is absent (e.g. Telegram
-        # group conversations have no single user).
-        all_for_cw = await pg_get_conversations_for_coworker(coworker_id)
-        ranked = [
-            c.id
-            for c in all_for_cw
-            if c.user_id == user_id or c.user_id is None
-        ]
-        return ranked
-
-    class _OrchestratorChannelSender:
-        """ChannelSender adapter for the approval notification path.
-
-        SECURITY CONTRACT — ``conversation_id`` MUST come from a
-        tenant-scoped DB lookup that the caller has already trusted
-        (in practice: ``ApprovalRequest.conversation_id`` from a row
-        the engine fetched via ``get_approval_request(tenant_id=...)``,
-        OR a conversation_id rotated through
-        ``NotificationTargetResolver`` which the engine bound to the
-        request's tenant). The ``get_conversation_for_notification``
-        lookup below is intentionally cross-tenant (no GUC), so a
-        forged or mis-routed conversation_id would happily resolve
-        to *another* tenant's chat and we would publish the approval
-        prompt there.
-
-        Adding a defence-in-depth ``conv.tenant_id == request.tenant_id``
-        check here would require threading the request's tenant
-        through ChannelSender — left as a follow-up rather than
-        widened in this PR. Until then: callers must not pass an
-        unvalidated conversation_id (e.g. from user input) to this
-        sender.
-        """
-
-        async def send_to_conversation(
-            self, conversation_id: str, text: str
-        ) -> None:
-            conv = await _pg_get_conv(conversation_id)
-            if conv is None:
-                logger.warning(
-                    "approval notification: conversation not found",
-                    conversation_id=conversation_id,
-                )
-                return
-            cw = _state.coworkers.get(conv.coworker_id)
-            await _send_via_coworker(cw, conv.channel_chat_id, text)
-
-    resolver = NotificationTargetResolver(
-        get_conversations_for_user_and_coworker=_convs_for_user_and_cw,
-        get_conversation=_pg_get_conv,
-        webui_base_url=os.environ.get("WEBUI_BASE_URL") or None,
-    )
-    approval_engine = ApprovalEngine(
-        publisher=_transport.js,
-        channel_sender=_OrchestratorChannelSender(),
-        resolver=resolver,
-    )
-    ipc_deps.set_approval_engine(approval_engine)
-
-    # V2 P1.1: thread the approval engine through to SafetyEngine so
-    # require_approval verdicts actually produce human-in-the-loop
-    # decision surfaces instead of just landing in the audit table.
-    # The safety engine was instantiated earlier in start_subscribers
-    # (without the approval dep because that module isn't constructed
-    # yet at that point); patching the attribute post-hoc keeps
-    # ordering minimal and avoids re-threading construction.
-    if _safety_engine is not None:
-        _safety_engine._approval_handler = approval_engine  # type: ignore[attr-defined]
-
-    from rolemesh.approval.executor import ApprovalWorker
-    from rolemesh.approval.expiry import run_approval_maintenance_loop
-
-    approval_worker = ApprovalWorker(
-        js=_transport.js,
-        channel_sender=_OrchestratorChannelSender(),
-    )
-    await approval_worker.start()
-
-    # V2 P1.1: 24-hour TTL on safety_decisions.approval_context.
-    # Runs alongside approval maintenance — separate loops because the
-    # two touch different tables and should fail independently.
+    # Safety Framework background maintenance loop.
     from rolemesh.safety.maintenance import run_safety_maintenance_loop
 
     safety_maintenance_stop = asyncio.Event()
     safety_maintenance_task = asyncio.create_task(
         run_safety_maintenance_loop(stop_event=safety_maintenance_stop)
-    )
-
-    approval_maintenance_stop = asyncio.Event()
-    approval_maintenance_task = asyncio.create_task(
-        run_approval_maintenance_loop(
-            approval_engine, stop_event=approval_maintenance_stop
-        )
-    )
-
-    # Cancel-for-job cascade: agent containers publish on StoppedEvent
-    # (see docs/backend-stop-contract.md §8). We fan those out through
-    # the engine so each pending approval for the aborted job gets
-    # status=cancelled + an audit row.
-    async def _on_cancel_for_job(msg: Any) -> None:
-        try:
-            jid = msg.subject.rsplit(".", 1)[-1]
-        except Exception:  # noqa: BLE001 — defensive, subject format is fixed
-            await msg.ack()
-            return
-        try:
-            await approval_engine.cancel_for_job(jid)
-        except Exception as exc:  # noqa: BLE001 — never let handler death leak
-            logger.warning(
-                "approval cancel_for_job handler failed",
-                job_id=jid,
-                error=str(exc),
-            )
-        with contextlib.suppress(Exception):
-            await msg.ack()
-
-    cancel_sub = await _transport.js.subscribe(
-        "approval.cancel_for_job.*",
-        durable="orch-approval-cancel",
-        cb=_on_cancel_for_job,
-        manual_ack=True,
     )
 
     ipc_tasks = await _start_nats_ipc_subscriptions(_transport, ipc_deps)
@@ -1571,12 +1662,12 @@ async def main() -> None:
 
     # Mirror MCP registry deltas into THIS process. The webui process
     # is the one that publishes ``egress.mcp.changed`` (admin REST
-    # edits coworker.tools), but our in-process ``_mcp_registry`` is
-    # also the source the snapshot responder serves to the gateway.
-    # Without this subscription, an admin tools edit would land on the
-    # gateway via the broadcast yet leave the orchestrator's view
-    # stale; the next gateway restart would then re-fetch a snapshot
-    # that's missing the edit.
+    # edits a coworker's MCP bindings), but our in-process
+    # ``_mcp_registry`` is also the source the snapshot responder
+    # serves to the gateway. Without this subscription, an admin tools
+    # edit would land on the gateway via the broadcast yet leave the
+    # orchestrator's view stale; the next gateway restart would then
+    # re-fetch a snapshot that's missing the edit.
     mcp_sub = await subscribe_mcp_changes(_transport.nc)
     egress_responder_subs.append(mcp_sub)
 
@@ -1592,6 +1683,116 @@ async def main() -> None:
 
         token_sub = await start_token_responder(_transport.nc, vault=_vault)
         egress_responder_subs.append(token_sub)
+
+    # Credential RPC: the gateway's RemoteCredentialResolver forwards
+    # every (tenant_id, provider) lookup here so we can decrypt rows
+    # using THIS process's CredentialResolver (which holds the DB
+    # conn and the Fernet vault). Without this responder the gateway's
+    # RPC times out and the agent's LLM call surfaces as 502.
+    from rolemesh.egress.orch_glue import start_credential_responder
+
+    cred_sub = await start_credential_responder(
+        _transport.nc, resolver=_credential_resolver,
+    )
+    egress_responder_subs.append(cred_sub)
+
+    # v1.1 §7: hot-reload pipeline for coworker config changes from
+    # the WebUI. The /api/v1 PATCH publishes ``web.coworker.restart``
+    # on the JS ``web-ipc`` stream; this subscriber re-reads the row
+    # so the next request uses the new config without an orchestrator
+    # restart. The stream is created by the WebUI lifespan; we ensure
+    # it here too in case the orchestrator boots before the WebUI.
+    from nats.js.api import StreamConfig as _WebStreamConfig
+
+    from rolemesh.db import get_coworker as _db_get_coworker
+    from rolemesh.db import list_skills_for_coworker as _db_list_skills
+    from rolemesh.orchestration.coworker_hot_reload import (
+        subscribe_coworker_mcp_changed,
+        subscribe_coworker_restart,
+        subscribe_coworker_skills_changed,
+    )
+
+    try:
+        await _transport.js.add_stream(
+            _WebStreamConfig(name="web-ipc", subjects=["web.>"], max_age=3600.0)
+        )
+    except Exception:
+        with contextlib.suppress(Exception):
+            await _transport.js.update_stream(
+                _WebStreamConfig(name="web-ipc", subjects=["web.>"], max_age=3600.0)
+            )
+
+    async def _fetch_cw(coworker_id: str, tenant_id: str) -> Coworker | None:
+        return await _db_get_coworker(coworker_id, tenant_id=tenant_id)
+
+    async def _fetch_mcp_configs(coworker_id: str, tenant_id: str):
+        return await list_coworker_mcp_configs(
+            coworker_id, tenant_id=tenant_id,
+        )
+
+    async def _fetch_skills(coworker_id: str, tenant_id: str):
+        # Projection-eligible only — matches the spawn-time projector
+        # filter. The orchestrator cache feeds container spawn, so
+        # mismatched enabled flags would inflate the tmpfs mount.
+        return await _db_list_skills(
+            coworker_id,
+            tenant_id=tenant_id,
+            enabled_only=True,
+            with_files=True,
+        )
+
+    coworker_restart_sub = await subscribe_coworker_restart(
+        _transport.js,
+        state=_state,
+        fetch_coworker=_fetch_cw,
+        fetch_mcp_configs=_fetch_mcp_configs,
+    )
+    egress_responder_subs.append(coworker_restart_sub)
+
+    # web.coworker.mcp_changed — sibling subscriber that handles the
+    # narrower "junction row touched" event (bind / unbind / patch
+    # enabled_tools). Keeps ``CoworkerState.mcp_configs`` honest
+    # without a full coworker row refetch.
+    coworker_mcp_sub = await subscribe_coworker_mcp_changed(
+        _transport.js,
+        state=_state,
+        fetch_mcp_configs=_fetch_mcp_configs,
+    )
+    egress_responder_subs.append(coworker_mcp_sub)
+
+    # web.coworker.skills_changed — sibling of mcp_changed for the
+    # per-tenant skills catalog (v1.1 03b). Catalog edits and
+    # coworker_skills mutations both publish; subscriber refreshes
+    # ``CoworkerState.skills`` so the next container spawn sees the
+    # new projection.
+    coworker_skills_sub = await subscribe_coworker_skills_changed(
+        _transport.js,
+        state=_state,
+        fetch_skills=_fetch_skills,
+    )
+    egress_responder_subs.append(coworker_skills_sub)
+
+    # chore A — orchestrator-side ``web.run.cancel.*`` subscriber.
+    # WebUI publishes the event from POST /api/v1/runs/{id}/cancel
+    # (and from the WS request.cancel frame). The subscriber stops
+    # the container (if any) and writes ``runs.status='cancelled'``
+    # via the lifecycle helper. Re-uses the existing ``web-ipc``
+    # JetStream stream registered above.
+    from rolemesh.orchestration.run_cancel_subscriber import (
+        subscribe_run_cancel,
+    )
+
+    assert _runtime is not None, (
+        "ContainerRuntime must be initialised before "
+        "subscribe_run_cancel — _runtime is wired in "
+        "_init_container_runtime earlier in startup."
+    )
+    run_cancel_sub = await subscribe_run_cancel(
+        _transport.js,
+        runtime=_runtime,
+        fetch_active_container=_queue.get_active_container_name,
+    )
+    egress_responder_subs.append(run_cancel_sub)
 
     # Launch the egress gateway now that the snapshot responders are
     # registered. Moved here from _ensure_container_system_running()
@@ -1616,17 +1817,10 @@ async def main() -> None:
         with contextlib.suppress(Exception):
             await sub.unsubscribe()  # type: ignore[union-attr]
 
-    approval_maintenance_stop.set()
     safety_maintenance_stop.set()
-    with contextlib.suppress(Exception):
-        await cancel_sub.unsubscribe()
-    approval_maintenance_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await approval_maintenance_task
     safety_maintenance_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await safety_maintenance_task
-    await approval_worker.stop()
     # V2 P0.3: shut down the safety RPC server and its thread pool so
     # nats-py can tear down the subscription cleanly and in-flight
     # sync checks do not block process exit.
@@ -1712,48 +1906,10 @@ class _TrustedCoworkerRec:
 
 
 class _IpcDepsImpl:
-    """Concrete IpcDeps backed by OrchestratorState.
-
-    The approval engine is attached lazily via set_approval_engine() so
-    deployments without ApprovalEngine fall through to no-op handlers —
-    keeps the approval module zero-impact when it is not wired up.
-    """
-
-    def __init__(self) -> None:
-        # ApprovalEngine type is imported lazily in main() to avoid the
-        # module-level import cycle (approval.engine imports db.pg which
-        # imports main-adjacent types).
-        self._approval_engine: object | None = None
-
-    def set_approval_engine(self, engine: object | None) -> None:
-        self._approval_engine = engine
+    """Concrete IpcDeps backed by OrchestratorState."""
 
     async def send_message(self, jid: str, text: str) -> None:
         await _send_via_coworker(None, jid, text)
-
-    async def on_proposal(
-        self, data: dict[str, object], *, tenant_id: str, coworker_id: str
-    ) -> None:
-        if self._approval_engine is None:
-            logger.warning(
-                "submit_proposal received but approval engine is not wired"
-            )
-            return
-        await self._approval_engine.handle_proposal(  # type: ignore[attr-defined]
-            data, tenant_id=tenant_id, coworker_id=coworker_id
-        )
-
-    async def on_auto_intercept(
-        self, data: dict[str, object], *, tenant_id: str, coworker_id: str
-    ) -> None:
-        if self._approval_engine is None:
-            logger.warning(
-                "auto_approval_request received but approval engine is not wired"
-            )
-            return
-        await self._approval_engine.handle_auto_intercept(  # type: ignore[attr-defined]
-            data, tenant_id=tenant_id, coworker_id=coworker_id
-        )
 
     async def on_tasks_changed(self) -> None:
         if _transport is None:
@@ -1785,6 +1941,34 @@ class _IpcDepsImpl:
             t.add_done_callback(_bg_tasks.discard)
 
 
+async def _persist_web_assistant_message(
+    conv: Conversation, sender_name: str, text: str
+) -> None:
+    """Persist an assistant message for a web conversation.
+
+    Web is the only channel whose chat history lives in our own
+    ``messages`` table — Telegram/Slack rely on the third-party
+    service to retain history. The interactive web path persists via
+    ``_process_conversation_messages`` above; this helper covers the
+    IPC-driven paths (scheduled tasks today, future cross-chat sends)
+    that bypass that loop. Without it, a scheduled-task reply to a
+    web conversation goes to NATS only — invisible on page reload,
+    and invisible to any WS that wasn't already connected at fire
+    time (``DeliverPolicy.NEW`` doesn't replay).
+    """
+    await db_store_message(
+        tenant_id=conv.tenant_id,
+        conversation_id=conv.id,
+        msg_id=str(uuid.uuid4()),
+        sender=sender_name,
+        sender_name=sender_name,
+        content=text,
+        timestamp=datetime.now(UTC).isoformat(),
+        is_from_me=True,
+        is_bot_message=True,
+    )
+
+
 async def _send_via_coworker(cw_state: CoworkerState | None, chat_id: str, text: str) -> None:
     """Send a message using a specific coworker's binding."""
     if cw_state:
@@ -1796,6 +1980,10 @@ async def _send_via_coworker(cw_state: CoworkerState | None, chat_id: str, text:
                     gw = _gateways.get(channel_type)
                     if gw:
                         await gw.send_message(binding.id, chat_id, text)
+                        if channel_type == "web":
+                            await _persist_web_assistant_message(
+                                conv.conversation, cw_state.config.name, text
+                            )
                 return
     # Fallback: scan all coworkers (for backward compat)
     for cw in _state.coworkers.values():
@@ -1807,6 +1995,10 @@ async def _send_via_coworker(cw_state: CoworkerState | None, chat_id: str, text:
                     gw = _gateways.get(channel_type)
                     if gw:
                         await gw.send_message(binding.id, chat_id, text)
+                        if channel_type == "web":
+                            await _persist_web_assistant_message(
+                                conv.conversation, cw.config.name, text
+                            )
                 return
     logger.warning("No channel for chat_id", chat_id=chat_id)
 

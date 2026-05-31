@@ -385,10 +385,9 @@ class TestWarnVerdict:
 class TestRequireApprovalVerdict:
     @pytest.mark.asyncio
     async def test_require_approval_treated_like_block(self) -> None:
-        # P1.1 will handle the actual approval-request creation via
-        # the audit ingestion path. From the user's perspective on
-        # MODEL_OUTPUT, the reply is suppressed via the block channel
-        # with the verdict's reason.
+        # require_approval short-circuits like block. From the user's
+        # perspective on MODEL_OUTPUT, the reply is suppressed via the
+        # block channel with the verdict's reason.
         rule = {
             "id": "r-ap",
             "tenant_id": "t",

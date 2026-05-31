@@ -57,7 +57,7 @@ def test_realistic_long_mcp_name_raises() -> None:
     # boundary — so `len(bad) > 64` failed before the real check ran. This
     # test was failing under the (now-fixed) vacuously-green CI.
     bad = "mcp__internal_dev_tools_v2__github_search_issues_advanced_filtering"
-    assert len(bad) > 64
+    assert len(bad) > 64, f"test setup bug: bad={len(bad)} chars, need >64"
     with pytest.raises(ValueError, match="Bedrock Converse"):
         _convert_tool_config([_tool(bad)], "auto")
 

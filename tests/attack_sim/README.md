@@ -1,8 +1,8 @@
 # Attack Simulation Suite
 
 Every test in this directory models a **concrete attack** against the
-running system and asserts that one of the three defense layers
-(container hardening, approval, safety framework) neutralizes it.
+running system and asserts that one of the defense layers
+(container hardening, safety framework) neutralizes it.
 
 **Not a fuzzer.** Each test is a named, deterministic scenario with a
 clear attacker goal and a clear pass/fail criterion. If a test starts
@@ -16,8 +16,6 @@ failing, a known defense just regressed.
 | `test_B_secret_exfil.py` | Credential / secret theft | Env allowlist + safety `secret_scanner` |
 | `test_C_prompt_injection.py` | Prompt injection / jailbreak | Safety `llm_guard.prompt_injection`, `llm_guard.jailbreak` |
 | `test_D_data_exfil.py` | Data exfiltration (PII, URL, DNS) | Safety `pii.regex`, `presidio.pii`, `domain_allowlist` |
-| `test_E_tenant_isolation.py` | Cross-tenant forgery and leakage | Approval engine `_tenant_matches`, IPC dispatcher, REST |
-| `test_F_approval_abuse.py` | Approval flow race / bypass | Approval engine atomic CAS, audit trigger |
 | `test_G_dos.py` | Denial of service | Pipeline resilience, worker queueing, rate limits |
 | `test_H_config_attack.py` | Configuration-layer attack | Pydantic validation, AgentPermissions |
 
@@ -44,8 +42,6 @@ next security layer.
 
 - `test_D_data_exfil::test_dns_exfiltration_via_dig` → blocked by
   egress control (EC-1/EC-2, not yet implemented)
-- `test_E_tenant_isolation::test_nats_subject_sidechannel` → blocked
-  by NATS subject ACL (per-tenant NATS accounts, not yet implemented)
 - `test_B_secret_exfil::test_read_other_coworker_env_via_proc` →
   blocked by seccomp (verified manually via `verify-hardening.sh`)
 

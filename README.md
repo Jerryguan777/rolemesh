@@ -2,7 +2,7 @@
 
 > Multi-tenant agent platform with enterprise-grade safety.
 
-Run AI coworkers on your own infrastructure: each tenant gets sandboxed Claude or Pi agents, reachable from any team channel, governed by a real safety pipeline and a human-approval flow.
+Run AI coworkers on your own infrastructure: each tenant gets sandboxed Claude or Pi agents, reachable from any team channel, governed by a real safety pipeline.
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 ![Python](https://img.shields.io/badge/Python-3.12%2B-blue)
@@ -48,20 +48,14 @@ RoleMesh is built for that gap:
 - Slack.
 - Microsoft Teams (planned).
 
-### 5. Human-approval flow
-
-- `Agent plan → human approve → Agent execute`.
-- Goes beyond chat: your coworker can take real actions, with you kept in the loop.
-- Batch approval for related actions.
-
-### 6. Per-coworker skills
+### 5. Per-coworker skills
 
 - Markdown-based capability folders (a `SKILL.md` plus optional supporting files) that the agent reads on demand.
 - The model auto-invokes a skill based on its frontmatter `description` — no slash commands, no human-side wiring.
 - DB-backed and tenant-scoped: skills live in Postgres with RLS, projected per-spawn into a read-only bind mount, never shared across tenants.
 - Backend-aware frontmatter: write a skill once, project it to either Claude SDK (`/home/agent/.claude/skills`) or Pi (`/home/agent/.pi/skills`); fields scoped to the other backend are dropped at projection time.
 
-### 7. Evaluation framework
+### 6. Evaluation framework
 
 - `rolemesh-eval` CLI — Inspect AI based, manual / nightly tool for measuring how coworker behavior changes across `system_prompt` / `tools` / `skills` / `agent_backend` / `model` configurations.
 - Three orthogonal scorers: `final_answer` (exact / regex / LLM-judge), `tool_trace` (required / forbidden / expected order), `cost` (per-sample latency + token spend).
@@ -152,11 +146,11 @@ Create a `.env` file at the project root. The tables below list the most useful 
 
 ### Channels
 
-| Key                  | Required for     |
-|----------------------|------------------|
-| `TELEGRAM_BOT_TOKEN` | Telegram channel |
-| `SLACK_BOT_TOKEN`    | Slack channel    |
-| `SLACK_APP_TOKEN`    | Slack channel    |
+Channel credentials (Telegram / Slack / web) are **stored per coworker**
+in the `channel_bindings` DB table — they are not read from `.env`.
+Use the Settings → Coworker → Channels UI (or
+`POST /api/v1/coworkers/{id}/bindings`) to bind a coworker to a
+channel with its bot tokens.
 
 ### Storage
 
@@ -202,12 +196,12 @@ Details: `docs/switchable-agent-backend.md`.
 
 ## Channels
 
-| Channel  | Setup                                                                   |
-|----------|-------------------------------------------------------------------------|
-| WebUI    | `rolemesh-webui` (defaults to port 8080).                               |
-| Telegram | Set `TELEGRAM_BOT_TOKEN`; gateway starts automatically with the orchestrator. |
-| Slack    | Set `SLACK_BOT_TOKEN` + `SLACK_APP_TOKEN`.                              |
-| Teams    | Planned — <TODO: link to tracking issue>.                               |
+| Channel  | Setup                                                                                                |
+|----------|------------------------------------------------------------------------------------------------------|
+| WebUI    | `rolemesh-webui` (defaults to port 8080).                                                            |
+| Telegram | Bind a coworker via Settings → Channels with a Telegram bot token; the gateway hot-loads on bind.   |
+| Slack    | Bind a coworker via Settings → Channels with `bot_token` + `app_token`.                              |
+| Teams    | Planned — <TODO: link to tracking issue>.                                                            |
 
 ---
 
@@ -265,8 +259,6 @@ Three layers, all enabled by default. Details in `docs/safety/`.
 2. **Network layer** — Internal-only agent bridge plus a dual-homed egress gateway. Per-tenant DNS allowlist, reverse-proxy credential injection, no direct internet from agents. See `docs/egress/deployment.md`.
 3. **Policy layer** — three-stage hooks (`INPUT_PROMPT`, `PRE_TOOL_CALL`, `MODEL_OUTPUT`) with built-in checks plus optional ML-backed detectors via the `safety-ml` extra. See `docs/safety/safety-framework.md`.
 
-Human-approval flow lives orthogonally on the policy layer — see `docs/approval-architecture.md`.
-
 ---
 
 ## Development
@@ -296,7 +288,6 @@ Step-by-step build plan and contribution flow: `STEPS.md`.
 |----------------------------------|-------------------------------------------------|
 | Multi-tenant architecture        | `docs/multi-tenant-architecture.md`             |
 | Auth and permissions             | `docs/auth-architecture.md`                     |
-| Approval flow                    | `docs/approval-architecture.md`                 |
 | Safety framework                 | `docs/safety/safety-framework.md`               |
 | Container hardening              | `docs/safety/container-hardening.md`            |
 | Attack-simulation matrix         | `docs/safety/attack-simulation-matrix.md`       |

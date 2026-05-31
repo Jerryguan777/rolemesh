@@ -23,7 +23,6 @@ PROJECT_ROOT: Path = Path.cwd()
 HOME_DIR: Path = Path.home()
 
 MOUNT_ALLOWLIST_PATH: Path = HOME_DIR / ".config" / "rolemesh" / "mount-allowlist.json"
-SENDER_ALLOWLIST_PATH: Path = HOME_DIR / ".config" / "rolemesh" / "sender-allowlist.json"
 STORE_DIR: Path = PROJECT_ROOT / "store"
 GROUPS_DIR: Path = PROJECT_ROOT / "groups"
 DATA_DIR: Path = PROJECT_ROOT / "data"
@@ -194,16 +193,7 @@ AGENT_BACKEND_DEFAULT: str = os.environ.get("ROLEMESH_AGENT_BACKEND", "claude")
 AUTH_MODE: str = os.environ.get("AUTH_MODE", "external")
 ROLEMESH_TOKEN_SECRET: str = os.environ.get("ROLEMESH_TOKEN_SECRET", "")
 
-# Approval module: what to do when the orchestrator cannot read policies
-# from the DB at container-start time (network blip, degraded replica, …).
-#   "closed" — refuse to start the agent. Safe default: a policy outage
-#              must not silently promote every call to unsupervised.
-#   "open"   — start without any approval policies loaded. Legacy
-#              behaviour; acceptable when the tenant accepts "no
-#              approval better than no agent" for availability reasons.
-APPROVAL_FAIL_MODE: str = os.environ.get("APPROVAL_FAIL_MODE", "closed")
-
-# SAFETY_FAIL_MODE mirrors APPROVAL_FAIL_MODE for the Safety Framework:
+# SAFETY_FAIL_MODE governs the Safety Framework boot-time behaviour:
 # on DB unreachable at container start, "closed" (default) refuses the
 # job; "open" runs the agent without safety rules and logs ERROR. The
 # safety hook itself is already fail-closed at runtime (check

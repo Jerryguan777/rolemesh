@@ -29,8 +29,7 @@ def pytest_collection_modifyitems(
     conftest's directory. We MUST filter by path, or a full-suite
     collection from the repo root would mark the entire suite ``e2e``
     and the default ``-m 'not ... and not e2e'`` would deselect
-    everything (vacuously green CI). See
-    ``tests/approval/e2e/conftest.py`` for the rationale.
+    everything (vacuously green CI).
     """
     for item in items:
         if _THIS_DIR in item.path.parents:

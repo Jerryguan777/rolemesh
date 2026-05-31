@@ -20,10 +20,9 @@ Semantics (V2 P0.2):
      while old rows still point at it.
   5. Action handling:
        - ``block``            → short-circuit with a block verdict
-       - ``require_approval`` → short-circuit; container hook treats
-                                 as block for this turn, orchestrator
-                                 audit sees ``verdict_action=require_approval``
-                                 so P1.1 can create an approval request
+       - ``require_approval`` → short-circuit; treated as a block for
+                                 this turn. The orchestrator audit sees
+                                 ``verdict_action=require_approval``
        - ``redact``           → replace ``ctx.payload`` with the
                                  ``modified_payload`` from the verdict
                                  and continue; final result is a
@@ -179,10 +178,10 @@ async def pipeline_run(
         if not isinstance(rule_config, dict):
             rule_config = {}
 
-        # V2 P1.1: ``action_override`` on the rule config lets an
-        # operator up/down-grade the check's natural verdict — e.g.
-        # turning an SSN block into an approval request without
-        # writing a new check. ``redact`` is forbidden as an override
+        # ``action_override`` on the rule config lets an operator
+        # up/down-grade the check's natural verdict — e.g. turning a
+        # warn into a block without writing a new check. ``redact`` is
+        # forbidden as an override
         # because it requires the check to have produced a
         # ``modified_payload``; REST validation rejects it there, but
         # defensive runtime handling catches a rogue direct INSERT.
@@ -245,7 +244,7 @@ async def pipeline_run(
             continue
 
         # Apply the override only when the check's natural verdict
-        # was non-allow — overriding an allow to block/approval would
+        # was non-allow — overriding an allow to block would
         # make every evaluation a gate regardless of whether the
         # check actually detected anything.
         if override is not None and verdict.action != "allow":
@@ -276,11 +275,10 @@ async def pipeline_run(
         await _publish_audit(publisher, current_ctx, rule, verdict)
 
         if verdict.action in _SHORT_CIRCUIT_ACTIONS:
-            # block + require_approval both exit the loop. The caller
-            # (hook or orch) distinguishes between them via
-            # verdict.action: block → refuse; require_approval → emit
-            # approval request (handled on the orch side in P1.1) and
-            # also refuse on the container side for this turn.
+            # block + require_approval both exit the loop and both
+            # refuse the turn. They are kept as distinct verdict
+            # actions for audit/reporting, but the runtime effect is
+            # identical: the turn is blocked.
             return replace(verdict, findings=list(all_findings))
 
         if verdict.action == "redact":
@@ -346,12 +344,9 @@ async def _publish_audit(
         "coworker_id": ctx.coworker_id or None,
         "conversation_id": ctx.conversation_id or None,
         "job_id": ctx.job_id or None,
-        # V2 P1.1: user_id threads through so the approval bridge
-        # (SafetyEngine._dispatch_require_approval →
-        # ApprovalEngine.create_from_safety) can attribute the
-        # request to the user whose turn triggered the gate.
-        # AuditEvent stays the source of truth for this field across
-        # the subscriber → engine → approval fan-out.
+        # user_id threads through so the orchestrator audit can
+        # attribute the decision to the user whose turn triggered the
+        # gate. AuditEvent stays the source of truth for this field.
         "user_id": ctx.user_id or None,
         "stage": ctx.stage.value,
         "verdict_action": verdict.action,
@@ -368,32 +363,6 @@ async def _publish_audit(
         "context_digest": compute_context_digest(ctx.payload),
         "context_summary": summarize_context(ctx.stage.value, ctx.payload),
     }
-    # V2 P1.1: attach approval_context so the orch audit handler can
-    # create an approval_request without re-deriving the tool_input.
-    # Only on PRE_TOOL_CALL — the other stages don't map onto the
-    # approval module's {mcp_server, tool_name, params} schema.
-    if (
-        verdict.action == "require_approval"
-        and ctx.stage.value == "pre_tool_call"
-    ):
-        tool_name = str(ctx.payload.get("tool_name", ""))
-        tool_input_raw = ctx.payload.get("tool_input") or {}
-        tool_input = (
-            dict(tool_input_raw)
-            if isinstance(tool_input_raw, dict)
-            else {}
-        )
-        # mcp_server_name parsed from ``mcp__{server}__{tool}``; empty
-        # for stock Claude tools (which never round-trip through the
-        # MCP proxy anyway).
-        mcp_server_name = ""
-        if tool_name.startswith("mcp__") and tool_name.count("__") >= 2:
-            mcp_server_name = tool_name.split("__", 2)[1]
-        event["approval_context"] = {
-            "tool_name": tool_name,
-            "tool_input": tool_input,
-            "mcp_server_name": mcp_server_name,
-        }
     subject = AUDIT_SUBJECT_TEMPLATE.format(job_id=ctx.job_id or "unknown")
     try:
         result = publisher(subject, event)

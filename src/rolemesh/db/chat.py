@@ -28,8 +28,11 @@ __all__ = [
     "get_all_conversations",
     "get_all_sessions",
     "get_channel_binding",
+    "get_channel_binding_by_id_admin",
+    "get_channel_binding_for_bot_token",
     "get_channel_binding_for_coworker",
     "get_channel_bindings_for_coworker",
+    "get_channel_bindings_for_tenant",
     "get_conversation",
     "get_conversation_by_binding_and_chat",
     "get_conversation_for_notification",
@@ -40,6 +43,7 @@ __all__ = [
     "set_session",
     "store_message",
     "update_channel_binding",
+    "update_channel_binding_bot_username",
     "update_conversation_last_invocation",
     "update_conversation_user_id",
 ]
@@ -63,7 +67,7 @@ async def create_channel_binding(
             """
             INSERT INTO channel_bindings (coworker_id, tenant_id, channel_type, credentials, bot_display_name)
             VALUES ($1::uuid, $2::uuid, $3, $4::jsonb, $5)
-            RETURNING id, coworker_id, tenant_id, channel_type, credentials, bot_display_name, status, created_at
+            RETURNING id, coworker_id, tenant_id, channel_type, credentials, bot_display_name, status, created_at, bot_username
             """,
             coworker_id,
             tenant_id,
@@ -86,7 +90,28 @@ def _record_to_channel_binding(row: asyncpg.Record) -> ChannelBinding:
         bot_display_name=row["bot_display_name"],
         status=row["status"] or "active",
         created_at=row["created_at"].isoformat() if row["created_at"] else "",
+        bot_username=row.get("bot_username"),
     )
+
+
+async def update_channel_binding_bot_username(
+    binding_id: str, bot_username: str
+) -> None:
+    """Persist the platform-native bot handle on connect (v6.1 §P1.4).
+
+    Called by the gateway when ``bot.get_me().username`` resolves so
+    the WebUI can synthesise a Telegram deep-link URL on the next
+    ``POST /api/v1/me/channel-links/telegram``. Cross-tenant by id is
+    safe because the row is uniquely keyed; bot_username is not a
+    privileged field (it's published in the @handle the user already
+    sees).
+    """
+    async with admin_conn() as conn:
+        await conn.execute(
+            "UPDATE channel_bindings SET bot_username = $1 WHERE id = $2::uuid",
+            bot_username,
+            binding_id,
+        )
 
 
 async def get_channel_binding(binding_id: str, *, tenant_id: str) -> ChannelBinding | None:
@@ -99,6 +124,68 @@ async def get_channel_binding(binding_id: str, *, tenant_id: str) -> ChannelBind
             "SELECT * FROM channel_bindings WHERE id = $1::uuid AND tenant_id = $2::uuid",
             binding_id,
             tenant_id,
+        )
+    if row is None:
+        return None
+    return _record_to_channel_binding(row)
+
+
+async def get_channel_binding_for_bot_token(
+    bot_token: str,
+) -> ChannelBinding | None:
+    """Resolve the channel binding for a Telegram bot token (v6.1 §P2b.1).
+
+    Used by the inbound CallbackQueryHandler to derive the tenant
+    that **owns** the bot receiving the click. The tenant MUST come
+    from this lookup, never from the sender_id — design decision S5:
+    the same Telegram user_id may be linked under different RoleMesh
+    accounts across tenants, so tenant routing has to ride on the
+    bot's own credential.
+
+    Multiple coworkers within a tenant can share one Telegram token
+    (see ``TelegramGateway`` / ``_BotInstance`` deduplication); the
+    rows still agree on ``tenant_id`` because the gateway dispatches
+    by binding within the same incoming Application. The function
+    returns whichever row is most recent; callers only need
+    ``tenant_id``, not coworker_id.
+
+    Admin-scoped because the caller has only the bot token and no
+    tenant context yet — RLS would block the lookup. This is safe: the
+    only legitimate caller is the Telegram gateway inside the
+    orchestrator process, and the bot token is the gateway's own
+    operating credential.
+    """
+    if not bot_token:
+        return None
+    async with admin_conn() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM channel_bindings "
+            "WHERE channel_type = 'telegram' "
+            "  AND credentials->>'bot_token' = $1 "
+            "ORDER BY created_at DESC NULLS LAST "
+            "LIMIT 1",
+            bot_token,
+        )
+    if row is None:
+        return None
+    return _record_to_channel_binding(row)
+
+
+async def get_channel_binding_by_id_admin(binding_id: str) -> ChannelBinding | None:
+    """Fetch a binding by id without a tenant filter.
+
+    Used by orchestrator-side hot-reload paths that discover a binding
+    via NATS subject (e.g. ``web.inbound.{binding_id}``) and need to
+    resolve its tenant before any tenant-scoped query can run. The
+    caller is the orchestrator process — never a user-facing handler,
+    which is why it goes through ``admin_conn`` and skips RLS. The
+    returned binding's ``tenant_id`` is what callers should plumb into
+    subsequent tenant-scoped reads.
+    """
+    async with admin_conn() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM channel_bindings WHERE id = $1::uuid",
+            binding_id,
         )
     if row is None:
         return None
@@ -127,6 +214,26 @@ async def get_all_channel_bindings() -> list[ChannelBinding]:
     """Get all channel bindings."""
     async with admin_conn() as conn:
         rows = await conn.fetch("SELECT * FROM channel_bindings ORDER BY tenant_id, coworker_id")
+    return [_record_to_channel_binding(row) for row in rows]
+
+
+async def get_channel_bindings_for_tenant(
+    tenant_id: str, channel_type: str
+) -> list[ChannelBinding]:
+    """All bindings of one channel_type for ``tenant_id``.
+
+    Used by the WebUI link endpoint to find a Telegram bot to point
+    the user at (deep-link construction needs the @username). Ordered
+    by ``created_at`` so a tenant that adds bots over time deep-links
+    against a stable choice rather than an arbitrary one.
+    """
+    async with tenant_conn(tenant_id) as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM channel_bindings "
+            "WHERE tenant_id = $1::uuid AND channel_type = $2 "
+            "ORDER BY created_at NULLS LAST",
+            tenant_id, channel_type,
+        )
     return [_record_to_channel_binding(row) for row in rows]
 
 
@@ -268,13 +375,11 @@ async def get_conversation(conversation_id: str, *, tenant_id: str) -> Conversat
 async def get_conversation_for_notification(conversation_id: str) -> Conversation | None:
     """Look up a conversation by id alone, intentionally cross-tenant.
 
-    System path. Called from the approval notification fan-out
-    (``_OrchestratorChannelSender`` and ``NotificationTargetResolver``)
-    where the only inputs are a ``conversation_id`` resolved by the
-    engine from an ``ApprovalRequest`` it already trusts. The
-    ``ChannelSender`` protocol carries no tenant context, so this
-    function exists as the explicit, named admin escape rather than
-    silently bypassing tenant scoping.
+    System path. Used by orchestrator notification fan-out paths where
+    the only input is a ``conversation_id`` resolved from a row the
+    caller already trusts, and no tenant context is threaded through.
+    This function exists as the explicit, named admin escape rather
+    than silently bypassing tenant scoping.
 
     DO NOT use this from REST handlers — use the tenant-scoped
     ``get_conversation`` for any path where the conversation_id can
@@ -433,6 +538,7 @@ async def store_message(
     cache_write_tokens: int | None = None,
     cost_usd: float | None = None,
     model_id: str | None = None,
+    run_id: str | None = None,
 ) -> None:
     """Store a message.
 
@@ -444,6 +550,13 @@ async def store_message(
     columns alone — a re-store of the same message id (e.g. a retry on
     the inbound path) must not blank out usage that an earlier write
     already recorded.
+
+    ``run_id`` (v1.1 §2.2) ties the message to the ``runs`` row that
+    produced it. v1.1 Phase 1 wires this through the WS /api/v1 path
+    (01b); legacy / external-channel writes pass ``None`` and the
+    column stays NULL. The ON CONFLICT branch leaves ``run_id`` alone
+    for the same reason it leaves usage alone — a retry must not
+    clobber the row that the first write attributed correctly.
     """
     async with tenant_conn(tenant_id) as conn:
         await conn.execute(
@@ -452,10 +565,10 @@ async def store_message(
                 tenant_id, conversation_id, id, sender, sender_name,
                 content, timestamp, is_from_me, is_bot_message,
                 input_tokens, output_tokens, cache_read_tokens,
-                cache_write_tokens, cost_usd, model_id
+                cache_write_tokens, cost_usd, model_id, run_id
             )
             VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9,
-                    $10, $11, $12, $13, $14, $15)
+                    $10, $11, $12, $13, $14, $15, $16::uuid)
             ON CONFLICT (tenant_id, id, conversation_id) DO UPDATE SET
                 content = EXCLUDED.content,
                 timestamp = EXCLUDED.timestamp
@@ -475,6 +588,7 @@ async def store_message(
             cache_write_tokens,
             cost_usd,
             model_id,
+            run_id,
         )
 
 

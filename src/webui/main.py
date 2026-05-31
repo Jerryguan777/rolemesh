@@ -20,11 +20,13 @@ from typing import TYPE_CHECKING
 
 import asyncpg
 import nats
-from fastapi import FastAPI, Query, WebSocket
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from nats.js.api import StreamConfig
+from rolemesh.auth.bootstrap_actor import BootstrapActorError
+from rolemesh.auth.bootstrap_users import init_bootstrap_users
 from rolemesh.db import (
     _get_pool,
     close_database,
@@ -33,7 +35,7 @@ from rolemesh.db import (
     init_database,
     tenant_conn,
 )
-from webui import auth, ws
+from webui import auth
 from webui.admin import router as admin_router
 from webui.config import (
     CORS_ORIGINS,
@@ -79,14 +81,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
     )
 
-    ws.set_jetstream(js)
-
     # Initialize the shared DB pool (used by both admin API and web binding auth)
     await _init_db()
 
     # Load web bindings using the shared pool
     await auth.init_auth(_get_pool())
     await auth.init_auth_provider()
+
+    # BOOTSTRAP_USERS multi-user fast-path (§5.2.1). Parsing happens
+    # once at startup so a malformed spec fails the process boot
+    # instead of intermittently failing requests. The function is a
+    # no-op when the env var is unset.
+    init_bootstrap_users()
 
     # Initialize TokenVault for OIDC token mirroring (mirrors orchestrator init).
     # This is per-process: orchestrator and webui each hold their own vault.
@@ -97,40 +103,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if _vault is not None:
         oidc_routes.set_token_vault(_vault)
 
-    # Approval engine for the WebUI's decide endpoint. The orchestrator
-    # process also owns an engine of its own for IPC events; they do not
-    # share in-memory state, only the DB. The decide endpoint returns
-    # 503 unless this is wired up, so the admin UI surfaces the missing
-    # configuration instead of silently 404'ing.
-    from rolemesh.approval.engine import ApprovalEngine
-    from rolemesh.approval.notification import NotificationTargetResolver
-    from rolemesh.db import get_conversation as _pg_get_conv
-    from webui import admin as _admin
-    from webui.config import WEBUI_BASE_URL
-
-    class _WebuiNoopChannel:
-        async def send_to_conversation(
-            self, conversation_id: str, text: str
-        ) -> None:
-            # Notifications are authored by the orchestrator process,
-            # which owns the gateway fan-out. The WebUI process handles
-            # decide but does not push back to channels itself.
-            return
-
-    async def _no_convs(user_id: str, coworker_id: str) -> list[str]:
-        return []
-
-    _admin.set_approval_engine(
-        ApprovalEngine(
-            publisher=js,
-            channel_sender=_WebuiNoopChannel(),
-            resolver=NotificationTargetResolver(
-                get_conversations_for_user_and_coworker=_no_convs,
-                get_conversation=_pg_get_conv,
-                webui_base_url=WEBUI_BASE_URL or None,
-            ),
-        )
+    # v1.1 §8.1: install the LLM CredentialVault singleton. Fails loud
+    # if ``CREDENTIAL_VAULT_KEY`` is unset — INV-VAULT-1. Done here
+    # (not at import time) so test apps that skip the lifespan don't
+    # accidentally depend on the env var.
+    from rolemesh.auth.credential_vault import (
+        create_credential_vault_from_env,
+        set_credential_vault,
     )
+
+    set_credential_vault(create_credential_vault_from_env())
+
+    from webui import admin as _admin
 
     # Wire the MCP-registry hot-reload publisher. When an admin
     # creates/updates an agent's tools, the PATCH handler emits one
@@ -140,10 +124,34 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # snapshot fetch on boot handles missed deltas as a backstop.
     _admin.set_mcp_publisher(_nc)
 
+    # v1.1 §7: wire the coworker hot-reload publisher. PATCH on
+    # /api/v1/coworkers/{id} (model_id change) emits
+    # ``web.coworker.restart`` via JetStream so the orchestrator
+    # re-reads the row without a full restart.
+    from webui.v1 import coworker_events, run_events, ws_stream
+
+    coworker_events.set_jetstream(js)
+    # v1.1 §4 (INV-6): wire the run-cancel publisher. POST
+    # /api/v1/runs/{id}/cancel emits ``web.run.cancel.{run_id}`` so
+    # the orchestrator stops the container and the lifecycle helper
+    # writes the terminal UPDATE — the webui never writes
+    # ``status='cancelled'`` directly (avoids ghost containers).
+    run_events.set_jetstream(js)
+    # v1.1 §4: wire the WS /api/v1/conversations/{id}/stream
+    # endpoint's JetStream context. The route itself is mounted
+    # at app-build time (below), but the JS handle is what each
+    # connection uses to publish ``web.inbound.*`` / subscribe
+    # to ``web.stream.*``.
+    ws_stream.set_jetstream(js)
+
     yield
 
     # Shutdown
+    coworker_events.set_jetstream(None)
+    run_events.set_jetstream(None)
+    ws_stream.set_jetstream(None)
     _admin.set_mcp_publisher(None)
+    set_credential_vault(None)
     await auth.close_auth()
     await _close_db()
     if _nc is not None:
@@ -152,6 +160,25 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(lifespan=lifespan)
+
+
+@app.exception_handler(BootstrapActorError)
+async def _bootstrap_actor_error_handler(
+    request: object, exc: BootstrapActorError
+) -> JSONResponse:
+    """INV-4: surface a deterministic 503 + error code when an audit
+    write needs a real actor but the bootstrap pseudo-user is in use
+    and the tenant has no owner. The frontend distinguishes this from
+    a generic failure via the ``code`` field.
+    """
+    return JSONResponse(
+        status_code=exc.status,
+        content={
+            "code": exc.code,
+            "message": str(exc),
+            "details": {"tenant_id": exc.tenant_id},
+        },
+    )
 
 # CORS for embedded SaaS scenarios where the browser sends credentials
 # (httpOnly refresh cookie) cross-origin. Only enabled when CORS_ORIGINS is set.
@@ -269,21 +296,28 @@ async def get_messages(
     return JSONResponse(result)
 
 
-@app.websocket("/ws/chat")
-async def websocket_chat(
-    websocket: WebSocket,
-    agent_id: str = "",
-    token: str = "",
-    chat_id: str = "",
-) -> None:
-    if not agent_id or not token:
-        await websocket.close(code=1008, reason="Missing agent_id or token")
-        return
-    await ws.handle_ws(websocket, agent_id, token, chat_id)
-
-
-# Admin API router
+# Admin API router (legacy /api/admin)
 app.include_router(admin_router)
+
+# v1 router: new prefixed surface introduced by webui-backend v1.1.
+from webui.api_v1 import router as api_v1_router  # noqa: E402
+from webui.v1.errors import install_error_handler  # noqa: E402
+
+# Flatten ErrorResponseException -> root JSON body for every /api/v1
+# 4xx so the typed client can ``narrow`` on the {code, message,
+# details?} envelope. Without this, FastAPI's default handler nests
+# the envelope inside ``{"detail": ...}`` and the codegen-generated
+# TS client can't decode it.
+install_error_handler(app)
+app.include_router(api_v1_router)
+
+# v1 WebSocket stream. PR-B (2026-05-31) removed the legacy
+# ``/ws/chat`` endpoint after migrating the Stop button into the v1
+# ``request.stop`` client frame — the SPA now uses a single WS per
+# chat-panel for both streaming and Stop.
+from webui.v1.ws_stream import register_routes as _register_v1_ws  # noqa: E402
+
+_register_v1_ws(app)
 
 # OIDC PKCE router (only when AUTH_MODE=oidc)
 if os.environ.get("AUTH_MODE", "external") == "oidc":

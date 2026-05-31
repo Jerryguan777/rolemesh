@@ -1,34 +1,24 @@
 """DB-layer cross-tenant isolation regression tests.
 
-Pre-commit fc4b0... `get_approval_policy(policy_id)`,
-`get_approval_request(request_id)`, `get_safety_rule(rule_id)`, and
-`list_approval_audit(request_id)` looked up rows by id alone, with no
-tenant filter. Tenant isolation was enforced one layer up (REST handlers
-checked `row.tenant_id == user.tenant_id`).
+By-id lookups such as `get_safety_rule(rule_id)`, `get_user(user_id)`,
+and `get_safety_decision(id)` must take a tenant_id and filter on it,
+rather than relying on an upstream REST handler to check
+`row.tenant_id == user.tenant_id`.
 
 If any caller forgot the upstream check — or a future caller forgot the
 upstream check — the DB would happily hand over another tenant's data.
 These tests pin the boundary at the DB function layer: each lookup MUST
 reject mismatched tenant_id.
-
-`approval_audit_log` previously had no `tenant_id` column at all
-(rows were tied to `approval_requests` only via FK), so cross-tenant
-audit reads relied entirely on the upstream `get_approval_request`
-check. The audit-log test below verifies the DB function now refuses
-mismatched tenants on its own.
 """
 
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from rolemesh.core.types import ScheduledTask
 from rolemesh.db import (
-    create_approval_policy,
-    create_approval_request,
     create_channel_binding,
     create_conversation,
     create_coworker,
@@ -36,8 +26,6 @@ from rolemesh.db import (
     create_task,
     create_tenant,
     create_user,
-    get_approval_policy,
-    get_approval_request,
     get_channel_binding,
     get_conversation,
     get_coworker,
@@ -46,7 +34,6 @@ from rolemesh.db import (
     get_task_by_id,
     get_user,
     insert_safety_decision,
-    list_approval_audit,
     resolve_user_for_auth,
     update_user,
 )
@@ -95,77 +82,6 @@ async def _two_tenants() -> dict[str, dict[str, str]]:
 
 
 # ---------------------------------------------------------------------------
-# get_approval_policy
-# ---------------------------------------------------------------------------
-
-
-async def test_get_approval_policy_rejects_mismatched_tenant() -> None:
-    """A policy created for tenant A must NOT be returned when looked
-    up under tenant B. Defense: function signature requires tenant_id
-    and SQL filters on it."""
-    tenants = await _two_tenants()
-    a, b = tenants["A"], tenants["B"]
-
-    policy = await create_approval_policy(
-        tenant_id=a["tenant_id"],
-        coworker_id=a["coworker_id"],
-        mcp_server_name="erp",
-        tool_name="refund",
-        condition_expr={"always": True},
-    )
-    # Same-tenant lookup works.
-    same_tenant = await get_approval_policy(policy.id, tenant_id=a["tenant_id"])
-    assert same_tenant is not None
-    assert same_tenant.id == policy.id
-
-    # Cross-tenant lookup must return None — no leakage even with
-    # a valid policy_id.
-    leaked = await get_approval_policy(policy.id, tenant_id=b["tenant_id"])
-    assert leaked is None, (
-        "get_approval_policy returned tenant A's policy when called "
-        "with tenant B's id — DB-layer isolation broken"
-    )
-
-
-# ---------------------------------------------------------------------------
-# get_approval_request
-# ---------------------------------------------------------------------------
-
-
-async def test_get_approval_request_rejects_mismatched_tenant() -> None:
-    """An approval request created for tenant A must NOT be returned
-    when looked up under tenant B."""
-    tenants = await _two_tenants()
-    a, b = tenants["A"], tenants["B"]
-
-    req = await create_approval_request(
-        tenant_id=a["tenant_id"],
-        coworker_id=a["coworker_id"],
-        conversation_id=a["conversation_id"],
-        policy_id=None,
-        user_id=a["user_id"],
-        job_id=f"j-{uuid.uuid4().hex[:8]}",
-        mcp_server_name="erp",
-        actions=[{"tool_name": "refund", "params": {}}],
-        action_hashes=[uuid.uuid4().hex],
-        rationale="test",
-        source="proposal",
-        status="pending",
-        resolved_approvers=[a["user_id"]],
-        expires_at=datetime.now(UTC) + timedelta(hours=1),
-    )
-
-    same_tenant = await get_approval_request(req.id, tenant_id=a["tenant_id"])
-    assert same_tenant is not None
-    assert same_tenant.id == req.id
-
-    leaked = await get_approval_request(req.id, tenant_id=b["tenant_id"])
-    assert leaked is None, (
-        "get_approval_request leaked tenant A's request to tenant B"
-    )
-
-
-# ---------------------------------------------------------------------------
 # get_safety_rule
 # ---------------------------------------------------------------------------
 
@@ -190,49 +106,6 @@ async def test_get_safety_rule_rejects_mismatched_tenant() -> None:
     leaked = await get_safety_rule(rule.id, tenant_id=b["tenant_id"])
     assert leaked is None, (
         "get_safety_rule leaked tenant A's rule to tenant B"
-    )
-
-
-# ---------------------------------------------------------------------------
-# list_approval_audit
-# ---------------------------------------------------------------------------
-
-
-async def test_list_approval_audit_rejects_mismatched_tenant() -> None:
-    """The audit-trigger writes a 'created' row whenever an approval
-    request is INSERTed. Reading those audit rows by request_id alone
-    used to leak across tenants because the audit table had no tenant
-    column. Now the function takes tenant_id and filters on it."""
-    tenants = await _two_tenants()
-    a, b = tenants["A"], tenants["B"]
-
-    req = await create_approval_request(
-        tenant_id=a["tenant_id"],
-        coworker_id=a["coworker_id"],
-        conversation_id=a["conversation_id"],
-        policy_id=None,
-        user_id=a["user_id"],
-        job_id=f"j-{uuid.uuid4().hex[:8]}",
-        mcp_server_name="erp",
-        actions=[{"tool_name": "refund", "params": {}}],
-        action_hashes=[uuid.uuid4().hex],
-        rationale="test",
-        source="proposal",
-        status="pending",
-        resolved_approvers=[a["user_id"]],
-        expires_at=datetime.now(UTC) + timedelta(hours=1),
-    )
-
-    # Same-tenant read works and returns the trigger-written 'created' row.
-    same_tenant = await list_approval_audit(req.id, tenant_id=a["tenant_id"])
-    assert same_tenant, "same-tenant audit read returned nothing"
-    assert any(e.action == "created" for e in same_tenant)
-
-    # Cross-tenant read returns empty even with a valid request_id.
-    leaked = await list_approval_audit(req.id, tenant_id=b["tenant_id"])
-    assert leaked == [], (
-        "list_approval_audit leaked audit rows for tenant A's request "
-        "to tenant B — audit table tenant filter broken"
     )
 
 

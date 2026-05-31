@@ -4,18 +4,19 @@ from __future__ import annotations
 
 import uuid as _uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import StreamingResponse
 
 from rolemesh import db
-from rolemesh.approval.engine import ApprovalEngine, ConflictError, ForbiddenError
+from rolemesh.auth.bootstrap_actor import resolve_actor_user_id
 from rolemesh.auth.permissions import AgentPermissions
 from rolemesh.auth.provider import AuthenticatedUser
 from rolemesh.core.group_folder import is_valid_group_folder
 from rolemesh.core.skills import (
+    SKILL_MANIFEST_NAME,
     SkillValidationError,
     parse_inbound_skill_md,
     validate_skill_file_path,
@@ -34,13 +35,6 @@ from webui.schemas import (
     AgentResponse,
     AgentSummary,
     AgentUpdate,
-    ApprovalAuditEntryResponse,
-    ApprovalDecisionRequest,
-    ApprovalPolicyCreate,
-    ApprovalPolicyResponse,
-    ApprovalPolicyUpdate,
-    ApprovalRequestDetailResponse,
-    ApprovalRequestResponse,
     AssignRequest,
     BindingCreate,
     BindingResponse,
@@ -68,7 +62,6 @@ from webui.schemas import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from rolemesh.approval.types import ApprovalAuditEntry, ApprovalPolicy, ApprovalRequest
     from rolemesh.core.types import ChannelBinding, Conversation, Coworker, ScheduledTask, Skill, Tenant, User
     from rolemesh.safety.types import Rule as SafetyRule
 
@@ -78,23 +71,7 @@ AdminUser = Annotated[AuthenticatedUser, Depends(require_manage_agents)]
 UserManager = Annotated[AuthenticatedUser, Depends(require_manage_users)]
 AuthedUser = Annotated[AuthenticatedUser, Depends(get_current_user)]
 
-# Module-level ApprovalEngine handle — set from the WebUI bootstrap when
-# approvals are wired up. None means the approval feature is not active
-# in this process; decision endpoints will 503 rather than silently
-# no-op, and list/get continue to work because they only touch the DB.
-_approval_engine: ApprovalEngine | None = None
-
-
-def set_approval_engine(engine: ApprovalEngine | None) -> None:
-    """Attach or detach the process-wide ApprovalEngine."""
-    global _approval_engine
-    _approval_engine = engine
-
-
-def _require_engine() -> ApprovalEngine:
-    if _approval_engine is None:
-        raise HTTPException(status_code=503, detail="Approval engine not configured")
-    return _approval_engine
+__all__ = ["router", "set_mcp_publisher"]
 
 
 # Module-level NATS client used to publish ``egress.mcp.changed``
@@ -118,13 +95,15 @@ def set_mcp_publisher(nc: Any) -> None:
     _mcp_publisher = nc
 
 
-async def _publish_mcp_for_coworker(action: str, cw: Coworker) -> None:
-    """Broadcast one ``egress.mcp.changed`` event per tool on the
-    coworker. Best-effort — a NATS hiccup must not break the admin
-    REST response, so the publisher itself swallows errors.
+async def _publish_mcp_for_coworker(
+    action: str, cw: Coworker, mcp_configs: list[McpServerConfig],
+) -> None:
+    """Broadcast one ``egress.mcp.changed`` event per MCP binding on
+    the coworker. Best-effort — a NATS hiccup must not break the
+    admin REST response, so the publisher itself swallows errors.
 
-    Used after create / update of a coworker's tools list. We send
-    one event per tool (not a single batched event) so the
+    Used after create / update of a coworker's MCP bindings. We send
+    one event per server (not a single batched event) so the
     gateway-side ``apply_change_event`` stays trivial — the same
     handler shape works for boot snapshot + live deltas.
 
@@ -138,10 +117,10 @@ async def _publish_mcp_for_coworker(action: str, cw: Coworker) -> None:
     on every admin edit. The proper fix is to re-key the registry on
     ``(tenant_id, name)`` (operator scope) or ``(coworker_id, name)``
     (per-agent scope) — tracked as a follow-up. Until then, document
-    in the operator playbook that tool names should be unique within
-    a tenant.
+    in the operator playbook that MCP server names should be unique
+    within a tenant.
     """
-    if _mcp_publisher is None:
+    if _mcp_publisher is None or not mcp_configs:
         return
     from urllib.parse import urlparse
 
@@ -149,7 +128,7 @@ async def _publish_mcp_for_coworker(action: str, cw: Coworker) -> None:
     from rolemesh.egress.mcp_cache import McpEntry
     from rolemesh.egress.orch_glue import publish_mcp_registry_changed
 
-    for tool in cw.tools:
+    for tool in mcp_configs:
         # Same origin computation the orchestrator's bootstrap
         # register_mcp_server walk uses (rolemesh/main.py); keep the
         # two paths aligned so the gateway never sees a tool URL the
@@ -206,7 +185,9 @@ def _user_to_response(u: User) -> UserResponse:
     )
 
 
-def _coworker_to_response(cw: Coworker) -> AgentResponse:
+def _coworker_to_response(
+    cw: Coworker, mcp_configs: list[McpServerConfig],
+) -> AgentResponse:
     return AgentResponse(
         id=cw.id,
         tenant_id=cw.tenant_id,
@@ -222,13 +203,27 @@ def _coworker_to_response(cw: Coworker) -> AgentResponse:
                 "headers": t.headers,
                 "auth_mode": t.auth_mode,
             }
-            for t in cw.tools
+            for t in mcp_configs
         ],
         max_concurrent=cw.max_concurrent,
         status=cw.status,
         agent_role=cw.agent_role,
         permissions=cw.permissions.to_dict() if cw.permissions else {},
         created_at=cw.created_at,
+    )
+
+
+async def _load_mcp_configs(
+    coworker_id: str, tenant_id: str,
+) -> list[McpServerConfig]:
+    """Project the relation layer into a ``McpServerConfig`` list.
+
+    Centralised so every admin reader of "what MCP servers does this
+    coworker have" goes through the same JOIN — keeps the response
+    body, the safety-rule guard, and the MCP publisher in lockstep.
+    """
+    return await db.list_coworker_mcp_configs(
+        coworker_id, tenant_id=tenant_id,
     )
 
 
@@ -440,7 +435,11 @@ async def delete_user(
 @router.get("/agents", response_model=list[AgentResponse])
 async def list_agents(user: AdminUser) -> list[AgentResponse]:
     agents = await db.get_coworkers_for_tenant(user.tenant_id)
-    return [_coworker_to_response(a) for a in agents]
+    out: list[AgentResponse] = []
+    for a in agents:
+        mcp_configs = await _load_mcp_configs(a.id, user.tenant_id)
+        out.append(_coworker_to_response(a, mcp_configs))
+    return out
 
 
 @router.post("/agents", response_model=AgentResponse, status_code=201)
@@ -459,19 +458,28 @@ async def create_agent(
             folder=body.folder,
             agent_backend=body.agent_backend,
             system_prompt=body.system_prompt,
-            tools=tools,
             max_concurrent=body.max_concurrent,
             agent_role=body.agent_role,
             permissions=permissions,
         )
     except asyncpg.UniqueViolationError as exc:
         raise HTTPException(status_code=409, detail="Agent with this folder already exists in tenant") from exc
+    # MCP bindings: the legacy admin wire keeps the ``tools`` field
+    # (the v1 ``/api/v1/coworkers/{id}/mcp-servers`` relation API is
+    # the explicit-binding path). We translate the inline list into
+    # one transactional ``replace_coworker_mcp_configs`` call so the
+    # coworker row + its junctions land together.
+    if tools:
+        await db.replace_coworker_mcp_configs(
+            cw.id, tenant_id=user.tenant_id, mcp_configs=tools,
+        )
+    mcp_configs = await _load_mcp_configs(cw.id, user.tenant_id)
     # Notify the egress gateway of the freshly-registered MCP tools
     # so it doesn't have to wait for an orchestrator restart to route
     # them. Best-effort; the snapshot path on gateway boot still
     # recovers full state if the broadcast misses.
-    await _publish_mcp_for_coworker("created", cw)
-    return _coworker_to_response(cw)
+    await _publish_mcp_for_coworker("created", cw, mcp_configs)
+    return _coworker_to_response(cw, mcp_configs)
 
 
 @router.get("/agents/{agent_id}", response_model=AgentDetailResponse)
@@ -482,8 +490,9 @@ async def get_agent_detail(
     cw = await _get_agent_or_404(agent_id, user.tenant_id)
     bindings = await db.get_channel_bindings_for_coworker(agent_id, tenant_id=user.tenant_id)
     conversations = await db.get_conversations_for_coworker(agent_id, tenant_id=user.tenant_id)
+    mcp_configs = await _load_mcp_configs(agent_id, user.tenant_id)
     return AgentDetailResponse(
-        **_coworker_to_response(cw).model_dump(),
+        **_coworker_to_response(cw, mcp_configs).model_dump(),
         bindings=[_binding_to_response(b) for b in bindings],
         conversations=[_conversation_to_response(c) for c in conversations],
     )
@@ -503,7 +512,6 @@ async def update_agent(
         tenant_id=user.tenant_id,
         name=body.name,
         system_prompt=body.system_prompt,
-        tools=tools,
         max_concurrent=body.max_concurrent,
         status=body.status,
         agent_role=body.agent_role,
@@ -511,7 +519,7 @@ async def update_agent(
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="Agent not found")
-    # Hot-reload MCP routes only when tools were actually included
+    # Hot-reload MCP routes only when ``tools`` was actually included
     # in the PATCH (``body.tools is not None``). A PATCH that only
     # touches name/permissions/etc. shouldn't generate spurious
     # mcp.changed traffic.
@@ -522,8 +530,13 @@ async def update_agent(
     # keyed. See ``_publish_mcp_for_coworker`` docstring for the
     # follow-up plan.
     if body.tools is not None:
-        await _publish_mcp_for_coworker("updated", updated)
-    return _coworker_to_response(updated)
+        await db.replace_coworker_mcp_configs(
+            agent_id, tenant_id=user.tenant_id, mcp_configs=tools or [],
+        )
+    mcp_configs = await _load_mcp_configs(agent_id, user.tenant_id)
+    if body.tools is not None:
+        await _publish_mcp_for_coworker("updated", updated, mcp_configs)
+    return _coworker_to_response(updated, mcp_configs)
 
 
 @router.delete("/agents/{agent_id}", status_code=204)
@@ -730,258 +743,6 @@ async def delete_task(
 
 
 # ---------------------------------------------------------------------------
-# Approval: policies (admin+)
-# ---------------------------------------------------------------------------
-
-
-def _policy_to_response(p: ApprovalPolicy) -> ApprovalPolicyResponse:
-    return ApprovalPolicyResponse(
-        id=p.id,
-        tenant_id=p.tenant_id,
-        coworker_id=p.coworker_id,
-        mcp_server_name=p.mcp_server_name,
-        tool_name=p.tool_name,
-        condition_expr=p.condition_expr,
-        approver_user_ids=p.approver_user_ids,
-        notify_conversation_id=p.notify_conversation_id,
-        auto_expire_minutes=p.auto_expire_minutes,
-        post_exec_mode=p.post_exec_mode,
-        enabled=p.enabled,
-        priority=p.priority,
-        created_at=p.created_at,
-        updated_at=p.updated_at,
-    )
-
-
-@router.get("/approval-policies", response_model=list[ApprovalPolicyResponse])
-async def list_approval_policies_ep(
-    user: AdminUser,
-    coworker_id: str | None = None,
-    enabled: bool | None = None,
-) -> list[ApprovalPolicyResponse]:
-    rows = await db.list_approval_policies(
-        user.tenant_id, coworker_id=coworker_id, enabled=enabled
-    )
-    return [_policy_to_response(p) for p in rows]
-
-
-@router.post(
-    "/approval-policies",
-    response_model=ApprovalPolicyResponse,
-    status_code=201,
-)
-async def create_approval_policy_ep(
-    body: ApprovalPolicyCreate,
-    user: AdminUser,
-) -> ApprovalPolicyResponse:
-    if body.coworker_id is not None:
-        # Guard against cross-tenant policy creation: a tenant admin must
-        # not be able to attach a policy to a coworker they don't own.
-        await _get_agent_or_404(body.coworker_id, user.tenant_id)
-    p = await db.create_approval_policy(
-        tenant_id=user.tenant_id,
-        coworker_id=body.coworker_id,
-        mcp_server_name=body.mcp_server_name,
-        tool_name=body.tool_name,
-        condition_expr=body.condition_expr,
-        approver_user_ids=body.approver_user_ids,
-        notify_conversation_id=body.notify_conversation_id,
-        auto_expire_minutes=body.auto_expire_minutes,
-        post_exec_mode=body.post_exec_mode,
-        enabled=body.enabled,
-        priority=body.priority,
-    )
-    return _policy_to_response(p)
-
-
-@router.get("/approval-policies/{policy_id}", response_model=ApprovalPolicyResponse)
-async def get_approval_policy_ep(
-    policy_id: str,
-    user: AdminUser,
-) -> ApprovalPolicyResponse:
-    p = await db.get_approval_policy(policy_id, tenant_id=user.tenant_id)
-    if p is None:
-        raise HTTPException(status_code=404, detail="Policy not found")
-    return _policy_to_response(p)
-
-
-@router.patch(
-    "/approval-policies/{policy_id}", response_model=ApprovalPolicyResponse
-)
-async def update_approval_policy_ep(
-    policy_id: str,
-    body: ApprovalPolicyUpdate,
-    user: AdminUser,
-) -> ApprovalPolicyResponse:
-    existing = await db.get_approval_policy(policy_id, tenant_id=user.tenant_id)
-    if existing is None:
-        raise HTTPException(status_code=404, detail="Policy not found")
-    updated = await db.update_approval_policy(
-        policy_id,
-        tenant_id=user.tenant_id,
-        mcp_server_name=body.mcp_server_name,
-        tool_name=body.tool_name,
-        condition_expr=body.condition_expr,
-        approver_user_ids=body.approver_user_ids,
-        notify_conversation_id=body.notify_conversation_id,
-        auto_expire_minutes=body.auto_expire_minutes,
-        post_exec_mode=body.post_exec_mode,
-        enabled=body.enabled,
-        priority=body.priority,
-    )
-    if updated is None:
-        raise HTTPException(status_code=404, detail="Policy not found")
-    return _policy_to_response(updated)
-
-
-@router.delete("/approval-policies/{policy_id}", status_code=204)
-async def delete_approval_policy_ep(
-    policy_id: str,
-    user: AdminUser,
-) -> None:
-    existing = await db.get_approval_policy(policy_id, tenant_id=user.tenant_id)
-    if existing is None:
-        raise HTTPException(status_code=404, detail="Policy not found")
-    await db.delete_approval_policy(policy_id, tenant_id=user.tenant_id)
-
-
-# ---------------------------------------------------------------------------
-# Approval: requests (any authenticated user can list their own;
-# admins see the full tenant)
-# ---------------------------------------------------------------------------
-
-
-def _request_to_response(r: ApprovalRequest) -> ApprovalRequestResponse:
-    return ApprovalRequestResponse(
-        id=r.id,
-        tenant_id=r.tenant_id,
-        coworker_id=r.coworker_id,
-        conversation_id=r.conversation_id,
-        policy_id=r.policy_id,
-        user_id=r.user_id,
-        job_id=r.job_id,
-        mcp_server_name=r.mcp_server_name,
-        actions=r.actions,
-        action_hashes=r.action_hashes,
-        rationale=r.rationale,
-        source=r.source,
-        status=r.status,
-        post_exec_mode=r.post_exec_mode,
-        resolved_approvers=r.resolved_approvers,
-        requested_at=r.requested_at,
-        expires_at=r.expires_at,
-        created_at=r.created_at,
-        updated_at=r.updated_at,
-    )
-
-
-def _audit_to_response(e: ApprovalAuditEntry) -> ApprovalAuditEntryResponse:
-    return ApprovalAuditEntryResponse(
-        id=e.id,
-        request_id=e.request_id,
-        action=e.action,
-        actor_user_id=e.actor_user_id,
-        note=e.note,
-        metadata=e.metadata,
-        created_at=e.created_at,
-    )
-
-
-@router.get("/approvals", response_model=list[ApprovalRequestResponse])
-async def list_approvals_ep(
-    user: AuthedUser,
-    status: str | None = None,
-    coworker_id: str | None = None,
-) -> list[ApprovalRequestResponse]:
-    rows = await db.list_approval_requests(
-        user.tenant_id, status=status, coworker_id=coworker_id
-    )
-    return [_request_to_response(r) for r in rows]
-
-
-@router.get(
-    "/approvals/{request_id}", response_model=ApprovalRequestDetailResponse
-)
-async def get_approval_ep(
-    request_id: str,
-    user: AuthedUser,
-) -> ApprovalRequestDetailResponse:
-    req = await db.get_approval_request(request_id, tenant_id=user.tenant_id)
-    if req is None:
-        raise HTTPException(status_code=404, detail="Approval not found")
-    audit = await db.list_approval_audit(request_id, tenant_id=user.tenant_id)
-    return ApprovalRequestDetailResponse(
-        **_request_to_response(req).model_dump(),
-        audit_log=[_audit_to_response(e) for e in audit],
-    )
-
-
-@router.get(
-    "/approvals/{request_id}/audit-log",
-    response_model=list[ApprovalAuditEntryResponse],
-)
-async def get_approval_audit_ep(
-    request_id: str,
-    user: AuthedUser,
-) -> list[ApprovalAuditEntryResponse]:
-    req = await db.get_approval_request(request_id, tenant_id=user.tenant_id)
-    if req is None:
-        raise HTTPException(status_code=404, detail="Approval not found")
-    rows = await db.list_approval_audit(request_id, tenant_id=user.tenant_id)
-    return [_audit_to_response(r) for r in rows]
-
-
-def _sanitize_note(note: str | None) -> str | None:
-    """Trim whitespace and strip ASCII/C1 control characters.
-
-    Pydantic already enforces max_length=1000; we still strip control
-    characters here because a future Markdown-rendering channel could
-    interpret e.g. \\r\\n as a heading break or \\x1b as an escape
-    sequence. Keeping the filter at the REST boundary means stored
-    notes are clean without a downstream channel-by-channel sanitizer.
-    """
-    if note is None:
-        return None
-    cleaned = "".join(
-        c for c in note if c == "\n" or c == "\t" or (0x20 <= ord(c) < 0x7F) or ord(c) > 0xA0
-    ).strip()
-    return cleaned or None
-
-
-@router.post(
-    "/approvals/{request_id}/decide",
-    response_model=ApprovalRequestResponse,
-)
-async def decide_approval_ep(
-    request_id: str,
-    body: ApprovalDecisionRequest,
-    user: AuthedUser,
-) -> ApprovalRequestResponse:
-    engine = _require_engine()
-    req = await db.get_approval_request(request_id, tenant_id=user.tenant_id)
-    if req is None:
-        raise HTTPException(status_code=404, detail="Approval not found")
-    try:
-        updated = await engine.handle_decision(
-            request_id=request_id,
-            tenant_id=user.tenant_id,
-            action=body.action,
-            user_id=user.user_id,
-            note=_sanitize_note(body.note),
-        )
-    except ForbiddenError as exc:
-        raise HTTPException(
-            status_code=403, detail="User is not an authorised approver"
-        ) from exc
-    except ConflictError as exc:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Request already {exc.current_status}",
-        ) from exc
-    return _request_to_response(updated)
-
-
-# ---------------------------------------------------------------------------
 # Safety: rules (admin+)
 # ---------------------------------------------------------------------------
 
@@ -1095,41 +856,77 @@ async def _validate_safety_rule_body(
     # check is slow AND the stage is PRE_TOOL_CALL — other combinations
     # have no budget conflict. Scope expansion:
     #   coworker_id is None → tenant-wide rule → union of every
-    #     coworker's tools
-    #   coworker_id is set  → single coworker's tools
+    #     coworker's MCP bindings
+    #   coworker_id is set  → single coworker's MCP bindings
     if (
         getattr(check, "cost_class", "cheap") == "slow"
         and stage_enum == Stage.PRE_TOOL_CALL
     ):
-        coworkers: list[object] = []
+        scope_coworkers: list[Coworker] = []
         if coworker_id is not None:
             cw = await db.get_coworker(coworker_id, tenant_id=tenant_id)
             if cw is not None:
-                coworkers.append(cw)
+                scope_coworkers.append(cw)
         else:
-            coworkers.extend(await db.get_coworkers_for_tenant(tenant_id))
-        for cw_any in coworkers:
-            tools = getattr(cw_any, "tools", None) or []
+            scope_coworkers.extend(
+                await db.get_coworkers_for_tenant(tenant_id)
+            )
+        for cw_any in scope_coworkers:
+            tools = await db.list_coworker_mcp_configs(
+                cw_any.id, tenant_id=tenant_id,
+            )
             for mcp in tools:
-                overrides = getattr(mcp, "tool_reversibility", {}) or {}
+                overrides = dict(mcp.tool_reversibility or {})
                 # Builtins win — operator can't flip a stock tool's
                 # reversibility via MCP override. The helper does that
                 # layering for us; we just scan the declared bare
                 # names per MCP server.
                 for bare_name in overrides:
                     if get_tool_reversibility(bare_name, overrides):
-                        name = getattr(cw_any, "name", "?")
                         raise HTTPException(
                             status_code=400,
                             detail=(
                                 f"Rule with slow check {check_id!r} at "
                                 f"PRE_TOOL_CALL is blocked: coworker "
-                                f"{name!r} configures reversible tool "
+                                f"{cw_any.name!r} configures reversible tool "
                                 f"{bare_name!r} which exceeds the "
                                 "100 ms budget. Narrow the rule scope "
                                 "or use a different stage."
                             ),
                         )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 deprecation markers for the safety GET surface.
+#
+# Per design §3 Phase 4 the v1 surface owns safety reads while admin
+# keeps writes + CSV. The six admin GET endpoints below get RFC 8594
+# `Sunset` + RFC 9745 `Deprecation` + RFC 8288 `Link` headers so any
+# remaining caller (the v1.1 04 session confirmed zero non-test
+# runtime callers) gets a visible signal to migrate.
+#
+# Date is anchored to the 04 session landing day (2026-05-21) plus
+# 180 days = 2026-11-17. Hardcoded rather than computed so the
+# deprecation date does not drift with the calendar.
+# ---------------------------------------------------------------------------
+
+_SAFETY_GET_SUNSET = "Tue, 17 Nov 2026 00:00:00 GMT"
+
+
+def _mark_safety_get_deprecated(
+    response: Response, *, successor_path: str
+) -> None:
+    """Stamp the standard deprecation triple on ``response``.
+
+    ``successor_path`` is the v1 endpoint the caller should migrate
+    to — included as a ``Link: ...; rel="successor-version"`` so a
+    machine-readable upgrade hint is one fetch away.
+    """
+    response.headers["Sunset"] = _SAFETY_GET_SUNSET
+    response.headers["Deprecation"] = "true"
+    response.headers["Link"] = (
+        f'<{successor_path}>; rel="successor-version"'
+    )
 
 
 @router.post(
@@ -1155,6 +952,7 @@ async def create_safety_rule_ep(
         tenant_id=user.tenant_id,
         coworker_id=body.coworker_id,
     )
+    actor = await resolve_actor_user_id(user.tenant_id, user.user_id)
     rule = await db.create_safety_rule(
         tenant_id=user.tenant_id,
         coworker_id=body.coworker_id,
@@ -1164,7 +962,7 @@ async def create_safety_rule_ep(
         priority=body.priority,
         enabled=body.enabled,
         description=body.description,
-        actor_user_id=user.user_id,
+        actor_user_id=actor,
     )
     await _publish_rule_changed("created", rule)
     return _safety_rule_to_response(rule)
@@ -1174,11 +972,15 @@ async def create_safety_rule_ep(
     "/safety/rules", response_model=list[SafetyRuleResponse]
 )
 async def list_safety_rules_ep(
+    response: Response,
     user: AdminUser,
     coworker_id: str | None = None,
     stage: str | None = None,
     enabled: bool | None = None,
 ) -> list[SafetyRuleResponse]:
+    _mark_safety_get_deprecated(
+        response, successor_path="/api/v1/safety/rules"
+    )
     rows = await db.list_safety_rules(
         user.tenant_id,
         coworker_id=coworker_id,
@@ -1193,8 +995,12 @@ async def list_safety_rules_ep(
 )
 async def get_safety_rule_ep(
     rule_id: str,
+    response: Response,
     user: AdminUser,
 ) -> SafetyRuleResponse:
+    _mark_safety_get_deprecated(
+        response, successor_path=f"/api/v1/safety/rules/{rule_id}"
+    )
     r = await db.get_safety_rule(rule_id, tenant_id=user.tenant_id)
     if r is None:
         raise HTTPException(status_code=404, detail="Rule not found")
@@ -1229,6 +1035,7 @@ async def update_safety_rule_ep(
             coworker_id=existing.coworker_id,
         )
 
+    actor = await resolve_actor_user_id(user.tenant_id, user.user_id)
     updated = await db.update_safety_rule(
         rule_id,
         tenant_id=user.tenant_id,
@@ -1238,7 +1045,7 @@ async def update_safety_rule_ep(
         priority=body.priority,
         enabled=body.enabled,
         description=body.description,
-        actor_user_id=user.user_id,
+        actor_user_id=actor,
     )
     if updated is None:
         raise HTTPException(status_code=404, detail="Rule not found")
@@ -1254,8 +1061,9 @@ async def delete_safety_rule_ep(
     existing = await db.get_safety_rule(rule_id, tenant_id=user.tenant_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Rule not found")
+    actor = await resolve_actor_user_id(user.tenant_id, user.user_id)
     await db.delete_safety_rule(
-        rule_id, tenant_id=user.tenant_id, actor_user_id=user.user_id
+        rule_id, tenant_id=user.tenant_id, actor_user_id=actor
     )
     await _publish_rule_changed("deleted", existing)
 
@@ -1295,7 +1103,10 @@ async def _publish_rule_changed(
 
 
 @router.get("/safety/checks")
-async def list_safety_checks_ep(_user: AdminUser) -> list[dict[str, object]]:
+async def list_safety_checks_ep(
+    response: Response,
+    _user: AdminUser,
+) -> list[dict[str, object]]:
     """Return metadata for every check registered on the orchestrator.
 
     Includes the pydantic JSON schema so clients (admin UI, API
@@ -1306,6 +1117,9 @@ async def list_safety_checks_ep(_user: AdminUser) -> list[dict[str, object]]:
     Ordering is stable-alphabetical on check_id so dashboards that
     cache results don't see phantom ordering changes.
     """
+    _mark_safety_get_deprecated(
+        response, successor_path="/api/v1/safety/checks"
+    )
     from rolemesh.safety.registry import get_orchestrator_registry
 
     checks = sorted(
@@ -1335,6 +1149,7 @@ async def list_safety_checks_ep(_user: AdminUser) -> list[dict[str, object]]:
 @router.get("/tenants/{tid}/safety/decisions")
 async def list_safety_decisions_ep(
     tid: str,
+    response: Response,
     user: AdminUser,
     verdict_action: str | None = None,
     coworker_id: str | None = None,
@@ -1351,6 +1166,9 @@ async def list_safety_decisions_ep(
     Returns ``{total, items}`` so the UI can render pagination without
     a second call.
     """
+    _mark_safety_get_deprecated(
+        response, successor_path="/api/v1/safety/decisions"
+    )
     if tid != user.tenant_id:
         raise HTTPException(status_code=403, detail="tenant scope mismatch")
     capped = max(1, min(int(limit), 200))
@@ -1380,13 +1198,18 @@ async def list_safety_decisions_ep(
 async def get_safety_decision_ep(
     tid: str,
     decision_id: str,
+    response: Response,
     user: AdminUser,
 ) -> dict[str, object]:
-    """Full decision detail including approval_context when present.
+    """Full safety decision detail.
 
     Returns 404 for cross-tenant lookup (not 403) — we don't leak UUID
     existence across tenants.
     """
+    _mark_safety_get_deprecated(
+        response,
+        successor_path=f"/api/v1/safety/decisions/{decision_id}",
+    )
     if tid != user.tenant_id:
         raise HTTPException(status_code=404, detail="decision not found")
     row = await db.get_safety_decision(decision_id, tenant_id=tid)
@@ -1399,6 +1222,7 @@ async def get_safety_decision_ep(
 async def list_safety_rule_audit_ep(
     tid: str,
     rule_id: str,
+    response: Response,
     user: AdminUser,
     limit: int = 200,
 ) -> list[dict[str, object]]:
@@ -1409,6 +1233,10 @@ async def list_safety_rule_audit_ep(
     underlying ``safety_rules_audit`` table is append-only, written by
     the DB trigger; this endpoint is pure read.
     """
+    _mark_safety_get_deprecated(
+        response,
+        successor_path=f"/api/v1/safety/rules/{rule_id}/audit",
+    )
     if tid != user.tenant_id:
         raise HTTPException(status_code=403, detail="tenant scope mismatch")
     capped = max(1, min(int(limit), 500))
@@ -1581,17 +1409,24 @@ def _normalize_files(
     return out
 
 
-def _skill_to_response(s: Skill) -> SkillResponse:
+def _skill_to_response(s: Skill, *, coworker_id: str) -> SkillResponse:
+    """Project a catalog skill into the admin response shape.
+
+    The legacy admin endpoint exposes ``coworker_id`` on the wire even
+    though the catalog is per-tenant now. We surface the URL path's
+    ``agent_id`` here so existing clients keep the same response
+    shape during the compatibility window.
+    """
     return SkillResponse(
         id=s.id,
-        coworker_id=s.coworker_id,
+        coworker_id=coworker_id,
         name=s.name,
         frontmatter_common=s.frontmatter_common,
         frontmatter_backend=s.frontmatter_backend,
         enabled=s.enabled,
         created_at=s.created_at,
         updated_at=s.updated_at,
-        created_by=s.created_by,
+        created_by_user_id=s.created_by_user_id,
         files={
             p: SkillFileInPayload(content=f.content, mime_type=f.mime_type)
             for p, f in s.files.items()
@@ -1599,12 +1434,12 @@ def _skill_to_response(s: Skill) -> SkillResponse:
     )
 
 
-def _skill_to_summary(s: Skill) -> SkillSummary:
+def _skill_to_summary(s: Skill, *, coworker_id: str) -> SkillSummary:
     desc_raw = s.frontmatter_common.get("description", "")
     description = desc_raw if isinstance(desc_raw, str) else ""
     return SkillSummary(
         id=s.id,
-        coworker_id=s.coworker_id,
+        coworker_id=coworker_id,
         name=s.name,
         description=description,
         enabled=s.enabled,
@@ -1625,7 +1460,7 @@ async def list_skills(
     skills = await db.list_skills_for_coworker(
         agent_id, tenant_id=user.tenant_id, enabled_only=False, with_files=False,
     )
-    return [_skill_to_summary(s) for s in skills]
+    return [_skill_to_summary(s, coworker_id=agent_id) for s in skills]
 
 
 @router.post(
@@ -1642,31 +1477,33 @@ async def create_skill(
     try:
         validate_skill_name(body.name)
         files = _normalize_files(body.files)
-        if "SKILL.md" not in files:
-            raise SkillValidationError("payload must include SKILL.md in 'files'")
+        if SKILL_MANIFEST_NAME not in files:
+            raise SkillValidationError(
+                f"payload must include {SKILL_MANIFEST_NAME} in 'files'"
+            )
         common, backend, body_text = parse_inbound_skill_md(
-            files["SKILL.md"].content,
+            files[SKILL_MANIFEST_NAME].content,
             frontmatter_common_override=body.frontmatter_common,
             frontmatter_backend_override=body.frontmatter_backend,
             expected_skill_name=body.name,
         )
     except SkillValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    # Replace SKILL.md content with the body-only form so the splitter
+    # Replace manifest content with the body-only form so the splitter
     # round-trips cleanly: frontmatter lives in the JSONB columns.
-    files["SKILL.md"] = SkillFile(
-        path="SKILL.md",
+    files[SKILL_MANIFEST_NAME] = SkillFile(
+        path=SKILL_MANIFEST_NAME,
         content=body_text,
-        mime_type=files["SKILL.md"].mime_type or "text/markdown",
+        mime_type=files[SKILL_MANIFEST_NAME].mime_type or "text/markdown",
     )
     # Bootstrap admin has user_id="bootstrap" (not a real UUID).
-    # Store NULL in created_by rather than letting asyncpg blow up.
+    # Store NULL in created_by_user_id rather than letting asyncpg blow up.
     try:
         created_by_uuid: str | None = str(_uuid.UUID(user.user_id))
     except (ValueError, AttributeError):
         created_by_uuid = None
     try:
-        skill = await db.create_skill(
+        skill = await db.create_skill_for_coworker(
             tenant_id=user.tenant_id,
             coworker_id=agent_id,
             name=body.name,
@@ -1674,16 +1511,16 @@ async def create_skill(
             frontmatter_backend=backend,
             files=files,
             enabled=body.enabled,
-            created_by=created_by_uuid,
+            created_by_user_id=created_by_uuid,
         )
     except asyncpg.UniqueViolationError as exc:
         raise HTTPException(
             status_code=409,
-            detail=f"Skill with name {body.name!r} already exists on this agent",
+            detail=f"Skill with name {body.name!r} already exists in this tenant",
         ) from exc
     except asyncpg.CheckViolationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return _skill_to_response(skill)
+    return _skill_to_response(skill, coworker_id=agent_id)
 
 
 @router.get(
@@ -1697,9 +1534,11 @@ async def get_skill_detail(
 ) -> SkillResponse:
     await _get_agent_or_404(agent_id, user.tenant_id)
     skill = await db.get_skill(skill_id, tenant_id=user.tenant_id)
-    if skill is None or skill.coworker_id != agent_id:
+    if skill is None or not await db.is_skill_bound_to_coworker(
+        skill_id, agent_id, tenant_id=user.tenant_id,
+    ):
         raise HTTPException(status_code=404, detail="Skill not found")
-    return _skill_to_response(skill)
+    return _skill_to_response(skill, coworker_id=agent_id)
 
 
 @router.patch(
@@ -1714,7 +1553,9 @@ async def update_skill(
 ) -> SkillResponse:
     await _get_agent_or_404(agent_id, user.tenant_id)
     existing = await db.get_skill(skill_id, tenant_id=user.tenant_id)
-    if existing is None or existing.coworker_id != agent_id:
+    if existing is None or not await db.is_skill_bound_to_coworker(
+        skill_id, agent_id, tenant_id=user.tenant_id,
+    ):
         raise HTTPException(status_code=404, detail="Skill not found")
 
     files: dict[str, SkillFile] | None = None
@@ -1723,26 +1564,28 @@ async def update_skill(
     try:
         if body.files is not None:
             files = _normalize_files(body.files)
-            if "SKILL.md" not in files:
-                raise SkillValidationError("'files' must include SKILL.md")
-            # Re-parse SKILL.md frontmatter (overrides applied on top).
+            if SKILL_MANIFEST_NAME not in files:
+                raise SkillValidationError(
+                    f"'files' must include {SKILL_MANIFEST_NAME}"
+                )
+            # Re-parse manifest frontmatter (overrides applied on top).
             parsed_common, parsed_backend, body_text = parse_inbound_skill_md(
-                files["SKILL.md"].content,
+                files[SKILL_MANIFEST_NAME].content,
                 frontmatter_common_override=body.frontmatter_common,
                 frontmatter_backend_override=body.frontmatter_backend,
                 expected_skill_name=existing.name,
             )
             common, backend = parsed_common, parsed_backend
-            files["SKILL.md"] = SkillFile(
-                path="SKILL.md",
+            files[SKILL_MANIFEST_NAME] = SkillFile(
+                path=SKILL_MANIFEST_NAME,
                 content=body_text,
-                mime_type=files["SKILL.md"].mime_type or "text/markdown",
+                mime_type=files[SKILL_MANIFEST_NAME].mime_type or "text/markdown",
             )
         elif body.frontmatter_common is not None or body.frontmatter_backend is not None:
             # Frontmatter-only update: re-validate against existing
             # body so description bounds stay consistent. Pull body
-            # text from the stored SKILL.md row to feed the splitter.
-            current_md = existing.files.get("SKILL.md")
+            # text from the stored manifest row to feed the splitter.
+            current_md = existing.files.get(SKILL_MANIFEST_NAME)
             current_body = current_md.content if current_md else ""
             # Important: ``A or B`` treats an explicitly-empty dict as
             # "not provided" because ``{}`` is falsy. Use ``is not None``
@@ -1785,7 +1628,7 @@ async def update_skill(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if updated is None:
         raise HTTPException(status_code=404, detail="Skill not found")
-    return _skill_to_response(updated)
+    return _skill_to_response(updated, coworker_id=agent_id)
 
 
 @router.delete(
@@ -1799,7 +1642,9 @@ async def delete_skill(
 ) -> None:
     await _get_agent_or_404(agent_id, user.tenant_id)
     skill = await db.get_skill(skill_id, tenant_id=user.tenant_id, with_files=False)
-    if skill is None or skill.coworker_id != agent_id:
+    if skill is None or not await db.is_skill_bound_to_coworker(
+        skill_id, agent_id, tenant_id=user.tenant_id,
+    ):
         raise HTTPException(status_code=404, detail="Skill not found")
     await db.delete_skill(skill_id, tenant_id=user.tenant_id)
 
@@ -1820,7 +1665,9 @@ async def update_skill_file(
     """
     await _get_agent_or_404(agent_id, user.tenant_id)
     skill = await db.get_skill(skill_id, tenant_id=user.tenant_id, with_files=False)
-    if skill is None or skill.coworker_id != agent_id:
+    if skill is None or not await db.is_skill_bound_to_coworker(
+        skill_id, agent_id, tenant_id=user.tenant_id,
+    ):
         raise HTTPException(status_code=404, detail="Skill not found")
     try:
         validate_skill_file_path(path)
@@ -1840,7 +1687,7 @@ async def update_skill_file(
         raise HTTPException(status_code=404, detail="Skill not found")
     refreshed = await db.get_skill(skill_id, tenant_id=user.tenant_id)
     assert refreshed is not None
-    return _skill_to_response(refreshed)
+    return _skill_to_response(refreshed, coworker_id=agent_id)
 
 
 @router.delete(
@@ -1858,12 +1705,17 @@ async def delete_skill_file(
     """
     await _get_agent_or_404(agent_id, user.tenant_id)
     skill = await db.get_skill(skill_id, tenant_id=user.tenant_id, with_files=False)
-    if skill is None or skill.coworker_id != agent_id:
+    if skill is None or not await db.is_skill_bound_to_coworker(
+        skill_id, agent_id, tenant_id=user.tenant_id,
+    ):
         raise HTTPException(status_code=404, detail="Skill not found")
-    if path == "SKILL.md":
+    if path == SKILL_MANIFEST_NAME:
         raise HTTPException(
             status_code=400,
-            detail="SKILL.md cannot be deleted; delete the whole skill or update it",
+            detail=(
+                f"{SKILL_MANIFEST_NAME} cannot be deleted; "
+                "delete the whole skill or update it"
+            ),
         )
     try:
         validate_skill_file_path(path)

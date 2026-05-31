@@ -223,7 +223,6 @@ The admin surface is grouped by module — each group's authoritative documentat
 | Conversation history | `GET /api/conversations`, `GET /api/conversations/{chat_id}/messages` | This file |
 | Coworker / agent CRUD | `/api/admin/agents/*` (incl. skills CRUD nested under each agent) | [`auth-architecture.md`](auth-architecture.md), [`skills-architecture.md`](skills-architecture.md) |
 | Safety rules | `/api/admin/safety/checks`, `/safety/rules`, `/safety/decisions`, `/safety/decisions.csv`, `/safety/rules/{id}/audit` | [`safety/safety-framework.md`](safety/safety-framework.md) |
-| Approval policies + decisions | `/api/admin/approval/*` | [`approval-architecture.md`](approval-architecture.md) |
 | OIDC auth | `/api/auth/{config,exchange,refresh,logout}` | "Authentication" above |
 
 The frontend mounts these as hash-routed pages alongside the chat (`#/admin/safety/rules`, `#/admin/safety/decisions`, …). Hash routing avoids needing a SPA history-API fallback in the FastAPI static handler — the same `index.html` works for the dev server (Vite at port 5173) and the FastAPI static mount (port 8080) without configuration drift.
@@ -259,5 +258,4 @@ Lit components typically use Shadow DOM with scoped CSS. We render to the light 
 - [`auth-architecture.md`](auth-architecture.md) — `AuthProvider` abstraction, agent + user permissions, OIDC details
 - [`nats-ipc-architecture.md`](nats-ipc-architecture.md) — orchestrator-side NATS protocol; `web-ipc` stream lives alongside `agent-ipc`
 - [`safety/safety-framework.md`](safety/safety-framework.md) — endpoints behind the safety admin pages
-- [`approval-architecture.md`](approval-architecture.md) — endpoints behind the approval admin pages
 - [`skills-architecture.md`](skills-architecture.md) — endpoints behind the per-agent skills CRUD

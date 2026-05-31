@@ -1,13 +1,29 @@
 import { LitElement, html } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
+
+// v2 design tokens. Loaded once at app entry so the cream/terracotta
+// palette is available to every component on first paint; CSS custom
+// properties cascade through shadow DOM via inheritance, so this
+// single import covers both light-DOM components (chat-panel) and
+// shadow-DOM v2 primitives (rm-dialog, rm-wizard, …).
+import './styles/tokens.css';
+// Shared visual language for the settings pages (Coworkers / MCP /
+// Skills / Models / Credentials). Lives next to tokens.css so all
+// v2 stylesheets load before any component mounts.
+import './styles/settings-pages.css';
+
 import './components/chat-panel.js';
 import './components/message-list.js';
 import './components/message-item.js';
 import './components/message-editor.js';
 import './components/sidebar.js';
+import './components/reauth-banner.js';
 import './components/login-page.js';
-import './components/safety-rules-page.js';
-import './components/safety-decisions-page.js';
+import './components/coming-soon.js';
+import './components/chat-shell.js';
+import './components/settings-shell.js';
+import './components/activity-shell.js';
+import { installLegacyRedirects, topLevelShell } from './router.js';
 import {
   fetchAuthConfig,
   getStoredToken,
@@ -16,17 +32,21 @@ import {
   scheduleRefresh,
 } from './services/oidc-auth.js';
 
+// Rewrite any v1.1 flat hash (`#/coworkers`, …) to its v2 nested
+// home (`#/manage/coworkers`, …) before any shell mounts. The
+// handler stays installed for the lifetime of the SPA so bookmarks
+// opened mid-session also redirect.
+installLegacyRedirects();
+
 type AuthState = 'loading' | 'login' | 'authenticated';
-type Route = 'chat' | 'admin-safety-rules' | 'admin-safety-decisions';
 
-// Map from location.hash to Route. Hash-based routing so the Vite dev
-// server + static FastAPI serve work without a history-API fallback.
-function routeFromHash(hash: string): Route {
-  if (hash === '#/admin/safety/rules') return 'admin-safety-rules';
-  if (hash === '#/admin/safety/decisions') return 'admin-safety-decisions';
-  return 'chat';
-}
-
+// `<rm-app>` is the auth state machine + outermost host. Once
+// authenticated, it picks one of three v2 shells based on the top
+// level of the current hash:
+//   `#/`           → `<rm-chat-shell>`
+//   `#/manage/*`   → `<rm-settings-shell>`
+//   `#/activity/*` → `<rm-activity-shell>` (mostly placeholder)
+// A hashchange listener swaps shells without a full reload.
 @customElement('rm-app')
 export class RmApp extends LitElement {
   protected override createRenderRoot() {
@@ -34,7 +54,9 @@ export class RmApp extends LitElement {
   }
 
   @state() private authState: AuthState = 'loading';
-  @state() private route: Route = routeFromHash(location.hash);
+  @state() private shell: 'chat' | 'manage' | 'activity' = topLevelShell(
+    location.hash,
+  );
 
   override async connectedCallback() {
     super.connectedCallback();
@@ -53,8 +75,8 @@ export class RmApp extends LitElement {
     window.removeEventListener('hashchange', this.onHashChange);
   }
 
-  private onHashChange = (): void => {
-    this.route = routeFromHash(location.hash);
+  private onHashChange = () => {
+    this.shell = topLevelShell(location.hash);
   };
 
   private async resolveAuth() {
@@ -72,7 +94,6 @@ export class RmApp extends LitElement {
     if (sessionStorage.getItem('oidc_code')) {
       const exchanged = await handleCallback();
       if (exchanged) {
-        // Token now in sessionStorage; chat-panel reads it from there
         this.authState = 'authenticated';
         this.startRefreshScheduler(exchanged.id_token);
         return;
@@ -100,36 +121,30 @@ export class RmApp extends LitElement {
 
   private startRefreshScheduler(token: string): void {
     scheduleRefresh(token, (newToken) => {
-      // Notify chat-panel to update its agent client and reconnect WebSocket
       window.dispatchEvent(
-        new CustomEvent('rm-token-refreshed', { detail: newToken })
+        new CustomEvent('rm-token-refreshed', { detail: newToken }),
       );
     });
   }
 
-  private renderRouted() {
-    switch (this.route) {
-      case 'admin-safety-rules':
-        return html`<rm-safety-rules-page></rm-safety-rules-page>`;
-      case 'admin-safety-decisions':
-        return html`<rm-safety-decisions-page></rm-safety-decisions-page>`;
-      default:
-        return html`<rm-chat-panel class="flex-1 min-h-0"></rm-chat-panel>`;
-    }
-  }
-
   override render() {
     if (this.authState === 'loading') {
-      return html`<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#666;">Loading...</div>`;
+      return html`<div
+        class="h-full flex items-center justify-center text-ink-2 dark:text-d-ink-2"
+      >Loading...</div>`;
     }
     if (this.authState === 'login') {
       return html`<rm-login-page></rm-login-page>`;
     }
-    return html`
-      <div class="h-full flex flex-col bg-surface-0 dark:bg-d-surface-0">
-        <div class="flex-1 min-h-0 overflow-auto">${this.renderRouted()}</div>
-      </div>
-    `;
+    switch (this.shell) {
+      case 'manage':
+        return html`<rm-settings-shell></rm-settings-shell>`;
+      case 'activity':
+        return html`<rm-activity-shell></rm-activity-shell>`;
+      case 'chat':
+      default:
+        return html`<rm-chat-shell></rm-chat-shell>`;
+    }
   }
 }
 

@@ -70,6 +70,30 @@ class WebNatsGateway:
     async def remove_binding(self, binding_id: str) -> None:
         self._bindings.pop(binding_id, None)
 
+    async def _refresh_binding(self, binding_id: str) -> bool:
+        """Look the binding up in the DB and register if it exists.
+
+        Returns ``True`` when the binding now lives in ``self._bindings``.
+        Centralised here so the listener loop only owns the "ack on
+        miss" decision. Uses the admin pool because the orchestrator
+        runs without a tenant context (the binding row is what tells
+        us which tenant it belongs to in the first place).
+        """
+        # Local import to avoid an import-cycle with the DB layer at
+        # module load (rolemesh.db pulls in lots of typing-only code).
+        from rolemesh.db import get_channel_binding_by_id_admin
+
+        try:
+            row = await get_channel_binding_by_id_admin(binding_id)
+        except Exception:
+            logger.exception("web_binding refresh failed", binding_id=binding_id)
+            return False
+        if row is None or row.channel_type != "web":
+            return False
+        self._bindings[row.id] = row
+        logger.info("web_binding hot-loaded", binding_id=binding_id, tenant_id=row.tenant_id)
+        return True
+
     async def send_message(self, binding_id: str, chat_id: str, text: str) -> None:
         """Publish a complete agent reply to ``web.outbound.{binding_id}.{chat_id}``."""
         msg = WebOutboundMessage(text=text)
@@ -175,9 +199,20 @@ class WebNatsGateway:
                     binding_id = parts[2] if len(parts) >= 3 else ""
 
                     if binding_id not in self._bindings:
-                        logger.warning("Unknown web binding_id", binding_id=binding_id)
-                        await msg.ack()
-                        continue
+                        # Hot-reload: a binding row that didn't exist
+                        # at orchestrator startup is the normal case
+                        # the first time a v1 user opens the chat for
+                        # a new coworker (the webui creates the row
+                        # at conversation-create time). Look it up
+                        # from DB and register on the fly instead of
+                        # dropping the message. If the row truly
+                        # doesn't exist (forged subject / cleanup
+                        # race) we log + ack so the consumer drains.
+                        registered = await self._refresh_binding(binding_id)
+                        if not registered:
+                            logger.warning("Unknown web binding_id", binding_id=binding_id)
+                            await msg.ack()
+                            continue
 
                     await self._on_message(
                         binding_id,

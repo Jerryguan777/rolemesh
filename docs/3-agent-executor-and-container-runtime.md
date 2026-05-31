@@ -200,7 +200,7 @@ A complete agent invocation:
         │     → ContainerSpec   (with hardening + network fields filled in)
         │
         ├── Write AgentInitData to NATS KV "agent-init.{job_id}"
-        │     (carries permissions, mcp_servers, safety_rules, approval_policies, …)
+        │     (carries permissions, mcp_servers, safety_rules, …)
         │
         ├── runtime.run(spec)                    ← ContainerRuntime layer
         │     → ContainerHandle
@@ -211,7 +211,7 @@ A complete agent invocation:
         │
         ├── Start timeout watcher + stderr reader tasks
         │
-        ├── (Inside the container, hooks/safety/approval/skills run as the
+        ├── (Inside the container, hooks/safety/skills run as the
         │    LLM produces tool calls and outputs — orchestrator side just
         │    consumes events from NATS)
         │
@@ -224,7 +224,7 @@ A complete agent invocation:
 
 The cut is clean: anything calling `runtime.*` or `handle.*` is the ContainerRuntime layer. Everything else (NATS, timeout, logging, output parsing) is the AgentExecutor layer.
 
-What runs *inside* the container — hook handlers, safety pipeline, approval gating, skill loading, MCP tool dispatch — is each documented in its own file ([`hooks-architecture.md`](hooks-architecture.md), [`safety/safety-framework.md`](safety/safety-framework.md), [`approval-architecture.md`](approval-architecture.md), [`skills-architecture.md`](skills-architecture.md), [`external-mcp-architecture.md`](external-mcp-architecture.md)). From the executor's perspective they are just events on NATS.
+What runs *inside* the container — hook handlers, safety pipeline, skill loading, MCP tool dispatch — is each documented in its own file ([`hooks-architecture.md`](hooks-architecture.md), [`safety/safety-framework.md`](safety/safety-framework.md), [`skills-architecture.md`](skills-architecture.md), [`external-mcp-architecture.md`](external-mcp-architecture.md)). From the executor's perspective they are just events on NATS.
 
 ---
 

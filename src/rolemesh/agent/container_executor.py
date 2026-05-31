@@ -109,11 +109,22 @@ class ContainerAgentExecutor:
         runtime: ContainerRuntime,
         transport: NatsTransport,
         get_coworker: Callable[[str], Coworker | None],
+        *,
+        get_mcp_configs: Callable[[str], list[McpServerConfig]] | None = None,
     ) -> None:
         self._config = config
         self._runtime = runtime
         self._transport = transport
         self._get_coworker = get_coworker
+        # 02b: MCP configs no longer live on ``Coworker``. The executor
+        # asks the orchestrator (or eval CLI) for the per-coworker
+        # binding list via this callable. Default returns an empty
+        # list so call sites that build an executor without wiring it
+        # up gracefully degrade to "no MCP servers" rather than
+        # raising AttributeError on the missing field.
+        self._get_mcp_configs: Callable[[str], list[McpServerConfig]] = (
+            get_mcp_configs or (lambda _cid: [])
+        )
 
     @property
     def name(self) -> str:
@@ -159,7 +170,7 @@ class ContainerAgentExecutor:
             # The inner ``_execute_after_setup`` explicitly cleans up
             # at each ``return`` for prompt disk reuse on the happy
             # paths, but exceptions raised by ``build_container_spec``,
-            # ``self._runtime.run``, the approval/safety loaders, or
+            # ``self._runtime.run``, the safety loader, or
             # any other line bypass those returns. ``cleanup_spawn_skills``
             # is idempotent, so duplicating with the inner calls is
             # harmless — this finally just guarantees no orphan dir
@@ -185,7 +196,7 @@ class ContainerAgentExecutor:
         public method can guarantee ``cleanup_spawn_skills(job_id)``
         runs on every exit path — including exceptions raised by
         ``build_container_spec``, ``self._runtime.run``, the
-        approval / safety loaders, or any other line in this body.
+        safety loader, or any other line in this body.
         The explicit ``cleanup_spawn_skills`` calls below remain so
         disk is reclaimed promptly on the happy paths; the outer
         finally only kicks in when something raises.
@@ -223,8 +234,37 @@ class ContainerAgentExecutor:
         safe_name = re.sub(r"[^a-zA-Z0-9-]", "-", inp.group_folder)
         container_name = f"rolemesh-{safe_name}-{start_epoch_ms}"
 
+        # Resolve coworker.model_id → Pi-format string. Falls back to
+        # host .env PI_MODEL_ID on any failure (no model_id set,
+        # orphan reference, DB blip) — best-effort, never blocks the
+        # spawn.
+        pi_model_override: str | None = None
+        if self._config.name == "pi" and coworker.model_id:
+            try:
+                from rolemesh.agent.executor import _DB_TO_PI_PROVIDER
+                from rolemesh.db import get_model_by_id
+
+                model_row = await get_model_by_id(coworker.model_id)
+                if model_row is not None:
+                    pi_provider = _DB_TO_PI_PROVIDER.get(
+                        model_row.provider, model_row.provider,
+                    )
+                    pi_model_override = f"{pi_provider}/{model_row.model_id}"
+            except Exception:
+                logger.warning(
+                    "Pi model_id resolution failed; falling back to "
+                    "host PI_MODEL_ID",
+                    coworker_id=coworker.id,
+                    model_id=coworker.model_id,
+                )
+
         spec = build_container_spec(
-            mounts, container_name, job_id, self._config, coworker=coworker,
+            mounts,
+            container_name,
+            job_id,
+            self._config,
+            coworker=coworker,
+            pi_model_id_override=pi_model_override,
         )
 
         logger.info(
@@ -241,7 +281,7 @@ class ContainerAgentExecutor:
         logs_dir = coworker_dir / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
 
-        # Build MCP server specs from coworker tools config.
+        # Build MCP server specs from the coworker's projected bindings.
         # proxy_host branches on EC: egress-gateway service name when
         # EC is active, host.docker.internal for the pre-EC rollback
         # path — matches build_container_spec's env routing so a
@@ -253,7 +293,8 @@ class ContainerAgentExecutor:
             else CONTAINER_HOST_GATEWAY
         )
         mcp_specs: list[McpServerSpec] | None = None
-        if coworker.tools:
+        coworker_mcp_configs = self._get_mcp_configs(coworker.id)
+        if coworker_mcp_configs:
             mcp_specs = [
                 rewrite_mcp_url_for_container(
                     tool_cfg,
@@ -261,67 +302,12 @@ class ContainerAgentExecutor:
                     proxy_port=CREDENTIAL_PROXY_PORT,
                     proxy_prefix=MCP_PROXY_PREFIX,
                 )
-                for tool_cfg in coworker.tools
+                for tool_cfg in coworker_mcp_configs
             ]
 
-        # Load per-coworker approval policies. Passed to the container
-        # as plain dicts so agent_runner.approval.policy (pure, stdlib-
-        # only) can evaluate them without a DB import. None when no
-        # policies exist, which keeps ApprovalHookHandler off the hook
-        # chain in zero-impact deployments.
-        approval_policies_dicts: list[dict[str, object]] | None = None
-        try:
-            from rolemesh.db import get_enabled_policies_for_coworker
-
-            enabled = await get_enabled_policies_for_coworker(
-                tenant_id, inp.coworker_id
-            )
-            if enabled:
-                approval_policies_dicts = [p.to_dict() for p in enabled]
-        except Exception as exc:
-            # The DB is unreachable at job-start. Two operator-selectable
-            # responses:
-            #   APPROVAL_FAIL_MODE=closed (default) — refuse to start.
-            #     A DB outage must not silently let every tool call run
-            #     unsupervised; this matches the fail-close posture of
-            #     the hook layer itself.
-            #   APPROVAL_FAIL_MODE=open — start without approvals.
-            #     Legacy behaviour for deployments that prioritize agent
-            #     availability over approval coverage during incidents.
-            from rolemesh.core.config import APPROVAL_FAIL_MODE
-
-            if APPROVAL_FAIL_MODE == "open":
-                logger.warning(
-                    "approval: DB unreachable — starting agent in "
-                    "fail-open mode (APPROVAL_FAIL_MODE=open). All tool "
-                    "calls will run without approval checks until the "
-                    "DB recovers and the container restarts.",
-                    coworker_id=inp.coworker_id,
-                    error=str(exc),
-                )
-            else:
-                # Fail-closed but ALSO silent: the orchestrator does not
-                # actively notify the tenant owner/admin. Users see "agent
-                # not responding"; operators must have external log alerts
-                # wired up to this ERROR line to notice. Acceptable for
-                # self-hosted / small-team deployments; for multi-tenant
-                # SaaS add a health endpoint + active push (Prometheus
-                # counter + in-chat notice to the tenant owner).
-                # See docs/approval-architecture.md §Known Gaps
-                # "Silent fail-closed on DB outage".
-                logger.error(
-                    "approval: DB unreachable at job start — refusing "
-                    "to start agent (APPROVAL_FAIL_MODE=closed). Set "
-                    "APPROVAL_FAIL_MODE=open to permit fail-open "
-                    "startup.",
-                    coworker_id=inp.coworker_id,
-                    error=str(exc),
-                )
-                raise
-
-        # Load per-coworker safety rules. Same fail-mode contract as
-        # approval above (SAFETY_FAIL_MODE closed default refuses
-        # startup; open logs and starts with no rules). None when no
+        # Load per-coworker safety rules. SAFETY_FAIL_MODE closed
+        # default refuses startup; open logs and starts with no rules.
+        # None when no
         # rules exist, so SafetyHookHandler stays off the hook chain
         # in zero-config deployments. Implementation lives in
         # rolemesh.safety.loader so the fail-mode branch is testable
@@ -378,7 +364,6 @@ class ContainerAgentExecutor:
             system_prompt=inp.system_prompt,
             role_config=inp.role_config,
             mcp_servers=mcp_specs,
-            approval_policies=approval_policies_dicts,
             safety_rules=safety_rules_dicts,
             slow_check_specs=slow_check_specs,
         )

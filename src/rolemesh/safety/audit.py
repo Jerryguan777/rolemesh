@@ -16,10 +16,6 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
-from rolemesh.db import (
-    insert_safety_decision,
-)
-
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
@@ -31,24 +27,16 @@ class AuditEvent:
     ``triggered_rule_ids`` lists the rules whose verdict materially
     shaped the final decision — for a single-rule block, that's one id;
     for a redact chain, all rules that produced modifications.
-
-    ``approval_context`` is retained only for ``verdict_action='require_approval'``
-    rows at the PRE_TOOL_CALL stage. Deliberately the ONLY place the
-    full tool_input lives after the turn — the rest of the audit
-    table keeps only a digest + short summary to avoid becoming a PII
-    sink. See the ``safety_decisions`` schema note about the 24h
-    cleanup policy for this column.
     """
 
     tenant_id: str
     coworker_id: str | None
     conversation_id: str | None
     job_id: str | None
-    # V2 P1.1: carried so the require_approval bridge can attribute
-    # the approval_request.user_id to the user whose turn triggered
-    # the safety gate. Not persisted in safety_decisions (would
-    # duplicate data the audit table doesn't need) — this field is
-    # in-flight metadata only.
+    # Carried as in-flight metadata to attribute the decision to the
+    # user whose turn triggered the safety gate. Not persisted in
+    # safety_decisions (would duplicate data the audit table doesn't
+    # need).
     user_id: str | None
     stage: str
     verdict_action: str
@@ -56,7 +44,6 @@ class AuditEvent:
     findings: list[dict[str, Any]]
     context_digest: str
     context_summary: str
-    approval_context: dict[str, Any] | None = None
 
 
 class AuditSink(Protocol):
@@ -67,6 +54,13 @@ class DbAuditSink:
     """Persists AuditEvent to the ``safety_decisions`` table."""
 
     async def write(self, event: AuditEvent) -> None:
+        # Lazy import: this class is the orchestrator-side implementation
+        # and is never instantiated inside agent containers. The top-level
+        # import was triggering ``ModuleNotFoundError: rolemesh.db`` in the
+        # container at import time, because audit.py is shipped to agents
+        # for its dataclass + Protocol shapes — only ``DbAuditSink.write``
+        # actually needs the DB and is only ever called on the orchestrator.
+        from rolemesh.db import insert_safety_decision
 
         await insert_safety_decision(
             tenant_id=event.tenant_id,
@@ -79,7 +73,6 @@ class DbAuditSink:
             findings=event.findings,
             context_digest=event.context_digest,
             context_summary=event.context_summary,
-            approval_context=event.approval_context,
         )
 
 
