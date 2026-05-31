@@ -96,6 +96,25 @@ class SchedulerDependencies(Protocol):
 _TASK_CLOSE_DELAY_S: float = 10.0
 
 
+def _compute_queue_key(task: ScheduledTask) -> str:
+    """Return the ``GroupQueue`` key for a scheduled task.
+
+    Must match what ``main.py`` uses for ``enqueue_message_check`` /
+    ``notify_idle`` / ``request_shutdown`` so the same conversation
+    ends up in the same ``_GroupState`` entry. The initial commit
+    (38e79d8) keyed everything on ``chat_jid``; the multi-tenant
+    refactor (058eb10) migrated the messaging side to
+    ``conversation_id`` but accidentally left the scheduler keyed
+    on ``channel_chat_id``, splitting one conversation into two
+    state entries and breaking warm-container preemption.
+
+    Falls back to ``coworker_id`` only when no conversation is bound
+    — that's the legitimate "coworker-scoped reminder" shape and
+    keeps such tasks queued under a stable identifier.
+    """
+    return task.conversation_id or task.coworker_id
+
+
 async def _run_task(
     task: ScheduledTask,
     deps: SchedulerDependencies,
@@ -140,8 +159,19 @@ async def _run_task(
     permissions = coworker.permissions
     transport = deps.transport
 
-    # Find conversation for chat_jid routing
+    # Two derived values share an origin (the bound Conversation) but
+    # are used for different things:
+    #   queue_key — identity inside ``GroupQueue._groups``. Must equal
+    #     ``main.py``'s message-side key (``conversation_id``) so a
+    #     warm message container and an incoming scheduled task share
+    #     the same ``_GroupState``. See ``_compute_queue_key`` for the
+    #     058eb10 regression backstory.
+    #   chat_jid — destination address for the channel gateway when
+    #     the task's reply goes out (Telegram chat id, web chat uuid,
+    #     ...). Comes from ``Conversation.channel_chat_id``; stays
+    #     channel-specific.
     conversation_id = task.conversation_id or ""
+    queue_key = _compute_queue_key(task)
     chat_jid = ""
 
     # Find the coworker state for context
@@ -188,7 +218,7 @@ async def _run_task(
         loop = asyncio.get_running_loop()
         close_handle = loop.call_later(
             _TASK_CLOSE_DELAY_S,
-            lambda: deps.queue.request_shutdown(chat_jid),
+            lambda: deps.queue.request_shutdown(queue_key),
         )
 
     try:
@@ -204,10 +234,10 @@ async def _run_task(
                 # Only release idle-gating once the run_prompt batch settles.
                 # With the is_final contract, per-prompt replies arrive as
                 # is_final=False and must not fire notify_idle — otherwise a
-                # concurrently pending task on the same chat_jid would preempt
+                # concurrently pending task on the same queue_key would preempt
                 # (request_shutdown) the container mid-batch.
                 if streamed_output.is_final:
-                    deps.queue.notify_idle(chat_jid)
+                    deps.queue.notify_idle(queue_key)
                 _schedule_close()
             if streamed_output.status == "error":
                 error = streamed_output.error or "Unknown error"
@@ -230,7 +260,7 @@ async def _run_task(
                 user_id=task.created_by_user_id or "",
             ),
             lambda container_name, job_id: deps.on_process(
-                chat_jid, container_name, coworker.folder, job_id
+                queue_key, container_name, coworker.folder, job_id
             ),
             _on_output,
         )
@@ -278,6 +308,40 @@ async def _run_task(
 _scheduler_running: bool = False
 
 
+async def _enqueue_due_tasks(
+    due_tasks: list[ScheduledTask], deps: SchedulerDependencies
+) -> None:
+    """Push one tick worth of due tasks into the ``GroupQueue``.
+
+    Extracted from ``_loop`` so the queue-key contract
+    (``_compute_queue_key``) can be exercised against a real DB row
+    without spinning up the infinite scheduler poll loop.
+
+    Re-fetches each row's current status before enqueueing — between
+    ``get_due_tasks`` and this call the row may have been cancelled
+    or completed by another process. Skipping the stale ones keeps
+    a status race from firing an already-cancelled reminder.
+    """
+    for task in due_tasks:
+        current_task = await get_task_by_id(task.id, tenant_id=task.tenant_id)
+        if not current_task or current_task.status != "active":
+            continue
+
+        def _make_fn(t: ScheduledTask) -> Callable[[], Awaitable[None]]:
+            async def _task_fn() -> None:
+                await _run_task(t, deps)
+
+            return _task_fn
+
+        deps.queue.enqueue_task(
+            _compute_queue_key(current_task),
+            current_task.id,
+            _make_fn(current_task),
+            tenant_id=current_task.tenant_id,
+            coworker_id=current_task.coworker_id,
+        )
+
+
 def start_scheduler_loop(deps: SchedulerDependencies) -> asyncio.Task[None]:
     """Launch an asyncio task that polls for due scheduled tasks."""
     global _scheduler_running
@@ -296,34 +360,7 @@ def start_scheduler_loop(deps: SchedulerDependencies) -> asyncio.Task[None]:
                 due_tasks = await get_due_tasks()
                 if due_tasks:
                     logger.info("Found due tasks", count=len(due_tasks))
-
-                for task in due_tasks:
-                    current_task = await get_task_by_id(task.id, tenant_id=task.tenant_id)
-                    if not current_task or current_task.status != "active":
-                        continue
-
-                    def _make_fn(t: ScheduledTask) -> Callable[[], Awaitable[None]]:
-                        async def _task_fn() -> None:
-                            await _run_task(t, deps)
-
-                        return _task_fn
-
-                    # Use conversation's channel_chat_id as the queue key
-                    queue_key = ""
-                    if current_task.conversation_id:
-                        orch = deps.orchestrator_state
-                        found = orch.get_conversation(current_task.conversation_id)
-                        if found:
-                            _, conv_state = found
-                            queue_key = conv_state.conversation.channel_chat_id
-
-                    deps.queue.enqueue_task(
-                        queue_key or current_task.coworker_id,
-                        current_task.id,
-                        _make_fn(current_task),
-                        tenant_id=current_task.tenant_id,
-                        coworker_id=current_task.coworker_id,
-                    )
+                await _enqueue_due_tasks(due_tasks, deps)
             except (OSError, RuntimeError, ValueError):
                 logger.exception("Error in scheduler loop")
 
