@@ -795,6 +795,29 @@ class WsServerEventRunError(BaseModel):
     details: dict[str, object] | None = None
 
 
+class WsServerEventRunProgress(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.run.progress"]
+    run_id: str
+    # Mirrors the orchestrator's progress status set: running,
+    # tool_use, queued, container_starting. Kept as a free string
+    # rather than an enum here so a new orch progress kind doesn't
+    # immediately bounce off pydantic validation in production while
+    # the FE is rolled out separately. The SPA's renderer falls back
+    # to a generic label for unknown values.
+    status: str
+    tool: str | None = None
+    input_preview: str | None = None
+
+
+class WsServerEventMessageAppended(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.message.appended"]
+    content: str
+    source: Literal["scheduled_task"]
+    timestamp: str
+
+
 # Tagged union over ``type``. Pydantic v2's Field discriminator picks
 # the right member based on the literal value, giving validation
 # errors that name the offending field (rather than the generic
@@ -804,6 +827,8 @@ WsServerEventModel = (
     | WsServerEventRunToken
     | WsServerEventRunCompleted
     | WsServerEventRunError
+    | WsServerEventRunProgress
+    | WsServerEventMessageAppended
 )
 
 

@@ -295,6 +295,43 @@ export class ChatPanel extends LitElement {
         }
         break;
       }
+      case 'event.run.progress': {
+        // Per-turn progress label (tool_use / running / queued /
+        // container_starting). The orchestrator emits these on
+        // ``web.stream.* type=status``; legacy /ws/chat forwarded
+        // them, the v1 cutover dropped the branch, so until this
+        // handler landed the SPA stopped showing "Calling Read…"
+        // and similar phase indicators between event.run.started
+        // and the first event.run.token.
+        //
+        // Scope to the active run so a redelivered stale frame
+        // doesn't briefly flash a phase that already passed.
+        const progressRunId =
+          typeof (e as { run_id?: unknown }).run_id === 'string'
+            ? (e as { run_id: string }).run_id
+            : null;
+        if (progressRunId && progressRunId === this.activeRunId) {
+          this.agentStatus = { label: this.formatProgressLabel(e) };
+        }
+        break;
+      }
+      case 'event.message.appended': {
+        // Out-of-band agent push (today: scheduled-task reminder).
+        // Append as a new assistant bubble, mirroring how messages
+        // fetched from GET /messages on reload are rendered. Does
+        // NOT touch run state — these arrive outside any user run.
+        const content =
+          typeof (e as { content?: unknown }).content === 'string'
+            ? (e as { content: string }).content
+            : '';
+        if (content) {
+          this.messages = [
+            ...this.messages,
+            { role: 'assistant', content },
+          ];
+        }
+        break;
+      }
       case 'event.run.error': {
         const message =
           typeof (e as { message?: unknown }).message === 'string'
@@ -351,6 +388,33 @@ export class ChatPanel extends LitElement {
         // dev/QA and will be re-wired when the engine starts emitting
         // the event. Forward-compat: unknown event types are ignored.
         break;
+    }
+  }
+
+  /** Map an ``event.run.progress`` payload to the human-readable
+   *  string shown in the progress line. Unknown statuses fall back
+   *  to a "Working…" label rather than the raw kind so a new orch
+   *  progress type doesn't surface as e.g. ``compaction_started``
+   *  to end users. Keeping the map here (not in the protocol) lets
+   *  copy iterate without bumping the wire schema. */
+  private formatProgressLabel(e: ServerEvent): string {
+    const ev = e as {
+      status?: unknown;
+      tool?: unknown;
+    };
+    const status = typeof ev.status === 'string' ? ev.status : '';
+    const tool = typeof ev.tool === 'string' && ev.tool ? ev.tool : null;
+    switch (status) {
+      case 'running':
+        return 'Thinking…';
+      case 'tool_use':
+        return tool ? `Calling ${tool}…` : 'Calling tool…';
+      case 'container_starting':
+        return 'Starting container…';
+      case 'queued':
+        return 'Queued…';
+      default:
+        return 'Working…';
     }
   }
 

@@ -144,6 +144,68 @@ async def _send_event(ws: WebSocket, frame: dict[str, Any]) -> None:
         await ws.send_json(frame)
 
 
+def _build_outbound_frame(*, text: str, timestamp: str) -> dict[str, Any]:
+    """Build an ``event.message.appended`` frame for an out-of-band
+    agent reply (scheduled-task reminder, future cross-chat
+    notification, etc).
+
+    Deliberately carries no ``run_id``: out-of-band messages aren't
+    bound to a user-initiated request.run lifecycle, and synthesising
+    a fake one would pollute the runs table on the SPA side. The
+    chat-panel renders these the same way it renders messages fetched
+    from ``GET /api/v1/conversations/{id}/messages`` on reload.
+    """
+    return {
+        "type": "event.message.appended",
+        "content": text,
+        "source": "scheduled_task",
+        "timestamp": timestamp,
+    }
+
+
+def _build_progress_frame_or_none(
+    active_run_id: str | None, payload: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Build an ``event.run.progress`` frame from a status payload, or
+    ``None`` when there's no active run to anchor it to.
+
+    The orchestrator publishes per-turn progress indicators
+    (``running`` / ``tool_use`` / ``queued`` / ``container_starting``)
+    on ``web.stream.{...}`` as a ``kind="status"`` chunk whose
+    ``content`` carries a JSON-serialised payload like
+    ``{"status": "tool_use", "tool": "Read", "input": "..."}``.
+    Legacy ``/ws/chat`` forwarded this; v1 dropped the branch and the
+    SPA stopped seeing "Calling Read…" / "Starting container…" labels.
+
+    Restore the path here with explicit field whitelisting so a future
+    metadata addition on the orch side doesn't accidentally leak
+    internal-only keys to the browser. ``tool`` and ``input_preview``
+    are populated only for ``tool_use`` payloads (matches the
+    ``ToolUseEvent`` metadata shape in agent_runner.main).
+    """
+    if active_run_id is None:
+        return None
+    status = payload.get("status")
+    if not isinstance(status, str) or not status:
+        return None
+    frame: dict[str, Any] = {
+        "type": "event.run.progress",
+        "run_id": active_run_id,
+        "status": status,
+    }
+    tool = payload.get("tool")
+    if isinstance(tool, str) and tool:
+        frame["tool"] = tool
+    # agent_runner publishes the truncated preview under ``input``
+    # (see ToolUseEvent → ContainerOutput.metadata). Rename here so
+    # the wire field name carries the truncation semantics explicitly
+    # — the SPA shouldn't think it's getting the full input.
+    input_preview = payload.get("input")
+    if isinstance(input_preview, str) and input_preview:
+        frame["input_preview"] = input_preview
+    return frame
+
+
 async def _terminate_run_completed(
     *, run_id: str, tenant_id: str, usage: Any | None
 ) -> None:
@@ -259,6 +321,17 @@ async def stream(
         ordered_consumer=True,
         deliver_policy=DeliverPolicy.NEW,
     )
+    # ``web.outbound.*`` carries complete agent replies that bypass
+    # the streaming path — today's only producer is the scheduled-task
+    # send_message IPC bridge in ``rolemesh.main``. Legacy ``/ws/chat``
+    # subscribed here; v1 missed it during the 2026-05-20 cutover, so
+    # scheduled-task reminders only appeared after a page reload
+    # (DB persistence kept the message; live push was silently dropped).
+    outbound_sub = await js.subscribe(
+        f"web.outbound.{binding_id}.{conv.channel_chat_id}",
+        ordered_consumer=True,
+        deliver_policy=DeliverPolicy.NEW,
+    )
 
     async def _forward_stream() -> None:
         """Fan NATS stream chunks to ``event.run.*`` frames.
@@ -321,6 +394,20 @@ async def stream(
                             "run_id": run_id,
                         },
                     )
+                elif kind == "status":
+                    # Per-turn progress indicator (running / tool_use /
+                    # queued / container_starting). Legacy ``/ws/chat``
+                    # forwarded these; the v1 cutover dropped the
+                    # branch, so the SPA stopped seeing "Calling Read…"
+                    # and "Starting container…" labels even though the
+                    # orchestrator kept publishing them. See
+                    # ``_build_progress_frame_or_none`` for the wire
+                    # contract — None is returned when no run is
+                    # active OR the payload lacks a ``status`` field.
+                    inner = json.loads(data.get("content", "{}"))
+                    progress = _build_progress_frame_or_none(run_id, inner)
+                    if progress is not None:
+                        await _send_event(ws, progress)
                 elif kind == "safety_blocked":
                     inner = json.loads(data.get("content", "{}"))
                     # Same ordering rationale as ``done`` above.
@@ -353,7 +440,37 @@ async def stream(
                 with contextlib.suppress(OSError, RuntimeError):
                     await msg.ack()
 
-    fwd_task = asyncio.create_task(_forward_stream())
+    async def _forward_outbound() -> None:
+        """Fan ``web.outbound.*`` payloads to ``event.message.appended``
+        frames. Independent of ``active_run_id`` — these messages are
+        agent-initiated side-channel deliveries (scheduled-task
+        reminders today; cross-chat notifications in the future) and
+        don't belong to any user-initiated run. See
+        ``_build_outbound_frame`` for the frame contract rationale.
+        """
+        async for msg in outbound_sub.messages:
+            try:
+                data = json.loads(msg.data)
+                text = data.get("text")
+                if isinstance(text, str) and text:
+                    await _send_event(
+                        ws,
+                        _build_outbound_frame(
+                            text=text,
+                            timestamp=datetime.now(UTC).isoformat(),
+                        ),
+                    )
+                await msg.ack()
+            except (WebSocketDisconnect, RuntimeError):
+                return
+            except (OSError, ValueError, TypeError, KeyError):
+                with contextlib.suppress(OSError, RuntimeError):
+                    await msg.ack()
+
+    fwd_tasks = [
+        asyncio.create_task(_forward_stream()),
+        asyncio.create_task(_forward_outbound()),
+    ]
 
     try:
         while True:
@@ -400,11 +517,14 @@ async def stream(
         # and the next GET /runs/{id} reports the truth.
         pass
     finally:
-        fwd_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await fwd_task
-        with contextlib.suppress(Exception):
-            await stream_sub.unsubscribe()
+        for t in fwd_tasks:
+            t.cancel()
+        for t in fwd_tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await t
+        for sub in (stream_sub, outbound_sub):
+            with contextlib.suppress(Exception):
+                await sub.unsubscribe()
 
 
 # ---------------------------------------------------------------------------

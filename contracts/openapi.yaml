@@ -2722,6 +2722,62 @@ components:
           additionalProperties: true
           nullable: true
 
+    WsServerEventRunProgress:
+      type: object
+      required: [type, run_id, status]
+      properties:
+        type: { type: string, enum: [event.run.progress] }
+        run_id: { type: string, format: uuid }
+        status:
+          type: string
+          description: |
+            Granular phase of the active run. Today's set:
+            `running`, `tool_use`, `queued`, `container_starting`.
+            Kept as an open string (not an enum) so a new
+            orchestrator progress kind doesn't have to fail
+            validation before the SPA learns about it; unknown
+            values render via the fallback label.
+        tool:
+          type: string
+          nullable: true
+          description: |
+            Tool name when `status == tool_use`. Null otherwise.
+        input_preview:
+          type: string
+          nullable: true
+          description: |
+            Truncated preview of the tool input (orchestrator
+            truncates server-side; the name carries the semantic).
+            Null for non-tool statuses.
+
+    WsServerEventMessageAppended:
+      type: object
+      required: [type, content, source, timestamp]
+      properties:
+        type: { type: string, enum: [event.message.appended] }
+        content: { type: string }
+        source:
+          type: string
+          enum: [scheduled_task]
+          description: |
+            What pushed this message. Currently only scheduled-task
+            replies; future side-channel deliveries (cross-chat,
+            agent-to-agent) extend the enum.
+        timestamp:
+          type: string
+          format: date-time
+          description: |
+            Server clock at forward time. The SPA uses this for
+            bubble ordering when no DB read has happened yet (the
+            persisted row's authoritative timestamp may differ
+            slightly; the next reload will reconcile via GET
+            /api/v1/conversations/{id}/messages).
+        # No run_id: out-of-band agent messages aren't bound to a
+        # user-initiated request.run lifecycle. The SPA renders them
+        # the same way it renders messages fetched from REST on
+        # reload — synthesising a fake run_id would pollute the
+        # client-side run map and confuse the cancel/stop paths.
+
     # Server → client. Discriminated on `type`; clients can pattern
     # match on the literal and TS narrows to the matching member.
     WsServerEvent:
@@ -2730,6 +2786,8 @@ components:
         - $ref: '#/components/schemas/WsServerEventRunToken'
         - $ref: '#/components/schemas/WsServerEventRunCompleted'
         - $ref: '#/components/schemas/WsServerEventRunError'
+        - $ref: '#/components/schemas/WsServerEventRunProgress'
+        - $ref: '#/components/schemas/WsServerEventMessageAppended'
       discriminator:
         propertyName: type
         mapping:
@@ -2737,6 +2795,8 @@ components:
           event.run.token: '#/components/schemas/WsServerEventRunToken'
           event.run.completed: '#/components/schemas/WsServerEventRunCompleted'
           event.run.error: '#/components/schemas/WsServerEventRunError'
+          event.run.progress: '#/components/schemas/WsServerEventRunProgress'
+          event.message.appended: '#/components/schemas/WsServerEventMessageAppended'
 
     WsClientFrameRequestRun:
       type: object
