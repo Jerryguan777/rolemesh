@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import socket
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -30,6 +31,7 @@ if TYPE_CHECKING:
     from .harness import OrchestratorHarness
 
 _NATS_URL = os.environ.get("NATS_URL", "nats://localhost:4222")
+_THIS_DIR = Path(__file__).parent
 
 
 def _nats_reachable(url: str) -> bool:
@@ -62,16 +64,22 @@ if not _nats_reachable(_NATS_URL):
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
-    """Stamp every test under this directory with the ``e2e`` marker.
+    """Stamp tests under THIS directory with the ``e2e`` marker.
 
-    Pytest auto-loads the nearest conftest, so this hook only fires
-    for items collected under ``tests/approval/e2e/``. Done at the
-    conftest level rather than by adding ``pytestmark`` to every file
-    so a new test file in this dir gets the marker by default and
-    can't accidentally leak into a fast PR run.
+    ``pytest_collection_modifyitems`` is a SESSION-wide hook: ``items``
+    holds every collected test in the run, not only those under this
+    conftest's directory. We must filter by path — otherwise a
+    full-suite collection from the repo root marks the ENTIRE suite
+    ``e2e`` and the default ``-m 'not integration and not e2e'``
+    deselects everything, so PR CI runs zero tests (vacuously green).
+
+    Done at the conftest level (rather than ``pytestmark`` per file) so
+    a new test file in this dir gets the marker by default and can't
+    accidentally leak into a fast PR run.
     """
     for item in items:
-        item.add_marker(pytest.mark.e2e)
+        if _THIS_DIR in item.path.parents:
+            item.add_marker(pytest.mark.e2e)
 
 
 @pytest.fixture
