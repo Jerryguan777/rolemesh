@@ -284,6 +284,8 @@ class ApprovalCoordinator:
         decision: str,
         decided_by: str | None,
         note: str | None = None,
+        expected_tenant_id: str | None = None,
+        expected_conversation_id: str | None = None,
     ) -> bool:
         """Apply a human decision: persist, relay to the container, resume.
 
@@ -293,9 +295,33 @@ class ApprovalCoordinator:
         NOT forward an ``approve`` — running a tool the user never authorised for
         this round is the failure mode we are guarding against (§8 decision
         race).
+
+        IDOR guard (S4): ``request_id`` is a bare UUID on the wire (Telegram
+        ``callback_data`` / a web decision frame). A channel that authenticated
+        an approver passes ``expected_tenant_id`` (and, when it knows it, the
+        ``expected_conversation_id`` the approver owns); a request whose pending
+        row does not match is refused **before** any DB write or relay, so a
+        guessed/forged ``request_id`` can never decide another tenant's — or
+        another conversation's — approval. Omitting the guards (internal
+        callers: fail-closed reject, expiry) keeps the legacy behaviour.
         """
         pending = self._pending.get(request_id)
         if pending is None:
+            return False
+        if expected_tenant_id is not None and pending.tenant_id != expected_tenant_id:
+            logger.warning(
+                "approval decide: tenant mismatch — refusing (IDOR guard)",
+                request_id=request_id,
+            )
+            return False
+        if (
+            expected_conversation_id is not None
+            and pending.conversation_id != expected_conversation_id
+        ):
+            logger.warning(
+                "approval decide: conversation mismatch — refusing (IDOR guard)",
+                request_id=request_id,
+            )
             return False
         status = "approved" if decision == "approve" else "rejected"
         row: ApprovalRequest | None = None

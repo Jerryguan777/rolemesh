@@ -26,15 +26,15 @@ import sys
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from rolemesh.channels.gateway import ChannelGateway
-    from rolemesh.db.approval import ApprovalRequest
     from rolemesh.orchestration.approval_coordinator import ApprovalCoordinator
+    from rolemesh.orchestration.approval_notify import ApprovalNotifier
     from rolemesh.safety.engine import SafetyEngine
 
 from rolemesh.agent import (
@@ -262,6 +262,107 @@ _safety_thread_pool: object | None = None
 # module without full startup stays cheap.
 _approval_coordinator: ApprovalCoordinator | None = None
 
+# HITL approval human-facing delivery (docs §10 S4). Owns the Telegram/web card
+# lifecycle (deliver on pending, deterministically edit on resolve) and the
+# card-location cache the decision funnel authorises taps against. Created
+# alongside the coordinator; None until startup.
+_approval_notifier: ApprovalNotifier | None = None
+
+
+async def _telegram_approval_decision(
+    request_id: str, decision: str, telegram_user_id: str, chat_id: str
+) -> str | None:
+    """Funnel a Telegram ✅/❌ tap into the coordinator (docs §10 S4).
+
+    IDOR guard: ``callback_data`` carries only ``request_id`` + verb. The
+    authoritative ``(tenant_id, conversation_id, chat_id)`` come from the
+    orchestrator's own card-location cache (not the client), and the tapping
+    Telegram account must resolve — via ``user_channel_identities`` — to a
+    RoleMesh user *in that tenant*. A guessed request_id, an unlinked sender,
+    or a tap from a different chat is refused before any decision is recorded.
+    Returns short toast text for the tap.
+    """
+    coordinator = _approval_coordinator
+    notifier = _approval_notifier
+    if coordinator is None or notifier is None:
+        return "Approvals are not ready yet; please retry."
+    ref = notifier.card_ref(request_id)
+    if ref is None:
+        return "This approval is no longer pending."
+    if chat_id and ref.chat_id and chat_id != ref.chat_id:
+        # Tap came from a chat other than the one the card lives in.
+        return "Not authorized to decide this approval."
+    from rolemesh.db.channel_identity import resolve_user_from_channel_sender
+
+    approver_user_id = await resolve_user_from_channel_sender(
+        ref.tenant_id, "telegram", telegram_user_id
+    )
+    if approver_user_id is None:
+        return "Your Telegram account is not linked; cannot approve."
+    won = await coordinator.decide(
+        request_id,
+        decision=decision,
+        decided_by=approver_user_id,
+        expected_tenant_id=ref.tenant_id,
+        expected_conversation_id=ref.conversation_id,
+    )
+    if not won:
+        return "This approval was already decided."
+    if decision == "approve":
+        # Reject/expire edit the card via the coordinator's notify_hard; the
+        # winning approve closes the loop here (no LLM path edits it).
+        await notifier.mark_outcome(request_id, "approved")
+        return "Approved ✅"
+    return "Rejected ❌"
+
+
+async def _web_approval_decision(
+    binding_id: str, chat_id: str, body: dict[str, object]
+) -> None:
+    """Funnel a WebUI approval-decision frame into the coordinator (docs §10 S4).
+
+    ``binding_id``/``chat_id`` are authenticated (subject); the tenant is
+    re-derived from the binding row and the conversation from (binding, chat),
+    so the coordinator's guard binds the decision to the conversation the
+    approver actually holds a ticket for. ``decided_by`` is the WebUI-stamped
+    ticket user.
+    """
+    coordinator = _approval_coordinator
+    notifier = _approval_notifier
+    if coordinator is None or notifier is None:
+        return
+    request_id = body.get("request_id")
+    decision = body.get("decision")
+    if not isinstance(request_id, str) or decision not in ("approve", "reject"):
+        return
+    from rolemesh.db import (
+        get_channel_binding_by_id_admin,
+        get_conversation_by_binding_and_chat,
+    )
+
+    binding = await get_channel_binding_by_id_admin(binding_id)
+    if binding is None:
+        return
+    conv = await get_conversation_by_binding_and_chat(
+        binding_id, chat_id, tenant_id=binding.tenant_id
+    )
+    if conv is None:
+        return
+    decided_by = body.get("decided_by")
+    if not isinstance(decided_by, str):
+        decided_by = conv.user_id
+    note = body.get("note")
+    won = await coordinator.decide(
+        request_id,
+        decision=decision,
+        decided_by=decided_by,
+        note=note if isinstance(note, str) else None,
+        expected_tenant_id=binding.tenant_id,
+        expected_conversation_id=conv.id,
+    )
+    if won and decision == "approve":
+        await notifier.mark_outcome(request_id, "approved")
+
 
 async def _handle_agent_message_ipc(data: dict[str, object]) -> None:
     """Handle one ``agent.*.messages`` NATS publish from the send_message tool.
@@ -419,6 +520,11 @@ async def _apply_model_output_safety(
             block=("[Response blocked by safety policy]", None)
         )
     if verdict.action in ("block", "require_approval"):
+        # R4 (docs/21-hitl-approval-plan.md §1): a safety ``require_approval``
+        # verdict is a HARD block and deliberately does NOT enter HITL tool
+        # approval. HITL gates only tenant MCP-tool *policy* matches (the
+        # block-and-await hook in agent_runner); the safety pipeline's
+        # require_approval stays a terminal block alias as it is on main.
         reason = verdict.reason or "[Response blocked by safety policy]"
         # Verdict at pipeline level doesn't carry rule_ids — the audit
         # path persists per-rule records to safety_decisions separately.
@@ -1307,19 +1413,59 @@ async def _start_nats_ipc_subscriptions(transport: NatsTransport, deps: _IpcDeps
             f"agent.{job_id}.approval_decision", json.dumps(payload).encode(),
         )
 
-    async def _notify_approval_status(req: ApprovalRequest) -> None:
-        # Soft "⏳ waiting for approval" signal to the web UI (§8 suspend step 5).
-        # Telegram/Web decision intake and the hard-channel cards are S4; this is
-        # only the "we're waiting" status while the container is held.
-        if req.conversation_id:
-            await _emit_status_for_conversation(
-                req.conversation_id,
-                {
-                    "status": "awaiting_approval",
-                    "request_id": req.id,
-                    "action_summary": req.action_summary,
-                },
-            )
+    # Human-facing card delivery (§10 S4): resolve the request's conversation →
+    # binding → chat and deliver/edit the ✅/❌ card on Telegram / web. Decoupled
+    # from DB + channels by injected callables (admin-scoped: the orchestrator
+    # has no tenant context and the request row carries the authoritative ids).
+    from rolemesh.channels.telegram_gateway import TelegramGateway
+    from rolemesh.channels.web_nats_gateway import WebNatsGateway
+    from rolemesh.db import (
+        get_channel_binding_by_id_admin,
+        get_conversation_for_notification,
+        get_conversations_for_coworker,
+    )
+    from rolemesh.orchestration.approval_notify import ApprovalNotifier
+
+    async def _list_convs_for_coworker(
+        coworker_id: str, tenant_id: str
+    ) -> list[Any]:
+        return await get_conversations_for_coworker(
+            coworker_id, tenant_id=tenant_id
+        )
+
+    async def _tg_send_card(
+        binding_id: str, chat_id: str, request_id: str, summary: str
+    ) -> int | None:
+        tg = _gateways.get("telegram")
+        if not isinstance(tg, TelegramGateway):
+            return None
+        return await tg.send_approval_card(
+            binding_id, chat_id, request_id, summary
+        )
+
+    async def _tg_edit_card(
+        binding_id: str, chat_id: str, message_id: int, text: str
+    ) -> None:
+        tg = _gateways.get("telegram")
+        if isinstance(tg, TelegramGateway):
+            await tg.edit_approval_card(binding_id, chat_id, message_id, text)
+
+    async def _web_publish_card(
+        binding_id: str, chat_id: str, payload: dict[str, Any]
+    ) -> None:
+        web = _gateways.get("web")
+        if isinstance(web, WebNatsGateway):
+            await web.send_approval_event(binding_id, chat_id, payload)
+
+    global _approval_notifier
+    _approval_notifier = ApprovalNotifier(
+        get_conversation=get_conversation_for_notification,
+        get_binding=get_channel_binding_by_id_admin,
+        list_conversations_for_coworker=_list_convs_for_coworker,
+        send_telegram_card=_tg_send_card,
+        edit_telegram_card=_tg_edit_card,
+        publish_web_event=_web_publish_card,
+    )
 
     global _approval_coordinator
     _approval_coordinator = ApprovalCoordinator(
@@ -1327,7 +1473,8 @@ async def _start_nats_ipc_subscriptions(transport: NatsTransport, deps: _IpcDeps
         persistence=db_persistence(),
         resolve_tenant=_resolve_tenant_for_coworker,
         publish_decision=_publish_approval_decision,
-        notify_status=_notify_approval_status,
+        notify_status=_approval_notifier.notify_status,
+        notify_hard=_approval_notifier.notify_hard,
     )
 
     approval_request_sub = await transport.js.subscribe(
@@ -1695,11 +1842,21 @@ async def main() -> None:
 
     # Initialize gateways and add bindings
     _web_gw = WebNatsGateway(on_message=_handle_incoming, transport=_transport)
+    _telegram_gw = TelegramGateway(on_message=_handle_incoming)
     _gateways = {
-        "telegram": TelegramGateway(on_message=_handle_incoming),
+        "telegram": _telegram_gw,
         "slack": SlackGateway(on_message=_handle_incoming),
         "web": _web_gw,
     }
+
+    # HITL approval decision intake (docs §10 S4). Register BEFORE bindings are
+    # added: the Telegram bot instances capture the callback at construction
+    # (inside add_binding), and the WebNatsGateway subscribes in start(). Both
+    # funnels late-bind the coordinator/notifier globals, which are created in
+    # _start_nats_ipc_subscriptions below — by the time any decision can arrive
+    # (a card must already have been delivered) those globals are set.
+    _telegram_gw.set_on_approval_decision(_telegram_approval_decision)
+    _web_gw.set_on_approval_decision(_web_approval_decision)
 
     # Add channel bindings to gateways
     for cw in _state.coworkers.values():

@@ -63,6 +63,14 @@ export type RunCompletedEvent =
 export type RunErrorEvent =
   components['schemas']['WsServerEventRunError'];
 
+/** HITL tool-approval card push + its deterministic resolution
+ *  (docs/21-hitl-approval-plan.md §10 S4). The card UI subscribes to
+ *  these via {@link V1WsClient.onEvent}. */
+export type ApprovalRequestedEvent =
+  components['schemas']['WsServerEventApprovalRequested'];
+export type ApprovalResolvedEvent =
+  components['schemas']['WsServerEventApprovalResolved'];
+
 export type ConnectionStatus = WsConnectionStatus;
 
 export type EventHandler = (event: ServerEvent) => void;
@@ -343,6 +351,26 @@ export class V1WsClient extends WsClientBase<ConnectionStatus> {
     this.rawSend({
       type: 'request.stop',
       run_id: this.activeRunId ?? undefined,
+    });
+  }
+
+  /** Send a `request.approval_decision` frame for a pending HITL approval
+   *  (docs §10 S4). The frame carries only the `request_id` + verb; the
+   *  server stamps the approver identity from the verified WS ticket
+   *  (IDOR guard), so the browser never supplies `decided_by`. The
+   *  orchestrator relays an approve to the blocked container and edits the
+   *  card deterministically — the SPA also receives an
+   *  `event.approval.resolved` to update the card in place. */
+  sendApprovalDecision(
+    requestId: string,
+    decision: 'approve' | 'reject',
+    note?: string,
+  ): void {
+    this.rawSend({
+      type: 'request.approval_decision',
+      request_id: requestId,
+      decision,
+      note: note ?? undefined,
     });
   }
 

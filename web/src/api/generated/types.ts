@@ -1770,7 +1770,43 @@ export interface components {
              */
             timestamp: string;
         };
-        WsServerEvent: components["schemas"]["WsServerEventRunStarted"] | components["schemas"]["WsServerEventRunToken"] | components["schemas"]["WsServerEventRunCompleted"] | components["schemas"]["WsServerEventRunError"] | components["schemas"]["WsServerEventRunProgress"] | components["schemas"]["WsServerEventMessageAppended"];
+        WsServerEventApprovalRequested: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "event.approval.requested";
+            /**
+             * Format: uuid
+             * @description The approval the SPA echoes back in a
+             *     request.approval_decision frame. HITL tool approval
+             *     (docs/21-hitl-approval-plan.md §10 S4). Carried out-of-band
+             *     like event.message.appended — an approval can outlive the
+             *     run that triggered it, and scheduled-task approvals have no
+             *     run at all.
+             */
+            request_id: string;
+            /** @description One-line human summary of the gated tool call. */
+            action_summary?: string | null;
+            /** @description When the pending approval auto-expires (ISO-8601). */
+            expires_at?: string | null;
+        };
+        WsServerEventApprovalResolved: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "event.approval.resolved";
+            /** Format: uuid */
+            request_id: string;
+            /**
+             * @description The orchestrator's deterministic terminal state (no LLM in
+             *     the loop). The SPA edits the card in place.
+             * @enum {string}
+             */
+            outcome: "approved" | "rejected" | "expired";
+        };
+        WsServerEvent: components["schemas"]["WsServerEventRunStarted"] | components["schemas"]["WsServerEventRunToken"] | components["schemas"]["WsServerEventRunCompleted"] | components["schemas"]["WsServerEventRunError"] | components["schemas"]["WsServerEventRunProgress"] | components["schemas"]["WsServerEventMessageAppended"] | components["schemas"]["WsServerEventApprovalRequested"] | components["schemas"]["WsServerEventApprovalResolved"];
         WsClientFrameRequestRun: {
             /**
              * @description discriminator enum property added by openapi-typescript
@@ -1815,7 +1851,20 @@ export interface components {
              */
             run_id?: string | null;
         };
-        WsClientFrame: components["schemas"]["WsClientFrameRequestRun"] | components["schemas"]["WsClientFrameRequestCancel"] | components["schemas"]["WsClientFrameRequestStop"];
+        WsClientFrameApprovalDecision: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "request.approval_decision";
+            /** Format: uuid */
+            request_id: string;
+            /** @enum {string} */
+            decision: "approve" | "reject";
+            /** @description Optional free-text rationale shown to the agent. */
+            note?: string | null;
+        };
+        WsClientFrame: components["schemas"]["WsClientFrameRequestRun"] | components["schemas"]["WsClientFrameRequestCancel"] | components["schemas"]["WsClientFrameRequestStop"] | components["schemas"]["WsClientFrameApprovalDecision"];
     };
     responses: {
         /** @description Malformed request. */

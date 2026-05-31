@@ -818,6 +818,37 @@ class WsServerEventMessageAppended(BaseModel):
     timestamp: str
 
 
+class WsServerEventApprovalRequested(BaseModel):
+    """HITL approval card push (docs/21-hitl-approval-plan.md §10 S4).
+
+    Out-of-band, like ``event.message.appended``: an agent's blocked MCP tool
+    call needs a human ✅/❌, so the orchestrator pushes this independent of any
+    ``run_id``. ``request_id`` is what the SPA echoes back in a
+    ``request.approval_decision`` frame; the browser never sees or supplies the
+    approver identity (resolved server-side from the WS ticket — IDOR guard).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.approval.requested"]
+    request_id: str
+    action_summary: str | None = None
+    expires_at: str | None = None
+
+
+class WsServerEventApprovalResolved(BaseModel):
+    """Hard-channel result: the card's deterministic terminal state.
+
+    ``outcome`` is the orchestrator's authoritative transition, set with no LLM
+    in the loop (approve via the decision funnel; reject/expire via the
+    coordinator's hard hook). The SPA edits the card in place.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.approval.resolved"]
+    request_id: str
+    outcome: Literal["approved", "rejected", "expired"]
+
+
 # Tagged union over ``type``. Pydantic v2's Field discriminator picks
 # the right member based on the literal value, giving validation
 # errors that name the offending field (rather than the generic
@@ -829,6 +860,8 @@ WsServerEventModel = (
     | WsServerEventRunError
     | WsServerEventRunProgress
     | WsServerEventMessageAppended
+    | WsServerEventApprovalRequested
+    | WsServerEventApprovalResolved
 )
 
 
@@ -852,10 +885,27 @@ class WsClientFrameRequestCancel(BaseModel):
     run_id: str
 
 
+class WsClientFrameApprovalDecision(BaseModel):
+    """A human ✅/❌ on a pending HITL approval (docs §10 S4).
+
+    Carries only ``request_id`` + verb (+ optional note). The approver identity
+    is NOT in the frame — the WS handler stamps the authenticated
+    ``user_id``/``tenant_id`` from the verified ticket when it relays to the
+    orchestrator (same IDOR posture as ``request.run`` / ``request.stop``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["request.approval_decision"]
+    request_id: str
+    decision: Literal["approve", "reject"]
+    note: str | None = None
+
+
 WsClientFrameModel = (
     WsClientFrameRequestRun
     | WsClientFrameRequestCancel
     | WsClientFrameRequestStop
+    | WsClientFrameApprovalDecision
 )
 
 

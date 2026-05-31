@@ -2778,6 +2778,43 @@ components:
         # reload — synthesising a fake run_id would pollute the
         # client-side run map and confuse the cancel/stop paths.
 
+    WsServerEventApprovalRequested:
+      type: object
+      required: [type, request_id]
+      properties:
+        type: { type: string, enum: [event.approval.requested] }
+        request_id:
+          type: string
+          format: uuid
+          description: |
+            The approval the SPA echoes back in a
+            request.approval_decision frame. HITL tool approval
+            (docs/21-hitl-approval-plan.md §10 S4). Carried out-of-band
+            like event.message.appended — an approval can outlive the
+            run that triggered it, and scheduled-task approvals have no
+            run at all.
+        action_summary:
+          type: string
+          nullable: true
+          description: One-line human summary of the gated tool call.
+        expires_at:
+          type: string
+          nullable: true
+          description: When the pending approval auto-expires (ISO-8601).
+
+    WsServerEventApprovalResolved:
+      type: object
+      required: [type, request_id, outcome]
+      properties:
+        type: { type: string, enum: [event.approval.resolved] }
+        request_id: { type: string, format: uuid }
+        outcome:
+          type: string
+          enum: [approved, rejected, expired]
+          description: |
+            The orchestrator's deterministic terminal state (no LLM in
+            the loop). The SPA edits the card in place.
+
     # Server → client. Discriminated on `type`; clients can pattern
     # match on the literal and TS narrows to the matching member.
     WsServerEvent:
@@ -2788,6 +2825,8 @@ components:
         - $ref: '#/components/schemas/WsServerEventRunError'
         - $ref: '#/components/schemas/WsServerEventRunProgress'
         - $ref: '#/components/schemas/WsServerEventMessageAppended'
+        - $ref: '#/components/schemas/WsServerEventApprovalRequested'
+        - $ref: '#/components/schemas/WsServerEventApprovalResolved'
       discriminator:
         propertyName: type
         mapping:
@@ -2797,6 +2836,8 @@ components:
           event.run.error: '#/components/schemas/WsServerEventRunError'
           event.run.progress: '#/components/schemas/WsServerEventRunProgress'
           event.message.appended: '#/components/schemas/WsServerEventMessageAppended'
+          event.approval.requested: '#/components/schemas/WsServerEventApprovalRequested'
+          event.approval.resolved: '#/components/schemas/WsServerEventApprovalResolved'
 
     WsClientFrameRequestRun:
       type: object
@@ -2840,15 +2881,35 @@ components:
             between fast Stop click and the first event.run.started
             echo); the field is therefore optional.
 
+    WsClientFrameApprovalDecision:
+      type: object
+      required: [type, request_id, decision]
+      properties:
+        type: { type: string, enum: [request.approval_decision] }
+        request_id: { type: string, format: uuid }
+        decision:
+          type: string
+          enum: [approve, reject]
+        note:
+          type: string
+          nullable: true
+          description: Optional free-text rationale shown to the agent.
+        # No approver identity field by design: the server stamps the
+        # authenticated user_id/tenant_id from the verified WS ticket
+        # when it relays to the orchestrator (IDOR guard, same posture
+        # as request.stop). A browser cannot forge who approved.
+
     # Client → server.
     WsClientFrame:
       oneOf:
         - $ref: '#/components/schemas/WsClientFrameRequestRun'
         - $ref: '#/components/schemas/WsClientFrameRequestCancel'
         - $ref: '#/components/schemas/WsClientFrameRequestStop'
+        - $ref: '#/components/schemas/WsClientFrameApprovalDecision'
       discriminator:
         propertyName: type
         mapping:
           request.run: '#/components/schemas/WsClientFrameRequestRun'
           request.cancel: '#/components/schemas/WsClientFrameRequestCancel'
           request.stop: '#/components/schemas/WsClientFrameRequestStop'
+          request.approval_decision: '#/components/schemas/WsClientFrameApprovalDecision'
