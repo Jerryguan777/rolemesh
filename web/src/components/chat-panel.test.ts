@@ -120,3 +120,123 @@ describe('ChatPanel — Stop vs Cancel routing (design §4.1)', () => {
     expect(i.runState).toBe('running');
   });
 });
+
+
+// ---------------------------------------------------------------------------
+// Side-channel events: event.message.appended + event.run.thinking
+//
+// Pinning the v1 protocol's two non-run-bound additions (PR #38). Both
+// were missing from the original v1.1 cutover — scheduled-task replies
+// never reached the SPA live, and the typing indicator disappeared
+// entirely. A regression that drops the chat-panel handlers (or breaks
+// the run_id guard on thinking) would surface here.
+// ---------------------------------------------------------------------------
+
+
+interface InternalsWithEvents extends Internals {
+  messages: Array<{ role: string; content: string; streaming?: boolean }>;
+  agentStatus: { label: string } | null;
+  handleV1Event(e: unknown): void;
+}
+
+
+describe('ChatPanel — side-channel events (PR #38)', () => {
+  it('event.message.appended pushes a new assistant bubble', () => {
+    const { i: base } = makePanel();
+    const i = base as unknown as InternalsWithEvents;
+    i.messages = [{ role: 'user', content: 'hi' }];
+
+    i.handleV1Event({
+      type: 'event.message.appended',
+      content: '⏰ 2 minutes up!',
+      source: 'scheduled_task',
+      timestamp: '2026-05-31T12:00:00+00:00',
+    });
+
+    expect(i.messages).toHaveLength(2);
+    expect(i.messages[1]).toEqual({
+      role: 'assistant',
+      content: '⏰ 2 minutes up!',
+    });
+    // Side-channel push must NOT touch run state — there's no
+    // user-initiated run associated with a scheduled-task reminder.
+    expect(i.runState).toBe('idle');
+  });
+
+  it('event.message.appended with empty content is ignored', () => {
+    const { i: base } = makePanel();
+    const i = base as unknown as InternalsWithEvents;
+    i.messages = [];
+
+    i.handleV1Event({
+      type: 'event.message.appended',
+      content: '',
+      source: 'scheduled_task',
+      timestamp: '2026-05-31T12:00:00+00:00',
+    });
+
+    // An empty bubble would render as a blank rectangle; defensive
+    // drop keeps malformed orchestrator publishes from polluting
+    // the conversation.
+    expect(i.messages).toEqual([]);
+  });
+
+  it('event.run.progress renders a tool_use label when run_id matches', () => {
+    const { i: base } = makePanel();
+    const i = base as unknown as InternalsWithEvents;
+    i.activeRunId = 'run-current';
+    i.agentStatus = null;
+
+    i.handleV1Event({
+      type: 'event.run.progress',
+      run_id: 'run-current',
+      status: 'tool_use',
+      tool: 'Read',
+      input_preview: 'file=README.md',
+    });
+    expect(i.agentStatus).toEqual({ label: 'Calling Read…' });
+  });
+
+  it('event.run.progress maps known statuses to canonical labels', () => {
+    const { i: base } = makePanel();
+    const i = base as unknown as InternalsWithEvents;
+    i.activeRunId = 'r1';
+
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ status: 'running' }, 'Thinking…'],
+      [{ status: 'container_starting' }, 'Starting container…'],
+      [{ status: 'queued' }, 'Queued…'],
+      [{ status: 'tool_use' }, 'Calling tool…'],
+      // Unknown status falls back to a generic label rather than
+      // leaking the raw kind to end users (e.g. ``compaction_started``
+      // would look like a bug to a non-engineer).
+      [{ status: 'unknown_kind_xyz' }, 'Working…'],
+    ];
+    for (const [extra, expectedLabel] of cases) {
+      i.agentStatus = null;
+      i.handleV1Event({ type: 'event.run.progress', run_id: 'r1', ...extra });
+      expect(i.agentStatus).toEqual({ label: expectedLabel });
+    }
+  });
+
+  it('event.run.progress from a stale run is ignored', () => {
+    // JetStream redelivery on reconnect can replay an old progress
+    // frame after the user has moved on to a new turn. Without the
+    // run_id guard, the SPA would briefly flash a phase that's
+    // already passed — visually disorienting and a clear regression
+    // signal in QA.
+    const { i: base } = makePanel();
+    const i = base as unknown as InternalsWithEvents;
+    i.activeRunId = 'run-current';
+    i.agentStatus = null;
+
+    i.handleV1Event({
+      type: 'event.run.progress',
+      run_id: 'run-previous',
+      status: 'tool_use',
+      tool: 'Read',
+    });
+
+    expect(i.agentStatus).toBeNull();
+  });
+});

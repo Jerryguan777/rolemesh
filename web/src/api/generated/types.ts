@@ -1720,7 +1720,57 @@ export interface components {
                 [key: string]: unknown;
             } | null;
         };
-        WsServerEvent: components["schemas"]["WsServerEventRunStarted"] | components["schemas"]["WsServerEventRunToken"] | components["schemas"]["WsServerEventRunCompleted"] | components["schemas"]["WsServerEventRunError"];
+        WsServerEventRunProgress: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "event.run.progress";
+            /** Format: uuid */
+            run_id: string;
+            /**
+             * @description Granular phase of the active run. Today's set:
+             *     `running`, `tool_use`, `queued`, `container_starting`.
+             *     Kept as an open string (not an enum) so a new
+             *     orchestrator progress kind doesn't have to fail
+             *     validation before the SPA learns about it; unknown
+             *     values render via the fallback label.
+             */
+            status: string;
+            /** @description Tool name when `status == tool_use`. Null otherwise. */
+            tool?: string | null;
+            /**
+             * @description Truncated preview of the tool input (orchestrator
+             *     truncates server-side; the name carries the semantic).
+             *     Null for non-tool statuses.
+             */
+            input_preview?: string | null;
+        };
+        WsServerEventMessageAppended: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "event.message.appended";
+            content: string;
+            /**
+             * @description What pushed this message. Currently only scheduled-task
+             *     replies; future side-channel deliveries (cross-chat,
+             *     agent-to-agent) extend the enum.
+             * @enum {string}
+             */
+            source: "scheduled_task";
+            /**
+             * Format: date-time
+             * @description Server clock at forward time. The SPA uses this for
+             *     bubble ordering when no DB read has happened yet (the
+             *     persisted row's authoritative timestamp may differ
+             *     slightly; the next reload will reconcile via GET
+             *     /api/v1/conversations/{id}/messages).
+             */
+            timestamp: string;
+        };
+        WsServerEvent: components["schemas"]["WsServerEventRunStarted"] | components["schemas"]["WsServerEventRunToken"] | components["schemas"]["WsServerEventRunCompleted"] | components["schemas"]["WsServerEventRunError"] | components["schemas"]["WsServerEventRunProgress"] | components["schemas"]["WsServerEventMessageAppended"];
         WsClientFrameRequestRun: {
             /**
              * @description discriminator enum property added by openapi-typescript
