@@ -1,6 +1,7 @@
 // Pure state helpers for the HITL approval cards (docs/21-hitl-approval-plan.md
-// §10 S5). Kept out of `chat-panel.ts` so the event→state transitions are unit-
-// testable in isolation, without mounting the whole chat surface.
+// §10 S5; rich-card contract in .hitl-ui/spec.md §3 + Appendix C.5). Kept out of
+// `chat-panel.ts` so the event→state transitions are unit-testable in isolation,
+// without mounting the whole chat surface.
 //
 // The card list is the SPA's view of in-flight approvals for the *current*
 // conversation. Three inputs feed it:
@@ -9,7 +10,10 @@
 //   - `GET /api/v1/approval-requests` (reconnect) → the authoritative pending set
 //
 // Every function is pure and returns a fresh array (Lit `@state` change
-// detection is reference-based), never mutating the input.
+// detection is reference-based), never mutating the input. The one exception to
+// "pure" is `applyResolved` stamping a client-side `resolvedAt`: the wire's
+// resolved event carries no timestamp (§3.6 says fall back to client time), so
+// we read the wall clock at flip time. That is a deliberate, documented seam.
 
 import type { components } from '../api/generated/types.js';
 import type {
@@ -17,16 +21,55 @@ import type {
   ApprovalResolvedEvent,
 } from '../ws/v1_client.js';
 
-export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'expired';
+export type ApprovalStatus =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'expired'
+  | 'cancelled';
 
 export interface ApprovalCard {
   requestId: string;
-  actionSummary: string | null;
+  /** The gated MCP server (`event.approval.requested.mcp_server_name`). */
+  mcpServerName: string | null;
+  /** The gated tool (`tool_name`). */
+  toolName: string | null;
+  /** Raw tool arguments — the decision input (§3.3). Defaults to `{}` when the
+   *  wire omits it or sends a non-object (the server drops non-dicts upstream,
+   *  but we still normalise defensively). */
+  params: Record<string, unknown>;
+  /** The coworker whose call is gated; used by the card meta line. */
+  coworkerId: string | null;
+  /** The agent's free-text "why" (§3.4). Null ⇒ the card omits the block. */
+  rationale: string | null;
+  /** When the approval became pending (ISO-8601), for the "2m ago" meta. */
+  requestedAt: string | null;
+  /** When the pending approval auto-expires (ISO-8601), drives the countdown. */
   expiresAt: string | null;
+  /** Server's one-line hint; kept for narrow surfaces and as a card subtitle. */
+  actionSummary: string | null;
   status: ApprovalStatus;
+  /** Client-stamped wall-clock (epoch ms) of the terminal flip; null while
+   *  pending. The wire's resolved event has no timestamp, so this is our own
+   *  record of "decided at" for the resolved header (§3.6). */
+  resolvedAt: number | null;
+  /** The approver's own rejection note (§3.5), held locally so the resolved
+   *  card can echo it back ("YOUR REASON"). Never comes off the wire — it is
+   *  what the user typed — and is lost on reconnect, which is acceptable. */
+  note: string | null;
 }
 
 type PendingRow = components['schemas']['PendingApprovalRequest'];
+
+/** Normalise a wire `params` value to a plain object. A non-object (array,
+ *  string, null, undefined) collapses to `{}` so the card never has to special-
+ *  case it — matching the server, which discards non-dict params upstream. */
+function coerceParams(p: unknown): Record<string, unknown> {
+  if (p && typeof p === 'object' && !Array.isArray(p)) {
+    return p as Record<string, unknown>;
+  }
+  return {};
+}
 
 /** Add a pending card for a freshly-requested approval.
  *
@@ -44,9 +87,17 @@ export function upsertRequested(
     ...cards,
     {
       requestId: ev.request_id,
-      actionSummary: ev.action_summary ?? null,
+      mcpServerName: ev.mcp_server_name ?? null,
+      toolName: ev.tool_name ?? null,
+      params: coerceParams(ev.params),
+      coworkerId: ev.coworker_id ?? null,
+      rationale: ev.rationale ?? null,
+      requestedAt: ev.requested_at ?? null,
       expiresAt: ev.expires_at ?? null,
+      actionSummary: ev.action_summary ?? null,
       status: 'pending',
+      resolvedAt: null,
+      note: null,
     },
   ];
 }
@@ -55,7 +106,8 @@ export function upsertRequested(
  *
  *  A resolution for an id we never showed is ignored (no phantom card with a
  *  status but no context). A card that already resolved is left untouched
- *  (first-wins, mirroring the server-side row transition). */
+ *  (first-wins, mirroring the server-side row transition). The flip stamps
+ *  `resolvedAt` from the wall clock since the wire carries no timestamp. */
 export function applyResolved(
   cards: readonly ApprovalCard[],
   ev: ApprovalResolvedEvent,
@@ -64,7 +116,7 @@ export function applyResolved(
   const next = cards.map((c) => {
     if (c.requestId !== ev.request_id || c.status !== 'pending') return c;
     changed = true;
-    return { ...c, status: ev.outcome };
+    return { ...c, status: ev.outcome, resolvedAt: Date.now() };
   });
   return changed ? next : [...cards];
 }
@@ -85,9 +137,17 @@ export function mergePending(
   const resolved = cards.filter((c) => c.status !== 'pending');
   const fromRows: ApprovalCard[] = rows.map((r) => ({
     requestId: r.request_id,
+    mcpServerName: r.mcp_server_name ?? null,
+    toolName: r.tool_name ?? null,
+    params: coerceParams(r.params),
+    coworkerId: r.coworker_id ?? null,
+    rationale: r.rationale ?? null,
+    requestedAt: r.requested_at ?? null,
+    expiresAt: r.expires_at ?? null,
     actionSummary: r.action_summary ?? null,
-    expiresAt: r.expires_at,
     status: 'pending',
+    resolvedAt: null,
+    note: null,
   }));
   // De-dup defensively: a row whose id already has a resolved card (decided in
   // the same instant the read raced) stays resolved, not re-pended.

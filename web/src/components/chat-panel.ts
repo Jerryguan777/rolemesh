@@ -270,8 +270,16 @@ export class ChatPanel extends LitElement {
     if (!this.v1) return;
     if (this.approvalInflight.has(detail.requestId)) return;
     this.approvalInflight.add(detail.requestId);
+    // Stash the rejection note locally so the resolved card can echo it back
+    // ("YOUR REASON", §3.6) — the note never returns on the resolved event.
+    if (detail.decision === 'reject' && detail.note) {
+      const note = detail.note;
+      this.approvals = this.approvals.map((c) =>
+        c.requestId === detail.requestId ? { ...c, note } : c,
+      );
+    }
     this.requestUpdate();
-    this.v1.sendApprovalDecision(detail.requestId, detail.decision);
+    this.v1.sendApprovalDecision(detail.requestId, detail.decision, detail.note);
   }
 
   private handleV1Event(e: ServerEvent): void {
@@ -804,6 +812,15 @@ export class ChatPanel extends LitElement {
               .requestId=${c.requestId}
               .actionSummary=${c.actionSummary}
               .status=${c.status}
+              .mcpServerName=${c.mcpServerName}
+              .toolName=${c.toolName}
+              .params=${c.params}
+              .rationale=${c.rationale}
+              .requestedAt=${c.requestedAt}
+              .expiresAt=${c.expiresAt}
+              .coworkerName=${this.activeCoworkerName}
+              .resolvedAt=${c.resolvedAt}
+              .note=${c.note}
               .busy=${this.approvalInflight.has(c.requestId)}
             ></rm-approval-card>
           `,
