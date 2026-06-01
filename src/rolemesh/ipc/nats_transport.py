@@ -84,6 +84,15 @@ class NatsTransport:
                 # subjects because its retention profile matches (short
                 # buffer, consumer-driven drain).
                 "agent.*.safety_events",
+                # HITL approval IPC (docs/21-hitl-approval-plan.md §3). All
+                # three subjects ride JetStream: the container publishes
+                # approval_request / approval_cancel and js-subscribes the
+                # decision; the orchestrator js-subscribes request/cancel and
+                # publishes the decision. They must be in this stream or
+                # ``js.subscribe`` raises NotFoundError at orchestrator startup.
+                "agent.*.approval_request",
+                "agent.*.approval_decision",
+                "agent.*.approval_cancel",
             ],
             max_age=_STREAM_MAX_AGE_S,
         )
