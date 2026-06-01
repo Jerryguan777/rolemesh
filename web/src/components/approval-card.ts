@@ -423,7 +423,7 @@ export class ApprovalCard extends LitElement {
             <button
               type="button"
               data-testid="approval-reject-cancel"
-              class="text-[12px] px-3 py-1 rounded-md border border-border-2 dark:border-d-border-2 text-ink-2 dark:text-d-ink-2 hover:bg-surface-2 dark:hover:bg-d-surface-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              class="text-[13px] font-medium px-3.5 py-1.5 rounded-lg border border-border-2 dark:border-d-border-2 text-ink-2 dark:text-d-ink-2 bg-surface dark:bg-d-surface hover:bg-surface-2 dark:hover:bg-d-surface-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               ?disabled=${this.busy}
               @click=${() => this.cancelReject()}
             >
@@ -432,7 +432,7 @@ export class ApprovalCard extends LitElement {
             <button
               type="button"
               data-testid="approval-reject-confirm"
-              class="text-[12px] px-3 py-1 rounded-md bg-red-600 text-white hover:bg-red-700 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              class="text-[13px] font-medium px-3.5 py-1.5 rounded-lg bg-[var(--rm-bad)] text-white hover:brightness-90 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               ?disabled=${this.busy}
               @click=${() => this.confirmReject()}
             >
@@ -447,20 +447,20 @@ export class ApprovalCard extends LitElement {
         <button
           type="button"
           data-testid="approval-reject"
-          class="text-[12px] px-3 py-1 rounded-md border border-red-300 dark:border-red-700 text-red-600 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/30 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+          class="text-[13px] font-medium px-3.5 py-1.5 rounded-lg border border-border-2 dark:border-d-border-2 text-ink-2 dark:text-d-ink-2 bg-surface dark:bg-d-surface hover:bg-surface-2 dark:hover:bg-d-surface-2 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
           ?disabled=${this.busy}
           @click=${() => this.openRejectForm()}
         >
-          ❌ Reject
+          Reject
         </button>
         <button
           type="button"
           data-testid="approval-approve"
-          class="text-[12px] px-3 py-1 rounded-md border border-emerald-300 dark:border-emerald-700 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-900/30 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+          class="text-[13px] font-medium px-3.5 py-1.5 rounded-lg bg-accent text-[var(--rm-accent-ink)] hover:bg-[var(--rm-accent-2)] transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
           ?disabled=${this.busy}
           @click=${() => this.approve()}
         >
-          ✅ Approve
+          Approve
         </button>
       </div>
     `;

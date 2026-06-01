@@ -78,7 +78,8 @@ export class MessageList extends LitElement {
         ${this.timeline().map((item) =>
           item.kind === 'message'
             ? html`<rm-message-item .message=${item.msg}></rm-message-item>`
-            : html`<rm-approval-card
+            : html`<div class="pl-10">
+              <rm-approval-card
                 .requestId=${item.card.requestId}
                 .actionSummary=${item.card.actionSummary}
                 .status=${item.card.status}
@@ -92,7 +93,8 @@ export class MessageList extends LitElement {
                 .resolvedAt=${item.card.resolvedAt}
                 .note=${item.card.note}
                 .busy=${this.approvalBusy.has(item.card.requestId)}
-              ></rm-approval-card>`,
+              ></rm-approval-card>
+            </div>`,
         )}
       </div>
     `;
