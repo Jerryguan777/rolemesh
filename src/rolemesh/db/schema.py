@@ -980,11 +980,19 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         "ON link_tokens(expires_at) WHERE used_at IS NULL"
     )
 
-    # --- Approval module REMOVED ---
-    # The human-approval subsystem was removed. Drop its tables, trigger,
-    # and function if a prior deployment created them, so upgraded
-    # databases retain no orphaned objects. ``require_approval`` remains a
-    # valid safety verdict (it now simply blocks the turn).
+    # --- Legacy v6.1 approval-audit cleanup ---
+    # The v6.1 "block-and-replay" approval subsystem was removed; the current
+    # block-and-await HITL module re-introduced ``approval_requests`` /
+    # ``approval_policies`` (created further below). Those new tables share the
+    # old names but NOT the old audit trigger/function/log, so drop only the
+    # genuinely-dead v6.1 objects to keep a v6.1-upgraded DB free of orphans.
+    #
+    # IMPORTANT: do NOT ``DROP TABLE approval_requests`` / ``approval_policies``
+    # here. ``_create_schema`` runs on every service start, so an unconditional
+    # drop wiped all approval history and policies on each restart (the tables
+    # were silently recreated empty below) — a real data-loss regression left
+    # over from the removal era. The CREATE TABLE IF NOT EXISTS + ADD COLUMN
+    # IF NOT EXISTS migrations below carry the schema forward without a drop.
     await conn.execute(
         "DROP TRIGGER IF EXISTS trg_approval_audit ON approval_requests"
     )
@@ -992,8 +1000,6 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         "DROP FUNCTION IF EXISTS _approval_write_audit_from_trigger()"
     )
     await conn.execute("DROP TABLE IF EXISTS approval_audit_log CASCADE")
-    await conn.execute("DROP TABLE IF EXISTS approval_requests CASCADE")
-    await conn.execute("DROP TABLE IF EXISTS approval_policies CASCADE")
 
     # --- Safety Framework tables ---
     # Admin-managed rules that the container loads as a snapshot at job

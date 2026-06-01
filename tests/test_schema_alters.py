@@ -31,13 +31,15 @@ postgres is allowed for schema-level invariants.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import asyncpg
 import pytest
 
 from rolemesh.db import (
     _get_admin_pool,
+    create_approval_policy,
+    create_approval_request,
     create_channel_binding,
     create_conversation,
     create_coworker,
@@ -72,6 +74,62 @@ async def test_create_schema_is_idempotent() -> None:
         # First call is already done by the fixture; we hammer a
         # second one to assert no exception.
         await _create_schema(conn)
+
+
+async def test_create_schema_preserves_approval_data_across_restart() -> None:
+    """``_create_schema`` MUST NOT wipe approval rows on re-run.
+
+    Regression: the builder carried an unconditional ``DROP TABLE
+    approval_requests / approval_policies CASCADE`` left over from the v6.1
+    approval-module *removal*, then recreated the tables empty further down.
+    Because ``_create_schema`` runs on every ``init_database()`` — i.e. every
+    service start — this silently wiped ALL approval history and policies on
+    each restart, so resolved cards never survived a reload after a bounce.
+
+    We seed one request and one policy, simulate a restart by re-running the
+    schema builder on the live connection, and assert both survive. Before the
+    fix this asserted-count drops to 0; after it, the rows persist.
+    """
+    tenant = await create_tenant(name="T", slug=f"appr-{uuid.uuid4().hex[:8]}")
+    cw = await create_coworker(
+        tenant_id=tenant.id, name="cw", folder=f"f-{uuid.uuid4().hex[:8]}"
+    )
+    req = await create_approval_request(
+        tenant_id=tenant.id,
+        coworker_id=cw.id,
+        job_id="job-x",
+        mcp_server_name="mock-fs",
+        action={"tool_name": "write_file", "params": {}},
+        action_summary="s",
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    policy = await create_approval_policy(
+        tenant_id=tenant.id, mcp_server_name="mock-fs", tool_name="write_file"
+    )
+
+    pool = _get_admin_pool()
+    async with pool.acquire() as conn:
+        assert (
+            await conn.fetchval(
+                "SELECT count(*) FROM approval_requests WHERE id = $1::uuid", req.id
+            )
+            == 1
+        ), "seed precondition: request row present"
+        # Simulate a service restart: the schema builder runs again on a DB
+        # that already holds approval data.
+        await _create_schema(conn)
+        assert (
+            await conn.fetchval(
+                "SELECT count(*) FROM approval_requests WHERE id = $1::uuid", req.id
+            )
+            == 1
+        ), "approval request must survive a _create_schema re-run (restart)"
+        assert (
+            await conn.fetchval(
+                "SELECT count(*) FROM approval_policies WHERE id = $1::uuid", policy.id
+            )
+            == 1
+        ), "approval policy must survive a _create_schema re-run (restart)"
 
 
 # ---------------------------------------------------------------------------
