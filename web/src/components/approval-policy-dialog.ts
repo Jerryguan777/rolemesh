@@ -1,7 +1,14 @@
-// <rm-approval-policy-dialog> — create / edit an HITL approval policy
-// (docs/21-hitl-approval-plan.md §10 S5), including the structured condition
-// builder (§7 grammar). One dialog backs both flows: `editing` null = create
-// (POST), non-null = edit (PATCH).
+// <rm-approval-policy-dialog> — create / edit / duplicate an HITL approval
+// policy (spec §5.7-5.14), including the structured condition builder (§7
+// grammar). One dialog backs all three flows:
+//   - `editing` non-null  → edit  (PATCH; title "Edit approval policy")
+//   - `duplicating` non-null → create, pre-filled (POST; "Duplicate …")
+//   - both null            → create, defaults (POST; "New approval policy")
+//
+// Every field is visible at top level — no "More options" disclosure (§5.11);
+// Priority and Enabled are core fields used on most policy creations. A live
+// preview (§5.13) regenerates on every change using the same `conditionSentence`
+// renderer as the list cards, so what the user previews is what the card shows.
 //
 // The condition builder exposes the shallow subset of the §7 grammar
 // (`{always}` or a flat and/or of `{field,op,value}` leaves) — see
@@ -11,6 +18,7 @@
 
 import { LitElement, html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 
 import './dialog.js';
 import { ApiError, getApiClient } from '../api/client.js';
@@ -25,6 +33,7 @@ import {
   type ConditionMode,
   type LeafRow,
   buildConditionExpr,
+  conditionSentence,
   emptyRow,
   exprToForm,
 } from './condition-form.js';
@@ -38,6 +47,8 @@ const INPUT_CLASS =
 export class ApprovalPolicyDialog extends LitElement {
   @property({ type: Boolean }) open = false;
   @property({ attribute: false }) editing: ApprovalPolicy | null = null;
+  /** Source policy when opening in duplicate mode — create flow, pre-filled. */
+  @property({ attribute: false }) duplicating: ApprovalPolicy | null = null;
 
   @state() private mcpServerName = '';
   @state() private toolName = '*';
@@ -65,13 +76,20 @@ export class ApprovalPolicyDialog extends LitElement {
     }
   }
 
+  /** The policy the form should seed from: the edit target, else the
+   *  duplicate source, else nothing (defaults). */
+  private seedSource(): ApprovalPolicy | null {
+    return this.editing ?? this.duplicating;
+  }
+
   private seedForm(): void {
-    if (this.editing) {
-      this.mcpServerName = this.editing.mcp_server_name;
-      this.toolName = this.editing.tool_name;
-      this.priority = this.editing.priority;
-      this.enabled = this.editing.enabled;
-      const form: ConditionForm = exprToForm(this.editing.condition_expr);
+    const src = this.seedSource();
+    if (src) {
+      this.mcpServerName = src.mcp_server_name;
+      this.toolName = src.tool_name;
+      this.priority = src.priority;
+      this.enabled = src.enabled;
+      const form: ConditionForm = exprToForm(src.condition_expr);
       this.mode = form.mode;
       this.connective = form.connective;
       this.rows = form.rows.length ? form.rows : [emptyRow()];
@@ -102,6 +120,7 @@ export class ApprovalPolicyDialog extends LitElement {
     this.busy = true;
     this.err = null;
     try {
+      let saved: ApprovalPolicy;
       if (this.editing) {
         const body: ApprovalPolicyUpdate = {
           mcp_server_name: this.mcpServerName.trim(),
@@ -112,33 +131,28 @@ export class ApprovalPolicyDialog extends LitElement {
         // Only resend the condition if it's still editable here — otherwise
         // leave the (complex) stored expression untouched.
         if (this.conditionEditable) {
-          body.condition_expr = buildConditionExpr({
-            mode: this.mode,
-            connective: this.connective,
-            rows: this.rows,
-          });
+          body.condition_expr = this.currentExpr();
         }
-        await this.api.updateApprovalPolicy(this.editing.id, body);
-        this.dispatchEvent(
-          new CustomEvent('approval-policy-updated', { bubbles: true, composed: true }),
-        );
+        saved = await this.api.updateApprovalPolicy(this.editing.id, body);
       } else {
+        // Create — covers both the New and Duplicate flows (duplicate just
+        // seeds the form; the POST is identical, server assigns a new id).
         const body: ApprovalPolicyCreate = {
           mcp_server_name: this.mcpServerName.trim(),
           tool_name: this.toolName.trim(),
           priority: this.priority,
           enabled: this.enabled,
-          condition_expr: buildConditionExpr({
-            mode: this.mode,
-            connective: this.connective,
-            rows: this.rows,
-          }),
+          condition_expr: this.currentExpr(),
         };
-        await this.api.createApprovalPolicy(body);
-        this.dispatchEvent(
-          new CustomEvent('approval-policy-created', { bubbles: true, composed: true }),
-        );
+        saved = await this.api.createApprovalPolicy(body);
       }
+      this.dispatchEvent(
+        new CustomEvent('approval-policy-saved', {
+          detail: { policy: saved },
+          bubbles: true,
+          composed: true,
+        }),
+      );
       this.close();
     } catch (err) {
       this.err =
@@ -148,6 +162,15 @@ export class ApprovalPolicyDialog extends LitElement {
     } finally {
       this.busy = false;
     }
+  }
+
+  /** condition_expr from the current form state (fail-closed per §5.14). */
+  private currentExpr() {
+    return buildConditionExpr({
+      mode: this.mode,
+      connective: this.connective,
+      rows: this.rows,
+    });
   }
 
   private updateRow(i: number, patch: Partial<LeafRow>): void {
@@ -173,7 +196,7 @@ export class ApprovalPolicyDialog extends LitElement {
           This policy uses an advanced condition that the form can't edit.
           The other fields are still editable; the condition is left as-is.
           <pre class="mt-1 text-[11.5px] overflow-x-auto">${JSON.stringify(
-            this.editing?.condition_expr ?? {},
+            this.seedSource()?.condition_expr ?? {},
             null,
             2,
           )}</pre>
@@ -182,28 +205,27 @@ export class ApprovalPolicyDialog extends LitElement {
     }
     return html`
       <div class="flex flex-col gap-2">
-        <label class="flex items-center gap-2 text-[12.5px]">
-          <input
-            type="radio"
-            name="cond-mode"
+        <div class="rm-seg" role="radiogroup" aria-label="When to require approval">
+          <button
+            type="button"
+            class="${this.mode === 'always' ? 'rm-seg--on' : ''}"
             data-testid="mode-always"
-            ?checked=${this.mode === 'always'}
-            @change=${() => { this.mode = 'always'; }}
+            aria-pressed=${this.mode === 'always'}
+            @click=${() => { this.mode = 'always'; }}
             ?disabled=${this.busy}
-          />
-          Always require approval for this tool
-        </label>
-        <label class="flex items-center gap-2 text-[12.5px]">
-          <input
-            type="radio"
-            name="cond-mode"
+          >Every time</button>
+          <button
+            type="button"
+            class="${this.mode === 'match' ? 'rm-seg--on' : ''}"
             data-testid="mode-match"
-            ?checked=${this.mode === 'match'}
-            @change=${() => { this.mode = 'match'; }}
+            aria-pressed=${this.mode === 'match'}
+            @click=${() => {
+              this.mode = 'match';
+              if (this.rows.length === 0) this.rows = [emptyRow()];
+            }}
             ?disabled=${this.busy}
-          />
-          Only when a condition matches
-        </label>
+          >Only when…</button>
+        </div>
         ${this.mode === 'match' ? this.renderLeaves() : nothing}
       </div>
     `;
@@ -211,25 +233,26 @@ export class ApprovalPolicyDialog extends LitElement {
 
   private renderLeaves(): TemplateResult {
     return html`
-      <div class="pl-6 flex flex-col gap-2" data-testid="leaf-rows">
+      <div class="pl-1 flex flex-col gap-2" data-testid="leaf-rows">
         ${this.rows.length > 1
-          ? html`<div class="text-[12px]">
-              Match
-              <select
-                class="text-[12px] px-1 py-0.5 rounded border border-surface-3 dark:border-d-surface-3 bg-surface-1 dark:bg-d-surface-1"
-                .value=${this.connective}
-                data-testid="connective"
-                @change=${(e: Event) => {
-                  this.connective = (e.target as HTMLSelectElement).value as
-                    | 'and'
-                    | 'or';
-                }}
-                ?disabled=${this.busy}
-              >
-                <option value="and">all</option>
-                <option value="or">any</option>
-              </select>
-              of:
+          ? html`<div class="flex items-center gap-2 text-[12px]">
+              <span class="text-ink-2 dark:text-d-ink-2">Combine with</span>
+              <div class="rm-seg">
+                <button
+                  type="button"
+                  class="${this.connective === 'and' ? 'rm-seg--on' : ''}"
+                  data-testid="connective-and"
+                  @click=${() => { this.connective = 'and'; }}
+                  ?disabled=${this.busy}
+                >All (AND)</button>
+                <button
+                  type="button"
+                  class="${this.connective === 'or' ? 'rm-seg--on' : ''}"
+                  data-testid="connective-or"
+                  @click=${() => { this.connective = 'or'; }}
+                  ?disabled=${this.busy}
+                >Any (OR)</button>
+              </div>
             </div>`
           : nothing}
         ${this.rows.map((r, i) => this.renderLeaf(r, i))}
@@ -291,17 +314,51 @@ export class ApprovalPolicyDialog extends LitElement {
     `;
   }
 
+  /** Live preview sentence (§5.13) — single source of truth shared with the
+   *  list cards via `conditionSentence`. */
+  private renderPreview(): TemplateResult {
+    const server = this.mcpServerName.trim() || 'a server';
+    const toolDisp = this.toolName.trim() === '*' ? 'any tool' : this.toolName.trim() || 'a tool';
+    const expr =
+      this.editing && !this.conditionEditable
+        ? this.editing.condition_expr
+        : this.currentExpr();
+    const sentence = conditionSentence(expr);
+    return html`
+      <div class="rm-pol-preview" data-testid="policy-preview">
+        When a coworker calls <code>${server} · ${toolDisp}</code>
+        ${unsafeHTML(sentence)}, pause and ask the requester to confirm before
+        running. Priority <b>${this.priority}</b>.${this.enabled
+          ? nothing
+          : html` <i>(disabled — won’t match until re-enabled)</i>`}
+      </div>
+    `;
+  }
+
+  private dialogTitle(): string {
+    if (this.editing) return 'Edit approval policy';
+    if (this.duplicating) return 'Duplicate approval policy';
+    return 'New approval policy';
+  }
+
+  private saveLabel(): string {
+    return this.editing ? 'Save changes' : 'Create policy';
+  }
+
   override render(): TemplateResult {
-    const title = this.editing ? 'Edit approval policy' : 'New approval policy';
     return html`
       <rm-dialog
-        title=${title}
+        title=${this.dialogTitle()}
         ?open=${this.open}
         ?close-on-backdrop=${!this.busy}
         ?close-on-esc=${!this.busy}
         width="560px"
         @close=${this.close}
       >
+        <p class="text-[12.5px] text-ink-2 dark:text-d-ink-2 mb-3">
+          Require a human to sign off before a coworker runs a specific tool
+          call. Approvals time out after 5 minutes and auto-reject.
+        </p>
         <div class="mb-3">
           <label class="block text-[12.5px] font-medium mb-1">MCP server name</label>
           <input
@@ -330,37 +387,42 @@ export class ApprovalPolicyDialog extends LitElement {
             ?disabled=${this.busy}
           />
         </div>
-        <div class="mb-3 flex items-center gap-4">
+        <div class="mb-3">
+          <label class="block text-[12.5px] font-medium mb-1">Require approval</label>
+          ${this.renderConditionBuilder()}
+        </div>
+        <div class="mb-2 flex items-end gap-4">
           <label class="text-[12.5px] font-medium">
             Priority
+            <span class="text-ink-3 dark:text-d-ink-3 font-normal">higher wins on ties</span>
             <input
               type="number"
-              class="${INPUT_CLASS} w-20 ml-2 inline-block"
+              class="${INPUT_CLASS} w-24 mt-1 block"
               data-testid="priority"
               .value=${String(this.priority)}
               @input=${(e: Event) => {
-                this.priority = Number((e.target as HTMLInputElement).value) || 0;
+                this.priority = parseInt((e.target as HTMLInputElement).value, 10) || 0;
               }}
               ?disabled=${this.busy}
             />
           </label>
-          <label class="flex items-center gap-2 text-[12.5px] font-medium">
-            <input
-              type="checkbox"
+          <div class="text-[12.5px] font-medium">
+            Status
+            <button
+              type="button"
+              class="rm-pol-toggle ${this.enabled ? 'rm-pol-toggle--on' : ''} mt-1"
               data-testid="enabled"
-              ?checked=${this.enabled}
-              @change=${(e: Event) => {
-                this.enabled = (e.target as HTMLInputElement).checked;
-              }}
+              aria-pressed=${this.enabled}
+              @click=${() => { this.enabled = !this.enabled; }}
               ?disabled=${this.busy}
-            />
-            Enabled
-          </label>
+            >
+              <span>${this.enabled ? 'Enabled' : 'Disabled'}</span>
+              <span class="rm-switch"></span>
+            </button>
+          </div>
         </div>
-        <div class="mb-2">
-          <label class="block text-[12.5px] font-medium mb-1">Condition</label>
-          ${this.renderConditionBuilder()}
-        </div>
+
+        ${this.renderPreview()}
 
         ${this.err
           ? html`<div
@@ -383,7 +445,7 @@ export class ApprovalPolicyDialog extends LitElement {
             data-testid="submit"
             ?disabled=${this.busy}
             @click=${() => void this.submit()}
-          >${this.busy ? 'Saving…' : this.editing ? 'Save' : 'Create'}</button>
+          >${this.busy ? 'Saving…' : this.saveLabel()}</button>
         </div>
       </rm-dialog>
     `;

@@ -89,6 +89,69 @@ export function buildConditionExpr(form: {
   return { [form.connective]: leaves } as unknown as ConditionExpr;
 }
 
+/** Reverse of {@link parseValue} for display in a sentence (§5.12).
+ *
+ *  Numbers / booleans render bare, `null` as `null`, strings quoted (so the
+ *  reader can tell `"5000"` the string from `5000` the number), arrays/objects
+ *  as JSON. This is the *display* form — distinct from {@link leafToRow}'s
+ *  edit form, which strips the quotes off a string so the input is editable. */
+export function formatValue(value: unknown): string {
+  if (value === null) return 'null';
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  if (typeof value === 'string') {
+    return `"${value.replace(/"/g, '\\"')}"`;
+  }
+  return JSON.stringify(value);
+}
+
+/** Escape a string for safe interpolation into the `conditionSentence` HTML. */
+function esc(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function leafSentence(leaf: Leaf): string {
+  return esc(`${leaf.field ?? '?'} ${leaf.op ?? '?'} ${formatValue(leaf.value)}`);
+}
+
+/** Human-readable, HTML-safe rendering of a `condition_expr` (Appendix C.3).
+ *
+ *  The single source of truth for both the list-card subtitle and the dialog's
+ *  live preview — the same sentence appears in both places so what the user
+ *  previews is exactly what the card will show. The condition body is wrapped
+ *  in `<b>…</b>`; callers must render the result with `unsafeHTML` (the leaf
+ *  text is escaped, so this is safe). Anything the flat builder can't express
+ *  (deep nesting, mixed forms) collapses to an `(advanced condition)` note
+ *  rather than lying about the shape.
+ *
+ *  Returns the *clause* only ("every time" / "when <b>…</b>"); callers add the
+ *  surrounding "→ pause to confirm" / full-sentence framing. */
+export function conditionSentence(expr: unknown): string {
+  if (typeof expr !== 'object' || expr === null) return 'every time';
+  const obj = expr as Record<string, unknown>;
+  if ('always' in obj) {
+    return obj.always === false ? 'never' : 'every time';
+  }
+  if (isLeaf(obj)) {
+    return `when <b>${leafSentence(obj)}</b>`;
+  }
+  for (const [connective, word] of [
+    ['and', 'AND'],
+    ['or', 'OR'],
+  ] as const) {
+    const subs = obj[connective];
+    if (Array.isArray(subs) && subs.length > 0 && subs.every(isLeaf)) {
+      return `when <b>${(subs as Leaf[]).map(leafSentence).join(` ${word} `)}</b>`;
+    }
+  }
+  return 'when <i>(advanced condition)</i>';
+}
+
 interface Leaf {
   field: string;
   op: string;
