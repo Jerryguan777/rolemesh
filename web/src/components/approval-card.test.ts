@@ -39,20 +39,13 @@ describe('<rm-approval-card>', () => {
     vi.useRealTimers();
   });
 
-  it('renders the action summary and both action buttons when pending', async () => {
-    el = await mount({ actionSummary: 'charge $500 on stripe' });
-    expect($(el, '[data-testid="approval-summary"]')?.textContent).toContain(
-      'charge $500 on stripe',
+  it('renders the tool chip and both action buttons when pending', async () => {
+    el = await mount({ mcpServerName: 'stripe', toolName: 'charge' });
+    expect($(el, '[data-testid="approval-tool"]')?.textContent).toContain(
+      'charge',
     );
     expect($(el, '[data-testid="approval-approve"]')).not.toBeNull();
     expect($(el, '[data-testid="approval-reject"]')).not.toBeNull();
-  });
-
-  it('falls back to a generic summary when none is given', async () => {
-    el = await mount({ actionSummary: null });
-    expect($(el, '[data-testid="approval-summary"]')?.textContent).toContain(
-      'needs your approval',
-    );
   });
 
   // --- new field rendering ---------------------------------------------------

@@ -468,10 +468,6 @@ export class ApprovalCard extends LitElement {
 
   override render(): TemplateResult {
     const resolved = this.status !== 'pending';
-    const summary =
-      this.actionSummary && this.actionSummary.trim()
-        ? this.actionSummary
-        : 'A tool call needs your approval.';
     return html`
       <div
         class="my-2 max-w-[560px] rounded-xl border border-border-2 dark:border-d-border-2 bg-surface dark:bg-d-surface overflow-hidden ${resolved
@@ -483,12 +479,6 @@ export class ApprovalCard extends LitElement {
         ${this.renderHeader()}
         <div class="px-3.5 py-3">
           ${this.renderMeta()}${this.renderToolChip()}
-          <div
-            class="text-[13px] text-ink-1 dark:text-d-ink-1 break-words mb-2.5"
-            data-testid="approval-summary"
-          >
-            ${summary}
-          </div>
           <div class=${resolved ? 'opacity-75' : ''}>
             ${this.renderParams()}
           </div>
