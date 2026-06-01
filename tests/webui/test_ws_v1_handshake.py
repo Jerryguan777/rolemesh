@@ -107,6 +107,21 @@ _TEST_SECRET = "v1-ws-handshake-secret-only-for-tests"
 os.environ.setdefault("WS_TICKET_SECRET", _TEST_SECRET)
 
 
+@pytest.fixture(autouse=True)
+def _pin_ws_ticket_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the app's verifier to THIS module's signing secret per test.
+
+    The module-level ``setdefault`` above is order-dependent: a sibling test
+    module collected first (``test_v1_auth_endpoints`` uses a *different*
+    secret) wins the global env, so in a batch run our valid tickets verify
+    as 4002. ``ws_ticket._get_secret`` reads ``WS_TICKET_SECRET`` dynamically,
+    so pinning it per test makes signing and verification agree regardless of
+    collection order; monkeypatch restores the prior value afterwards so
+    sibling modules keep theirs.
+    """
+    monkeypatch.setenv("WS_TICKET_SECRET", _TEST_SECRET)
+
+
 # ---------------------------------------------------------------------------
 # Captured JetStream stub
 # ---------------------------------------------------------------------------
