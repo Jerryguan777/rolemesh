@@ -17,9 +17,31 @@ export class MessageList extends LitElement {
 
   protected override createRenderRoot() { return this; }
 
+  // "Stick to bottom" only while the user is already near the bottom. Without
+  // this guard the unconditional scroll-to-bottom below yanked the view down on
+  // EVERY re-render — and re-renders are frequent (connection-state changes / WS
+  // reconnect churn) — so a user who scrolled up to read an approval card or
+  // earlier messages was snapped back to the bottom and could not scroll.
+  private stickToBottom = true;
+  private scrollEl: HTMLElement | null = null;
+  private readonly onScroll = () => {
+    const c = this.scrollEl;
+    if (c) this.stickToBottom = c.scrollHeight - c.scrollTop - c.clientHeight < 80;
+  };
+
+  override firstUpdated() {
+    this.scrollEl = document.getElementById('scroll-area');
+    this.scrollEl?.addEventListener('scroll', this.onScroll, { passive: true });
+  }
+
+  override disconnectedCallback() {
+    super.disconnectedCallback();
+    this.scrollEl?.removeEventListener('scroll', this.onScroll);
+  }
+
   override updated() {
-    const container = document.getElementById('scroll-area');
-    if (container) {
+    const container = this.scrollEl ?? document.getElementById('scroll-area');
+    if (container && this.stickToBottom) {
       requestAnimationFrame(() => { container.scrollTop = container.scrollHeight; });
     }
   }
