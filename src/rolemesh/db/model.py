@@ -221,6 +221,9 @@ async def count_coworkers_using_model(model_id: str) -> int:
     tenant's. Frontend never sees this count — it's a 409 gating
     signal only.
     """
+    # inv-1-ok: deliberate cross-tenant aggregate — returns only a COUNT
+    # (never row data) so an operator can see a platform model's total usage
+    # before retiring it (see docstring); never exposed to a tenant.
     async with admin_conn() as conn:
         n = await conn.fetchval(
             "SELECT COUNT(*) FROM coworkers WHERE model_id = $1::uuid",
