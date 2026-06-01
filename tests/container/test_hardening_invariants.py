@@ -10,10 +10,26 @@ hardening guarantee?* They catch the "someone added a new field and
 accidentally weakened the baseline" class of regression that single-case
 tests cannot.
 
-Coverage strategy: explicit cartesian sweeps (pytest.parametrize) over
-the input dimensions that actually reach the ContainerSpec — this mimics
-property-based testing without adding hypothesis as a dependency. Each
-invariant is asserted over *every* generated spec.
+Coverage strategy: instead of a full cartesian sweep (which multiplied
+EVERY invariant by all 1008 input combos = ~22k cases, 93% of them
+re-testing input-independent constants), each invariant runs over only
+the axis it actually depends on:
+
+  * input-INDEPENDENT invariants (readonly rootfs, cap-drop, no-new-privs,
+    IMDS blackhole, docker.sock, …) run over a small *covering sample*
+    where every value of every dimension appears at least once — enough
+    to catch a future change that makes a "constant" suddenly vary with
+    input, without paying for the full product.
+  * UID-sensitive invariants (tmpfs uid/gid, never-root, HOME env) run
+    over the full ``_HOST_UIDS`` axis.
+  * resource-sensitive invariants (memory/cpu clamp, swap, runtime) run
+    over the full ``_COWORKERS`` axis.
+  * the env allowlist invariant runs over the full ``_BACKEND_CONFIGS``
+    axis (the adversarial "rogue" backend is the case that matters).
+
+This mimics property-based testing without adding hypothesis, and keeps
+the run/collection cost proportional to what each invariant actually
+exercises (~230 cases instead of ~22k).
 """
 
 from __future__ import annotations
@@ -44,10 +60,10 @@ def _coworker(
     )
 
 
-# Input matrix: every reasonable combination of the knobs that actually
-# flow into build_container_spec. Explicitly includes the adversarial
-# corners — empty mounts, over-cap memory, unknown extra_env keys, mixed
-# permissions, both auth modes.
+# Input matrix dimensions: every reasonable value of the knobs that
+# actually flow into build_container_spec. Explicitly includes the
+# adversarial corners — empty mounts, over-cap memory, unknown extra_env
+# keys, mixed permissions, both auth modes.
 _BACKEND_CONFIGS: list[AgentBackendConfig | None] = [
     None,
     AgentBackendConfig(name="claude", image="img", extra_env={"AGENT_BACKEND": "claude"}),
@@ -108,34 +124,19 @@ _HOST_UIDS: list[tuple[int | None, int | None]] = [
 ]
 
 
-# Flatten the matrix up front so pytest reports one failure per combo.
-_CASES: list[tuple[Any, ...]] = [
-    (bc, cw, ms, am, hu)
-    for bc in _BACKEND_CONFIGS
-    for cw in _COWORKERS
-    for ms in _MOUNT_SETS
-    for am in _AUTH_MODES
-    for hu in _HOST_UIDS
-]
+def _build(
+    bc: AgentBackendConfig | None,
+    cw: Coworker | None,
+    ms: list[VolumeMount],
+    am: str,
+    host_uid: int | None,
+    host_gid: int | None,
+) -> Any:
+    """Build one ContainerSpec for a fully-specified input combo.
 
-
-def _id(case: tuple[Any, ...]) -> str:
-    bc, cw, ms, am, hu = case
-    bc_tag = bc.name if bc else "nobc"
-    cw_tag = (
-        f"cw-{cw.container_config.runtime or 'def'}"
-        f"-m{cw.container_config.memory_limit or 'def'}"
-        if cw and cw.container_config else "nocw"
-    )
-    hu_tag = f"h{hu[0]}" if hu[0] is not None else "hNone"
-    return f"{bc_tag}.{cw_tag}.m{len(ms)}.{am}.{hu_tag}"
-
-
-@pytest.fixture(params=_CASES, ids=[_id(c) for c in _CASES])
-def spec(request: pytest.FixtureRequest) -> Any:
-    """Build one ContainerSpec per input case and expose it for invariants."""
-    bc, cw, ms, am, (host_uid, host_gid) = request.param
-
+    Centralizes the auth-mode patch and the os.getuid handling (including
+    the Windows "no getuid" branch) so every fixture below shares one
+    spec-construction path."""
     with patch("rolemesh.container.runner.detect_auth_mode", return_value=am):
         if host_uid is None:
             # Simulate a host without os.getuid (Windows). Temporarily
@@ -154,13 +155,98 @@ def spec(request: pytest.FixtureRequest) -> Any:
             return build_container_spec(ms, "c", "j", backend_config=bc, coworker=cw)
 
 
+# ---------------------------------------------------------------------------
+# Covering sample for INPUT-INDEPENDENT invariants.
+#
+# Row i takes index (i mod len) of each dimension. With N = max dimension
+# length (7 = len(_COWORKERS)) every single value of every dimension
+# appears at least once; we use 2× that so each dimension's values also
+# pair up against more than one neighbour. This is a 1-covering array, not
+# a full product: it proves "the constant didn't become input-dependent"
+# without re-running the same assertion thousands of times.
+# ---------------------------------------------------------------------------
+_SAMPLE_N = 14
+_SAMPLE_CASES: list[tuple[Any, ...]] = [
+    (
+        _BACKEND_CONFIGS[i % len(_BACKEND_CONFIGS)],
+        _COWORKERS[i % len(_COWORKERS)],
+        _MOUNT_SETS[i % len(_MOUNT_SETS)],
+        _AUTH_MODES[i % len(_AUTH_MODES)],
+        _HOST_UIDS[i % len(_HOST_UIDS)],
+    )
+    for i in range(_SAMPLE_N)
+]
+
+
+def _sample_id(case: tuple[Any, ...]) -> str:
+    bc, cw, ms, am, hu = case
+    bc_tag = bc.name if bc else "nobc"
+    cw_tag = (
+        f"cw-{cw.container_config.runtime or 'def'}"
+        f"-m{cw.container_config.memory_limit or 'def'}"
+        if cw and cw.container_config else "nocw"
+    )
+    hu_tag = f"h{hu[0]}" if hu[0] is not None else "hNone"
+    return f"{bc_tag}.{cw_tag}.m{len(ms)}.{am}.{hu_tag}"
+
+
+@pytest.fixture(params=_SAMPLE_CASES, ids=[_sample_id(c) for c in _SAMPLE_CASES])
+def spec(request: pytest.FixtureRequest) -> Any:
+    """A ContainerSpec from the covering sample. Use for invariants that
+    must hold regardless of input."""
+    bc, cw, ms, am, (host_uid, host_gid) = request.param
+    return _build(bc, cw, ms, am, host_uid, host_gid)
+
+
 @pytest.fixture
 def host_config(spec) -> dict[str, Any]:  # type: ignore[no-untyped-def]
     return DockerRuntime._spec_to_config(spec)["HostConfig"]
 
 
+# Dimension-focused fixtures: each varies ONE axis at full resolution and
+# pins the others to a representative value.
+@pytest.fixture(
+    params=_HOST_UIDS,
+    ids=[f"h{u[0]}" if u[0] is not None else "hNone" for u in _HOST_UIDS],
+)
+def uid_spec(request: pytest.FixtureRequest) -> Any:
+    """One spec per host UID/GID scenario; other knobs fixed. Use for
+    invariants whose behaviour depends on the resolved container User."""
+    host_uid, host_gid = request.param
+    return _build(None, _coworker(), [], "api-key", host_uid, host_gid)
+
+
+@pytest.fixture(
+    params=_COWORKERS,
+    ids=[
+        f"cw-{c.container_config.runtime or 'def'}-m{c.container_config.memory_limit or 'def'}"
+        if c and c.container_config else "nocw"
+        for c in _COWORKERS
+    ],
+)
+def resource_spec(request: pytest.FixtureRequest) -> Any:
+    """One spec per coworker resource config; other knobs fixed. Use for
+    memory/cpu clamp, swap, and runtime invariants."""
+    return _build(None, request.param, [], "api-key", 1000, 1000)
+
+
+@pytest.fixture
+def resource_host_config(resource_spec) -> dict[str, Any]:  # type: ignore[no-untyped-def]
+    return DockerRuntime._spec_to_config(resource_spec)["HostConfig"]
+
+
+@pytest.fixture(
+    params=_BACKEND_CONFIGS,
+    ids=[b.name if b else "nobc" for b in _BACKEND_CONFIGS],
+)
+def backend_spec(request: pytest.FixtureRequest) -> Any:
+    """One spec per backend config; other knobs fixed. Use for the env
+    allowlist invariant — the 'rogue' backend is the case that matters."""
+    return _build(request.param, _coworker(), [], "api-key", 1000, 1000)
+
+
 # ---------------------------------------------------------------------------
-# Invariants at the ContainerSpec layer (what we hand to DockerRuntime)
+# Input-INDEPENDENT invariants at the ContainerSpec layer (covering sample)
 # ---------------------------------------------------------------------------
 
 
@@ -194,11 +280,6 @@ def test_inv_security_opt_never_disables_seccomp(spec) -> None:  # type: ignore[
         assert "seccomp=unconfined" not in opt
 
 
-def test_inv_runtime_is_one_of_the_allowed_set(spec) -> None:  # type: ignore[no-untyped-def]
-    """OCI runtime must be either the supported pair or None (= Docker default)."""
-    assert spec.runtime in {None, "runc", "runsc"}
-
-
 def test_inv_pids_limit_positive(spec) -> None:  # type: ignore[no-untyped-def]
     """PidsLimit must be a positive integer — 0 or None at this layer would
     silently remove the fork-bomb ceiling."""
@@ -206,92 +287,16 @@ def test_inv_pids_limit_positive(spec) -> None:  # type: ignore[no-untyped-def]
     assert spec.pids_limit > 0
 
 
-def test_inv_memory_limit_within_global_ceiling(spec) -> None:  # type: ignore[no-untyped-def]
-    """After clamp, the final spec's memory_limit must not exceed
-    CONTAINER_MAX_MEMORY (default 8g). Over-cap coworker configs are
-    guaranteed to be clamped down."""
-    from rolemesh.container.docker_runtime import _parse_memory
-    from rolemesh.core.config import CONTAINER_MAX_MEMORY
-    assert _parse_memory(spec.memory_limit) <= _parse_memory(CONTAINER_MAX_MEMORY)
-
-
-def test_inv_cpu_limit_within_global_ceiling(spec) -> None:  # type: ignore[no-untyped-def]
-    from rolemesh.core.config import CONTAINER_MAX_CPU
-    assert spec.cpu_limit is not None
-    assert spec.cpu_limit <= CONTAINER_MAX_CPU
-
-
-def test_inv_env_keys_subset_of_allowlist(spec) -> None:  # type: ignore[no-untyped-def]
+def test_inv_env_keys_subset_of_allowlist(backend_spec) -> None:  # type: ignore[no-untyped-def]
     """This is the primary defense against backends accidentally leaking
     orchestrator-side env into containers. If a new key joins the
     allowlist the test still passes; if a backend slips a key PAST the
-    allowlist (by bypassing _filter_env_allowlist) the test fails."""
-    assert set(spec.env.keys()) <= CONTAINER_ENV_ALLOWLIST
+    allowlist (by bypassing _filter_env_allowlist) the test fails.
 
-
-def test_inv_tmpfs_uid_gid_matches_user_field(spec) -> None:  # type: ignore[no-untyped-def]
-    """Every tmpfs entry that pins uid= / gid= MUST match the container's
-    User field. Otherwise Linux owns the tmpfs as <tmpfs_uid>:<tmpfs_gid>
-    at mount time, the process runs as <user_uid>:<user_gid>, and every
-    write hits EACCES. macOS 2026-04-21 regression: the old code had
-    User=502:20 from os.getuid() but tmpfs hardcoded uid=1000, making
-    Pi's first mkdir(~/.pi) fail silently.
-
-    Not every tmpfs entry has uid/gid (e.g. /tmp is world-writable via
-    mode=1777) — those lines are skipped."""
-    import re as _re
-    if spec.user is not None:
-        expected_uid, expected_gid = (int(x) for x in spec.user.split(":"))
-    else:
-        # Windows / no-getuid path: tmpfs should use AGENT_UID/GID.
-        from rolemesh.container.runner import AGENT_GID, AGENT_UID
-        expected_uid, expected_gid = AGENT_UID, AGENT_GID
-
-    for path, options in spec.tmpfs.items():
-        uid_match = _re.search(r"\buid=(\d+)", options)
-        gid_match = _re.search(r"\bgid=(\d+)", options)
-        if uid_match is None and gid_match is None:
-            continue  # world-writable tmpfs (e.g. /tmp with mode=1777)
-        assert uid_match is not None, f"tmpfs {path} has gid but no uid: {options}"
-        assert gid_match is not None, f"tmpfs {path} has uid but no gid: {options}"
-        assert int(uid_match.group(1)) == expected_uid, (
-            f"tmpfs {path} uid={uid_match.group(1)} but container runs as uid={expected_uid}"
-        )
-        assert int(gid_match.group(1)) == expected_gid, (
-            f"tmpfs {path} gid={gid_match.group(1)} but container runs as gid={expected_gid}"
-        )
-
-
-def test_inv_container_never_runs_as_root(spec) -> None:  # type: ignore[no-untyped-def]
-    """If the orchestrator itself runs as root (host_uid=0), the agent
-    container must NOT inherit that — CapDrop/readonly-rootfs hardening
-    assumes a non-root UID inside the container. The resolver policy is
-    to fall back to AGENT_UID (image-baked non-root agent) in this case.
-
-    Also covers the platform-has-no-getuid case where we can't look up
-    a runtime UID at all; the spec.user stays None, and Docker uses the
-    image's USER agent (non-root)."""
-    if spec.user is None:
-        # Image USER directive (agent @ uid 1000) takes over. Nothing to assert
-        # on spec level; the baseline invariant (non-root) is enforced by the
-        # Dockerfile and verified by integration tests.
-        return
-    uid, gid = (int(x) for x in spec.user.split(":"))
-    assert uid != 0, "container must not run as uid 0 (root)"
-    # gid 0 is root group; ok to allow in the downgrade-root-to-AGENT_UID
-    # fallback (AGENT_GID is 1000 so this never hits in practice), but
-    # still: block 0:0 specifically so a future regression can't sneak
-    # a full root:root pair through.
-    assert (uid, gid) != (0, 0)
-
-
-def test_inv_home_env_set_when_user_override_present(spec) -> None:  # type: ignore[no-untyped-def]
-    """Whenever we hand Docker a `User=...` value, we also MUST set
-    env[HOME]=/home/agent. A runtime UID that isn't in /etc/passwd has
-    no pwd entry to fall back on, so any SDK calling
-    os.path.expanduser('~') would otherwise break."""
-    if spec.user is not None:
-        assert spec.env.get("HOME") == "/home/agent"
+    Varies over _BACKEND_CONFIGS because env keys come from backend
+    extra_env — the adversarial 'rogue' backend (SECRET_LEAK key) is the
+    case this exists to catch."""
+    assert set(backend_spec.env.keys()) <= CONTAINER_ENV_ALLOWLIST
 
 
 def test_inv_metadata_blackhole_always_present(spec) -> None:  # type: ignore[no-untyped-def]
@@ -322,7 +327,104 @@ def test_inv_bind_mounts_do_not_expose_host_root_filesystems(spec) -> None:  # t
 
 
 # ---------------------------------------------------------------------------
-# Invariants at the HostConfig layer (what Docker Engine actually sees)
+# Resource-sensitive invariants (vary over the coworker axis)
+# ---------------------------------------------------------------------------
+
+
+def test_inv_runtime_is_one_of_the_allowed_set(resource_spec) -> None:  # type: ignore[no-untyped-def]
+    """OCI runtime must be either the supported pair or None (= Docker
+    default). Varies over _COWORKERS because runtime comes from the
+    coworker's container_config."""
+    assert resource_spec.runtime in {None, "runc", "runsc"}
+
+
+def test_inv_memory_limit_within_global_ceiling(resource_spec) -> None:  # type: ignore[no-untyped-def]
+    """After clamp, the final spec's memory_limit must not exceed
+    CONTAINER_MAX_MEMORY (default 8g). Over-cap coworker configs are
+    guaranteed to be clamped down."""
+    from rolemesh.container.docker_runtime import _parse_memory
+    from rolemesh.core.config import CONTAINER_MAX_MEMORY
+    assert _parse_memory(resource_spec.memory_limit) <= _parse_memory(CONTAINER_MAX_MEMORY)
+
+
+def test_inv_cpu_limit_within_global_ceiling(resource_spec) -> None:  # type: ignore[no-untyped-def]
+    from rolemesh.core.config import CONTAINER_MAX_CPU
+    assert resource_spec.cpu_limit is not None
+    assert resource_spec.cpu_limit <= CONTAINER_MAX_CPU
+
+
+# ---------------------------------------------------------------------------
+# UID-sensitive invariants (vary over the host UID/GID axis)
+# ---------------------------------------------------------------------------
+
+
+def test_inv_tmpfs_uid_gid_matches_user_field(uid_spec) -> None:  # type: ignore[no-untyped-def]
+    """Every tmpfs entry that pins uid= / gid= MUST match the container's
+    User field. Otherwise Linux owns the tmpfs as <tmpfs_uid>:<tmpfs_gid>
+    at mount time, the process runs as <user_uid>:<user_gid>, and every
+    write hits EACCES. macOS 2026-04-21 regression: the old code had
+    User=502:20 from os.getuid() but tmpfs hardcoded uid=1000, making
+    Pi's first mkdir(~/.pi) fail silently.
+
+    Not every tmpfs entry has uid/gid (e.g. /tmp is world-writable via
+    mode=1777) — those lines are skipped."""
+    import re as _re
+    if uid_spec.user is not None:
+        expected_uid, expected_gid = (int(x) for x in uid_spec.user.split(":"))
+    else:
+        # Windows / no-getuid path: tmpfs should use AGENT_UID/GID.
+        from rolemesh.container.runner import AGENT_GID, AGENT_UID
+        expected_uid, expected_gid = AGENT_UID, AGENT_GID
+
+    for path, options in uid_spec.tmpfs.items():
+        uid_match = _re.search(r"\buid=(\d+)", options)
+        gid_match = _re.search(r"\bgid=(\d+)", options)
+        if uid_match is None and gid_match is None:
+            continue  # world-writable tmpfs (e.g. /tmp with mode=1777)
+        assert uid_match is not None, f"tmpfs {path} has gid but no uid: {options}"
+        assert gid_match is not None, f"tmpfs {path} has uid but no gid: {options}"
+        assert int(uid_match.group(1)) == expected_uid, (
+            f"tmpfs {path} uid={uid_match.group(1)} but container runs as uid={expected_uid}"
+        )
+        assert int(gid_match.group(1)) == expected_gid, (
+            f"tmpfs {path} gid={gid_match.group(1)} but container runs as gid={expected_gid}"
+        )
+
+
+def test_inv_container_never_runs_as_root(uid_spec) -> None:  # type: ignore[no-untyped-def]
+    """If the orchestrator itself runs as root (host_uid=0), the agent
+    container must NOT inherit that — CapDrop/readonly-rootfs hardening
+    assumes a non-root UID inside the container. The resolver policy is
+    to fall back to AGENT_UID (image-baked non-root agent) in this case.
+
+    Also covers the platform-has-no-getuid case where we can't look up
+    a runtime UID at all; the spec.user stays None, and Docker uses the
+    image's USER agent (non-root)."""
+    if uid_spec.user is None:
+        # Image USER directive (agent @ uid 1000) takes over. Nothing to assert
+        # on spec level; the baseline invariant (non-root) is enforced by the
+        # Dockerfile and verified by integration tests.
+        return
+    uid, gid = (int(x) for x in uid_spec.user.split(":"))
+    assert uid != 0, "container must not run as uid 0 (root)"
+    # gid 0 is root group; ok to allow in the downgrade-root-to-AGENT_UID
+    # fallback (AGENT_GID is 1000 so this never hits in practice), but
+    # still: block 0:0 specifically so a future regression can't sneak
+    # a full root:root pair through.
+    assert (uid, gid) != (0, 0)
+
+
+def test_inv_home_env_set_when_user_override_present(uid_spec) -> None:  # type: ignore[no-untyped-def]
+    """Whenever we hand Docker a `User=...` value, we also MUST set
+    env[HOME]=/home/agent. A runtime UID that isn't in /etc/passwd has
+    no pwd entry to fall back on, so any SDK calling
+    os.path.expanduser('~') would otherwise break."""
+    if uid_spec.user is not None:
+        assert uid_spec.env.get("HOME") == "/home/agent"
+
+
+# ---------------------------------------------------------------------------
+# Input-INDEPENDENT invariants at the HostConfig layer (covering sample)
 # ---------------------------------------------------------------------------
 
 
@@ -340,14 +442,6 @@ def test_inv_hc_cap_drop_contains_all(host_config: dict[str, Any]) -> None:
     assert "ALL" in host_config["CapDrop"]
 
 
-def test_inv_hc_memory_swap_disabled_when_memory_set(host_config: dict[str, Any]) -> None:
-    """Setting Memory without disabling MemorySwap lets cgroups default to
-    unlimited swap, defeating the memory cap. Pin the "MemorySwap == Memory"
-    contract at the HostConfig layer."""
-    if "Memory" in host_config:
-        assert host_config.get("MemorySwap") == host_config["Memory"]
-
-
 def test_inv_hc_no_seccomp_unconfined(host_config: dict[str, Any]) -> None:
     for opt in host_config.get("SecurityOpt", []):
         assert "seccomp=unconfined" not in opt
@@ -357,3 +451,15 @@ def test_inv_hc_extra_hosts_has_metadata_blackhole(host_config: dict[str, Any]) 
     entries = host_config.get("ExtraHosts", [])
     assert "metadata.google.internal:127.0.0.1" in entries
     assert "169.254.169.254:127.0.0.1" in entries
+
+
+# Memory-swap pinning depends on whether a memory limit is set, so it
+# varies over the coworker axis (some coworkers set memory, some don't).
+def test_inv_hc_memory_swap_disabled_when_memory_set(
+    resource_host_config: dict[str, Any],
+) -> None:
+    """Setting Memory without disabling MemorySwap lets cgroups default to
+    unlimited swap, defeating the memory cap. Pin the "MemorySwap == Memory"
+    contract at the HostConfig layer."""
+    if "Memory" in resource_host_config:
+        assert resource_host_config.get("MemorySwap") == resource_host_config["Memory"]

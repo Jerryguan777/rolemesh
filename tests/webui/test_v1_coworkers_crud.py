@@ -16,6 +16,7 @@ laptop without docker-compose, but CI / smoke must run it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import uuid
@@ -407,6 +408,15 @@ async def test_patch_model_id_round_trips_through_real_nats() -> None:
         await js.update_stream(
             StreamConfig(name="web-ipc", subjects=["web.>"], max_age=3600.0)
         )
+
+    # Drop any consumer a previous (crashed) run left bound. JetStream
+    # durables persist server-side and a push durable permits only one
+    # active subscription, so a leaked binding makes every later run fail at
+    # subscribe with "consumer is already bound to a subscription". The
+    # subscribe below sits outside this test's try/finally, so without this
+    # pre-clean a single crash would wedge the durable permanently.
+    with contextlib.suppress(Exception):
+        await js.delete_consumer("web-ipc", "orch-web-coworker-restart")
 
     received: asyncio.Queue[dict[str, str]] = asyncio.Queue()
 

@@ -21,7 +21,7 @@ import asyncpg
 
 from rolemesh.core.config import ADMIN_DATABASE_URL, DATABASE_URL
 from rolemesh.core.logger import get_logger
-from rolemesh.db.schema import _create_schema
+from rolemesh.db.schema import _create_schema, _seed_reference_data
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -34,6 +34,8 @@ __all__ = [
     "_get_admin_pool",
     "_get_pool",
     "_init_test_database",
+    "_reset_test_data",
+    "_setup_test_database",
     "admin_conn",
     "close_database",
     "init_database",
@@ -199,6 +201,66 @@ async def _init_test_database(
         await conn.execute("DROP TABLE IF EXISTS registered_groups CASCADE")
         await conn.execute("DROP TABLE IF EXISTS router_state CASCADE")
         await _create_schema(conn)
+
+
+async def _reset_test_data(
+    conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record],
+) -> None:
+    """Empty every base table in the public schema in one statement.
+
+    Per-test isolation without paying the ~130-round-trip cost of dropping
+    and recreating the whole schema each test (see ``_setup_test_database``).
+    ``TRUNCATE ... RESTART IDENTITY CASCADE`` resets sequences and follows
+    FK chains, matching the clean-slate guarantee the drop/recreate path
+    used to give. The table list is discovered dynamically so a new table
+    is picked up automatically — no hand-maintained drop list to drift.
+
+    Safe with the shared-pool optimization because ``tenant_conn`` sets the
+    RLS GUC with ``is_local=true`` inside a transaction, so the tenant scope
+    never leaks between tests on a reused connection.
+
+    Reference/seed rows (default tenant, platform model catalog) are
+    re-seeded after the truncate so a per-test reset matches what the old
+    drop-and-recreate path produced — TRUNCATE alone would leave the seeded
+    tables empty and break tests that read the platform catalog.
+    """
+    rows = await conn.fetch(
+        "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
+    )
+    if not rows:
+        return
+    tables = ", ".join(f'public."{r["tablename"]}"' for r in rows)
+    await conn.execute(f"TRUNCATE {tables} RESTART IDENTITY CASCADE")
+    await _seed_reference_data(conn)
+
+
+async def _setup_test_database(
+    database_url: str, admin_database_url: str | None = None
+) -> None:
+    """Prepare a clean test database, cheaply.
+
+    asyncpg pools are bound to the event loop they were created on and the
+    test suite uses function-scoped loops, so the pools themselves must be
+    (re)opened per test. The expensive part — building ~130 schema objects
+    — does NOT have to repeat: the session's testcontainer Postgres keeps
+    the schema across tests, so we create it only on the first call (when
+    ``tenants`` is absent) and just TRUNCATE on every later call.
+
+    Drop-in faster replacement for ``_init_test_database`` for the shared
+    ``test_db`` fixture. ``_init_test_database`` is kept for the few bespoke
+    fixtures that intentionally rebuild from scratch (e.g. ones that add
+    legacy tables).
+    """
+    global _pool, _admin_pool
+    admin_url = admin_database_url or database_url
+    _pool = await asyncpg.create_pool(database_url, min_size=2, max_size=10)
+    _admin_pool = await asyncpg.create_pool(admin_url, min_size=1, max_size=3)
+    async with _admin_pool.acquire() as conn:
+        schema_present = await conn.fetchval("SELECT to_regclass('public.tenants')")
+        if schema_present is None:
+            await _create_schema(conn)
+        else:
+            await _reset_test_data(conn)
 
 
 async def close_database() -> None:

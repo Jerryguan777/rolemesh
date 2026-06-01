@@ -12,14 +12,25 @@ worker. Operators who want the e2e tests opt back in with
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+
+_THIS_DIR = Path(__file__).parent
 
 
 def pytest_collection_modifyitems(
     config: pytest.Config, items: list[pytest.Item]
 ) -> None:
-    """Stamp every test under this directory with the ``e2e`` marker.
+    """Stamp tests under THIS directory with the ``e2e`` marker.
 
+    ``pytest_collection_modifyitems`` is a session-wide hook: ``items``
+    holds every collected test in the run, not just those under this
+    conftest's directory. We MUST filter by path, or a full-suite
+    collection from the repo root would mark the entire suite ``e2e``
+    and the default ``-m 'not ... and not e2e'`` would deselect
+    everything (vacuously green CI).
     """
     for item in items:
-        item.add_marker(pytest.mark.e2e)
+        if _THIS_DIR in item.path.parents:
+            item.add_marker(pytest.mark.e2e)
