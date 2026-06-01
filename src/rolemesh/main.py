@@ -1434,13 +1434,13 @@ async def _start_nats_ipc_subscriptions(transport: NatsTransport, deps: _IpcDeps
         )
 
     async def _tg_send_card(
-        binding_id: str, chat_id: str, request_id: str, summary: str
+        binding_id: str, chat_id: str, request_id: str, text: str
     ) -> int | None:
         tg = _gateways.get("telegram")
         if not isinstance(tg, TelegramGateway):
             return None
         return await tg.send_approval_card(
-            binding_id, chat_id, request_id, summary
+            binding_id, chat_id, request_id, text
         )
 
     async def _tg_edit_card(

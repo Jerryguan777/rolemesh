@@ -187,7 +187,12 @@ async def test_telegram_approve_full_chain(monkeypatch: pytest.MonkeyPatch) -> N
 
     # 1. Container blocks → orchestrator suspends + delivers the card.
     await coord.on_approval_request(_request_payload())
-    assert ch.tg_sends == [("bind1", "chat1", "req1", "stripe.charge(amount)")]
+    assert len(ch.tg_sends) == 1
+    binding_id, chat_id, request_id, body = ch.tg_sends[0]
+    assert (binding_id, chat_id, request_id) == ("bind1", "chat1", "req1")
+    # The card body now mirrors the web card (server.tool chip + params).
+    assert "stripe.charge" in body
+    assert "amount: 500" in body
 
     # 2. User taps ✅. main funnel resolves identity + decides.
     toast = await main_module._telegram_approval_decision("req1", "approve", "7", "chat1")
