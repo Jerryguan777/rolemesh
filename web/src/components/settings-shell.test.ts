@@ -144,6 +144,7 @@ describe('<rm-settings-shell>', () => {
     ['models',             'Models',             'rm-models-page'],
     ['credentials',        'Credentials',        'rm-credentials-page'],
     ['safety',             'Safety rules',       'rm-safety-rules-page'],
+    ['approval-policies',  'Approval policies',  'rm-approval-policies-page'],
     ['general',            'General',            'rm-coming-soon'],
     ['members',            'Members',            'rm-coming-soon'],
     ['connected-channels', 'Connected channels', 'rm-connected-channels-page'],

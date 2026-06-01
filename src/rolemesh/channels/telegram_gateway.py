@@ -11,9 +11,11 @@ import contextlib
 from typing import TYPE_CHECKING
 
 import asyncpg
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     MessageHandler,
     filters,
@@ -34,11 +36,21 @@ from rolemesh.db import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from telegram import Bot, Update
     from telegram.ext import ContextTypes
 
     from rolemesh.channels.gateway import MessageCallback
     from rolemesh.core.types import ChannelBinding
+
+    # (request_id, decision, telegram_user_id, chat_id) -> optional toast text.
+    # ``decision`` is "approve" | "reject". The handler resolves the approver's
+    # RoleMesh identity from (tenant, telegram_user_id) server-side — the
+    # callback only ever carries the request_id + verb (IDOR guard, §10 S4).
+    ApprovalDecisionCallback = Callable[
+        [str, str, str, str], Awaitable[str | None]
+    ]
 
 logger = get_logger()
 
@@ -146,15 +158,110 @@ async def _send_telegram_message(bot: Bot, chat_id: str | int, text: str) -> Non
         await bot.send_message(chat_id, text)
 
 
+# ---------------------------------------------------------------------------
+# HITL approval card (docs/21-hitl-approval-plan.md §10 S4)
+# ---------------------------------------------------------------------------
+#
+# callback_data is "apr:{request_id}" / "rej:{request_id}". A UUID request_id
+# keeps the whole token ≈ 40 bytes, within Telegram's 64-byte limit (§6). It
+# carries NO approver identity — that is resolved server-side from the
+# authenticated Telegram sender (IDOR guard).
+
+_APPROVE_PREFIX = "apr:"
+_REJECT_PREFIX = "rej:"
+
+
+def _approval_keyboard(request_id: str) -> InlineKeyboardMarkup:
+    """The two-button ✅/❌ inline keyboard for one pending approval."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "✅ Approve", callback_data=f"{_APPROVE_PREFIX}{request_id}"
+                ),
+                InlineKeyboardButton(
+                    "❌ Reject", callback_data=f"{_REJECT_PREFIX}{request_id}"
+                ),
+            ]
+        ]
+    )
+
+
+def parse_approval_callback(data: str | None) -> tuple[str, str] | None:
+    """Parse ``callback_data`` into ``(decision, request_id)`` or ``None``.
+
+    ``decision`` is normalised to "approve" / "reject". Anything that is not a
+    well-formed approval callback (other buttons, empty id) returns ``None`` so
+    the handler ignores it rather than dispatching a bogus decision.
+    """
+    if not data:
+        return None
+    if data.startswith(_APPROVE_PREFIX):
+        request_id = data[len(_APPROVE_PREFIX):]
+        return ("approve", request_id) if request_id else None
+    if data.startswith(_REJECT_PREFIX):
+        request_id = data[len(_REJECT_PREFIX):]
+        return ("reject", request_id) if request_id else None
+    return None
+
+
+async def _handle_approval_callback(
+    update: Update, on_decision: ApprovalDecisionCallback | None
+) -> None:
+    """Dispatch a tapped ✅/❌ button to the orchestrator decision funnel.
+
+    Module-level (not a closure) so the parse + dispatch + answer flow is
+    testable with a stub ``Update`` instead of a live ``Application``. The
+    Telegram-authenticated ``from_user.id`` is the only identity input; the
+    callback payload is never trusted for *who* approved, only *what* request
+    and *which* verb.
+    """
+    query = update.callback_query
+    if query is None:
+        return
+    parsed = parse_approval_callback(query.data)
+    if parsed is None:
+        # Not ours (or malformed) — still answer so the client spinner clears.
+        with contextlib.suppress(Exception):
+            await query.answer()
+        return
+    decision, request_id = parsed
+    user = query.from_user
+    chat = query.message.chat if query.message is not None else None
+    telegram_user_id = str(user.id) if user is not None else ""
+    chat_id = str(chat.id) if chat is not None else ""
+
+    toast: str | None = None
+    if on_decision is not None:
+        try:
+            toast = await on_decision(
+                request_id, decision, telegram_user_id, chat_id
+            )
+        except Exception:
+            logger.exception(
+                "telegram approval callback dispatch failed",
+                request_id=request_id,
+            )
+            toast = "Could not record your decision; please retry."
+    with contextlib.suppress(Exception):
+        await query.answer(text=toast or None)
+
+
 class _BotInstance:
     """A single Telegram bot instance for one unique token.
 
     May serve multiple bindings (coworkers) that share the same token.
     """
 
-    def __init__(self, token: str, on_message: MessageCallback) -> None:
+    def __init__(
+        self,
+        token: str,
+        on_message: MessageCallback,
+        on_approval_decision: ApprovalDecisionCallback | None = None,
+    ) -> None:
         self._token = token
         self._on_message = on_message
+        self._on_approval_decision = on_approval_decision
         self._app: Application | None = None  # type: ignore[type-arg]
         self._bot_username: str | None = None
         # All binding IDs served by this bot instance
@@ -298,6 +405,20 @@ class _BotInstance:
         app.add_handler(CommandHandler("chatid", _cmd_chatid))
         app.add_handler(CommandHandler("ping", _cmd_ping))
 
+        # HITL approval: ✅/❌ inline-button taps. Restricted to our
+        # "apr:"/"rej:" callback_data so it never swallows callbacks from a
+        # future unrelated keyboard sharing this bot.
+        async def _on_approval(
+            update: Update, context: ContextTypes.DEFAULT_TYPE
+        ) -> None:
+            await _handle_approval_callback(update, self._on_approval_decision)
+
+        app.add_handler(
+            CallbackQueryHandler(
+                _on_approval, pattern=rf"^({_APPROVE_PREFIX}|{_REJECT_PREFIX})"
+            )
+        )
+
         async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.error("Telegram bot error", error=str(context.error))
 
@@ -359,6 +480,33 @@ class _BotInstance:
         with contextlib.suppress(Exception):
             await self._app.bot.send_chat_action(chat_id, ChatAction.TYPING)
 
+    async def send_approval_card(
+        self, chat_id: str, request_id: str, summary: str
+    ) -> int | None:
+        """Send the ✅/❌ approval card; return its ``message_id`` for later edit."""
+        if self._app is None:
+            return None
+        text = f"⏳ Approval required for {summary}.\nApprove or reject this tool call."
+        try:
+            sent = await self._app.bot.send_message(
+                chat_id, text, reply_markup=_approval_keyboard(request_id)
+            )
+        except Exception:
+            logger.exception("Failed to send Telegram approval card", chat_id=chat_id)
+            return None
+        return int(sent.message_id)
+
+    async def edit_approval_card(
+        self, chat_id: str, message_id: int, text: str
+    ) -> None:
+        """Edit a delivered card to its terminal state, dropping the buttons."""
+        if self._app is None:
+            return
+        with contextlib.suppress(Exception):
+            await self._app.bot.edit_message_text(
+                text, chat_id=chat_id, message_id=message_id, reply_markup=None
+            )
+
 
 class TelegramGateway:
     """Manages Telegram bots, deduplicating by token.
@@ -369,6 +517,7 @@ class TelegramGateway:
 
     def __init__(self, on_message: MessageCallback) -> None:
         self._on_message = on_message
+        self._on_approval_decision: ApprovalDecisionCallback | None = None
         # binding_id -> token (for reverse lookup)
         self._binding_to_token: dict[str, str] = {}
         # token -> _BotInstance (deduplicated)
@@ -377,6 +526,39 @@ class TelegramGateway:
     @property
     def channel_type(self) -> str:
         return "telegram"
+
+    def set_on_approval_decision(self, fn: ApprovalDecisionCallback) -> None:
+        """Register the HITL approval-decision callback (orchestrator funnel).
+
+        Set before bindings are added so every bot instance is built with it.
+        ``fn(request_id, decision, telegram_user_id, chat_id)`` resolves the
+        approver server-side and returns optional toast text for the tap.
+        """
+        self._on_approval_decision = fn
+
+    def _bot_for_binding(self, binding_id: str) -> _BotInstance | None:
+        token = self._binding_to_token.get(binding_id)
+        if token is None:
+            return None
+        return self._bots_by_token.get(token)
+
+    async def send_approval_card(
+        self, binding_id: str, chat_id: str, request_id: str, summary: str
+    ) -> int | None:
+        """Resolve the binding's bot and send an approval card."""
+        bot = self._bot_for_binding(binding_id)
+        if bot is None:
+            logger.warning("No telegram bot for binding", binding_id=binding_id)
+            return None
+        return await bot.send_approval_card(chat_id, request_id, summary)
+
+    async def edit_approval_card(
+        self, binding_id: str, chat_id: str, message_id: int, text: str
+    ) -> None:
+        """Resolve the binding's bot and edit a delivered card."""
+        bot = self._bot_for_binding(binding_id)
+        if bot is not None:
+            await bot.edit_approval_card(chat_id, message_id, text)
 
     async def add_binding(self, binding: ChannelBinding) -> None:
         """Add a binding. If the token is already active, reuse the existing bot."""
@@ -413,7 +595,7 @@ class TelegramGateway:
             return
 
         # New token — create new bot instance
-        bot = _BotInstance(token, self._on_message)
+        bot = _BotInstance(token, self._on_message, self._on_approval_decision)
         bot.add_binding_id(binding.id, binding.bot_display_name)
         self._bots_by_token[token] = bot
         await bot.start()

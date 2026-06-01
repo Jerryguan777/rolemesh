@@ -42,6 +42,8 @@ DB_DIR = Path(__file__).resolve().parent.parent / "src" / "rolemesh" / "db"
 # show ``tenant_id`` in every SELECT/UPDATE/DELETE statement in
 # ``src/rolemesh/db/``. Keep alphabetised.
 TENANT_SCOPED_TABLES: frozenset[str] = frozenset({
+    "approval_policies",
+    "approval_requests",
     "channel_bindings",
     "conversations",
     "coworkers",

@@ -379,6 +379,112 @@ class MCPServerUpdate(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# HITL tool-approval policies (docs/21-hitl-approval-plan.md §4 / §7 / §10 S5)
+# ---------------------------------------------------------------------------
+
+
+def _validate_condition_expr_field(value: dict[str, object]) -> dict[str, object]:
+    """Pydantic-side adaptor: reject a structurally-invalid condition at the API.
+
+    Delegates to the single pure validator in ``agent_runner.approval.policy``
+    so the editor's notion of "valid" never drifts from the matcher's grammar.
+    A malformed expression is a 422 here (clean operator feedback), not a policy
+    that silently approval-gates everything at runtime (the fail-closed default).
+    """
+    # Imported lazily to keep the module import graph flat (the validator lives
+    # in the zero-dep agent_runner matcher, shared with the container hook).
+    from agent_runner.approval.policy import (
+        ConditionValidationError,
+        validate_condition_expr,
+    )
+
+    try:
+        validate_condition_expr(value)
+    except ConditionValidationError as exc:
+        raise ValueError(str(exc)) from exc
+    return value
+
+
+class ApprovalPolicy(BaseModel):
+    """Wire projection of an ``approval_policies`` row (§4.1)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    tenant_id: str
+    mcp_server_name: str
+    tool_name: str
+    condition_expr: dict[str, object]
+    enabled: bool
+    priority: int
+    updated_at: str
+
+
+class ApprovalPolicyCreate(BaseModel):
+    """``POST /api/v1/approval-policies`` body.
+
+    ``tool_name`` is an exact MCP tool name or ``"*"`` for server-wide.
+    ``condition_expr`` defaults to ``{"always": true}`` — the conservative
+    gate (every matched call needs approval). A supplied expression is
+    structurally validated (§7 grammar); a malformed one is a 422.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mcp_server_name: str = Field(min_length=1, max_length=200)
+    tool_name: str = Field(min_length=1, max_length=200)
+    condition_expr: dict[str, object] = Field(default_factory=lambda: {"always": True})
+    enabled: bool = True
+    priority: int = 0
+
+    _check_condition = field_validator("condition_expr")(
+        _validate_condition_expr_field
+    )
+
+
+class ApprovalPolicyUpdate(BaseModel):
+    """``PATCH /api/v1/approval-policies/{id}`` body — every field optional.
+
+    Absent fields are left alone; present fields are written. ``condition_expr``
+    cannot be cleared to ``null`` (the column is ``NOT NULL``) — omit it to
+    leave it, or send a new valid expression to replace it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mcp_server_name: str | None = Field(default=None, min_length=1, max_length=200)
+    tool_name: str | None = Field(default=None, min_length=1, max_length=200)
+    condition_expr: dict[str, object] | None = None
+    enabled: bool | None = None
+    priority: int | None = None
+
+    _check_condition = field_validator("condition_expr")(
+        _validate_condition_expr_field
+    )
+
+
+class PendingApprovalRequest(BaseModel):
+    """Wire projection of a *pending* ``approval_requests`` row (§4.2).
+
+    The web reconnect read (``GET /api/v1/approval-requests``) returns these so
+    a browser that dropped its socket can re-render the in-flight ✅/❌ cards
+    from the authoritative DB rows (the live ``event.approval.requested`` push
+    is fire-and-forget). Only pending rows are ever returned; a resolved request
+    is delivered as ``event.approval.resolved`` instead.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    conversation_id: str | None = None
+    mcp_server_name: str
+    tool_name: str
+    action_summary: str | None = None
+    requested_at: str
+    expires_at: str
+
+
+# ---------------------------------------------------------------------------
 # Coworker <-> MCP server bindings (design §2.1)
 # ---------------------------------------------------------------------------
 
@@ -818,6 +924,37 @@ class WsServerEventMessageAppended(BaseModel):
     timestamp: str
 
 
+class WsServerEventApprovalRequested(BaseModel):
+    """HITL approval card push (docs/21-hitl-approval-plan.md §10 S4).
+
+    Out-of-band, like ``event.message.appended``: an agent's blocked MCP tool
+    call needs a human ✅/❌, so the orchestrator pushes this independent of any
+    ``run_id``. ``request_id`` is what the SPA echoes back in a
+    ``request.approval_decision`` frame; the browser never sees or supplies the
+    approver identity (resolved server-side from the WS ticket — IDOR guard).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.approval.requested"]
+    request_id: str
+    action_summary: str | None = None
+    expires_at: str | None = None
+
+
+class WsServerEventApprovalResolved(BaseModel):
+    """Hard-channel result: the card's deterministic terminal state.
+
+    ``outcome`` is the orchestrator's authoritative transition, set with no LLM
+    in the loop (approve via the decision funnel; reject/expire via the
+    coordinator's hard hook). The SPA edits the card in place.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.approval.resolved"]
+    request_id: str
+    outcome: Literal["approved", "rejected", "expired"]
+
+
 # Tagged union over ``type``. Pydantic v2's Field discriminator picks
 # the right member based on the literal value, giving validation
 # errors that name the offending field (rather than the generic
@@ -829,6 +966,8 @@ WsServerEventModel = (
     | WsServerEventRunError
     | WsServerEventRunProgress
     | WsServerEventMessageAppended
+    | WsServerEventApprovalRequested
+    | WsServerEventApprovalResolved
 )
 
 
@@ -852,10 +991,27 @@ class WsClientFrameRequestCancel(BaseModel):
     run_id: str
 
 
+class WsClientFrameApprovalDecision(BaseModel):
+    """A human ✅/❌ on a pending HITL approval (docs §10 S4).
+
+    Carries only ``request_id`` + verb (+ optional note). The approver identity
+    is NOT in the frame — the WS handler stamps the authenticated
+    ``user_id``/``tenant_id`` from the verified ticket when it relays to the
+    orchestrator (same IDOR posture as ``request.run`` / ``request.stop``).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["request.approval_decision"]
+    request_id: str
+    decision: Literal["approve", "reject"]
+    note: str | None = None
+
+
 WsClientFrameModel = (
     WsClientFrameRequestRun
     | WsClientFrameRequestCancel
     | WsClientFrameRequestStop
+    | WsClientFrameApprovalDecision
 )
 
 

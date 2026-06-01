@@ -22,7 +22,21 @@ import { customElement, state } from 'lit/decorators.js';
 import { getApiClient, ApiError } from '../api/client.js';
 import type { Conversation, Coworker, Me, Message } from '../api/client.js';
 import { getStoredToken } from '../services/oidc-auth.js';
-import { V1WsClient, type ServerEvent, type ConnectionStatus } from '../ws/v1_client.js';
+import {
+  V1WsClient,
+  type ServerEvent,
+  type ConnectionStatus,
+  type ApprovalRequestedEvent,
+  type ApprovalResolvedEvent,
+} from '../ws/v1_client.js';
+import './approval-card.js';
+import type { ApprovalDecisionDetail } from './approval-card.js';
+import {
+  type ApprovalCard,
+  applyResolved,
+  mergePending,
+  upsertRequested,
+} from './approval-store.js';
 
 interface AgentStatusState {
   /** Mirrored from the legacy status frame so the progress line keeps
@@ -77,6 +91,13 @@ export class ChatPanel extends LitElement {
   // Sticky terminal flag — when the most recent run completed with
   // status != running, both Stop and Cancel disable until a new send.
   @state() runTerminal = false;
+  // In-flight HITL approval cards for the active conversation. Driven by
+  // `event.approval.requested` / `event.approval.resolved` and refreshed
+  // from REST on (re)connect (docs/21-hitl-approval-plan.md §10 S5).
+  @state() private approvals: ApprovalCard[] = [];
+  // request_ids whose decision was just sent and is awaiting the resolved
+  // echo — disables the card buttons so a double-tap can't fire twice.
+  private approvalInflight = new Set<string>();
   private stoppingTimer: ReturnType<typeof setTimeout> | null = null;
   private cancellingTimer: ReturnType<typeof setTimeout> | null = null;
   private runningWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
@@ -191,6 +212,9 @@ export class ChatPanel extends LitElement {
     this.runState = 'idle';
     this.runTerminal = false;
     this.activeRunId = null;
+    // Approval cards are conversation-scoped; drop the previous chat's.
+    this.approvals = [];
+    this.approvalInflight.clear();
 
     // v1 client owns streaming / cancel
     this.v1 = new V1WsClient({
@@ -214,7 +238,40 @@ export class ChatPanel extends LitElement {
   }
 
   private handleV1Status(s: ConnectionStatus): void {
+    const wasConnected = this.connected;
     this.connected = s === 'open';
+    // On (re)connect, re-render in-flight approval cards from the
+    // authoritative DB rows — the live `event.approval.requested` push is
+    // fire-and-forget, so a card that arrived while the socket was down (or
+    // before a reload) is only recoverable via this read (§10 S5).
+    if (this.connected && !wasConnected) {
+      void this.refreshPendingApprovals();
+    }
+  }
+
+  private async refreshPendingApprovals(): Promise<void> {
+    const conversationId = this.activeConversationId;
+    if (!conversationId) return;
+    try {
+      const rows = await this.api.listPendingApprovals(conversationId);
+      // Guard against a conversation switch mid-flight.
+      if (this.activeConversationId !== conversationId) return;
+      this.approvals = mergePending(this.approvals, rows);
+    } catch (err) {
+      console.warn('listPendingApprovals failed', err);
+    }
+  }
+
+  /** Relay a card tap to the orchestrator. The frame carries only the
+   *  request id + verb; the approver identity is stamped server-side from
+   *  the verified WS ticket (IDOR guard). We mark the card busy until the
+   *  `event.approval.resolved` echo lands so a double-tap can't double-send. */
+  private handleApprovalDecision(detail: ApprovalDecisionDetail): void {
+    if (!this.v1) return;
+    if (this.approvalInflight.has(detail.requestId)) return;
+    this.approvalInflight.add(detail.requestId);
+    this.requestUpdate();
+    this.v1.sendApprovalDecision(detail.requestId, detail.decision);
   }
 
   private handleV1Event(e: ServerEvent): void {
@@ -307,6 +364,21 @@ export class ChatPanel extends LitElement {
             { role: 'assistant', content },
           ];
         }
+        break;
+      }
+      case 'event.approval.requested': {
+        // A blocked MCP tool call needs a human ✅/❌. Out-of-band, like
+        // event.message.appended — does NOT touch run state.
+        this.approvals = upsertRequested(
+          this.approvals,
+          e as ApprovalRequestedEvent,
+        );
+        break;
+      }
+      case 'event.approval.resolved': {
+        const ev = e as ApprovalResolvedEvent;
+        this.approvals = applyResolved(this.approvals, ev);
+        this.approvalInflight.delete(ev.request_id);
         break;
       }
       case 'event.run.error': {
@@ -679,7 +751,10 @@ export class ChatPanel extends LitElement {
             <div class="max-w-[720px] mx-auto w-full">
               ${this.messages.length === 0 ? this.renderEmpty() : ''}
               <rm-message-list .messages=${this.messages}></rm-message-list>
-              ${this.messages.length > 0 ? html`<div class="h-8"></div>` : ''}
+              ${this.renderApprovals()}
+              ${this.messages.length > 0 || this.approvals.length > 0
+                ? html`<div class="h-8"></div>`
+                : ''}
             </div>
           </div>
 
@@ -708,6 +783,31 @@ export class ChatPanel extends LitElement {
             </div>
           </div>
         </div>
+      </div>
+    `;
+  }
+
+  /** Render the in-flight HITL approval cards (if any). Each card emits an
+   *  `approval-decision` CustomEvent that we relay to the WS frame. */
+  private renderApprovals() {
+    if (this.approvals.length === 0) return '';
+    return html`
+      <div
+        class="px-4"
+        data-testid="approval-region"
+        @approval-decision=${(e: CustomEvent<ApprovalDecisionDetail>) =>
+          this.handleApprovalDecision(e.detail)}
+      >
+        ${this.approvals.map(
+          (c) => html`
+            <rm-approval-card
+              .requestId=${c.requestId}
+              .actionSummary=${c.actionSummary}
+              .status=${c.status}
+              .busy=${this.approvalInflight.has(c.requestId)}
+            ></rm-approval-card>
+          `,
+        )}
       </div>
     `;
   }

@@ -47,7 +47,11 @@ class WebNatsGateway:
         self._bindings: dict[str, ChannelBinding] = {}
         self._sub_task: asyncio.Task[None] | None = None
         self._stop_sub_task: asyncio.Task[None] | None = None
+        self._approval_sub_task: asyncio.Task[None] | None = None
         self._on_stop: Callable[[str, str], Awaitable[None]] | None = None
+        self._on_approval_decision: (
+            Callable[[str, str, dict[str, object]], Awaitable[None]] | None
+        ) = None
 
     def set_on_stop(self, fn: Callable[[str, str], Awaitable[None]]) -> None:
         """Register callback for browser-initiated Stop signals.
@@ -57,6 +61,19 @@ class WebNatsGateway:
         the subject, never from client-controlled payload.
         """
         self._on_stop = fn
+
+    def set_on_approval_decision(
+        self, fn: Callable[[str, str, dict[str, object]], Awaitable[None]]
+    ) -> None:
+        """Register the HITL approval-decision callback from the WebUI.
+
+        ``fn(binding_id, chat_id, body)`` — ``binding_id``/``chat_id`` come
+        from the authenticated subject; ``body`` carries the WebUI-stamped
+        ``decided_by``/``tenant_id``/``conversation_id`` (from the verified WS
+        ticket) plus ``request_id``/``decision``. The orchestrator re-derives a
+        tenant/conversation guard before relaying (IDOR, §10 S4).
+        """
+        self._on_approval_decision = fn
 
     # -- ChannelGateway protocol ------------------------------------------------
 
@@ -110,14 +127,33 @@ class WebNatsGateway:
             msg.to_bytes(),
         )
 
+    async def send_approval_event(
+        self, binding_id: str, chat_id: str, payload: dict[str, object]
+    ) -> None:
+        """Publish a HITL approval card / resolution to ``web.approval.*``.
+
+        The payload is a card-lifecycle event (``approval.requested`` /
+        ``approval.resolved``); the WS handler whitelists fields into an
+        ``event.approval.*`` browser frame.
+        """
+        await self._transport.js.publish(
+            f"web.approval.{binding_id}.{chat_id}",
+            json.dumps(payload).encode(),
+        )
+
     async def shutdown(self) -> None:
-        for task in (self._sub_task, self._stop_sub_task):
+        for task in (
+            self._sub_task,
+            self._stop_sub_task,
+            self._approval_sub_task,
+        ):
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
         self._sub_task = None
         self._stop_sub_task = None
+        self._approval_sub_task = None
 
     # -- Web-specific streaming methods ----------------------------------------
 
@@ -266,4 +302,37 @@ class WebNatsGateway:
                         await msg.ack()
 
         self._stop_sub_task = asyncio.create_task(_stop_listener())
+
+        # HITL approval decisions from the WebUI (§10 S4). Subject
+        # web.approval_decision.{binding_id}.{chat_id}; the binding/chat in the
+        # subject are authenticated, and the body carries the ticket-stamped
+        # decided_by/tenant_id/conversation_id the WebUI verified. NEW so a
+        # restart doesn't replay a decision whose request already resolved.
+        with contextlib.suppress(Exception):
+            await js.delete_consumer("web-ipc", "orch-web-approval-decision")
+        approval_sub = await js.subscribe(
+            "web.approval_decision.*.*",
+            durable="orch-web-approval-decision",
+            deliver_policy=DeliverPolicy.NEW,
+        )
+
+        async def _approval_listener() -> None:
+            async for msg in approval_sub.messages:
+                try:
+                    parts = msg.subject.split(".")
+                    if len(parts) >= 4 and self._on_approval_decision is not None:
+                        binding_id = parts[2]
+                        chat_id = parts[3]
+                        body = json.loads(msg.data)
+                        if isinstance(body, dict):
+                            await self._on_approval_decision(
+                                binding_id, chat_id, body
+                            )
+                    await msg.ack()
+                except Exception:
+                    logger.exception("Error processing web approval decision")
+                    with contextlib.suppress(Exception):
+                        await msg.ack()
+
+        self._approval_sub_task = asyncio.create_task(_approval_listener())
         logger.info("WebNatsGateway started")

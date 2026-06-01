@@ -17,6 +17,12 @@ from fastapi import APIRouter, Response
 from rolemesh.core.backend_capabilities import backends_as_json
 from webui.schemas_v1 import Backend
 from webui.v1.admin_models import router as admin_models_router
+from webui.v1.approvals import (
+    policies_router as approval_policies_router,
+)
+from webui.v1.approvals import (
+    requests_router as approval_requests_router,
+)
 from webui.v1.auth import me_router as auth_me_router
 from webui.v1.auth import router as auth_router
 from webui.v1.bindings import router as bindings_router
@@ -83,3 +89,7 @@ router.include_router(admin_models_router)
 # v6.1 §P1.4 — Telegram IM linking surfaces (POST/GET telegram +
 # DELETE by identity).
 router.include_router(channel_links_router)
+# HITL tool approval (docs/21-hitl-approval-plan.md §10 S5): policy CRUD +
+# pending-request read for web-reconnect card re-render.
+router.include_router(approval_policies_router)
+router.include_router(approval_requests_router)

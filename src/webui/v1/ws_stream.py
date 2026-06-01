@@ -206,6 +206,45 @@ def _build_progress_frame_or_none(
     return frame
 
 
+def _build_approval_frame_or_none(
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Project an orchestrator ``web.approval.*`` payload to a client frame.
+
+    Whitelist fields explicitly (same posture as the progress branch) so a
+    future orchestrator-side key can't leak to the browser. ``requested`` →
+    ``event.approval.requested`` (carries the card data); ``resolved`` →
+    ``event.approval.resolved`` (the deterministic terminal state). Anything
+    else returns ``None`` and is dropped.
+    """
+    kind = payload.get("type")
+    request_id = payload.get("request_id")
+    if not isinstance(request_id, str) or not request_id:
+        return None
+    if kind == "approval.requested":
+        frame: dict[str, Any] = {
+            "type": "event.approval.requested",
+            "request_id": request_id,
+        }
+        summary = payload.get("action_summary")
+        if isinstance(summary, str):
+            frame["action_summary"] = summary
+        expires_at = payload.get("expires_at")
+        if isinstance(expires_at, str):
+            frame["expires_at"] = expires_at
+        return frame
+    if kind == "approval.resolved":
+        outcome = payload.get("outcome")
+        if outcome not in ("approved", "rejected", "expired"):
+            return None
+        return {
+            "type": "event.approval.resolved",
+            "request_id": request_id,
+            "outcome": outcome,
+        }
+    return None
+
+
 async def _terminate_run_completed(
     *, run_id: str, tenant_id: str, usage: Any | None
 ) -> None:
@@ -329,6 +368,15 @@ async def stream(
     # (DB persistence kept the message; live push was silently dropped).
     outbound_sub = await js.subscribe(
         f"web.outbound.{binding_id}.{conv.channel_chat_id}",
+        ordered_consumer=True,
+        deliver_policy=DeliverPolicy.NEW,
+    )
+    # ``web.approval.*`` carries HITL approval cards + their hard-channel
+    # resolution. Independent of ``active_run_id`` (an approval can outlive the
+    # run that triggered it, and scheduled-task approvals have no run at all),
+    # so it rides its own subject like ``web.outbound``.
+    approval_sub = await js.subscribe(
+        f"web.approval.{binding_id}.{conv.channel_chat_id}",
         ordered_consumer=True,
         deliver_policy=DeliverPolicy.NEW,
     )
@@ -467,9 +515,29 @@ async def stream(
                 with contextlib.suppress(OSError, RuntimeError):
                     await msg.ack()
 
+    async def _forward_approval() -> None:
+        """Fan ``web.approval.*`` payloads to ``event.approval.*`` frames.
+
+        Independent of ``active_run_id`` — see ``_build_approval_frame_or_none``
+        for the wire contract and field whitelisting.
+        """
+        async for msg in approval_sub.messages:
+            try:
+                data = json.loads(msg.data)
+                frame = _build_approval_frame_or_none(data)
+                if frame is not None:
+                    await _send_event(ws, frame)
+                await msg.ack()
+            except (WebSocketDisconnect, RuntimeError):
+                return
+            except (OSError, ValueError, TypeError, KeyError):
+                with contextlib.suppress(OSError, RuntimeError):
+                    await msg.ack()
+
     fwd_tasks = [
         asyncio.create_task(_forward_stream()),
         asyncio.create_task(_forward_outbound()),
+        asyncio.create_task(_forward_approval()),
     ]
 
     try:
@@ -516,6 +584,15 @@ async def stream(
                     f"web.stop.{binding_id}.{conv.channel_chat_id}",
                     b"{}",
                 )
+            elif kind == "request.approval_decision":
+                await _handle_approval_decision(
+                    ws=ws,
+                    frame=frame,
+                    payload=payload,
+                    conv=conv,
+                    binding_id=binding_id,
+                    js=js,
+                )
             else:
                 await _send_event(
                     ws,
@@ -536,7 +613,7 @@ async def stream(
         for t in fwd_tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await t
-        for sub in (stream_sub, outbound_sub):
+        for sub in (stream_sub, outbound_sub, approval_sub):
             with contextlib.suppress(Exception):
                 await sub.unsubscribe()
 
@@ -654,6 +731,64 @@ async def _handle_request_run(
         },
     )
     return run_id
+
+
+async def _handle_approval_decision(
+    *,
+    ws: WebSocket,
+    frame: dict[str, Any],
+    payload: WsTicketPayload,
+    conv: Any,
+    binding_id: str,
+    js: JetStreamContext,
+) -> None:
+    """Relay a ✅/❌ on a HITL approval to the orchestrator.
+
+    IDOR posture (locked, §10 S4): the browser supplies only ``request_id`` +
+    ``decision``. The approver identity is stamped here from the *verified
+    ticket* (``payload.user_id`` / ``payload.tenant_id``) — never from the
+    frame — and the subject ``web.approval_decision.{binding_id}.{chat_id}``
+    carries authenticated ids the orchestrator re-derives a tenant/conversation
+    guard from. A compromised browser can at most replay an id it already owns;
+    it cannot forge *who* approved or reach another conversation's request.
+    """
+    request_id = frame.get("request_id")
+    decision = frame.get("decision")
+    if not isinstance(request_id, str) or not request_id:
+        await _send_event(
+            ws,
+            {
+                "type": "event.run.error",
+                "code": "PROTOCOL_MISSING_REQUEST_ID",
+                "message": "request.approval_decision requires 'request_id'",
+            },
+        )
+        return
+    if decision not in ("approve", "reject"):
+        await _send_event(
+            ws,
+            {
+                "type": "event.run.error",
+                "code": "PROTOCOL_BAD_DECISION",
+                "message": "decision must be 'approve' or 'reject'",
+            },
+        )
+        return
+    note = frame.get("note")
+    body = {
+        "request_id": request_id,
+        "decision": decision,
+        "note": note if isinstance(note, str) else None,
+        # Authenticated, server-stamped from the ticket — not the browser.
+        "decided_by": payload.user_id,
+        "tenant_id": payload.tenant_id,
+        "conversation_id": conv.id,
+    }
+    with contextlib.suppress(Exception):
+        await js.publish(
+            f"web.approval_decision.{binding_id}.{conv.channel_chat_id}",
+            json.dumps(body).encode(),
+        )
 
 
 async def _handle_request_cancel(

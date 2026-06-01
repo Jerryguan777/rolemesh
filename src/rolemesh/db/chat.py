@@ -157,6 +157,9 @@ async def get_channel_binding_for_bot_token(
     """
     if not bot_token:
         return None
+    # inv-1-ok: tenant_id is the OUTPUT of this lookup, not an input — the
+    # Telegram gateway holds only the bot_token (a secret credential) and
+    # derives the owning tenant from this admin_conn row (see docstring).
     async with admin_conn() as conn:
         row = await conn.fetchrow(
             "SELECT * FROM channel_bindings "

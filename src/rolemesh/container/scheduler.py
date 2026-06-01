@@ -14,6 +14,7 @@ import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from rolemesh.core.config import IDLE_TIMEOUT
 from rolemesh.core.logger import get_logger
 
 if TYPE_CHECKING:
@@ -53,6 +54,17 @@ class _GroupState:
     retry_count: int = 0
     tenant_id: str = ""
     coworker_id: str = ""
+    # HITL approval (docs/21-hitl-approval-plan.md §8). ``idle_handle`` is the
+    # reaping-path-A timer, owned here (not in a main.py closure) so the
+    # approval suspend path can cancel/re-arm it from a NATS handler.
+    # ``awaiting_approval`` holds every request_id currently blocking the
+    # container on a human decision — a ``set`` (not a bool) because one turn
+    # can dispatch multiple gated tool calls concurrently. ``adopted`` marks a
+    # state rebuilt by restart recovery for a container that has no
+    # ``_run_for_group`` coroutine of its own.
+    idle_handle: asyncio.TimerHandle | None = None
+    awaiting_approval: set[str] = field(default_factory=set)
+    adopted: bool = False
 
 
 class GroupQueue:
@@ -63,8 +75,10 @@ class GroupQueue:
         transport: NatsTransport | None = None,
         runtime: ContainerRuntime | None = None,
         orchestrator_state: OrchestratorState | None = None,
+        idle_timeout_ms: int = IDLE_TIMEOUT,
     ) -> None:
         self._groups: dict[str, _GroupState] = {}
+        self._idle_timeout_ms = idle_timeout_ms
         self._active_count: int = 0
         self._waiting_groups: list[str] = []
         self._process_messages_fn: Callable[[str], Awaitable[bool]] | None = None
@@ -262,9 +276,133 @@ class GroupQueue:
     def notify_idle(self, group_jid: str) -> None:
         """Mark container as idle-waiting. Preempt if tasks pending."""
         state = self._get_group(group_jid)
+        # An approval suspend explicitly disowns reaping path B (§8). If an
+        # is_final output races in while a decision is still pending, honour the
+        # suspend rather than re-arming the flag that would let a queued task
+        # reap the container mid-approval.
+        if state.awaiting_approval:
+            return
         state.idle_waiting = True
         if state.pending_tasks:
             self.request_shutdown(group_jid)
+
+    # -- HITL approval: idle suspend / resume (docs/21-hitl-approval-plan.md §8)
+
+    def arm_idle_timer(self, group_jid: str) -> None:
+        """(Re)arm the per-group idle reaping timer (reaping path A).
+
+        Idle-timer ownership lives here, not in a ``main.py`` closure, because
+        the approval suspend path must cancel and later re-arm this exact timer
+        from a NATS handler that cannot reach a closure-local ``TimerHandle``.
+
+        No-op while an approval is pending on this group: a bounded approval
+        wait suspends reaping, and no path — not even a new follow-up message —
+        may re-arm idle until the last decision resolves (§8 suspend step 6).
+        The only caller that re-arms after a suspend is ``resume_from_approval``
+        once the ``awaiting_approval`` set drains.
+        """
+        state = self._get_group(group_jid)
+        if state.idle_handle is not None:
+            state.idle_handle.cancel()
+            state.idle_handle = None
+        if state.awaiting_approval:
+            return
+        loop = asyncio.get_running_loop()
+        cb = self._reap_adopted if state.adopted else self.request_shutdown
+        state.idle_handle = loop.call_later(self._idle_timeout_ms / 1000.0, cb, group_jid)
+
+    def cancel_idle_timer(self, group_jid: str) -> None:
+        """Cancel the idle reaping timer for a group, if armed."""
+        state = self._get_group(group_jid)
+        if state.idle_handle is not None:
+            state.idle_handle.cancel()
+            state.idle_handle = None
+
+    def suspend_for_approval(self, group_jid: str, request_id: str) -> None:
+        """Suspend all three idle-reaping paths for a pending approval (§8).
+
+        Closes path A (cancel the idle timer), paths B/C (force
+        ``idle_waiting`` False so ``enqueue_task`` / ``notify_idle`` cannot
+        request a shutdown), and records ``request_id`` in a ``set`` so
+        concurrent approvals in one turn each hold the suspend independently.
+        """
+        state = self._get_group(group_jid)
+        self.cancel_idle_timer(group_jid)
+        state.idle_waiting = False
+        # Defensive force-check: paths B/C are gated on this exact flag, so do
+        # not rely on an implicit invariant that it was already False.
+        assert state.idle_waiting is False
+        state.awaiting_approval.add(request_id)
+
+    def resume_from_approval(self, group_jid: str, request_id: str) -> bool:
+        """Resume idle reaping when an approval resolves (§8). Idempotent.
+
+        Double-cancel safe: a ``request_id`` not currently in the set (already
+        resumed by an earlier decision, or never suspended here) is a no-op and
+        returns ``False`` — so the S2 ``decision``-then-``cancel`` pair for one
+        request cannot re-arm idle twice or mis-clear a sibling's suspend.
+        Re-arms a full idle timeout only when the set drains, and only for a
+        container the idle timer governs (not a scheduled-task container, whose
+        own machinery reaps it).
+        """
+        state = self._get_group(group_jid)
+        if request_id not in state.awaiting_approval:
+            return False
+        state.awaiting_approval.discard(request_id)
+        if not state.awaiting_approval and not state.is_task_container:
+            self.arm_idle_timer(group_jid)
+        return True
+
+    def is_awaiting_approval(self, group_jid: str) -> bool:
+        """True while at least one approval is pending on this group."""
+        state = self._groups.get(group_jid)
+        return bool(state and state.awaiting_approval)
+
+    def adopt_orphan_container(
+        self,
+        group_jid: str,
+        *,
+        job_id: str,
+        tenant_id: str,
+        coworker_id: str,
+    ) -> None:
+        """Re-register a container that outlived an orchestrator restart (R2).
+
+        ``_groups`` is in-memory and empty after a restart, but a container
+        blocked on a pending approval may still be alive. Rebuild just enough
+        ``_GroupState`` for the suspend/resume + reaping machinery to manage it:
+        mark it ``active`` with its ``job_id`` so ``request_shutdown`` can reach
+        it, and flag it ``adopted`` so the idle reaper also tears the rebuilt
+        state down — a normal container's teardown runs in ``_run_for_group``'s
+        ``finally``, which is not executing for an adopted one.
+        """
+        state = self._get_group(group_jid)
+        state.active = True
+        state.is_running = True
+        state.is_task_container = False
+        state.adopted = True
+        state.job_id = job_id
+        state.tenant_id = tenant_id or state.tenant_id
+        state.coworker_id = coworker_id or state.coworker_id
+
+    def _reap_adopted(self, group_jid: str) -> None:
+        """Idle-reap an adopted (restart-recovered) container and clear state.
+
+        An adopted container has no ``_run_for_group`` coroutine whose
+        ``finally`` resets the group and drains queued work, so after asking it
+        to wind down we reset the state inline and drain. Otherwise the
+        conversation would stay wedged ``active`` forever and never spawn a
+        fresh container.
+        """
+        self.request_shutdown(group_jid)
+        state = self._get_group(group_jid)
+        state.active = False
+        state.is_running = False
+        state.adopted = False
+        state.container_name = None
+        state.job_id = None
+        state.idle_handle = None
+        self._drain_group(group_jid)
 
     def send_message(self, group_jid: str, text: str) -> bool:
         """Send a follow-up message to the active container via NATS JetStream."""
@@ -313,12 +451,17 @@ class GroupQueue:
         if self._transport is None:
             return
 
+        # Capture job_id at call time: callers like the adopted-container reaper
+        # reset state.job_id immediately after requesting shutdown, and this
+        # send runs in a later loop turn — reading the attribute then would
+        # target ``agent.None.shutdown``.
+        job_id = state.job_id
+
         async def _send_shutdown() -> None:
             assert self._transport is not None
-            assert state.job_id is not None
             try:
                 await self._transport.nc.request(
-                    f"agent.{state.job_id}.shutdown",
+                    f"agent.{job_id}.shutdown",
                     b"shutdown",
                     timeout=5.0,
                 )

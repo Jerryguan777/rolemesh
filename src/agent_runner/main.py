@@ -323,6 +323,36 @@ async def run_query_loop(
         nats_client=nc,
     )
 
+    # HITL approval hook (docs/21-hitl-approval-plan.md §6). Registered only
+    # when this run carries a non-empty policy snapshot — mirrors the safety
+    # handler's zero-cost-when-inactive rule. The handler blocks a matched MCP
+    # tool call in place until the orchestrator relays a decision over
+    # agent.{job_id}.approval_decision (subscribed below). APPROVAL_TIMEOUT is
+    # the in-band fallback bound; the startup assertion in core/config keeps it
+    # strictly below the container watchdog floor.
+    from rolemesh.core.config import APPROVAL_TIMEOUT
+
+    from .hooks.handlers import ApprovalHookHandler, policies_from_snapshot
+
+    approval_handler: ApprovalHookHandler | None = None
+    approval_policies = policies_from_snapshot(init.approval_policies)
+    if approval_policies:
+        async def _publish_approval(subject: str, payload: dict[str, Any]) -> None:
+            await js.publish(subject, json.dumps(payload).encode())
+
+        approval_handler = ApprovalHookHandler(
+            publish=_publish_approval,
+            policies=approval_policies,
+            job_id=job_id,
+            tenant_id=init.tenant_id,
+            coworker_id=init.coworker_id,
+            conversation_id=init.conversation_id or None,
+            user_id=init.user_id or None,
+            timeout_ms=APPROVAL_TIMEOUT,
+        )
+        hook_registry.register(approval_handler)
+        log(f"Approval hook active ({len(approval_policies)} policy snapshot)")
+
     backend.subscribe(on_event)
     await backend.start(
         init,
@@ -372,6 +402,35 @@ async def run_query_loop(
         deliver_policy=DeliverPolicy.NEW,
     )
     input_sub = await js.subscribe(f"agent.{job_id}.input")
+
+    # Approval decisions are relayed by the orchestrator over JetStream. We ack
+    # on receipt and route the payload to the blocked hook's await point via
+    # ApprovalHookHandler.resolve_decision (first-wins: an unknown/stale
+    # request_id is a no-op). The container is awaiting a Future, not blocking
+    # the loop, so this push callback fires while an approval is pending.
+    approval_decision_sub = None
+    if approval_handler is not None:
+        _approval_handler = approval_handler
+
+        async def handle_approval_decision(msg: Any) -> None:
+            await msg.ack()
+            try:
+                data = json.loads(msg.data)
+            except (ValueError, TypeError) as exc:
+                log(f"Malformed approval_decision dropped: {exc}")
+                return
+            if isinstance(data, dict) and not _approval_handler.resolve_decision(data):
+                log(
+                    "approval_decision for unknown/stale request dropped: "
+                    f"{data.get('request_id')}"
+                )
+
+        approval_decision_sub = await js.subscribe(
+            f"agent.{job_id}.approval_decision",
+            cb=handle_approval_decision,
+            ordered_consumer=True,
+            deliver_policy=DeliverPolicy.NEW,
+        )
 
     # Build initial prompt
     prompt = init.prompt
@@ -471,6 +530,8 @@ async def run_query_loop(
         await input_sub.unsubscribe()
         await shutdown_sub.unsubscribe()
         await interrupt_sub.unsubscribe()
+        if approval_decision_sub is not None:
+            await approval_decision_sub.unsubscribe()
         await backend.shutdown()
 
 

@@ -44,6 +44,8 @@ print(json.dumps({
     "CREDENTIAL_PROXY_PORT": c.CREDENTIAL_PROXY_PORT,
     "CONTAINER_CPU_LIMIT": c.CONTAINER_CPU_LIMIT,
     "TIMEZONE": c.TIMEZONE,
+    "APPROVAL_TIMEOUT": c.APPROVAL_TIMEOUT,
+    "IDLE_TIMEOUT": c.IDLE_TIMEOUT,
 }))
 """
 
@@ -143,3 +145,35 @@ def test_timezone_rejects_abbreviation_without_slash() -> None:
 def test_timezone_falls_back_to_utc_when_nothing_valid() -> None:
     assert cfg(TZ="", no_system_tz=True)["TIMEZONE"] == "UTC"
     assert cfg(TZ=_DELETE, no_system_tz=True)["TIMEZONE"] == "UTC"
+
+
+# --- HITL approval (docs/21-hitl-approval-plan.md §5) ------------------------
+
+
+def test_approval_timeout_default_is_5_min() -> None:
+    assert cfg(APPROVAL_TIMEOUT=_DELETE)["APPROVAL_TIMEOUT"] == 300_000
+
+
+def test_approval_timeout_below_watchdog_floor() -> None:
+    """Frozen §5 invariant: the approval await must fire before the container
+    watchdog floor (IDLE_TIMEOUT + 30_000), so the watchdog can never pre-empt
+    a pending approval."""
+    out = cfg(APPROVAL_TIMEOUT=_DELETE, IDLE_TIMEOUT=_DELETE)
+    assert out["APPROVAL_TIMEOUT"] < out["IDLE_TIMEOUT"] + 30_000
+
+
+def test_startup_refuses_when_approval_timeout_reaches_watchdog_floor() -> None:
+    """A misconfigured APPROVAL_TIMEOUT that would let the watchdog reap a
+    pending approval must refuse to start (the module-level guard raises), not
+    silently kill containers mid-approval."""
+    import os
+
+    env = dict(os.environ)
+    env["IDLE_TIMEOUT"] = "1800000"
+    env["APPROVAL_TIMEOUT"] = str(1_800_000 + 30_000)  # == floor, not strictly <
+    proc = subprocess.run(
+        [sys.executable, "-c", _SCRIPT],
+        env=env, cwd=_ROOT, capture_output=True, text=True, timeout=60,
+    )
+    assert proc.returncode != 0
+    assert "APPROVAL_TIMEOUT" in proc.stderr
