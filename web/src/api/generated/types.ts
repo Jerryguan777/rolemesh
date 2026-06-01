@@ -256,6 +256,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/conversations/{id}/approval-requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        /**
+         * List a conversation's approval requests (all states, for chat history)
+         * @description The conversation's full HITL approval record — pending AND resolved
+         *     (approved / rejected / expired / cancelled) — oldest first, so the SPA
+         *     re-renders approval cards inline in the message stream on reload, not
+         *     just the pending ones. Tenant-scoped via the conversation row: a
+         *     conversation outside the caller's tenant returns 404.
+         */
+        get: operations["listConversationApprovalRequests"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/models": {
         parameters: {
             query?: never;
@@ -1391,7 +1417,7 @@ export interface components {
             enabled?: boolean;
             priority?: number;
         };
-        PendingApprovalRequest: {
+        ApprovalRequest: {
             /**
              * Format: uuid
              * @description Echo back in a `request.approval_decision` WS frame.
@@ -1420,6 +1446,21 @@ export interface components {
             coworker_id?: string | null;
             /** @description The agent's free-text "why I'm calling this tool" (nullable). */
             rationale?: string | null;
+            /**
+             * @description Lifecycle status. Always `pending` on the tenant-wide inbox read
+             *     (`GET /approval-requests`); the conversation sub-resource
+             *     (`GET /conversations/{id}/approval-requests`) returns every state so
+             *     resolved cards re-render inline in chat history.
+             * @enum {string}
+             */
+            status: "pending" | "approved" | "rejected" | "expired" | "cancelled";
+            /**
+             * Format: date-time
+             * @description When the request was resolved; null while pending.
+             */
+            decided_at?: string | null;
+            /** @description The approver's note on a reject; null otherwise. */
+            note?: string | null;
         };
         SkillFile: {
             path: string;
@@ -2538,6 +2579,30 @@ export interface operations {
             404: components["responses"]["NotFound"];
         };
     };
+    listConversationApprovalRequests: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalRequest"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
     listModels: {
         parameters: {
             query?: {
@@ -3394,7 +3459,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["PendingApprovalRequest"][];
+                    "application/json": components["schemas"]["ApprovalRequest"][];
                 };
             };
             401: components["responses"]["Unauthorized"];

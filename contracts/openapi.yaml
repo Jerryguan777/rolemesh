@@ -424,6 +424,33 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /api/v1/conversations/{id}/approval-requests:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [Conversations]
+      operationId: listConversationApprovalRequests
+      summary: List a conversation's approval requests (all states, for chat history)
+      description: |
+        The conversation's full HITL approval record — pending AND resolved
+        (approved / rejected / expired / cancelled) — oldest first, so the SPA
+        re-renders approval cards inline in the message stream on reload, not
+        just the pending ones. Tenant-scoped via the conversation row: a
+        conversation outside the caller's tenant returns 404.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ApprovalRequest' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /api/v1/models:
     get:
       tags: [Models]
@@ -1177,7 +1204,7 @@ paths:
             application/json:
               schema:
                 type: array
-                items: { $ref: '#/components/schemas/PendingApprovalRequest' }
+                items: { $ref: '#/components/schemas/ApprovalRequest' }
         '401':
           $ref: '#/components/responses/Unauthorized'
 
@@ -2284,7 +2311,7 @@ components:
         enabled: { type: boolean }
         priority: { type: integer }
 
-    PendingApprovalRequest:
+    ApprovalRequest:
       type: object
       required:
         - request_id
@@ -2292,6 +2319,7 @@ components:
         - tool_name
         - requested_at
         - expires_at
+        - status
       properties:
         request_id:
           type: string
@@ -2324,6 +2352,23 @@ components:
           type: string
           nullable: true
           description: The agent's free-text "why I'm calling this tool" (nullable).
+        status:
+          type: string
+          enum: [pending, approved, rejected, expired, cancelled]
+          description: |
+            Lifecycle status. Always `pending` on the tenant-wide inbox read
+            (`GET /approval-requests`); the conversation sub-resource
+            (`GET /conversations/{id}/approval-requests`) returns every state so
+            resolved cards re-render inline in chat history.
+        decided_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the request was resolved; null while pending.
+        note:
+          type: string
+          nullable: true
+          description: The approver's note on a reject; null otherwise.
 
     # -----------------------------------------------------------------
     # Skills (design §3 Phase 3 / docs/19-skills-architecture.md)

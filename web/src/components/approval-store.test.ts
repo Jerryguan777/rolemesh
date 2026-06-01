@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   type ApprovalCard,
   applyResolved,
+  cardsFromConversation,
   mergePending,
   upsertRequested,
 } from './approval-store.js';
@@ -12,7 +13,7 @@ import type {
 } from '../ws/v1_client.js';
 import type { components } from '../api/generated/types.js';
 
-type PendingRow = components['schemas']['PendingApprovalRequest'];
+type PendingRow = components['schemas']['ApprovalRequest'];
 
 function requested(
   id: string,
@@ -43,6 +44,9 @@ function row(id: string, extra: Partial<PendingRow> = {}): PendingRow {
     action_summary: 's',
     requested_at: '2026-01-01T00:00:00Z',
     expires_at: '2026-01-01T00:05:00Z',
+    status: 'pending',
+    decided_at: null,
+    note: null,
     ...extra,
   };
 }
@@ -62,6 +66,7 @@ function seed(id: string, status: ApprovalCard['status']): ApprovalCard {
     status,
     resolvedAt: null,
     note: null,
+    orderTs: 0,
   };
 }
 
@@ -235,5 +240,53 @@ describe('mergePending', () => {
     const out = mergePending([seed('a', 'approved')], [row('a')]);
     expect(out).toHaveLength(1);
     expect(out[0].status).toBe('approved');
+  });
+});
+
+describe('cardsFromConversation', () => {
+  it('preserves a resolved row status verbatim (not forced to pending)', () => {
+    // This is the whole point of the full-conversation read vs mergePending:
+    // a row that the server records as rejected must re-render as a rejected
+    // card on reload, with no live action buttons.
+    const out = cardsFromConversation([
+      row('a', { status: 'rejected', decided_at: '2026-01-01T00:02:00Z' }),
+    ]);
+    expect(out[0].status).toBe('rejected');
+  });
+
+  it('parses decided_at into resolvedAt for a terminal row', () => {
+    const out = cardsFromConversation([
+      row('a', { status: 'approved', decided_at: '2026-01-01T00:02:00Z' }),
+    ]);
+    expect(out[0].resolvedAt).toBe(Date.parse('2026-01-01T00:02:00Z'));
+  });
+
+  it('leaves resolvedAt null for a still-pending row even if decided_at leaks in', () => {
+    // Defensive: a pending row should never carry a decided_at, but if the API
+    // ever sends one we must not paint a pending card as already-decided.
+    const out = cardsFromConversation([
+      row('a', { status: 'pending', decided_at: '2026-01-01T00:02:00Z' }),
+    ]);
+    expect(out[0].resolvedAt).toBeNull();
+  });
+
+  it('orders the card by requested_at, not decided_at', () => {
+    // The card belongs where the request was raised (right after the user's
+    // message), not where it was decided — decided_at can be much later.
+    const out = cardsFromConversation([
+      row('a', {
+        status: 'approved',
+        requested_at: '2026-01-01T00:00:00Z',
+        decided_at: '2026-01-01T09:00:00Z',
+      }),
+    ]);
+    expect(out[0].orderTs).toBe(Date.parse('2026-01-01T00:00:00Z'));
+  });
+
+  it('defaults status to pending when the row omits it', () => {
+    const r = row('a');
+    delete (r as { status?: string }).status;
+    const out = cardsFromConversation([r]);
+    expect(out[0].status).toBe('pending');
   });
 });

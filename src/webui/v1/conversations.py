@@ -28,14 +28,17 @@ from rolemesh.db import (
     get_channel_binding_for_coworker,
     get_conversation,
     get_conversations_for_coworker,
+    list_requests_for_conversation,
     tenant_conn,
 )
 from webui.dependencies import get_current_user
 from webui.schemas_v1 import (
+    ApprovalRequest,
     Conversation,
     ConversationCreate,
     Message,
 )
+from webui.v1.approvals import _request_to_response
 from webui.v1.coworkers import _get_coworker_or_404
 from webui.v1.errors import raise_error_response
 
@@ -236,6 +239,28 @@ async def list_conversation_messages(
             )
         )
     return out
+
+
+@conversations_router.get(
+    "/{conversation_id}/approval-requests",
+    response_model=list[ApprovalRequest],
+)
+async def list_conversation_approval_requests(
+    conversation_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> list[ApprovalRequest]:
+    """Return the conversation's full HITL approval record (all states).
+
+    Unlike the tenant-wide ``GET /api/v1/approval-requests`` (pending only, for
+    the inbox), this returns pending AND resolved requests oldest-first so the
+    chat re-renders resolved ✅/❌ cards inline on reload, not just in-flight
+    ones. Tenant-scoped: a conversation outside the caller's tenant is 404.
+    """
+    await _get_conversation_or_404(conversation_id, user.tenant_id)
+    rows = await list_requests_for_conversation(
+        conversation_id, tenant_id=user.tenant_id
+    )
+    return [_request_to_response(r) for r in rows]
 
 
 def _looks_like_uuid(value: str) -> bool:

@@ -5,7 +5,7 @@
 // it dispatches no `approval-decision` frame and renders no approve /
 // reject controls.
 //
-// State scope: the component self-holds its own `PendingApprovalRequest[]`
+// State scope: the component self-holds its own `ApprovalRequest[]`
 // fetched from `GET /api/v1/approval-requests` WITHOUT a conversation_id
 // filter (tenant-wide; RLS scopes to the user's tenant server-side). The
 // approval-store is deliberately NOT lifted to the shell — the inbox and
@@ -32,7 +32,7 @@ import {
   getApiClient,
   type Conversation,
   type Coworker,
-  type PendingApprovalRequest,
+  type ApprovalRequest,
 } from '../api/client.js';
 import { iconInbox } from './icons.js';
 
@@ -118,7 +118,7 @@ export class ApprovalsInbox extends LitElement {
 
   /** Tenant-wide pending set — the inbox's own store (NOT the chat
    *  panel's). */
-  @state() private requests: PendingApprovalRequest[] = [];
+  @state() private requests: ApprovalRequest[] = [];
   /** Re-read at 1Hz while open so the countdowns tick. */
   @state() private now = Date.now();
 
@@ -267,7 +267,7 @@ export class ApprovalsInbox extends LitElement {
    *  §4.7) scroll the matching card into view and pulse it. Cross-coworker
    *  jumps reload the page in the shell, so the scroll is best-effort there
    *  and authoritative for an already-loaded conversation. */
-  private async jumpToConv(req: PendingApprovalRequest): Promise<void> {
+  private async jumpToConv(req: ApprovalRequest): Promise<void> {
     // Tell the shell to close the popover (it owns `open`).
     this.dispatchEvent(
       new CustomEvent('inbox-close', { bubbles: true, composed: true }),
@@ -299,7 +299,7 @@ export class ApprovalsInbox extends LitElement {
 
   /** Ascending by `expires_at` — most urgent first (§4.5). A missing
    *  timestamp sorts last (it has no deadline pressure). */
-  private sorted(): PendingApprovalRequest[] {
+  private sorted(): ApprovalRequest[] {
     return [...this.requests].sort((a, b) => {
       const ta = a.expires_at ? Date.parse(a.expires_at) : Infinity;
       const tb = b.expires_at ? Date.parse(b.expires_at) : Infinity;
@@ -516,7 +516,7 @@ export class ApprovalsInbox extends LitElement {
     `;
   }
 
-  private renderRow(r: PendingApprovalRequest): TemplateResult {
+  private renderRow(r: ApprovalRequest): TemplateResult {
     const name = this.coworkerName(r.coworker_id);
     const tool = [r.mcp_server_name, r.tool_name].filter(Boolean).join('.');
     const title = this.conversationTitle(r.conversation_id);

@@ -20,7 +20,9 @@ from fastapi import APIRouter, Depends, Query, Response
 from agent_runner.approval.policy import ApprovalPolicy as ApprovalPolicyValue
 from rolemesh.auth.provider import AuthenticatedUser
 from rolemesh.db.approval import (
-    ApprovalRequest,
+    ApprovalRequest as ApprovalRequestRow,
+)
+from rolemesh.db.approval import (
     create_approval_policy,
     delete_approval_policy,
     get_approval_policy,
@@ -33,7 +35,7 @@ from webui.schemas_v1 import (
     ApprovalPolicy,
     ApprovalPolicyCreate,
     ApprovalPolicyUpdate,
-    PendingApprovalRequest,
+    ApprovalRequest,
 )
 from webui.v1.errors import raise_error_response
 
@@ -55,7 +57,7 @@ def _policy_to_response(p: ApprovalPolicyValue) -> ApprovalPolicy:
     )
 
 
-def _request_to_response(r: ApprovalRequest) -> PendingApprovalRequest:
+def _request_to_response(r: ApprovalRequestRow) -> ApprovalRequest:
     # ``action`` is the {tool_name, params} snapshot. The decision UX (§1.2)
     # needs the raw params to be informative — the user cannot meaningfully
     # approve a tool call they can't see the arguments of. The endpoint is
@@ -64,7 +66,7 @@ def _request_to_response(r: ApprovalRequest) -> PendingApprovalRequest:
     tool_name = str(action.get("tool_name", ""))
     raw_params = action.get("params")
     params = raw_params if isinstance(raw_params, dict) else None
-    return PendingApprovalRequest(
+    return ApprovalRequest(
         request_id=r.id,
         conversation_id=r.conversation_id,
         mcp_server_name=r.mcp_server_name,
@@ -75,6 +77,9 @@ def _request_to_response(r: ApprovalRequest) -> PendingApprovalRequest:
         params=params,
         coworker_id=r.coworker_id,
         rationale=r.rationale,
+        status=r.status,
+        decided_at=r.decided_at.isoformat() if r.decided_at else None,
+        note=r.note,
     )
 
 
@@ -195,7 +200,7 @@ async def delete_policy_endpoint(
 # ---------------------------------------------------------------------------
 
 
-@requests_router.get("", response_model=list[PendingApprovalRequest])
+@requests_router.get("", response_model=list[ApprovalRequest])
 async def list_pending_requests_endpoint(
     conversation_id: str | None = Query(
         default=None,
@@ -206,7 +211,7 @@ async def list_pending_requests_endpoint(
         ),
     ),
     user: AuthenticatedUser = Depends(get_current_user),
-) -> list[PendingApprovalRequest]:
+) -> list[ApprovalRequest]:
     """Pending approval requests for the caller's tenant (oldest first).
 
     Authoritative source for re-rendering ✅/❌ cards after a socket drop. The

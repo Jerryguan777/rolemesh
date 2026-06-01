@@ -34,7 +34,7 @@ import type { ApprovalDecisionDetail } from './approval-card.js';
 import {
   type ApprovalCard,
   applyResolved,
-  mergePending,
+  cardsFromConversation,
   upsertRequested,
 } from './approval-store.js';
 
@@ -53,6 +53,14 @@ export interface ChatMessage {
   streaming?: boolean;
   safetyStage?: string;
   safetyRuleId?: string;
+  /** Ordering key (epoch ms) for chronological interleave with approval cards.
+   *  Stamped with the wall clock when the bubble first gets *content* (live), or
+   *  parsed from the server `timestamp` on reload. An empty streaming
+   *  placeholder is stamped at creation and re-stamped on its first token, so a
+   *  post-approval confirmation sorts after the approval card that gated it
+   *  rather than before (the placeholder is born before the card, but its
+   *  content arrives after). Mirrors `ApprovalCard.orderTs`. */
+  timestamp: number;
 }
 
 type RunState = 'idle' | 'running' | 'stopping' | 'cancelling';
@@ -198,6 +206,11 @@ export class ChatPanel extends LitElement {
         .map((m) => ({
           role: m.role === 'assistant' ? 'assistant' : 'user',
           content: m.content,
+          // Server timestamp is the ordering key on reload so persisted
+          // messages interleave correctly with the conversation's resolved
+          // approval cards (both server-clock). Falls back to 0 for the rare
+          // row with no timestamp, which keeps it at the very top.
+          timestamp: m.timestamp ? Date.parse(m.timestamp) : 0,
         }));
     } catch (err) {
       console.warn('listMessages failed', err);
@@ -228,6 +241,10 @@ export class ChatPanel extends LitElement {
     void this.v1.connect();
 
     await this.loadMessages(conversationId);
+    // Re-render the conversation's full approval record (pending + resolved)
+    // inline. Without this, a reload showed messages only — resolved ✅/❌
+    // cards vanished — and a fresh load had no cards until the first live push.
+    await this.refreshApprovals(conversationId);
   }
 
   private teardownV1(): void {
@@ -240,25 +257,37 @@ export class ChatPanel extends LitElement {
   private handleV1Status(s: ConnectionStatus): void {
     const wasConnected = this.connected;
     this.connected = s === 'open';
-    // On (re)connect, re-render in-flight approval cards from the
-    // authoritative DB rows — the live `event.approval.requested` push is
-    // fire-and-forget, so a card that arrived while the socket was down (or
-    // before a reload) is only recoverable via this read (§10 S5).
+    // On (re)connect, re-render approval cards from the authoritative DB rows —
+    // the live `event.approval.requested`/`resolved` pushes are fire-and-forget,
+    // so a card raised (or decided) while the socket was down is only
+    // recoverable via this read (§10 S5).
     if (this.connected && !wasConnected) {
-      void this.refreshPendingApprovals();
+      void this.refreshApprovals(this.activeConversationId);
     }
   }
 
-  private async refreshPendingApprovals(): Promise<void> {
-    const conversationId = this.activeConversationId;
+  /** Rebuild the card list from the conversation's full approval record
+   *  (pending + resolved, oldest-first). The server is the source of truth for
+   *  status / timestamps; we preserve only the client-side rejection `note`
+   *  (never persisted) by carrying it over from the matching in-memory card. */
+  private async refreshApprovals(conversationId: string | null): Promise<void> {
     if (!conversationId) return;
     try {
-      const rows = await this.api.listPendingApprovals(conversationId);
+      const rows = await this.api.listConversationApprovals(conversationId);
       // Guard against a conversation switch mid-flight.
       if (this.activeConversationId !== conversationId) return;
-      this.approvals = mergePending(this.approvals, rows);
+      const localNotes = new Map(
+        this.approvals
+          .filter((c) => c.note)
+          .map((c) => [c.requestId, c.note] as const),
+      );
+      this.approvals = cardsFromConversation(rows).map((c) =>
+        localNotes.has(c.requestId)
+          ? { ...c, note: localNotes.get(c.requestId) ?? null }
+          : c,
+      );
     } catch (err) {
-      console.warn('listPendingApprovals failed', err);
+      console.warn('listConversationApprovals failed', err);
     }
   }
 
@@ -307,7 +336,9 @@ export class ChatPanel extends LitElement {
         if (!hasPlaceholder) {
           this.messages = [
             ...this.messages,
-            { role: 'assistant', content: '', streaming: true },
+            // Provisional stamp; re-stamped when the first token lands so a
+            // post-approval confirmation sorts after its gating card.
+            { role: 'assistant', content: '', streaming: true, timestamp: Date.now() },
           ];
         }
         this.agentStatus = { label: 'Thinking…' };
@@ -324,12 +355,18 @@ export class ChatPanel extends LitElement {
         if (last?.role === 'assistant' && last.streaming) {
           this.messages = [
             ...this.messages.slice(0, -1),
-            { ...last, content: last.content + delta },
+            {
+              ...last,
+              content: last.content + delta,
+              // First token into an empty placeholder: re-stamp to now so a
+              // confirmation gated by an approval sorts after that card.
+              timestamp: last.content ? last.timestamp : Date.now(),
+            },
           ];
         } else {
           this.messages = [
             ...this.messages,
-            { role: 'assistant', content: delta, streaming: true },
+            { role: 'assistant', content: delta, streaming: true, timestamp: Date.now() },
           ];
         }
         break;
@@ -376,10 +413,19 @@ export class ChatPanel extends LitElement {
           typeof (e as { content?: unknown }).content === 'string'
             ? (e as { content: string }).content
             : '';
+        // The side-channel push carries its own server timestamp; honour it so
+        // an out-of-band reminder lands in chronological position rather than
+        // always at "now" (matters on reload, where it sits among server-
+        // stamped history).
+        const appendedAt = (e as { timestamp?: unknown }).timestamp;
+        const ts =
+          typeof appendedAt === 'string' && appendedAt
+            ? Date.parse(appendedAt)
+            : Date.now();
         if (content) {
           this.messages = [
             ...this.messages,
-            { role: 'assistant', content },
+            { role: 'assistant', content, timestamp: ts },
           ];
         }
         break;
@@ -423,6 +469,7 @@ export class ChatPanel extends LitElement {
               typeof details.stage === 'string' ? details.stage : 'unknown',
             safetyRuleId:
               typeof details.rule_id === 'string' ? details.rule_id : undefined,
+            timestamp: Date.now(),
           };
           if (last?.role === 'assistant' && last.streaming && !last.content) {
             this.messages = [...this.messages.slice(0, -1), safetyMsg];
@@ -433,12 +480,17 @@ export class ChatPanel extends LitElement {
           if (last?.role === 'assistant' && last.streaming && !last.content) {
             this.messages = [
               ...this.messages.slice(0, -1),
-              { ...last, content: `**Error:** ${message}`, streaming: false },
+              {
+                ...last,
+                content: `**Error:** ${message}`,
+                streaming: false,
+                timestamp: Date.now(),
+              },
             ];
           } else {
             this.messages = [
               ...this.messages,
-              { role: 'assistant', content: `**Error:** ${message}` },
+              { role: 'assistant', content: `**Error:** ${message}`, timestamp: Date.now() },
             ];
           }
         }
@@ -591,7 +643,11 @@ export class ChatPanel extends LitElement {
       if (err instanceof ApiError) {
         this.messages = [
           ...this.messages,
-          { role: 'assistant', content: `**Error:** cancel failed (${err.message})` },
+          {
+            role: 'assistant',
+            content: `**Error:** cancel failed (${err.message})`,
+            timestamp: Date.now(),
+          },
         ];
       }
       this.runState = 'running';
@@ -619,7 +675,11 @@ export class ChatPanel extends LitElement {
         console.warn('createCoworkerConversation failed', err);
         this.messages = [
           ...this.messages,
-          { role: 'assistant', content: '**Error:** could not create conversation' },
+          {
+            role: 'assistant',
+            content: '**Error:** could not create conversation',
+            timestamp: Date.now(),
+          },
         ];
         return;
       }
@@ -640,7 +700,7 @@ export class ChatPanel extends LitElement {
       }
     }
 
-    this.messages = [...this.messages, { role: 'user', content: text }];
+    this.messages = [...this.messages, { role: 'user', content: text, timestamp: Date.now() }];
     // Reset terminal flag so Stop/Cancel re-enable for the new run.
     this.runTerminal = false;
     this.runState = 'running';

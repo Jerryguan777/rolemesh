@@ -35,6 +35,7 @@ __all__ = [
     "list_approval_policies",
     "list_pending_requests_all_tenants",
     "list_pending_requests_for_tenant",
+    "list_requests_for_conversation",
     "resolve_approval_request",
     "update_approval_policy",
 ]
@@ -362,6 +363,27 @@ async def list_pending_requests_for_tenant(
             "WHERE tenant_id = $1::uuid AND status = 'pending' "
             "ORDER BY requested_at ASC",
             tenant_id,
+        )
+    return [_record_to_request(r) for r in rows]
+
+
+async def list_requests_for_conversation(
+    conversation_id: str, *, tenant_id: str
+) -> list[ApprovalRequest]:
+    """All approval requests for one conversation, oldest first.
+
+    Unlike :func:`list_pending_requests_for_tenant` this returns every status
+    (pending + resolved) so the web chat can re-render the conversation's full
+    approval record inline. Tenant-scoped via ``tenant_conn`` (RLS) plus the
+    explicit ``tenant_id`` predicate (INV-1 belt).
+    """
+    async with tenant_conn(tenant_id) as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM approval_requests "
+            "WHERE tenant_id = $1::uuid AND conversation_id = $2::uuid "
+            "ORDER BY requested_at ASC",
+            tenant_id,
+            conversation_id,
         )
     return [_record_to_request(r) for r in rows]
 

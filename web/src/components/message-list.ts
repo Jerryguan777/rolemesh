@@ -7,10 +7,10 @@ import './approval-card.js';
 @customElement('rm-message-list')
 export class MessageList extends LitElement {
   @property({ attribute: false }) messages: ChatMessage[] = [];
-  // In-flight + resolved HITL approval cards, rendered inline at the tail of the
-  // conversation stream so they scroll with it (not as a detached footer block).
-  // An approval is raised by the latest agent turn and the container blocks until
-  // it resolves, so the tail is its correct chronological position.
+  // In-flight + resolved HITL approval cards, interleaved into the message
+  // stream by timestamp (see `render`) so each card sits in its true
+  // chronological position — right after the user turn that triggered it and
+  // before the confirmation — instead of being pinned to the conversation tail.
   @property({ attribute: false }) approvals: ApprovalCard[] = [];
   @property({ attribute: false }) approvalBusy: Set<string> = new Set();
   @property() coworkerName = '';
@@ -46,27 +46,53 @@ export class MessageList extends LitElement {
     }
   }
 
+  /** Merge messages and approval cards into one chronological stream.
+   *
+   *  Both carry an epoch-ms ordering key (`ChatMessage.timestamp` /
+   *  `ApprovalCard.orderTs`) that is consistent within its source — server
+   *  clock on reload, browser clock on live push. The sort is stable, so when
+   *  two items share a key (e.g. coarse server-second granularity) their
+   *  original relative order is kept, with messages before cards on a tie. */
+  private timeline(): Array<
+    { kind: 'message'; ts: number; msg: ChatMessage }
+    | { kind: 'approval'; ts: number; card: ApprovalCard }
+  > {
+    const items: Array<
+      { kind: 'message'; ts: number; msg: ChatMessage }
+      | { kind: 'approval'; ts: number; card: ApprovalCard }
+    > = [
+      ...this.messages.map(
+        (msg) => ({ kind: 'message' as const, ts: msg.timestamp, msg }),
+      ),
+      ...this.approvals.map(
+        (card) => ({ kind: 'approval' as const, ts: card.orderTs, card }),
+      ),
+    ];
+    return items.sort((a, b) => a.ts - b.ts);
+  }
+
   override render() {
     if (this.messages.length === 0 && this.approvals.length === 0) return html``;
     return html`
       <div class="flex flex-col px-4 pt-6">
-        ${this.messages.map((msg) => html`<rm-message-item .message=${msg}></rm-message-item>`)}
-        ${this.approvals.map(
-          (c) => html`<rm-approval-card
-            .requestId=${c.requestId}
-            .actionSummary=${c.actionSummary}
-            .status=${c.status}
-            .mcpServerName=${c.mcpServerName}
-            .toolName=${c.toolName}
-            .params=${c.params}
-            .rationale=${c.rationale}
-            .requestedAt=${c.requestedAt}
-            .expiresAt=${c.expiresAt}
-            .coworkerName=${this.coworkerName}
-            .resolvedAt=${c.resolvedAt}
-            .note=${c.note}
-            .busy=${this.approvalBusy.has(c.requestId)}
-          ></rm-approval-card>`,
+        ${this.timeline().map((item) =>
+          item.kind === 'message'
+            ? html`<rm-message-item .message=${item.msg}></rm-message-item>`
+            : html`<rm-approval-card
+                .requestId=${item.card.requestId}
+                .actionSummary=${item.card.actionSummary}
+                .status=${item.card.status}
+                .mcpServerName=${item.card.mcpServerName}
+                .toolName=${item.card.toolName}
+                .params=${item.card.params}
+                .rationale=${item.card.rationale}
+                .requestedAt=${item.card.requestedAt}
+                .expiresAt=${item.card.expiresAt}
+                .coworkerName=${this.coworkerName}
+                .resolvedAt=${item.card.resolvedAt}
+                .note=${item.card.note}
+                .busy=${this.approvalBusy.has(item.card.requestId)}
+              ></rm-approval-card>`,
         )}
       </div>
     `;

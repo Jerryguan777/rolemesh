@@ -26,7 +26,7 @@ Bug-bait focus:
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -34,9 +34,11 @@ from fastapi import FastAPI
 
 from rolemesh.auth.provider import AuthenticatedUser
 from rolemesh.db import (
+    create_approval_request,
     create_coworker,
     create_tenant,
     create_user,
+    resolve_approval_request,
     store_message,
 )
 from webui.api_v1 import router as api_v1_router
@@ -323,5 +325,150 @@ async def test_get_conversation_with_invalid_uuid_returns_404_not_500() -> None:
     app = _build_app(_authed(tid, uid))
     async with _client(app) as c:
         r = await c.get("/api/v1/conversations/not-a-uuid")
+    assert r.status_code == 404
+    assert r.json()["code"] == "NOT_FOUND"
+
+
+# ---------------------------------------------------------------------------
+# Conversation approval record — GET /conversations/{id}/approval-requests
+#
+# This sub-resource is the chat surface's source of truth for re-rendering the
+# full approval history inline (pending + resolved), so a reload doesn't drop
+# the resolved ✅/❌ cards. Bug-bait: it must (a) include resolved rows, not
+# just pending; (b) order by requested_at (where the card belongs) not
+# decided_at; (c) scope to the one conversation; (d) hold the tenant edge.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_request(
+    *, tenant_id: str, coworker_id: str, conversation_id: str, summary: str
+) -> str:
+    req = await create_approval_request(
+        tenant_id=tenant_id,
+        coworker_id=coworker_id,
+        conversation_id=conversation_id,
+        job_id="job-x",
+        mcp_server_name="stripe",
+        action={"tool_name": "charge", "params": {"amount": 500}},
+        action_summary=summary,
+        rationale="why",
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    return req.id
+
+
+@pytest.mark.asyncio
+async def test_conversation_approvals_include_resolved_oldest_first() -> None:
+    """Pending AND resolved rows come back, oldest-first by requested_at.
+
+    The pending-only inbox read would drop the resolved card on reload — the
+    whole reason this endpoint exists. We seed two requests, resolve the
+    *first*, and assert both surface with their real status in request order.
+    """
+    tid, uid, cw_id = await _make_tenant_user_coworker()
+    app = _build_app(_authed(tid, uid))
+    async with _client(app) as c:
+        r = await c.post(f"/api/v1/coworkers/{cw_id}/conversations", json={})
+        conv_id = r.json()["id"]
+
+    first = await _seed_request(
+        tenant_id=tid, coworker_id=cw_id, conversation_id=conv_id, summary="first"
+    )
+    second = await _seed_request(
+        tenant_id=tid, coworker_id=cw_id, conversation_id=conv_id, summary="second"
+    )
+    resolved = await resolve_approval_request(
+        first, tenant_id=tid, status="approved", decided_by=uid
+    )
+    assert resolved is not None, "seed precondition: first request must resolve"
+
+    async with _client(app) as c:
+        r = await c.get(f"/api/v1/conversations/{conv_id}/approval-requests")
+    assert r.status_code == 200, r.text
+    rows = r.json()
+    assert [x["request_id"] for x in rows] == [first, second], "oldest-first"
+    assert rows[0]["status"] == "approved"
+    assert rows[0]["decided_at"] is not None
+    assert rows[1]["status"] == "pending"
+    assert rows[1]["decided_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_conversation_approvals_ordered_by_request_not_decision_time() -> None:
+    """A request raised first but decided last still sorts first.
+
+    The card belongs where the agent raised it (right after the user turn),
+    not where the human happened to click — so ordering keys on requested_at.
+    Resolving the *older* request last (so decided_at order is the reverse of
+    requested_at order) would expose an accidental ORDER BY decided_at.
+    """
+    tid, uid, cw_id = await _make_tenant_user_coworker()
+    app = _build_app(_authed(tid, uid))
+    async with _client(app) as c:
+        r = await c.post(f"/api/v1/coworkers/{cw_id}/conversations", json={})
+        conv_id = r.json()["id"]
+
+    older = await _seed_request(
+        tenant_id=tid, coworker_id=cw_id, conversation_id=conv_id, summary="older"
+    )
+    newer = await _seed_request(
+        tenant_id=tid, coworker_id=cw_id, conversation_id=conv_id, summary="newer"
+    )
+    # Decide the NEWER one first, the OLDER one second — decided_at order is
+    # now the opposite of requested_at order.
+    await resolve_approval_request(newer, tenant_id=tid, status="approved")
+    await resolve_approval_request(older, tenant_id=tid, status="rejected")
+
+    async with _client(app) as c:
+        r = await c.get(f"/api/v1/conversations/{conv_id}/approval-requests")
+    assert r.status_code == 200, r.text
+    assert [x["request_id"] for x in r.json()] == [older, newer]
+
+
+@pytest.mark.asyncio
+async def test_conversation_approvals_scoped_to_the_one_conversation() -> None:
+    """A request on a *sibling* conversation (same tenant) is not returned."""
+    tid, uid, cw_id = await _make_tenant_user_coworker()
+    app = _build_app(_authed(tid, uid))
+    async with _client(app) as c:
+        a = await c.post(f"/api/v1/coworkers/{cw_id}/conversations", json={})
+        conv_a = a.json()["id"]
+        b = await c.post(f"/api/v1/coworkers/{cw_id}/conversations", json={})
+        conv_b = b.json()["id"]
+
+    mine = await _seed_request(
+        tenant_id=tid, coworker_id=cw_id, conversation_id=conv_a, summary="mine"
+    )
+    await _seed_request(
+        tenant_id=tid, coworker_id=cw_id, conversation_id=conv_b, summary="sibling"
+    )
+
+    async with _client(app) as c:
+        r = await c.get(f"/api/v1/conversations/{conv_a}/approval-requests")
+    assert r.status_code == 200, r.text
+    assert [x["request_id"] for x in r.json()] == [mine]
+
+
+@pytest.mark.asyncio
+async def test_conversation_approvals_cross_tenant_is_404() -> None:
+    """Tenant A asking for tenant B's conversation gets a flat 404.
+
+    Same isolation contract as the conversation GET: a guessed/leaked UUID
+    from another tenant must collapse to the same 404 a non-existent id gets
+    — no read of B's approvals, no existence oracle.
+    """
+    a_tid, a_uid, _ = await _make_tenant_user_coworker("convapr-a")
+    b_tid, _b_uid, b_cw = await _make_tenant_user_coworker("convapr-b")
+    b_app = _build_app(_authed(b_tid, _b_uid))
+    async with _client(b_app) as c:
+        r = await c.post(f"/api/v1/coworkers/{b_cw}/conversations", json={})
+        b_conv = r.json()["id"]
+    await _seed_request(
+        tenant_id=b_tid, coworker_id=b_cw, conversation_id=b_conv, summary="victim"
+    )
+
+    a_app = _build_app(_authed(a_tid, a_uid))
+    async with _client(a_app) as c:
+        r = await c.get(f"/api/v1/conversations/{b_conv}/approval-requests")
     assert r.status_code == 404
     assert r.json()["code"] == "NOT_FOUND"

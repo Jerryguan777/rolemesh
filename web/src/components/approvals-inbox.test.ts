@@ -44,7 +44,7 @@ import {
 import type {
   Conversation,
   Coworker,
-  PendingApprovalRequest,
+  ApprovalRequest,
 } from '../api/client.js';
 
 // --- fixtures ---------------------------------------------------------------
@@ -82,8 +82,8 @@ function expiresInMin(mins: number): string {
 }
 
 function req(
-  over: Partial<PendingApprovalRequest> & { request_id: string },
-): PendingApprovalRequest {
+  over: Partial<ApprovalRequest> & { request_id: string },
+): ApprovalRequest {
   return {
     conversation_id: 'conv-ops',
     coworker_id: 'cw-ops',
@@ -95,7 +95,7 @@ function req(
     params: { campaign_id: 'SP-Auto-Hydration', account_id: 'ACME-PRIME' },
     rationale: null,
     ...over,
-  } as PendingApprovalRequest;
+  } as ApprovalRequest;
 }
 
 async function settle(el: ApprovalsInbox): Promise<void> {
@@ -106,7 +106,7 @@ async function settle(el: ApprovalsInbox): Promise<void> {
 }
 
 interface MountOpts {
-  rows?: PendingApprovalRequest[];
+  rows?: ApprovalRequest[];
   open?: boolean;
   coworkers?: Coworker[];
   conversations?: Conversation[];

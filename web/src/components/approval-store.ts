@@ -57,9 +57,17 @@ export interface ApprovalCard {
    *  card can echo it back ("YOUR REASON"). Never comes off the wire — it is
    *  what the user typed — and is lost on reconnect, which is acceptable. */
   note: string | null;
+  /** Ordering key (epoch ms) used to interleave the card with chat messages in
+   *  chronological position instead of pinning it to the conversation tail. It
+   *  is stamped client-side at the instant the card enters the timeline for a
+   *  *live* push (so it follows arrival order regardless of client↔server clock
+   *  skew), and parsed from the server `requested_at` on reload (so it matches
+   *  the server's ordering of the persisted messages around it). Both sources
+   *  are monotonic within their own world, which is all the interleave needs. */
+  orderTs: number;
 }
 
-type PendingRow = components['schemas']['PendingApprovalRequest'];
+type PendingRow = components['schemas']['ApprovalRequest'];
 
 /** Normalise a wire `params` value to a plain object. A non-object (array,
  *  string, null, undefined) collapses to `{}` so the card never has to special-
@@ -98,6 +106,10 @@ export function upsertRequested(
       status: 'pending',
       resolvedAt: null,
       note: null,
+      // Live push: stamp arrival time so the card sorts after the user message
+      // that triggered it and before the (later) confirmation, even if the
+      // server's requested_at clock differs from the browser's.
+      orderTs: Date.now(),
     },
   ];
 }
@@ -148,9 +160,46 @@ export function mergePending(
     status: 'pending',
     resolvedAt: null,
     note: null,
+    orderTs: r.requested_at ? Date.parse(r.requested_at) : Date.now(),
   }));
   // De-dup defensively: a row whose id already has a resolved card (decided in
   // the same instant the read raced) stays resolved, not re-pended.
   const resolvedIds = new Set(resolved.map((c) => c.requestId));
   return [...resolved, ...fromRows.filter((c) => !resolvedIds.has(c.requestId))];
+}
+
+/** Build the full card list from a conversation's authoritative approval record
+ *  (`GET /api/v1/conversations/{id}/approval-requests`).
+ *
+ *  Unlike {@link mergePending} (pending-only, for the inbox / reconnect), this
+ *  read carries *every* status plus `decided_at`, so the chat surface can
+ *  re-render resolved ✅/❌ cards inline on reload — not just in-flight ones.
+ *  `status` is taken verbatim from the row (the server is the source of truth),
+ *  `resolvedAt` is parsed from `decided_at` for terminal rows, and `orderTs` is
+ *  parsed from `requested_at` so the card lands in chronological position among
+ *  the persisted messages. `note` (the approver's typed reason) is client-only
+ *  and not persisted, so it is always null here. */
+export function cardsFromConversation(
+  rows: readonly PendingRow[],
+): ApprovalCard[] {
+  return rows.map((r) => {
+    const status = (r.status as ApprovalStatus) ?? 'pending';
+    const decidedAt = r.decided_at ?? null;
+    return {
+      requestId: r.request_id,
+      mcpServerName: r.mcp_server_name ?? null,
+      toolName: r.tool_name ?? null,
+      params: coerceParams(r.params),
+      coworkerId: r.coworker_id ?? null,
+      rationale: r.rationale ?? null,
+      requestedAt: r.requested_at ?? null,
+      expiresAt: r.expires_at ?? null,
+      actionSummary: r.action_summary ?? null,
+      status,
+      resolvedAt:
+        status !== 'pending' && decidedAt ? Date.parse(decidedAt) : null,
+      note: r.note ?? null,
+      orderTs: r.requested_at ? Date.parse(r.requested_at) : 0,
+    };
+  });
 }

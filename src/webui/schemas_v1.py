@@ -464,14 +464,15 @@ class ApprovalPolicyUpdate(BaseModel):
     )
 
 
-class PendingApprovalRequest(BaseModel):
-    """Wire projection of a *pending* ``approval_requests`` row (§4.2).
+class ApprovalRequest(BaseModel):
+    """Wire projection of an ``approval_requests`` row (§4.2).
 
-    The web reconnect read (``GET /api/v1/approval-requests``) returns these so
-    a browser that dropped its socket can re-render the in-flight ✅/❌ cards
-    from the authoritative DB rows (the live ``event.approval.requested`` push
-    is fire-and-forget). Only pending rows are ever returned; a resolved request
-    is delivered as ``event.approval.resolved`` instead.
+    Two reads return these: the tenant-wide inbox read
+    (``GET /api/v1/approval-requests``) yields only ``pending`` rows; the
+    conversation sub-resource
+    (``GET /api/v1/conversations/{id}/approval-requests``) yields every state so
+    a reconnecting browser re-renders both pending and resolved cards inline in
+    chat history. ``status`` distinguishes them.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -489,6 +490,10 @@ class PendingApprovalRequest(BaseModel):
     params: dict[str, object] | None = None
     coworker_id: str | None = None
     rationale: str | None = None
+    # pending|approved|rejected|expired|cancelled — 'pending' on the inbox read.
+    status: str
+    decided_at: str | None = None
+    note: str | None = None
 
 
 # ---------------------------------------------------------------------------
