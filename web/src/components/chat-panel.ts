@@ -771,8 +771,14 @@ export class ChatPanel extends LitElement {
           <div class="flex-1 overflow-y-auto" id="scroll-area">
             <div class="max-w-[720px] mx-auto w-full">
               ${this.messages.length === 0 ? this.renderEmpty() : ''}
-              <rm-message-list .messages=${this.messages}></rm-message-list>
-              ${this.renderApprovals()}
+              <rm-message-list
+                .messages=${this.messages}
+                .approvals=${this.approvals}
+                .approvalBusy=${this.approvalInflight}
+                .coworkerName=${this.activeCoworkerName}
+                @approval-decision=${(e: CustomEvent<ApprovalDecisionDetail>) =>
+                  this.handleApprovalDecision(e.detail)}
+              ></rm-message-list>
               ${this.messages.length > 0 || this.approvals.length > 0
                 ? html`<div class="h-8"></div>`
                 : ''}
@@ -804,40 +810,6 @@ export class ChatPanel extends LitElement {
             </div>
           </div>
         </div>
-      </div>
-    `;
-  }
-
-  /** Render the in-flight HITL approval cards (if any). Each card emits an
-   *  `approval-decision` CustomEvent that we relay to the WS frame. */
-  private renderApprovals() {
-    if (this.approvals.length === 0) return '';
-    return html`
-      <div
-        class="px-4"
-        data-testid="approval-region"
-        @approval-decision=${(e: CustomEvent<ApprovalDecisionDetail>) =>
-          this.handleApprovalDecision(e.detail)}
-      >
-        ${this.approvals.map(
-          (c) => html`
-            <rm-approval-card
-              .requestId=${c.requestId}
-              .actionSummary=${c.actionSummary}
-              .status=${c.status}
-              .mcpServerName=${c.mcpServerName}
-              .toolName=${c.toolName}
-              .params=${c.params}
-              .rationale=${c.rationale}
-              .requestedAt=${c.requestedAt}
-              .expiresAt=${c.expiresAt}
-              .coworkerName=${this.activeCoworkerName}
-              .resolvedAt=${c.resolvedAt}
-              .note=${c.note}
-              .busy=${this.approvalInflight.has(c.requestId)}
-            ></rm-approval-card>
-          `,
-        )}
       </div>
     `;
   }
