@@ -282,6 +282,16 @@ export class ChatPanel extends LitElement {
     this.v1.sendApprovalDecision(detail.requestId, detail.decision, detail.note);
   }
 
+  /** Bubble a tenant-scope "something changed in approvals" signal so the
+   *  top-bar inbox (which keeps its own cross-conversation store) can
+   *  re-pull. `composed` lets it cross the shadow boundary if a future
+   *  host shadow-roots the panel; today both live in light DOM. */
+  private emitApprovalActivity(): void {
+    this.dispatchEvent(
+      new CustomEvent('approval-activity', { bubbles: true, composed: true }),
+    );
+  }
+
   private handleV1Event(e: ServerEvent): void {
     if (this.runState === 'running') this.resetRunningWatchdog();
     switch (e.type) {
@@ -381,12 +391,15 @@ export class ChatPanel extends LitElement {
           this.approvals,
           e as ApprovalRequestedEvent,
         );
+        // Nudge the cross-conversation inbox to re-pull (§4.8 trigger C).
+        this.emitApprovalActivity();
         break;
       }
       case 'event.approval.resolved': {
         const ev = e as ApprovalResolvedEvent;
         this.approvals = applyResolved(this.approvals, ev);
         this.approvalInflight.delete(ev.request_id);
+        this.emitApprovalActivity();
         break;
       }
       case 'event.run.error': {

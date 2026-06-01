@@ -49,11 +49,17 @@ import {
 import { connectionState } from '../ws/connection-state.js';
 import { clearToken } from '../services/oidc-auth.js';
 import './chat-panel.js';
+import './approvals-inbox.js';
+import type {
+  ApprovalsCountDetail,
+  ApprovalsInbox,
+} from './approvals-inbox.js';
 import './reauth-banner.js';
 import {
   iconActivity,
   iconChevronDown,
   iconClose,
+  iconInbox,
   iconLogout,
   iconPlus,
   iconSearch,
@@ -183,7 +189,12 @@ export class RmChatShell extends LitElement {
   @state() private bootstrapped = false;
   /** Which popover, if any, is open. Only one at a time to keep
    *  keyboard handling simple. */
-  @state() private openMenu: '' | 'coworker' | 'user' = '';
+  @state() private openMenu: '' | 'coworker' | 'user' | 'approvals' = '';
+  /** Pending-approval count for the top-bar badge, fed by the inbox's
+   *  `approvals-count` event (the inbox owns the store — §4.8). `urgent`
+   *  flags ≥1 item under the 5-minute expiry line so the badge deepens. */
+  @state() private approvalTotal = 0;
+  @state() private approvalUrgent = false;
   /** Sidebar conversation-list search. Toggled by the "Search
    *  conversations" button; clearing or closing restores the full
    *  list. Filtering is purely client-side over the already-fetched
@@ -228,6 +239,13 @@ export class RmChatShell extends LitElement {
     void this.bootstrap();
     document.addEventListener('click', this.onDocumentClick, true);
     this.addEventListener('agent-connection', this.onAgentConnection);
+    // Approvals inbox plumbing (§4): the inbox owns its own store and
+    // bubbles {total,urgent} for the badge; it asks us to close the
+    // popover on a row jump; and the chat-panel bubbles `approval-activity`
+    // whenever a card is requested/resolved so we re-pull the inbox.
+    this.addEventListener('approvals-count', this.onApprovalsCount as EventListener);
+    this.addEventListener('inbox-close', this.onInboxClose);
+    this.addEventListener('approval-activity', this.onApprovalActivity);
     // Subscribe to the aggregate ConnectionState so any WS client
     // flipping open/closed directly drives the top-bar dot — even if
     // the message-editor's agent-connection relay misses an edge.
@@ -241,6 +259,9 @@ export class RmChatShell extends LitElement {
     super.disconnectedCallback();
     document.removeEventListener('click', this.onDocumentClick, true);
     this.removeEventListener('agent-connection', this.onAgentConnection);
+    this.removeEventListener('approvals-count', this.onApprovalsCount as EventListener);
+    this.removeEventListener('inbox-close', this.onInboxClose);
+    this.removeEventListener('approval-activity', this.onApprovalActivity);
     this.connStateUnsub?.();
     this.connStateUnsub = null;
   }
@@ -249,6 +270,44 @@ export class RmChatShell extends LitElement {
     const detail = (e as CustomEvent<{ connected: boolean }>).detail;
     if (detail && typeof detail.connected === 'boolean') {
       this.agentConnected = detail.connected;
+    }
+  };
+
+  private onApprovalsCount = (e: CustomEvent<ApprovalsCountDetail>): void => {
+    this.approvalTotal = e.detail.total;
+    this.approvalUrgent = e.detail.urgent > 0;
+  };
+
+  private onInboxClose = (): void => {
+    if (this.openMenu === 'approvals') this.openMenu = '';
+  };
+
+  /** A chat-panel approval card was requested/resolved — re-pull the
+   *  inbox so the badge + list reflect the change without waiting for the
+   *  next open or poll. */
+  private onApprovalActivity = (): void => {
+    void this.querySelector<ApprovalsInbox>('rm-approvals-inbox')?.refresh();
+  };
+
+  private toggleApprovals = (): void => {
+    this.openMenu = this.openMenu === 'approvals' ? '' : 'approvals';
+  };
+
+  /** Wired into the inbox: switch sidebar coworker + open the gated
+   *  conversation. Cross-coworker / cross-conversation jumps full-reload
+   *  via the existing navigation (chat-panel reads URL params in its
+   *  constructor); a jump to the already-active conversation is a no-op
+   *  here and the inbox just scrolls to the card in place (§4.7). */
+  private jumpToConversation = async (
+    conversationId: string | null,
+    coworkerId: string | null,
+  ): Promise<void> => {
+    if (coworkerId && coworkerId !== this.activeCoworkerId) {
+      location.href = this.buildHref(coworkerId, conversationId);
+      return;
+    }
+    if (conversationId && conversationId !== this.activeConversationId) {
+      this.navigateConversation(conversationId);
     }
   };
 
@@ -915,6 +974,36 @@ export class RmChatShell extends LitElement {
           display: grid;
           place-items: center;
         }
+        /* Deeper red when any pending approval is < 5 minutes from expiry
+         * (spec §4.1) — the dot draws the eye before the deadline lapses. */
+        rm-chat-shell .cs-iconbtn .bdg.urgent {
+          background: var(--rm-bad);
+        }
+        /* The approvals popover anchors to this relatively-positioned
+         * wrapper so the inbox's absolutely-positioned panel hangs under
+         * the trigger button. */
+        rm-chat-shell .appr-anchor {
+          position: relative;
+          display: inline-flex;
+        }
+        /* Amber halo pulse on the card the inbox jumps to (§4.7). Lives
+         * here (not in the inbox component) so it is present in the global
+         * stylesheet even when the popover has already closed; the target
+         * card lives in the slotted chat-panel. */
+        rm-chat-shell .rm-appr-highlight {
+          animation: rm-appr-highlight 1.8s ease-out;
+        }
+        @keyframes rm-appr-highlight {
+          0% {
+            box-shadow: 0 0 0 0 var(--rm-accent);
+          }
+          25% {
+            box-shadow: 0 0 0 4px var(--rm-accent-subtle, rgba(194, 97, 63, 0.3));
+          }
+          100% {
+            box-shadow: 0 0 0 0 rgba(194, 97, 63, 0);
+          }
+        }
         rm-chat-shell .cs-tenant {
           display: flex;
           align-items: center;
@@ -1177,6 +1266,36 @@ export class RmChatShell extends LitElement {
               `
             : nothing}
           <span class="spacer"></span>
+          <span class="appr-anchor">
+            <button
+              class="cs-iconbtn"
+              data-testid="topbar-approvals"
+              data-menu-trigger="approvals"
+              aria-label="Approvals"
+              aria-haspopup="dialog"
+              aria-expanded=${this.openMenu === 'approvals'}
+              title="Approvals"
+              @click=${this.toggleApprovals}
+            >
+              ${iconInbox(19)}
+              ${this.approvalTotal > 0
+                ? html`<span
+                    class=${`bdg ${this.approvalUrgent ? 'urgent' : ''}`}
+                    data-testid="approvals-badge"
+                    data-urgent=${this.approvalUrgent ? 'true' : 'false'}
+                    >${this.approvalTotal}</span
+                  >`
+                : nothing}
+            </button>
+            <rm-approvals-inbox
+              data-testid="approvals-inbox"
+              .open=${this.openMenu === 'approvals'}
+              .activeConversationId=${this.activeConversationId}
+              .coworkers=${this.coworkers}
+              .conversations=${this.conversations}
+              .jumpHandler=${this.jumpToConversation}
+            ></rm-approvals-inbox>
+          </span>
           <button
             class="cs-iconbtn"
             data-testid="topbar-activity"

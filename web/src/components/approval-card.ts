@@ -478,6 +478,7 @@ export class ApprovalCard extends LitElement {
           ? 'opacity-95'
           : ''}"
         data-testid="approval-card"
+        data-appr-id=${this.requestId}
       >
         ${this.renderHeader()}
         <div class="px-3.5 py-3">
