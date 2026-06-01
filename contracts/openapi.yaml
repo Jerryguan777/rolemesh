@@ -2227,6 +2227,7 @@ components:
         - condition_expr
         - enabled
         - priority
+        - created_at
         - updated_at
       properties:
         id: { type: string, format: uuid }
@@ -2240,6 +2241,7 @@ components:
         priority:
           type: integer
           description: Higher wins on multiple matches; ties break to newest.
+        created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
 
     ApprovalPolicyCreate:
@@ -2306,6 +2308,22 @@ components:
           nullable: true
         requested_at: { type: string, format: date-time }
         expires_at: { type: string, format: date-time }
+        params:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: |
+            Raw {tool_name→params} arguments snapshot — the decision input
+            (§1.2). Tenant-scoped endpoint, so never crosses a tenant edge.
+        coworker_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: The coworker whose call is gated.
+        rationale:
+          type: string
+          nullable: true
+          description: The agent's free-text "why I'm calling this tool" (nullable).
 
     # -----------------------------------------------------------------
     # Skills (design §3 Phase 3 / docs/19-skills-architecture.md)
@@ -3033,6 +3051,43 @@ components:
             like event.message.appended — an approval can outlive the
             run that triggered it, and scheduled-task approvals have no
             run at all.
+        mcp_server_name:
+          type: string
+          nullable: true
+          description: The gated MCP server identity (§1.1).
+        tool_name:
+          type: string
+          nullable: true
+          description: The gated tool name (§1.1).
+        params:
+          type: object
+          additionalProperties: true
+          nullable: true
+          description: |
+            Raw tool input arguments — the decision input (§1.1). Without
+            it the card cannot be informative.
+        coworker_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: The coworker whose call is gated (§1.1).
+        conversation_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            Originating conversation; null for scheduled-task approvals
+            that have no live conversation (§1.1).
+        requested_at:
+          type: string
+          nullable: true
+          description: When the approval became pending (ISO-8601, §1.1).
+        rationale:
+          type: string
+          nullable: true
+          description: |
+            The agent's "why I'm calling this tool" (§1.1). Nullable; the
+            card omits the section when null.
         action_summary:
           type: string
           nullable: true
@@ -3050,10 +3105,12 @@ components:
         request_id: { type: string, format: uuid }
         outcome:
           type: string
-          enum: [approved, rejected, expired]
+          enum: [approved, rejected, expired, cancelled]
           description: |
             The orchestrator's deterministic terminal state (no LLM in
-            the loop). The SPA edits the card in place.
+            the loop). The SPA edits the card in place. `cancelled` =
+            the coworker's container withdrew the call (Stop / hook
+            exception), distinct from `expired` (no decision in time).
 
     # Server → client. Discriminated on `type`; clients can pattern
     # match on the literal and TS narrows to the matching member.

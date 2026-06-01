@@ -207,6 +207,9 @@ class ApprovalHookHandler:
                     "tool_name": tool,
                     "params": params,
                     "action_summary": _action_summary(server, tool, params),
+                    # Agent's "why" for this call. No fill mechanism yet — always
+                    # None for now; plumbed nullable end-to-end (HITL UI U1).
+                    "rationale": None,
                     "requested_at": requested_at.isoformat(),
                     "expires_at": expires_at.isoformat(),
                 },

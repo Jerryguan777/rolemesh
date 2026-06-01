@@ -438,11 +438,14 @@ def test_approval_request_payload_contract() -> None:
     assert req["requested_at"] == _FIXED_NOW.isoformat()
     expected_expiry = (_FIXED_NOW + timedelta(milliseconds=300_000)).isoformat()
     assert req["expires_at"] == expected_expiry
+    # rationale is plumbed nullable; the hook has no fill mechanism yet, so it
+    # is always present and always None for now (HITL UI U1).
+    assert req["rationale"] is None
     # Forward-compat contract: exactly the §3.1 keys, no extras.
     assert set(req) == {
         "request_id", "tenant_id", "coworker_id", "conversation_id", "user_id",
         "job_id", "policy_id", "mcp_server_name", "tool_name", "params",
-        "action_summary", "requested_at", "expires_at",
+        "action_summary", "rationale", "requested_at", "expires_at",
     }
 
 

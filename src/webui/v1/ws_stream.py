@@ -226,16 +226,34 @@ def _build_approval_frame_or_none(
             "type": "event.approval.requested",
             "request_id": request_id,
         }
-        summary = payload.get("action_summary")
-        if isinstance(summary, str):
-            frame["action_summary"] = summary
+        # Decision-relevant fields (§1.1). String fields are added only when the
+        # carrier supplies a string (whitelist posture: an unexpected internal
+        # key can never reach the browser). ``params`` is the raw tool input dict
+        # — the decision input — and ``rationale``/``conversation_id`` are
+        # nullable, so they pass through as-is when present.
+        for key in ("mcp_server_name", "tool_name", "requested_at", "action_summary"):
+            value = payload.get(key)
+            if isinstance(value, str):
+                frame[key] = value
+        coworker_id = payload.get("coworker_id")
+        if isinstance(coworker_id, str):
+            frame["coworker_id"] = coworker_id
+        if "params" in payload:
+            params = payload.get("params")
+            if isinstance(params, dict):
+                frame["params"] = params
+        for nullable_key in ("conversation_id", "rationale"):
+            if nullable_key in payload:
+                value = payload.get(nullable_key)
+                if value is None or isinstance(value, str):
+                    frame[nullable_key] = value
         expires_at = payload.get("expires_at")
         if isinstance(expires_at, str):
             frame["expires_at"] = expires_at
         return frame
     if kind == "approval.resolved":
         outcome = payload.get("outcome")
-        if outcome not in ("approved", "rejected", "expired"):
+        if outcome not in ("approved", "rejected", "expired", "cancelled"):
             return None
         return {
             "type": "event.approval.resolved",

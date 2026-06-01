@@ -50,14 +50,20 @@ def _policy_to_response(p: ApprovalPolicyValue) -> ApprovalPolicy:
         condition_expr=p.condition_expr,
         enabled=p.enabled,
         priority=p.priority,
+        created_at=p.created_at.isoformat() if p.created_at else "",
         updated_at=p.updated_at.isoformat() if p.updated_at else "",
     )
 
 
 def _request_to_response(r: ApprovalRequest) -> PendingApprovalRequest:
-    # ``action`` is the {tool_name, params} snapshot; the card only needs the
-    # tool name, never the raw params (which may carry sensitive arguments).
-    tool_name = str(r.action.get("tool_name", "")) if isinstance(r.action, dict) else ""
+    # ``action`` is the {tool_name, params} snapshot. The decision UX (§1.2)
+    # needs the raw params to be informative — the user cannot meaningfully
+    # approve a tool call they can't see the arguments of. The endpoint is
+    # already strictly tenant-scoped, so the params never cross a tenant edge.
+    action = r.action if isinstance(r.action, dict) else {}
+    tool_name = str(action.get("tool_name", ""))
+    raw_params = action.get("params")
+    params = raw_params if isinstance(raw_params, dict) else None
     return PendingApprovalRequest(
         request_id=r.id,
         conversation_id=r.conversation_id,
@@ -66,6 +72,9 @@ def _request_to_response(r: ApprovalRequest) -> PendingApprovalRequest:
         action_summary=r.action_summary,
         requested_at=r.requested_at.isoformat() if r.requested_at else "",
         expires_at=r.expires_at.isoformat() if r.expires_at else "",
+        params=params,
+        coworker_id=r.coworker_id,
+        rationale=r.rationale,
     )
 
 

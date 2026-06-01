@@ -59,6 +59,7 @@ class ApprovalRequest:
     mcp_server_name: str
     action: dict[str, Any]          # { tool_name, params }
     action_summary: str | None
+    rationale: str | None           # agent's "why" (nullable; no fill yet)
     status: str
     decided_by: str | None
     note: str | None
@@ -84,6 +85,7 @@ def _record_to_policy(row: asyncpg.Record) -> ApprovalPolicy:
         enabled=bool(row["enabled"]),
         priority=int(row["priority"]),
         updated_at=row["updated_at"],
+        created_at=row["created_at"],
     )
 
 
@@ -99,6 +101,7 @@ def _record_to_request(row: asyncpg.Record) -> ApprovalRequest:
         mcp_server_name=row["mcp_server_name"],
         action=_json_to_dict(row["action"]),
         action_summary=row["action_summary"],
+        rationale=row["rationale"],
         status=row["status"],
         decided_by=str(row["decided_by"]) if row["decided_by"] else None,
         note=row["note"],
@@ -260,6 +263,7 @@ async def create_approval_request(
     policy_id: str | None = None,
     user_id: str | None = None,
     action_summary: str | None = None,
+    rationale: str | None = None,
     request_id: str | None = None,
 ) -> ApprovalRequest:
     """Insert a ``pending`` approval request and return it.
@@ -283,11 +287,11 @@ async def create_approval_request(
                 INSERT INTO approval_requests (
                     id, tenant_id, coworker_id, conversation_id, policy_id,
                     user_id, job_id, mcp_server_name, action, action_summary,
-                    expires_at
+                    rationale, expires_at
                 )
                 VALUES (
                     $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid,
-                    $6::uuid, $7, $8, $9::jsonb, $10, $11
+                    $6::uuid, $7, $8, $9::jsonb, $10, $11, $12
                 )
                 RETURNING *
                 """,
@@ -301,6 +305,7 @@ async def create_approval_request(
                 mcp_server_name,
                 json.dumps(action),
                 action_summary,
+                rationale,
                 expires_at,
             )
         else:
@@ -308,11 +313,12 @@ async def create_approval_request(
                 """
                 INSERT INTO approval_requests (
                     tenant_id, coworker_id, conversation_id, policy_id, user_id,
-                    job_id, mcp_server_name, action, action_summary, expires_at
+                    job_id, mcp_server_name, action, action_summary, rationale,
+                    expires_at
                 )
                 VALUES (
                     $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid,
-                    $6, $7, $8::jsonb, $9, $10
+                    $6, $7, $8::jsonb, $9, $10, $11
                 )
                 RETURNING *
                 """,
@@ -325,6 +331,7 @@ async def create_approval_request(
                 mcp_server_name,
                 json.dumps(action),
                 action_summary,
+                rationale,
                 expires_at,
             )
     assert row is not None

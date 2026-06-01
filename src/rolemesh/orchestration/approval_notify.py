@@ -50,6 +50,7 @@ _OUTCOME_TEXT = {
     "approved": "✅ Approved",
     "rejected": "❌ Rejected",
     "expired": "⏰ Expired (no decision in time)",
+    "cancelled": "⏰ Cancelled (the coworker withdrew this call)",
 }
 
 
@@ -158,12 +159,23 @@ class ApprovalNotifier:
                 message_id = None
             ref.telegram_message_id = message_id
         elif target.channel_type == "web":
+            # The decision-relevant payload (§1.1): the SPA renders an informative
+            # card from the WS push alone, before any REST read. ``action`` is the
+            # {tool_name, params} snapshot persisted on the row.
+            action = req.action if isinstance(req.action, dict) else {}
             await self._safe_publish_web(
                 target.binding_id,
                 target.chat_id,
                 {
                     "type": "approval.requested",
                     "request_id": req.id,
+                    "mcp_server_name": req.mcp_server_name,
+                    "tool_name": action.get("tool_name"),
+                    "params": action.get("params"),
+                    "coworker_id": req.coworker_id,
+                    "conversation_id": req.conversation_id,
+                    "requested_at": req.requested_at.isoformat(),
+                    "rationale": req.rationale,
                     "action_summary": req.action_summary,
                     "expires_at": req.expires_at.isoformat(),
                 },

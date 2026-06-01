@@ -23,6 +23,7 @@ def _req(
     coworker_id: str = "cw1",
     conversation_id: str | None = "conv1",
     action_summary: str | None = "stripe.charge(amount)",
+    rationale: str | None = None,
 ) -> ApprovalRequest:
     now = datetime.now(tz=UTC)
     return ApprovalRequest(
@@ -36,6 +37,7 @@ def _req(
         mcp_server_name="stripe",
         action={"tool_name": "charge", "params": {"amount": 500}},
         action_summary=action_summary,
+        rationale=rationale,
         status="pending",
         decided_by=None,
         note=None,
@@ -214,6 +216,40 @@ async def test_web_card_emits_requested_then_resolved() -> None:
     }
     # No Telegram traffic for a web conversation.
     assert h.tg_sends == [] and h.tg_edits == []
+
+
+async def test_web_requested_payload_carries_decision_fields() -> None:
+    # §1.1: the web card must be informative from the push alone. The notifier
+    # projects the row's {tool_name, params} snapshot + identity + rationale.
+    h = _Harness(
+        conversations={"conv1": _conv()}, bindings={"bind1": _binding("web")}
+    )
+    n = h.notifier()
+    await n.notify_status(_req(rationale="refunding duplicate order"))
+    payload = h.web_events[0][2]
+    assert payload["mcp_server_name"] == "stripe"
+    assert payload["tool_name"] == "charge"
+    assert payload["params"] == {"amount": 500}
+    assert payload["coworker_id"] == "cw1"
+    assert payload["conversation_id"] == "conv1"
+    assert payload["rationale"] == "refunding duplicate order"
+    assert payload["requested_at"]  # ISO timestamp present
+
+
+async def test_web_card_emits_cancelled_resolution() -> None:
+    # §1.5: a container-side cancel flips the web card to ``cancelled``.
+    h = _Harness(
+        conversations={"conv1": _conv()}, bindings={"bind1": _binding("web")}
+    )
+    n = h.notifier()
+    req = _req()
+    await n.notify_status(req)
+    await n.notify_hard(req, "cancelled")
+    assert h.web_events[1][2] == {
+        "type": "approval.resolved",
+        "request_id": "req1",
+        "outcome": "cancelled",
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -65,6 +65,7 @@ class _Store:
             requested_at=_now(), decided_at=None,
             policy_id=kw.get("policy_id"), user_id=kw.get("user_id"),
             action_summary=kw.get("action_summary"),
+            rationale=kw.get("rationale"),
             conversation_id=kw.get("conversation_id"),
             tenant_id=kw["tenant_id"], coworker_id=kw["coworker_id"],
             job_id=kw["job_id"], mcp_server_name=kw["mcp_server_name"],

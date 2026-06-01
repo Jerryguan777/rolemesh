@@ -73,6 +73,10 @@ class ApprovalPolicy:
     enabled: bool
     priority: int
     updated_at: datetime
+    # Set from the row by the persistence layer; the matcher never reads it.
+    # Defaulted so the in-container snapshot builder (which has no created_at)
+    # and matcher tests need not supply it.
+    created_at: datetime | None = None
 
 
 # Binary leaf operators. Each takes (actual_field_value, policy_value) and

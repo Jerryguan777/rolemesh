@@ -64,6 +64,7 @@ class _FakeStore:
         policy_id: str | None = None,
         user_id: str | None = None,
         action_summary: str | None = None,
+        rationale: str | None = None,
         request_id: str | None = None,
     ) -> ApprovalRequest:
         rid = request_id or str(uuid.uuid4())
@@ -78,6 +79,7 @@ class _FakeStore:
             mcp_server_name=mcp_server_name,
             action=action,
             action_summary=action_summary,
+            rationale=rationale,
             status="pending",
             decided_by=None,
             note=None,
@@ -336,6 +338,30 @@ async def test_notify_hard_fires_on_expiry_with_kind_expired() -> None:
     await coord.on_approval_request(_payload(expires_in_ms=30))
     await asyncio.sleep(0.08)
     assert hard == [("req1", "expired")]
+
+
+async def test_container_cancel_emits_cancelled_hard_event() -> None:
+    # §1.5: a container-side cancel (Stop / exception) must flip the card via
+    # the hard channel — otherwise the SPA's card stays pending forever.
+    coord, _q, store, decisions, hard = _make_with_notify()
+    await coord.on_approval_request(_payload())
+    await coord.on_approval_cancel({"request_id": "req1"})
+    assert store.rows["req1"].status == "cancelled"
+    assert hard == [("req1", "cancelled")]
+    # A cancel is NOT a decision: nothing is relayed back to the container.
+    assert decisions == []
+
+
+async def test_cancel_after_decision_does_not_emit_second_hard_event() -> None:
+    # A cancel that loses the pending→terminal race (a decision already won)
+    # resolves zero rows, so it must NOT fire a spurious ``cancelled`` flip on
+    # top of the decision's own terminal event.
+    coord, _q, _store, _decisions, hard = _make_with_notify()
+    await coord.on_approval_request(_payload())
+    await coord.decide("req1", decision="reject", decided_by="user1")
+    assert hard == [("req1", "rejected")]
+    await coord.on_approval_cancel({"request_id": "req1"})
+    assert hard == [("req1", "rejected")]  # no extra ("req1", "cancelled")
 
 
 # ---------------------------------------------------------------------------
