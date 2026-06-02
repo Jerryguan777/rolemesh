@@ -1,6 +1,11 @@
 target-version = "py312"
 line-length = 120
 
+# src/pi is a vendored copy of the Pi SDK (third-party, upstream-owned). We
+# vendor it in-tree rather than pip-installing it, but it shouldn't be held
+# to this repo's lint conventions any more than any other dependency would.
+extend-exclude = ["src/pi"]
+
 [lint]
 select = [
     "E",    # pycodestyle errors
