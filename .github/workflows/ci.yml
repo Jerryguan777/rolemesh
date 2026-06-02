@@ -97,7 +97,11 @@ jobs:
       # deselects it automatically — that path is preferable to a
       # growing CI-side ignore list.
       - name: Pytest
-        run: uv run pytest tests/ --ignore=tests/attack_sim --maxfail=10 -q
+        # -n auto parallelizes across the runner's cores (pytest-xdist). The
+        # suite is test-isolated (per-worker testcontainer Postgres, per-test
+        # truncate), so workers don't share DB state. Roughly halves wall-clock
+        # on the 2-core runner and keeps us clear of the 20-minute job timeout.
+        run: uv run pytest tests/ --ignore=tests/attack_sim --maxfail=10 -q -n auto
 
   # Frontend (web/) job. Independent of the Python test job — runs in
   # parallel on its own runner so it doesn't sit through the ~50-package
