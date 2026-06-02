@@ -24,6 +24,7 @@ import pytest
 from agent_runner.approval.policy import (
     ApprovalPolicy,
     evaluate_condition,
+    evaluate_condition_explained,
     find_matching_policy,
 )
 
@@ -138,6 +139,59 @@ def test_present_null_field_is_a_real_value_not_missing() -> None:
 )
 def test_unevaluable_conditions_fail_closed(expr: object, params: dict, why: str) -> None:
     assert evaluate_condition(expr, params) is True, f"should fail closed: {why}"  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# evaluate_condition_explained — the reason channel (turns a silent gate into
+# a fixable signal). Invariant: reason is non-None EXACTLY when the True came
+# from fail-closed (couldn't evaluate), never from a genuine match.
+# ---------------------------------------------------------------------------
+
+
+def test_explained_clean_true_carries_no_reason() -> None:
+    assert evaluate_condition_explained({"always": True}, {}) == (True, None)
+    assert evaluate_condition_explained(
+        {"field": "x", "op": "==", "value": 1}, {"x": 1}
+    ) == (True, None)
+
+
+def test_explained_clean_false_carries_no_reason() -> None:
+    assert evaluate_condition_explained(
+        {"field": "x", "op": "==", "value": 1}, {"x": 2}
+    ) == (False, None)
+
+
+def test_explained_missing_field_gates_and_names_the_field() -> None:
+    # The real-world bug: a field typo ('paht' for 'path') makes the condition
+    # un-evaluable, so it fail-closes and gates every call. The reason must name
+    # the offending field so the user can fix the typo.
+    matched, reason = evaluate_condition_explained(
+        {"field": "paht", "op": "==", "value": "x.txt"}, {"path": "x.txt"}
+    )
+    assert matched is True
+    assert reason is not None
+    assert "paht" in reason
+
+
+def test_explained_missing_branch_in_and_still_reports_a_reason() -> None:
+    # First branch true (so AND evaluation reaches the second), second branch
+    # references a missing field: the whole AND fail-closes True and the reason
+    # points at the un-evaluable branch.
+    expr = {
+        "and": [
+            {"field": "amount", "op": ">", "value": 100},
+            {"field": "currancy", "op": "==", "value": "USD"},
+        ],
+    }
+    matched, reason = evaluate_condition_explained(expr, {"amount": 500})
+    assert matched is True
+    assert reason is not None and "currancy" in reason
+
+
+def test_explained_malformed_leaf_gates_with_a_generic_reason() -> None:
+    matched, reason = evaluate_condition_explained({"op": ">", "value": 1}, {"x": 1})
+    assert matched is True
+    assert reason is not None  # generic ("malformed") is fine here
 
 
 def test_empty_or_does_not_short_circuit_to_false() -> None:
