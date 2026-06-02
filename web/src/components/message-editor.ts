@@ -54,7 +54,7 @@ function colourForCoworker(c: Coworker | null): string {
 @customElement('rm-message-editor')
 export class MessageEditor extends LitElement {
   // Three-state UI:
-  //  idle     — brand-colored Send button (↑), enabled when text present
+  //  idle     — accent (terracotta) Send button (↑), enabled when text present
   //  running  — dark Stop button (■), always enabled; clicking emits 'stop'
   //  stopping — dimmed Stop button with spinner ring, disabled
   @property({ type: String }) agentState: AgentState = 'idle';
@@ -253,7 +253,10 @@ export class MessageEditor extends LitElement {
     const base = 'flex items-center justify-center w-8 h-8 rounded-lg transition-all duration-150 relative';
     if (this.agentState === 'idle') {
       return this.canSend
-        ? `${base} bg-brand text-white hover:bg-brand-dark active:scale-95 shadow-sm`
+        // Terracotta accent to match the prototype's `.send` (var(--accent) /
+        // accent-ink, hover accent-2). Uses --rm-* directly so it flips for
+        // dark mode like the rest of the v2 palette.
+        ? `${base} bg-[var(--rm-accent)] text-[var(--rm-accent-ink)] hover:bg-[var(--rm-accent-2)] active:scale-95 shadow-sm`
         : `${base} bg-surface-2 dark:bg-d-surface-2 text-ink-4 dark:text-d-ink-4 cursor-default`;
     }
     if (this.agentState === 'running') {
