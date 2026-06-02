@@ -13,6 +13,7 @@ reproducible in a pure pytest. They appear in the manual runbook.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 
 import pytest
@@ -20,7 +21,6 @@ import pytest
 import rolemesh.agent  # noqa: F401
 from rolemesh.db import list_safety_decisions
 from rolemesh.safety.types import SafetyContext, Stage
-import contextlib
 
 # ---------------------------------------------------------------------------
 # G3. Oversized tool_input

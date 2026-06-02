@@ -24,6 +24,7 @@ on a laptop without docker-compose; CI smoke must run it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import uuid
@@ -44,7 +45,6 @@ from rolemesh.orchestration.run_cancel_subscriber import (
 )
 from rolemesh.runs import create_run, update_run_terminal
 from rolemesh.runs import terminators as terminators_mod
-import contextlib
 
 pytestmark = pytest.mark.usefixtures("test_db")
 

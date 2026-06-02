@@ -193,9 +193,13 @@ def test_agent_backend_config_frozen() -> None:
 # ---------------------------------------------------------------------------
 
 
-import pytest
+
+from typing import TYPE_CHECKING
 
 from rolemesh.agent.executor import _pi_extra_env
+
+if TYPE_CHECKING:
+    import pytest
 
 
 class TestPiExtraEnvBedrock:

@@ -30,6 +30,8 @@ from nats.js.api import StreamConfig
 # from PR runs; nightly / explicit ``-m integration`` flips it on.
 pytestmark = pytest.mark.integration
 
+import contextlib
+
 from agent_runner.backend import BackendEvent, ResultEvent, SessionInitEvent
 from agent_runner.main import (
     ContainerOutput,
@@ -39,7 +41,6 @@ from agent_runner.main import (
 )
 from agent_runner.tools.context import ToolContext
 from rolemesh.ipc.protocol import AgentInitData
-import contextlib
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
