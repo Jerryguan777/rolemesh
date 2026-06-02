@@ -342,6 +342,213 @@
   font-size: var(--rm-text-sm);
 }
 
+/* ── Approval-policies page (spec §5) ─────────────────────────────
+ * Policy rows reuse .rm-card but swap the avatar for a priority badge
+ * and the status pill for an always-visible enable/disable switch.
+ * Prototype lines 379-411. */
+
+/* Priority badge — fixed-width left chip. ≥10 amber, 0 muted gray,
+ * else neutral surface. Tabular numerals so badges line up. */
+.rm-pol-pri {
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--rm-ink-3);
+  background: var(--rm-surface-2);
+  padding: 5px 8px;
+  border-radius: 5px;
+  flex-shrink: 0;
+  min-width: 64px;
+  text-align: center;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+.rm-pol-pri.rm-pol-pri--hi { background: var(--rm-warn-subtle); color: var(--rm-warn); }
+.rm-pol-pri.rm-pol-pri--zero { background: var(--rm-surface-3); color: var(--rm-ink-3); }
+.rm-card.rm-card--dim .rm-pol-pri { background: var(--rm-surface-3); color: var(--rm-ink-3); }
+
+/* "(all tools)" qualifier after a `*` tool name. */
+.rm-pol-alltools { font-size: 11px; color: var(--rm-ink-3); font-weight: 400; }
+
+/* The condition sentence on the row subtitle keeps the muted subtitle
+ * colour but bolds the condition body so it reads as a clause. */
+.rm-mn .rm-pol-sent b { color: var(--rm-ink-2); font-weight: 600; }
+.rm-mn .rm-pol-sent i { font-style: italic; }
+
+/* Enable/disable switch — always visible (not hover-gated), so a
+ * policy can be silenced in one click (spec §5.3). Bright even when
+ * the card body is dimmed. */
+.rm-pol-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 11.5px;
+  color: var(--rm-ink-3);
+  font-weight: 500;
+  padding: 4px 7px;
+  border-radius: 7px;
+  transition: var(--rm-transition);
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  font-family: inherit;
+}
+.rm-pol-toggle:hover { background: var(--rm-surface-3); }
+.rm-pol-toggle .rm-switch {
+  width: 30px;
+  height: 18px;
+  border-radius: 9px;
+  background: var(--rm-surface-3);
+  position: relative;
+  transition: var(--rm-transition);
+  border: 1px solid var(--rm-border-2);
+  flex-shrink: 0;
+}
+.rm-pol-toggle .rm-switch::after {
+  content: '';
+  position: absolute;
+  top: 1.5px;
+  left: 1.5px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #fff;
+  transition: var(--rm-transition);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+.rm-pol-toggle.rm-pol-toggle--on { color: var(--rm-accent); }
+.rm-pol-toggle.rm-pol-toggle--on .rm-switch {
+  background: var(--rm-accent);
+  border-color: var(--rm-accent);
+}
+.rm-pol-toggle.rm-pol-toggle--on .rm-switch::after { left: 14.5px; }
+.rm-pol-toggle:disabled { opacity: 0.6; cursor: progress; }
+
+/* The dim only applies to the card body, never the toggle — the user
+ * keeps a bright control to re-enable. .rm-card--dim already sets the
+ * card opacity; pull the toggle back to full. */
+.rm-card.rm-card--dim .rm-pol-toggle { opacity: 1; }
+
+/* Newly-created / just-edited card pulse (spec §5.7 — same intent as
+ * the inbox→chat highlight). */
+@keyframes rm-pol-highlight {
+  0% { box-shadow: 0 0 0 0 rgba(194, 97, 63, 0); }
+  30% { box-shadow: 0 0 0 5px var(--rm-accent-subtle); }
+  100% { box-shadow: 0 0 0 0 rgba(194, 97, 63, 0); }
+}
+.rm-card.rm-card--highlight { animation: rm-pol-highlight 1.8s ease-out; }
+
+/* Rich empty state (spec §5.6) — check-circle + create CTA. */
+.rm-pol-empty {
+  text-align: center;
+  padding: 42px 24px 36px;
+  background: var(--rm-surface-2);
+  border: 1px dashed var(--rm-border-2);
+  border-radius: var(--rm-r);
+}
+.rm-pol-empty .rm-pol-empty-icon {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  background: var(--rm-surface);
+  border: 1px solid var(--rm-border-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 14px;
+  color: var(--rm-good);
+}
+.rm-pol-empty p { margin: 0 0 5px; color: var(--rm-ink-2); font-size: 14px; line-height: 1.5; }
+.rm-pol-empty .rm-pol-empty-sub { color: var(--rm-ink-3); font-size: 12.5px; margin-bottom: 16px; }
+.rm-pol-empty button {
+  background: var(--rm-accent);
+  color: var(--rm-accent-ink);
+  padding: 9px 18px;
+  border-radius: 8px;
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+  border: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: inherit;
+  transition: var(--rm-transition);
+}
+.rm-pol-empty button:hover { background: var(--rm-accent-2); }
+
+/* Bottom evaluation-order hint (spec §5.1) — hidden when the list is
+ * empty (no rules ⇒ order is meaningless). */
+.rm-pol-hint {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--rm-border);
+  font-size: 12.5px;
+  color: var(--rm-ink-3);
+  line-height: 1.6;
+}
+
+/* Dialog live preview (spec §5.13). */
+.rm-pol-preview {
+  background: var(--rm-accent-subtle);
+  border-radius: var(--rm-radius-sm);
+  padding: 11px 13px;
+  font-size: 12.5px;
+  color: var(--rm-ink-2);
+  line-height: 1.55;
+  margin-top: 14px;
+}
+.rm-pol-preview code {
+  font-family: var(--rm-font-mono);
+  font-size: 11px;
+  background: var(--rm-surface);
+  padding: 1px 5px;
+  border-radius: 5px;
+}
+.rm-pol-preview b { color: var(--rm-ink); font-weight: 600; }
+.rm-pol-preview i { color: var(--rm-ink-3); }
+
+/* Segmented control (Every time / Only when… and All/Any) in the dialog. */
+.rm-seg {
+  display: inline-flex;
+  gap: 4px;
+  background: var(--rm-surface-2);
+  padding: 3px;
+  border-radius: 8px;
+}
+.rm-seg button {
+  padding: 5px 12px;
+  border-radius: 6px;
+  font-size: 12.5px;
+  color: var(--rm-ink-2);
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+}
+.rm-seg button.rm-seg--on { background: var(--rm-surface); color: var(--rm-ink); font-weight: 500; }
+.rm-seg button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* Transient toast (spec §5.3 — optimistic-toggle failure). Anchored to
+ * the page wrapper; auto-dismisses. */
+.rm-toast {
+  position: fixed;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--rm-ink);
+  color: var(--rm-bg);
+  font-size: 12.5px;
+  padding: 9px 16px;
+  border-radius: 8px;
+  box-shadow: var(--rm-shadow-md);
+  z-index: 60;
+  animation: rm-fade 0.18s ease both;
+}
+
 /* Hide the native <details> marker for any <summary> that uses
  * .list-none (Tailwind's marker-removal utility doesn't reach the
  * browser-specific pseudo-elements). The coworker wizard's review

@@ -133,17 +133,17 @@ const NAV_GROUPS: NavGroup[] = [
     heading: 'Governance',
     entries: [
       {
-        slug: 'safety',
-        label: 'Safety rules',
-        icon: () => iconShield(16),
-        render: () => html`<rm-safety-rules-page></rm-safety-rules-page>`,
-      },
-      {
         slug: 'approval-policies',
         label: 'Approval policies',
         icon: () => iconShield(16),
         render: () =>
           html`<rm-approval-policies-page></rm-approval-policies-page>`,
+      },
+      {
+        slug: 'safety',
+        label: 'Safety rules',
+        icon: () => iconShield(16),
+        render: () => html`<rm-safety-rules-page></rm-safety-rules-page>`,
       },
     ],
   },

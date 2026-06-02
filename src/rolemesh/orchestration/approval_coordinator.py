@@ -174,6 +174,8 @@ class ApprovalCoordinator:
         raw_params = payload.get("params")
         params = raw_params if isinstance(raw_params, dict) else {}
         action_summary = payload.get("action_summary")
+        raw_rationale = payload.get("rationale")
+        rationale = raw_rationale if isinstance(raw_rationale, str) else None
         key = approval_queue_key(conversation_id, coworker_id)
 
         # Server-side truth for the tenant; the payload value is only a fallback
@@ -225,6 +227,7 @@ class ApprovalCoordinator:
                 policy_id=policy_id,
                 user_id=user_id,
                 action_summary=action_summary,
+                rationale=rationale,
                 request_id=request_id,
             )
         except Exception:
@@ -269,11 +272,19 @@ class ApprovalCoordinator:
             return
         # The container initiated this; mark the row cancelled (first-wins) but
         # do NOT publish a decision back.
+        row: ApprovalRequest | None = None
         with contextlib.suppress(Exception):
-            await self._persistence.resolve_request(
+            row = await self._persistence.resolve_request(
                 request_id, tenant_id=pending.tenant_id, status="cancelled"
             )
         self._resolve_local(request_id)
+        # Flip the card in place for the user (same hard-channel path as
+        # reject/expired). Only when *this* cancel won the pending→terminal
+        # transition — a cancel racing a decision/expiry resolves zero rows and
+        # the winner already (or will) emit its own terminal event.
+        if row is not None and self._notify_hard is not None:
+            with contextlib.suppress(Exception):
+                await self._notify_hard(row, "cancelled")
 
     # -- decision intake (S4 channels call this; also used internally) ----
 

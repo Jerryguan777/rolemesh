@@ -159,6 +159,8 @@ describe('ChatPanel — side-channel events (PR #38)', () => {
     expect(i.messages[1]).toEqual({
       role: 'assistant',
       content: '⏰ 2 minutes up!',
+      // Ordering key parsed from the event's own server timestamp.
+      timestamp: Date.parse('2026-05-31T12:00:00+00:00'),
     });
     // Side-channel push must NOT touch run state — there's no
     // user-initiated run associated with a scheduled-task reminder.

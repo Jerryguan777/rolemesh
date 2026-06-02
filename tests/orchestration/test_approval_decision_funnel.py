@@ -65,6 +65,7 @@ class _Store:
             requested_at=_now(), decided_at=None,
             policy_id=kw.get("policy_id"), user_id=kw.get("user_id"),
             action_summary=kw.get("action_summary"),
+            rationale=kw.get("rationale"),
             conversation_id=kw.get("conversation_id"),
             tenant_id=kw["tenant_id"], coworker_id=kw["coworker_id"],
             job_id=kw["job_id"], mcp_server_name=kw["mcp_server_name"],
@@ -186,7 +187,12 @@ async def test_telegram_approve_full_chain(monkeypatch: pytest.MonkeyPatch) -> N
 
     # 1. Container blocks → orchestrator suspends + delivers the card.
     await coord.on_approval_request(_request_payload())
-    assert ch.tg_sends == [("bind1", "chat1", "req1", "stripe.charge(amount)")]
+    assert len(ch.tg_sends) == 1
+    binding_id, chat_id, request_id, body = ch.tg_sends[0]
+    assert (binding_id, chat_id, request_id) == ("bind1", "chat1", "req1")
+    # The card body now mirrors the web card (server.tool chip + params).
+    assert "stripe.charge" in body
+    assert "amount: 500" in body
 
     # 2. User taps ✅. main funnel resolves identity + decides.
     toast = await main_module._telegram_approval_decision("req1", "approve", "7", "chat1")

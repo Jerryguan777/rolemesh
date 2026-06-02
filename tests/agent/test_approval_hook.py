@@ -159,6 +159,59 @@ def test_mcp_tool_without_matching_policy_allows() -> None:
     assert broker.published == []
 
 
+# ---------------------------------------------------------------------------
+# rationale — a fail-closed gate (un-evaluable condition) explains itself
+# ---------------------------------------------------------------------------
+
+
+def test_unevaluable_policy_gates_with_a_reason_in_the_rationale() -> None:
+    # A typo'd field ('paht' for 'path') makes the condition un-evaluable, so
+    # the policy fail-closes and gates EVERY call. The published request must
+    # carry a rationale naming the bad field, so the card / Telegram / log say
+    # WHY instead of leaving a phantom gate.
+    broker = StubBroker()
+    handler = _handler(
+        broker,
+        [_policy(condition={"field": "paht", "op": "==", "value": "x.txt"})],
+    )
+
+    async def go() -> None:
+        task = asyncio.create_task(
+            handler.on_pre_tool_use(_event("mcp__email__send", {"path": "x.txt"}))
+        )
+        await _wait_for_requests(broker, 1)
+        rid = broker.requests[0]["request_id"]
+        handler.resolve_decision({"request_id": rid, "decision": "approve"})
+        await task
+
+    asyncio.run(go())
+    rationale = broker.requests[0]["rationale"]
+    assert rationale is not None
+    assert "paht" in rationale  # names the offending field so it can be fixed
+
+
+def test_genuine_match_leaves_rationale_none() -> None:
+    # A cleanly-true condition is a real match; rationale stays None (the
+    # agent-supplied "why" is not wired). Only fail-closed gates explain.
+    broker = StubBroker()
+    handler = _handler(
+        broker,
+        [_policy(condition={"field": "path", "op": "==", "value": "x.txt"})],
+    )
+
+    async def go() -> None:
+        task = asyncio.create_task(
+            handler.on_pre_tool_use(_event("mcp__email__send", {"path": "x.txt"}))
+        )
+        await _wait_for_requests(broker, 1)
+        rid = broker.requests[0]["request_id"]
+        handler.resolve_decision({"request_id": rid, "decision": "approve"})
+        await task
+
+    asyncio.run(go())
+    assert broker.requests[0]["rationale"] is None
+
+
 def test_empty_policy_snapshot_allows_all_mcp() -> None:
     broker = StubBroker()
     handler = _handler(broker, [])
@@ -438,11 +491,14 @@ def test_approval_request_payload_contract() -> None:
     assert req["requested_at"] == _FIXED_NOW.isoformat()
     expected_expiry = (_FIXED_NOW + timedelta(milliseconds=300_000)).isoformat()
     assert req["expires_at"] == expected_expiry
+    # rationale is plumbed nullable; the hook has no fill mechanism yet, so it
+    # is always present and always None for now (HITL UI U1).
+    assert req["rationale"] is None
     # Forward-compat contract: exactly the §3.1 keys, no extras.
     assert set(req) == {
         "request_id", "tenant_id", "coworker_id", "conversation_id", "user_id",
         "job_id", "policy_id", "mcp_server_name", "tool_name", "params",
-        "action_summary", "requested_at", "expires_at",
+        "action_summary", "rationale", "requested_at", "expires_at",
     }
 
 

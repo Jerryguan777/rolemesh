@@ -24,6 +24,22 @@
   --color-d-ink-2: #94a3b8;
   --color-d-ink-3: #64748b;
   --color-d-ink-4: #334155;
+
+  /* v2 terracotta tokens — bridge of the --rm-* design tokens
+     (src/styles/tokens.css) into Tailwind's @theme. Without these, utilities
+     like `border-accent` / `bg-accent/5` / `border-border-2` and the bare
+     `bg-surface` referenced colors @theme never registered, so Tailwind
+     dropped them at build and the approval card lost its accent line, panel
+     background and borders. Values mirror --rm-* light; the `-d-` variants
+     mirror the tokens.css dark @media block. */
+  --color-accent: #c2613f;
+  --color-d-accent: #d6764f;
+  --color-surface: #ffffff;
+  --color-d-surface: #27231c;
+  --color-border: rgba(42, 38, 32, 0.10);
+  --color-d-border: rgba(236, 231, 220, 0.10);
+  --color-border-2: rgba(42, 38, 32, 0.17);
+  --color-d-border-2: rgba(236, 231, 220, 0.17);
 }
 
 /* ─── Base ─── */

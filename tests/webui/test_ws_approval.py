@@ -105,6 +105,84 @@ def test_build_requested_frame_whitelists_fields() -> None:
     assert "secret_internal_key" not in frame
 
 
+def test_build_requested_frame_carries_decision_fields() -> None:
+    # §1.1: the card must be informative from the push alone. params is the
+    # decision input; rationale + conversation_id are nullable and pass through.
+    frame = _build_approval_frame_or_none(
+        {
+            "type": "approval.requested",
+            "request_id": "r1",
+            "mcp_server_name": "stripe",
+            "tool_name": "charge",
+            "params": {"amount": 500, "currency": "usd"},
+            "coworker_id": "cw1",
+            "conversation_id": None,
+            "requested_at": "2026-05-31T00:00:00Z",
+            "rationale": "refunding the duplicate order",
+            "action_summary": "stripe.charge",
+            "expires_at": "2026-05-31T00:05:00Z",
+            "secret_internal_key": "must-not-leak",
+        }
+    )
+    assert frame is not None
+    assert frame["params"] == {"amount": 500, "currency": "usd"}
+    assert frame["rationale"] == "refunding the duplicate order"
+    assert frame["mcp_server_name"] == "stripe"
+    assert frame["tool_name"] == "charge"
+    assert frame["coworker_id"] == "cw1"
+    assert frame["conversation_id"] is None
+    assert frame["requested_at"] == "2026-05-31T00:00:00Z"
+    assert "secret_internal_key" not in frame
+    # The full frame must validate against the wire schema (no extra=forbid trip).
+    WsServerEventApprovalRequested.model_validate(frame)
+
+
+def test_build_requested_frame_drops_non_dict_params() -> None:
+    # A malformed params (not an object) must never reach the browser as one —
+    # the schema types it as object|null, and the SPA reads keys off it.
+    frame = _build_approval_frame_or_none(
+        {
+            "type": "approval.requested",
+            "request_id": "r1",
+            "params": "amount=500",  # malformed
+        }
+    )
+    assert frame is not None
+    assert "params" not in frame
+
+
+def test_build_requested_frame_omits_absent_optional_fields() -> None:
+    # When the carrier has only the legacy minimal set, no new keys appear —
+    # so an old orchestrator payload still projects a valid, lean frame.
+    frame = _build_approval_frame_or_none(
+        {
+            "type": "approval.requested",
+            "request_id": "r1",
+            "action_summary": "stripe.charge",
+            "expires_at": "2026-05-31T00:00:00Z",
+        }
+    )
+    assert frame == {
+        "type": "event.approval.requested",
+        "request_id": "r1",
+        "action_summary": "stripe.charge",
+        "expires_at": "2026-05-31T00:00:00Z",
+    }
+
+
+def test_build_resolved_frame_accepts_cancelled() -> None:
+    # §1.5: a container-side cancel must flip the card, not strand it pending.
+    frame = _build_approval_frame_or_none(
+        {"type": "approval.resolved", "request_id": "r1", "outcome": "cancelled"}
+    )
+    assert frame == {
+        "type": "event.approval.resolved",
+        "request_id": "r1",
+        "outcome": "cancelled",
+    }
+    WsServerEventApprovalResolved.model_validate(frame)
+
+
 def test_build_resolved_frame() -> None:
     frame = _build_approval_frame_or_none(
         {"type": "approval.resolved", "request_id": "r1", "outcome": "approved"}

@@ -256,6 +256,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/conversations/{id}/approval-requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        /**
+         * List a conversation's approval requests (all states, for chat history)
+         * @description The conversation's full HITL approval record — pending AND resolved
+         *     (approved / rejected / expired / cancelled) — oldest first, so the SPA
+         *     re-renders approval cards inline in the message stream on reload, not
+         *     just the pending ones. Tenant-scoped via the conversation row: a
+         *     conversation outside the caller's tenant returns 404.
+         */
+        get: operations["listConversationApprovalRequests"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/models": {
         parameters: {
             query?: never;
@@ -1367,6 +1393,8 @@ export interface components {
             /** @description Higher wins on multiple matches; ties break to newest. */
             priority: number;
             /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
             updated_at: string;
         };
         ApprovalPolicyCreate: {
@@ -1389,7 +1417,7 @@ export interface components {
             enabled?: boolean;
             priority?: number;
         };
-        PendingApprovalRequest: {
+        ApprovalRequest: {
             /**
              * Format: uuid
              * @description Echo back in a `request.approval_decision` WS frame.
@@ -1404,6 +1432,35 @@ export interface components {
             requested_at: string;
             /** Format: date-time */
             expires_at: string;
+            /**
+             * @description Raw {tool_name→params} arguments snapshot — the decision input
+             *     (§1.2). Tenant-scoped endpoint, so never crosses a tenant edge.
+             */
+            params?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Format: uuid
+             * @description The coworker whose call is gated.
+             */
+            coworker_id?: string | null;
+            /** @description The agent's free-text "why I'm calling this tool" (nullable). */
+            rationale?: string | null;
+            /**
+             * @description Lifecycle status. Always `pending` on the tenant-wide inbox read
+             *     (`GET /approval-requests`); the conversation sub-resource
+             *     (`GET /conversations/{id}/approval-requests`) returns every state so
+             *     resolved cards re-render inline in chat history.
+             * @enum {string}
+             */
+            status: "pending" | "approved" | "rejected" | "expired" | "cancelled";
+            /**
+             * Format: date-time
+             * @description When the request was resolved; null while pending.
+             */
+            decided_at?: string | null;
+            /** @description The approver's note on a reject; null otherwise. */
+            note?: string | null;
         };
         SkillFile: {
             path: string;
@@ -1925,6 +1982,35 @@ export interface components {
              *     run at all.
              */
             request_id: string;
+            /** @description The gated MCP server identity (§1.1). */
+            mcp_server_name?: string | null;
+            /** @description The gated tool name (§1.1). */
+            tool_name?: string | null;
+            /**
+             * @description Raw tool input arguments — the decision input (§1.1). Without
+             *     it the card cannot be informative.
+             */
+            params?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Format: uuid
+             * @description The coworker whose call is gated (§1.1).
+             */
+            coworker_id?: string | null;
+            /**
+             * Format: uuid
+             * @description Originating conversation; null for scheduled-task approvals
+             *     that have no live conversation (§1.1).
+             */
+            conversation_id?: string | null;
+            /** @description When the approval became pending (ISO-8601, §1.1). */
+            requested_at?: string | null;
+            /**
+             * @description The agent's "why I'm calling this tool" (§1.1). Nullable; the
+             *     card omits the section when null.
+             */
+            rationale?: string | null;
             /** @description One-line human summary of the gated tool call. */
             action_summary?: string | null;
             /** @description When the pending approval auto-expires (ISO-8601). */
@@ -1940,10 +2026,12 @@ export interface components {
             request_id: string;
             /**
              * @description The orchestrator's deterministic terminal state (no LLM in
-             *     the loop). The SPA edits the card in place.
+             *     the loop). The SPA edits the card in place. `cancelled` =
+             *     the coworker's container withdrew the call (Stop / hook
+             *     exception), distinct from `expired` (no decision in time).
              * @enum {string}
              */
-            outcome: "approved" | "rejected" | "expired";
+            outcome: "approved" | "rejected" | "expired" | "cancelled";
         };
         WsServerEvent: components["schemas"]["WsServerEventRunStarted"] | components["schemas"]["WsServerEventRunToken"] | components["schemas"]["WsServerEventRunCompleted"] | components["schemas"]["WsServerEventRunError"] | components["schemas"]["WsServerEventRunProgress"] | components["schemas"]["WsServerEventMessageAppended"] | components["schemas"]["WsServerEventApprovalRequested"] | components["schemas"]["WsServerEventApprovalResolved"];
         WsClientFrameRequestRun: {
@@ -2485,6 +2573,30 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Message"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listConversationApprovalRequests: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalRequest"][];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -3347,7 +3459,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["PendingApprovalRequest"][];
+                    "application/json": components["schemas"]["ApprovalRequest"][];
                 };
             };
             401: components["responses"]["Unauthorized"];

@@ -37,6 +37,7 @@ __all__ = [
     "ApprovalPolicy",
     "ConditionValidationError",
     "evaluate_condition",
+    "evaluate_condition_explained",
     "find_matching_policy",
     "validate_condition_expr",
 ]
@@ -73,6 +74,10 @@ class ApprovalPolicy:
     enabled: bool
     priority: int
     updated_at: datetime
+    # Set from the row by the persistence layer; the matcher never reads it.
+    # Defaulted so the in-container snapshot builder (which has no created_at)
+    # and matcher tests need not supply it.
+    created_at: datetime | None = None
 
 
 # Binary leaf operators. Each takes (actual_field_value, policy_value) and
@@ -146,6 +151,17 @@ _OPS = {
 _MISSING = object()
 
 
+class _ConditionEvalError(Exception):
+    """A condition could not be evaluated at match time — e.g. it references a
+    field the tool call doesn't include (usually a policy typo). Carries a
+    human-readable ``reason`` so the fail-closed gate can explain itself rather
+    than silently gating every call."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
 def _eval(expr: Any, params: dict[str, Any]) -> bool:
     """Recursively evaluate one node. May raise — callers fail closed.
 
@@ -182,8 +198,42 @@ def _eval(expr: Any, params: dict[str, Any]) -> bool:
     fn = _OPS[op]           # KeyError on unknown op → fail closed
     actual = params.get(field, _MISSING)
     if actual is _MISSING:
-        raise KeyError(f"field {field!r} missing from params")
-    return bool(fn(actual, value))
+        raise _ConditionEvalError(
+            f"the condition references field '{field}', which this tool call "
+            f"does not include"
+        )
+    try:
+        return bool(fn(actual, value))
+    except _ConditionEvalError:
+        raise
+    except Exception as exc:  # re-raised as a fail-closed reason below
+        raise _ConditionEvalError(
+            f"the '{op}' comparison on field '{field}' could not be evaluated"
+        ) from exc
+
+
+def evaluate_condition_explained(
+    expr: dict[str, Any], params: dict[str, Any]
+) -> tuple[bool, str | None]:
+    """Whether ``expr`` matches ``params``, AND why when the match is forced.
+
+    Returns ``(matched, reason)``:
+
+    * ``(True, None)``  — the condition genuinely evaluated true (a real match).
+    * ``(False, None)`` — the condition genuinely evaluated false (no match).
+    * ``(True, reason)`` — the condition could NOT be evaluated, so the call is
+      gated as a precaution (§7 fail-closed). ``reason`` is a human-readable
+      explanation (most often: the condition names a field the tool call does
+      not include — i.e. a typo in the policy). The two ``True`` cases look
+      identical to the matcher but mean very different things; surfacing the
+      reason turns a silent "gate everything" typo into a fixable signal.
+    """
+    try:
+        return _eval(expr, params), None
+    except _ConditionEvalError as exc:
+        return True, exc.reason
+    except Exception:  # noqa: BLE001 — any other malformed expr also fails closed
+        return True, "the policy condition is malformed and could not be evaluated"
 
 
 def evaluate_condition(expr: dict[str, Any], params: dict[str, Any]) -> bool:
@@ -192,12 +242,10 @@ def evaluate_condition(expr: dict[str, Any], params: dict[str, Any]) -> bool:
     ``True`` means the policy condition is satisfied (this call needs
     approval). Any malformed expression, missing field, type mismatch, or
     unexpected exception also returns ``True`` (§7 fail-closed). Only a
-    cleanly-evaluated, definitively-false condition returns ``False``.
+    cleanly-evaluated, definitively-false condition returns ``False``. See
+    :func:`evaluate_condition_explained` for the accompanying reason channel.
     """
-    try:
-        return _eval(expr, params)
-    except Exception:  # noqa: BLE001 — fail-closed: any error ⇒ require approval
-        return True
+    return evaluate_condition_explained(expr, params)[0]
 
 
 def validate_condition_expr(expr: Any, *, _depth: int = 0) -> None:

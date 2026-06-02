@@ -33,6 +33,7 @@ const listConvsSpy = vi.fn();
 const listMessagesSpy = vi.fn();
 const createConvSpy = vi.fn();
 const listModelsSpy = vi.fn();
+const listPendingApprovalsSpy = vi.fn();
 
 vi.mock('../api/client.js', async () => {
   const actual = await vi.importActual<typeof import('../api/client.js')>(
@@ -47,6 +48,8 @@ vi.mock('../api/client.js', async () => {
       listMessages: listMessagesSpy,
       createCoworkerConversation: createConvSpy,
       listModels: listModelsSpy,
+      // The slotted <rm-approvals-inbox> self-fetches on mount.
+      listPendingApprovals: listPendingApprovalsSpy,
       setToken: vi.fn(),
     }),
   };
@@ -252,7 +255,9 @@ describe('<rm-chat-shell>', () => {
       listMessagesSpy,
       createConvSpy,
       listModelsSpy,
+      listPendingApprovalsSpy,
     ].forEach((s) => s.mockReset());
+    listPendingApprovalsSpy.mockResolvedValue([]);
     listCoworkersSpy.mockResolvedValue([COWORKER_A, COWORKER_B]);
     getMeSpy.mockResolvedValue(ME);
     listConvsSpy.mockResolvedValue([
@@ -505,6 +510,93 @@ describe('<rm-chat-shell>', () => {
       '[data-testid="topbar-settings"]',
     )!.click();
     expect(loc.hashAssignments).toEqual(['#/manage/coworkers']);
+  });
+
+  describe('approvals inbox integration', () => {
+    it('renders an approvals trigger in the top-bar icon strip', async () => {
+      const el = await mountShell();
+      expect(
+        el.querySelector('[data-testid="topbar-approvals"]'),
+      ).not.toBeNull();
+      // It is NOT a hash-route button — it toggles a popover, so it must
+      // not navigate.
+      el.querySelector<HTMLButtonElement>(
+        '[data-testid="topbar-approvals"]',
+      )!.click();
+      expect(loc.hashAssignments).toEqual([]);
+    });
+
+    it('clicking the trigger opens the inbox panel; clicking again closes it', async () => {
+      const el = await mountShell();
+      // Closed by default — the inbox renders nothing.
+      expect(el.querySelector('[data-testid="approvals-panel"]')).toBeNull();
+      const btn = el.querySelector<HTMLButtonElement>(
+        '[data-testid="topbar-approvals"]',
+      )!;
+      btn.click();
+      await settle(el);
+      expect(
+        el.querySelector('[data-testid="approvals-panel"]'),
+      ).not.toBeNull();
+      btn.click();
+      await settle(el);
+      expect(el.querySelector('[data-testid="approvals-panel"]')).toBeNull();
+    });
+
+    it('no badge when the inbox reports zero pending', async () => {
+      const el = await mountShell();
+      expect(el.querySelector('[data-testid="approvals-badge"]')).toBeNull();
+    });
+
+    it('paints a badge with the pending count from the inbox count event', async () => {
+      const el = await mountShell();
+      const inbox = el.querySelector('rm-approvals-inbox')!;
+      inbox.dispatchEvent(
+        new CustomEvent('approvals-count', {
+          detail: { total: 3, urgent: 0 },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(el);
+      const badge = el.querySelector('[data-testid="approvals-badge"]');
+      expect(badge).not.toBeNull();
+      expect(badge?.textContent?.trim()).toBe('3');
+      expect(badge?.getAttribute('data-urgent')).toBe('false');
+    });
+
+    it('deepens the badge (data-urgent) when at least one item is expiring soon', async () => {
+      const el = await mountShell();
+      const inbox = el.querySelector('rm-approvals-inbox')!;
+      inbox.dispatchEvent(
+        new CustomEvent('approvals-count', {
+          detail: { total: 2, urgent: 1 },
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(el);
+      expect(
+        el
+          .querySelector('[data-testid="approvals-badge"]')
+          ?.getAttribute('data-urgent'),
+      ).toBe('true');
+    });
+
+    it('re-pulls the inbox when the chat-panel bubbles approval-activity', async () => {
+      const el = await mountShell();
+      // The inbox already seeded once on mount; isolate the trigger.
+      listPendingApprovalsSpy.mockClear();
+      // chat-panel dispatches this bubbling+composed on requested/resolved.
+      el.querySelector('rm-chat-panel')!.dispatchEvent(
+        new CustomEvent('approval-activity', {
+          bubbles: true,
+          composed: true,
+        }),
+      );
+      await settle(el);
+      expect(listPendingApprovalsSpy).toHaveBeenCalled();
+    });
   });
 
   it('clicking a conversation row navigates with a new ?chat_id', async () => {

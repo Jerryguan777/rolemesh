@@ -11,6 +11,9 @@ import './styles/tokens.css';
 // Skills / Models / Credentials). Lives next to tokens.css so all
 // v2 stylesheets load before any component mounts.
 import './styles/settings-pages.css';
+// Card-scoped warm-palette override for the HITL approval card (re-points the
+// @theme tokens to --rm-* inside rm-approval-card only).
+import './styles/approval-card.css';
 
 import './components/chat-panel.js';
 import './components/message-list.js';

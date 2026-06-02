@@ -1,0 +1,41 @@
+/* Approval card — opt the card subtree into the v2 warm palette.
+ *
+ * The card is built from the chat's Tailwind utilities (`bg-surface-2`,
+ * `text-ink-2`, `border-border-2`, `font-mono`, …). The app's default @theme
+ * maps those to a cool slate palette, but the v2 design (.hitl-ui/prototype)
+ * wants warm terracotta + Hanken/JetBrains type. Rather than rewrite every
+ * utility on the component, we re-point the @theme custom properties to the
+ * --rm-* design tokens for THIS element's subtree only — so the utilities
+ * resolve warm inside the card and stay slate everywhere else.
+ *
+ * The --rm-* tokens already flip for dark mode (tokens.css @media), so pointing
+ * both the light (`--color-x`) and dark (`--color-d-x`) @theme vars at the same
+ * --rm-* token gives correct light/dark automatically. The @theme tokens must
+ * still be *declared* in app.css for Tailwind to generate the utilities at
+ * build time; this file only overrides their values within the card. */
+rm-approval-card {
+  font-family: var(--rm-font-body);
+  --font-mono: var(--rm-font-mono);
+
+  --color-surface: var(--rm-surface);
+  --color-surface-2: var(--rm-surface-2);
+  --color-surface-3: var(--rm-surface-3);
+  --color-ink-0: var(--rm-ink);
+  --color-ink-1: var(--rm-ink);
+  --color-ink-2: var(--rm-ink-2);
+  --color-ink-3: var(--rm-ink-3);
+  --color-border: var(--rm-border);
+  --color-border-2: var(--rm-border-2);
+  --color-accent: var(--rm-accent);
+
+  --color-d-surface: var(--rm-surface);
+  --color-d-surface-2: var(--rm-surface-2);
+  --color-d-surface-3: var(--rm-surface-3);
+  --color-d-ink-0: var(--rm-ink);
+  --color-d-ink-1: var(--rm-ink);
+  --color-d-ink-2: var(--rm-ink-2);
+  --color-d-ink-3: var(--rm-ink-3);
+  --color-d-border: var(--rm-border);
+  --color-d-border-2: var(--rm-border-2);
+  --color-d-accent: var(--rm-accent);
+}

@@ -417,6 +417,7 @@ class ApprovalPolicy(BaseModel):
     condition_expr: dict[str, object]
     enabled: bool
     priority: int
+    created_at: str
     updated_at: str
 
 
@@ -463,14 +464,15 @@ class ApprovalPolicyUpdate(BaseModel):
     )
 
 
-class PendingApprovalRequest(BaseModel):
-    """Wire projection of a *pending* ``approval_requests`` row (§4.2).
+class ApprovalRequest(BaseModel):
+    """Wire projection of an ``approval_requests`` row (§4.2).
 
-    The web reconnect read (``GET /api/v1/approval-requests``) returns these so
-    a browser that dropped its socket can re-render the in-flight ✅/❌ cards
-    from the authoritative DB rows (the live ``event.approval.requested`` push
-    is fire-and-forget). Only pending rows are ever returned; a resolved request
-    is delivered as ``event.approval.resolved`` instead.
+    Two reads return these: the tenant-wide inbox read
+    (``GET /api/v1/approval-requests``) yields only ``pending`` rows; the
+    conversation sub-resource
+    (``GET /api/v1/conversations/{id}/approval-requests``) yields every state so
+    a reconnecting browser re-renders both pending and resolved cards inline in
+    chat history. ``status`` distinguishes them.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -482,6 +484,16 @@ class PendingApprovalRequest(BaseModel):
     action_summary: str | None = None
     requested_at: str
     expires_at: str
+    # §1.2: the decision input (raw params), the requesting coworker, and the
+    # agent's nullable rationale — so a reconnecting browser re-renders the same
+    # informative card the live WS push carried.
+    params: dict[str, object] | None = None
+    coworker_id: str | None = None
+    rationale: str | None = None
+    # pending|approved|rejected|expired|cancelled — 'pending' on the inbox read.
+    status: str
+    decided_at: str | None = None
+    note: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -937,6 +949,17 @@ class WsServerEventApprovalRequested(BaseModel):
     model_config = ConfigDict(extra="forbid")
     type: Literal["event.approval.requested"]
     request_id: str
+    # Decision-relevant additions (§1.1). All additive/optional so existing
+    # clients ignore them; the SPA renders an informative card from this push
+    # alone, before any REST read. ``params`` is the raw tool input — the
+    # decision input. ``rationale``/``conversation_id`` are nullable.
+    mcp_server_name: str | None = None
+    tool_name: str | None = None
+    params: dict[str, object] | None = None
+    coworker_id: str | None = None
+    conversation_id: str | None = None
+    requested_at: str | None = None
+    rationale: str | None = None
     action_summary: str | None = None
     expires_at: str | None = None
 
@@ -952,7 +975,9 @@ class WsServerEventApprovalResolved(BaseModel):
     model_config = ConfigDict(extra="forbid")
     type: Literal["event.approval.resolved"]
     request_id: str
-    outcome: Literal["approved", "rejected", "expired"]
+    # ``cancelled`` = the coworker's container withdrew the call (Stop / hook
+    # exception); distinct from ``expired`` (no decision in time). §1.5.
+    outcome: Literal["approved", "rejected", "expired", "cancelled"]
 
 
 # Tagged union over ``type``. Pydantic v2's Field discriminator picks

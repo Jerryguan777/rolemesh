@@ -481,12 +481,17 @@ class _BotInstance:
             await self._app.bot.send_chat_action(chat_id, ChatAction.TYPING)
 
     async def send_approval_card(
-        self, chat_id: str, request_id: str, summary: str
+        self, chat_id: str, request_id: str, text: str
     ) -> int | None:
-        """Send the ✅/❌ approval card; return its ``message_id`` for later edit."""
+        """Send the ✅/❌ approval card; return its ``message_id`` for later edit.
+
+        ``text`` is the fully-rendered plain-text body (built upstream by
+        ``approval_notify.pending_card_text`` so the Telegram card mirrors the
+        web chat card). Sent with no ``parse_mode`` so user-supplied param
+        values need no MarkdownV2 escaping.
+        """
         if self._app is None:
             return None
-        text = f"⏳ Approval required for {summary}.\nApprove or reject this tool call."
         try:
             sent = await self._app.bot.send_message(
                 chat_id, text, reply_markup=_approval_keyboard(request_id)
@@ -543,14 +548,14 @@ class TelegramGateway:
         return self._bots_by_token.get(token)
 
     async def send_approval_card(
-        self, binding_id: str, chat_id: str, request_id: str, summary: str
+        self, binding_id: str, chat_id: str, request_id: str, text: str
     ) -> int | None:
         """Resolve the binding's bot and send an approval card."""
         bot = self._bot_for_binding(binding_id)
         if bot is None:
             logger.warning("No telegram bot for binding", binding_id=binding_id)
             return None
-        return await bot.send_approval_card(chat_id, request_id, summary)
+        return await bot.send_approval_card(chat_id, request_id, text)
 
     async def edit_approval_card(
         self, binding_id: str, chat_id: str, message_id: int, text: str

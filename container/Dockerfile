@@ -59,6 +59,10 @@ COPY src/rolemesh/auth/permissions.py ./rolemesh/auth/permissions.py
 # audit + engine + loader's pg path and would fail at container
 # startup.
 COPY src/rolemesh/core/logger.py ./rolemesh/core/logger.py
+# core/config.py: agent_runner's HITL hook wiring imports APPROVAL_TIMEOUT
+# from here (single source of truth for the in-band await bound). Stdlib-only
+# (os + pathlib), so safe to ship to the agent image.
+COPY src/rolemesh/core/config.py ./rolemesh/core/config.py
 COPY src/rolemesh/safety/types.py ./rolemesh/safety/types.py
 COPY src/rolemesh/safety/errors.py ./rolemesh/safety/errors.py
 COPY src/rolemesh/safety/loader.py ./rolemesh/safety/loader.py

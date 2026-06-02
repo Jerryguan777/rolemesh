@@ -48,7 +48,11 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
-from agent_runner.approval.policy import ApprovalPolicy, find_matching_policy
+from agent_runner.approval.policy import (
+    ApprovalPolicy,
+    evaluate_condition_explained,
+    find_matching_policy,
+)
 
 from ..events import ToolCallVerdict
 
@@ -152,7 +156,26 @@ class ApprovalHookHandler:
             # No tenant policy gates this call — allow.
             return None
 
-        return await self._await_decision(server, tool, params, policy)
+        # Distinguish a genuine match from a fail-closed match (the policy's
+        # condition couldn't be evaluated — usually a typo'd field name, which
+        # otherwise silently gates *every* call). On the latter, carry the
+        # reason as the approval's rationale so the card / Telegram / log say
+        # WHY, instead of leaving the user with a phantom gate. A genuine match
+        # leaves the rationale None (the agent-supplied "why" is not wired yet).
+        _, gate_reason = evaluate_condition_explained(policy.condition_expr, params)
+        rationale: str | None = None
+        if gate_reason is not None:
+            _log.warning(
+                "approval gated by un-evaluable policy %s (%s.%s): %s",
+                policy.id, server, tool, gate_reason,
+            )
+            rationale = (
+                f"⚠ This approval policy's condition couldn't be evaluated "
+                f"({gate_reason}); the call was gated as a precaution. Check the "
+                f"policy's field names."
+            )
+
+        return await self._await_decision(server, tool, params, policy, rationale)
 
     # -- decision routing (called by the NATS decision subscription) ----
 
@@ -180,6 +203,7 @@ class ApprovalHookHandler:
         tool: str,
         params: dict[str, Any],
         policy: ApprovalPolicy,
+        rationale: str | None = None,
     ) -> ToolCallVerdict | None:
         request_id = self._id_factory()
         loop = asyncio.get_running_loop()
@@ -207,6 +231,11 @@ class ApprovalHookHandler:
                     "tool_name": tool,
                     "params": params,
                     "action_summary": _action_summary(server, tool, params),
+                    # The approval's "why". The agent-supplied rationale is not
+                    # wired yet (always None for a genuine match), but a
+                    # fail-closed match (un-evaluable condition) passes its
+                    # reason here so the user can see why the call was gated.
+                    "rationale": rationale,
                     "requested_at": requested_at.isoformat(),
                     "expires_at": expires_at.isoformat(),
                 },

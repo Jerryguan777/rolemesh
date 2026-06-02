@@ -1299,6 +1299,12 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         "CREATE INDEX IF NOT EXISTS idx_approval_requests_job "
         "ON approval_requests (job_id)"
     )
+    # The agent's free-text "why I'm calling this tool" (nullable). Added after
+    # the table shipped, so use the idempotent ADD COLUMN IF NOT EXISTS form for
+    # pre-existing dev DBs. Default null; no agent-fill mechanism yet (HITL UI U1).
+    await conn.execute(
+        "ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS rationale TEXT"
+    )
 
     # Reference/seed data — see _seed_reference_data.
     await _seed_reference_data(conn)

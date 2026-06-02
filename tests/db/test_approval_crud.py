@@ -85,10 +85,13 @@ async def test_create_policy_defaults_to_always_true() -> None:
     assert p.condition_expr == {"always": True}
     assert p.enabled is True
     assert p.priority == 0
+    # created_at is now read off the row and exposed (policies-page §1.6).
+    assert p.created_at is not None
     # Round-trips through jsonb as a real dict, not a string.
     fetched = await get_approval_policy(p.id, tenant_id=t["tenant_id"])
     assert fetched is not None
     assert fetched.condition_expr == {"always": True}
+    assert fetched.created_at is not None
 
 
 async def test_create_policy_preserves_nested_condition_jsonb() -> None:
@@ -195,6 +198,28 @@ async def test_create_request_round_trips_action_and_null_approver() -> None:
     assert fetched is not None
     assert fetched.action == action
     assert fetched.action_summary == "charge $500"
+    # Default rationale is null when the caller omits it (no fill mechanism).
+    assert fetched.rationale is None
+
+
+async def test_create_request_round_trips_rationale() -> None:
+    # rationale is plumbed nullable end-to-end; a supplied value must survive
+    # the INSERT/SELECT round-trip (catches an off-by-one in the column list).
+    t = await _tenant_with_coworker("A")
+    req = await create_approval_request(
+        tenant_id=t["tenant_id"], coworker_id=t["coworker_id"], job_id="job-1",
+        mcp_server_name="stripe",
+        action={"tool_name": "charge", "params": {"amount": 500}},
+        expires_at=_future(), user_id=t["user_id"],
+        action_summary="charge $500",
+        rationale="refunding the duplicate order",
+    )
+    assert req.rationale == "refunding the duplicate order"
+    # And it projects out of the pending-list read the REST surface consumes.
+    pending = await list_pending_requests_for_tenant(t["tenant_id"])
+    assert len(pending) == 1
+    assert pending[0].rationale == "refunding the duplicate order"
+    assert pending[0].action == {"tool_name": "charge", "params": {"amount": 500}}
 
 
 async def test_create_request_pins_explicit_id() -> None:

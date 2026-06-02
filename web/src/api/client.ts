@@ -73,8 +73,8 @@ export type ApprovalPolicyCreate =
   components['schemas']['ApprovalPolicyCreate'];
 export type ApprovalPolicyUpdate =
   components['schemas']['ApprovalPolicyUpdate'];
-export type PendingApprovalRequest =
-  components['schemas']['PendingApprovalRequest'];
+export type ApprovalRequest =
+  components['schemas']['ApprovalRequest'];
 export type ConditionExpr = components['schemas']['ConditionExpr'];
 
 export type ErrorResponseBody =
@@ -464,7 +464,7 @@ export class ApiClient {
    *  own cards. Tenant scoping is enforced server-side. */
   async listPendingApprovals(
     conversationId?: string,
-  ): Promise<PendingApprovalRequest[]> {
+  ): Promise<ApprovalRequest[]> {
     const qs = conversationId
       ? `?conversation_id=${encodeURIComponent(conversationId)}`
       : '';
@@ -473,7 +473,24 @@ export class ApiClient {
       { method: 'GET', headers: this.headers() },
     );
     if (!resp.ok) throw await this.parseError(resp);
-    return (await resp.json()) as PendingApprovalRequest[];
+    return (await resp.json()) as ApprovalRequest[];
+  }
+
+  /** A conversation's full HITL approval record — pending AND resolved,
+   *  oldest first. The chat surface fetches this on load so resolved
+   *  ✅/❌ cards re-render inline in chronological position (not just
+   *  in-flight ones). Tenant scoping is enforced server-side. */
+  async listConversationApprovals(
+    conversationId: string,
+  ): Promise<ApprovalRequest[]> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/conversations/${encodeURIComponent(
+        conversationId,
+      )}/approval-requests`,
+      { method: 'GET', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as ApprovalRequest[];
   }
 
   /** Returns `{ ok: true }` on 202, `{ ok: false, alreadyTerminal: true }`

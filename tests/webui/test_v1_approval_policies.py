@@ -285,7 +285,7 @@ async def test_garbage_uuid_collapses_to_same_404() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _seed_pending_request(actor: AuthenticatedUser) -> str:
+async def _seed_pending_request(actor: AuthenticatedUser) -> tuple[str, str]:
     cw = await create_coworker(
         tenant_id=actor.tenant_id,
         name=f"cw-{uuid.uuid4().hex[:6]}",
@@ -298,27 +298,33 @@ async def _seed_pending_request(actor: AuthenticatedUser) -> str:
         mcp_server_name="stripe",
         action={"tool_name": "charge", "params": {"amount": 500}},
         action_summary="charge $500",
+        rationale="refunding the duplicate order",
         expires_at=datetime.now(UTC) + timedelta(minutes=5),
     )
-    return req.id
+    return req.id, cw.id
 
 
 async def test_pending_requests_returns_own_tenant_only() -> None:
     a = await _make_actor("a")
     b = await _make_actor("b")
-    a_req = await _seed_pending_request(a)
-    b_req = await _seed_pending_request(b)
+    a_req, a_cw = await _seed_pending_request(a)
+    b_req, _ = await _seed_pending_request(b)
     async with _client(_build_app(a)) as ac:
         resp = await ac.get("/api/v1/approval-requests", headers=_AUTH)
     assert resp.status_code == 200
     ids = {r["request_id"] for r in resp.json()}
     assert a_req in ids
     assert b_req not in ids
-    # Projection never leaks the raw params, only the tool name + summary.
+    # §1.2: the projection now carries the decision-relevant payload — the raw
+    # params (the decision input), the requesting coworker, and the rationale —
+    # flattened out of the internal ``action`` wrapper.
     row = next(r for r in resp.json() if r["request_id"] == a_req)
     assert row["tool_name"] == "charge"
     assert row["action_summary"] == "charge $500"
-    assert "params" not in row
+    assert row["params"] == {"amount": 500}
+    assert row["coworker_id"] == a_cw
+    assert row["rationale"] == "refunding the duplicate order"
+    # The internal {tool_name, params} wrapper itself is never exposed verbatim.
     assert "action" not in row
 
 

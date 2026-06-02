@@ -26,6 +26,7 @@ S3 coordinator documents).
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -50,6 +51,7 @@ _OUTCOME_TEXT = {
     "approved": "✅ Approved",
     "rejected": "❌ Rejected",
     "expired": "⏰ Expired (no decision in time)",
+    "cancelled": "⏰ Cancelled (the coworker withdrew this call)",
 }
 
 
@@ -58,10 +60,99 @@ def card_text_for_outcome(outcome: str) -> str:
     return _OUTCOME_TEXT.get(outcome, f"Resolved: {outcome}")
 
 
-def pending_card_text(action_summary: str | None) -> str:
-    """Body text for the pending approve/reject card."""
-    summary = action_summary or "an MCP tool call"
-    return f"⏳ Approval required for {summary}.\nApprove or reject this tool call."
+# Card-body sizing. Telegram caps a message at 4096 chars; we aim far lower so
+# the card stays scannable on a phone. Each param value is clipped, and the
+# whole params block is dropped-with-ellipsis once the running body would blow
+# its budget — so even a tool called with hundreds of huge params can't grow
+# the card past ``_MAX_CARD_LEN`` (+ the small fixed header/footer).
+_MAX_VALUE_LEN = 80
+_MAX_RATIONALE_LEN = 240
+_MAX_SUMMARY_LEN = 160
+_MAX_CARD_LEN = 1500
+_ELLIPSIS = "…"
+
+
+def _clip(text: str, limit: int) -> str:
+    """Cut ``text`` to ``limit`` chars, marking the cut with an ellipsis."""
+    if len(text) <= limit:
+        return text
+    if limit <= len(_ELLIPSIS):
+        return _ELLIPSIS[:limit]
+    return text[: limit - len(_ELLIPSIS)] + _ELLIPSIS
+
+
+def _render_value(value: Any) -> str:
+    """One-line, length-capped rendering of a single param value.
+
+    Strings pass through; everything else is compact-JSON-encoded (falling back
+    to ``str`` for non-serialisable values). Newlines are collapsed so one param
+    occupies exactly one line, then the result is clipped to ``_MAX_VALUE_LEN``.
+    """
+    if isinstance(value, str):
+        rendered = value
+    else:
+        try:
+            rendered = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError):
+            rendered = str(value)
+    return _clip(" ".join(rendered.split()), _MAX_VALUE_LEN)
+
+
+def pending_card_text(req: ApprovalRequest) -> str:
+    """Plain-text body for the pending approve/reject card (Telegram).
+
+    Mirrors the web chat card (spec §6): a ``server.tool`` chip, one
+    ``key: value`` line per param (each value clipped), an optional ``Why:``
+    rationale line (omitted when null/blank), and the approve/reject prompt.
+
+    Plain text — deliberately **not** MarkdownV2 — so user-supplied param values
+    never have to be escaped and can't trip Telegram's formatter. The body is
+    budgeted well under Telegram's 4096-char limit; params that would overflow
+    are dropped and the truncation is flagged with an ellipsis line.
+    """
+    summary = _clip(req.action_summary or "an MCP tool call", _MAX_SUMMARY_LEN)
+    action = req.action if isinstance(req.action, dict) else {}
+    tool_name = action.get("tool_name")
+    params = action.get("params")
+
+    header = f"⏳ Approval required for {summary}."
+    chip = f"{req.mcp_server_name}.{tool_name}" if tool_name else (req.mcp_server_name or "")
+    footer = "Approve or reject this tool call."
+
+    rationale = (req.rationale or "").strip()
+    rationale_line = (
+        f"Why: {_clip(rationale, _MAX_RATIONALE_LEN)}" if rationale else None
+    )
+
+    # Everything except the params block is fixed-size and always rendered; the
+    # params block gets whatever budget is left under the cap.
+    fixed_len = len(header) + len(chip) + len(footer)
+    if rationale_line:
+        fixed_len += len(rationale_line)
+
+    param_lines: list[str] = []
+    if isinstance(params, dict) and params:
+        budget = _MAX_CARD_LEN - fixed_len
+        truncated = False
+        for key, value in params.items():
+            line = f"{key}: {_render_value(value)}"
+            if budget - (len(line) + 1) < 0:
+                truncated = True
+                break
+            param_lines.append(line)
+            budget -= len(line) + 1
+        if truncated or len(param_lines) < len(params):
+            param_lines.append(_ELLIPSIS)
+
+    # Blocks are separated by a blank line; chip + params form one tight block.
+    detail = [chip, *param_lines] if chip else param_lines
+    blocks = [header]
+    if detail:
+        blocks.append("\n".join(detail))
+    if rationale_line:
+        blocks.append(rationale_line)
+    blocks.append(footer)
+    return "\n\n".join(blocks)
 
 
 @dataclass
@@ -150,7 +241,7 @@ class ApprovalNotifier:
                     target.binding_id,
                     target.chat_id,
                     req.id,
-                    req.action_summary or "an MCP tool call",
+                    pending_card_text(req),
                 )
             except Exception:
                 logger.exception("approval notify: telegram card send failed",
@@ -158,12 +249,23 @@ class ApprovalNotifier:
                 message_id = None
             ref.telegram_message_id = message_id
         elif target.channel_type == "web":
+            # The decision-relevant payload (§1.1): the SPA renders an informative
+            # card from the WS push alone, before any REST read. ``action`` is the
+            # {tool_name, params} snapshot persisted on the row.
+            action = req.action if isinstance(req.action, dict) else {}
             await self._safe_publish_web(
                 target.binding_id,
                 target.chat_id,
                 {
                     "type": "approval.requested",
                     "request_id": req.id,
+                    "mcp_server_name": req.mcp_server_name,
+                    "tool_name": action.get("tool_name"),
+                    "params": action.get("params"),
+                    "coworker_id": req.coworker_id,
+                    "conversation_id": req.conversation_id,
+                    "requested_at": req.requested_at.isoformat(),
+                    "rationale": req.rationale,
                     "action_summary": req.action_summary,
                     "expires_at": req.expires_at.isoformat(),
                 },
