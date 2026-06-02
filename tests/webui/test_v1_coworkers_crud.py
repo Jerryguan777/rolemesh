@@ -448,8 +448,6 @@ async def test_patch_model_id_round_trips_through_real_nats() -> None:
         coworker_events.set_jetstream(None)
         await sub.unsubscribe()
         # Purge so other suites don't see stale messages.
-        try:
+        with contextlib.suppress(Exception):
             await js.delete_consumer("web-ipc", "orch-web-coworker-restart")
-        except Exception:
-            pass
         await nc.close()

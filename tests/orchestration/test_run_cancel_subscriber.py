@@ -44,6 +44,7 @@ from rolemesh.orchestration.run_cancel_subscriber import (
 )
 from rolemesh.runs import create_run, update_run_terminal
 from rolemesh.runs import terminators as terminators_mod
+import contextlib
 
 pytestmark = pytest.mark.usefixtures("test_db")
 
@@ -157,14 +158,10 @@ async def _purge_consumer(js: Any) -> None:
     (we WANT replay across orchestrator restarts) — this purge
     is purely for test hygiene.
     """
-    try:
+    with contextlib.suppress(Exception):
         await js.delete_consumer("web-ipc", "orch-web-run-cancel")
-    except Exception:
-        pass
-    try:
+    with contextlib.suppress(Exception):
         await js.purge_stream("web-ipc")
-    except Exception:
-        pass
 
 
 # ---------------------------------------------------------------------------

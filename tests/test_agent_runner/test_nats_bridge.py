@@ -39,6 +39,7 @@ from agent_runner.main import (
 )
 from agent_runner.tools.context import ToolContext
 from rolemesh.ipc.protocol import AgentInitData
+import contextlib
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -135,10 +136,8 @@ async def nats_conn():
         # so the new agent.*.interrupt subject gets routed.
         await js.update_stream(cfg)
     # Ensure KV bucket exists
-    try:
+    with contextlib.suppress(Exception):
         await js.create_key_value(bucket="agent-init")
-    except Exception:
-        pass
     yield nc, js
     await nc.close()
 
@@ -169,7 +168,7 @@ def _make_init(job_id: str, **overrides: Any) -> AgentInitData:
 class TestChannel1KVInit:
     async def test_write_and_read_init_data(self, nats_conn: tuple) -> None:
         """AgentInitData serialized to KV can be deserialized back."""
-        nc, js = nats_conn
+        _nc, js = nats_conn
         job_id = _unique_job_id()
         init = _make_init(job_id, prompt="test prompt", session_id="s-123")
 
@@ -194,7 +193,7 @@ class TestChannel1KVInit:
 class TestChannel2Results:
     async def test_publish_output_received_by_subscriber(self, nats_conn: tuple) -> None:
         """publish_output writes to JetStream; a subscriber receives it."""
-        nc, js = nats_conn
+        _nc, js = nats_conn
         job_id = _unique_job_id()
 
         sub = await js.subscribe(f"agent.{job_id}.results")
@@ -214,7 +213,7 @@ class TestChannel2Results:
         await sub.unsubscribe()
 
     async def test_error_output_format(self, nats_conn: tuple) -> None:
-        nc, js = nats_conn
+        _nc, js = nats_conn
         job_id = _unique_job_id()
 
         sub = await js.subscribe(f"agent.{job_id}.results")
@@ -242,7 +241,7 @@ class TestChannel2Results:
 class TestChannel3FollowUpInput:
     async def test_drain_nats_input_collects_pending(self, nats_conn: tuple) -> None:
         """drain_nats_input reads all pending messages from the input subject."""
-        nc, js = nats_conn
+        _nc, js = nats_conn
         job_id = _unique_job_id()
 
         # Publish 3 pending messages
@@ -259,7 +258,7 @@ class TestChannel3FollowUpInput:
         assert messages == ["pending-0", "pending-1", "pending-2"]
 
     async def test_drain_empty_returns_empty(self, nats_conn: tuple) -> None:
-        nc, js = nats_conn
+        _nc, js = nats_conn
         job_id = _unique_job_id()
         sub = await js.subscribe(f"agent.{job_id}.input")
         messages = await drain_nats_input(sub)
@@ -387,7 +386,7 @@ class TestChannel4CloseSignal:
 class TestChannel5And6ToolPublishes:
     async def test_send_message_tool_publishes_to_nats(self, nats_conn: tuple) -> None:
         """send_message tool publishes to agent.{id}.messages via real NATS."""
-        nc, js = nats_conn
+        _nc, js = nats_conn
         job_id = _unique_job_id()
 
         sub = await js.subscribe(f"agent.{job_id}.messages")
@@ -418,7 +417,7 @@ class TestChannel5And6ToolPublishes:
 
     async def test_schedule_task_tool_publishes_to_nats(self, nats_conn: tuple) -> None:
         """schedule_task tool publishes to agent.{id}.tasks via real NATS."""
-        nc, js = nats_conn
+        _nc, js = nats_conn
         job_id = _unique_job_id()
 
         sub = await js.subscribe(f"agent.{job_id}.tasks")

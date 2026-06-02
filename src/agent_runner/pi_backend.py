@@ -196,10 +196,7 @@ def _build_bridge_extension(hooks: HookRegistry) -> Extension:
         # .text attr) and dict shape (with "text" key).
         text_parts: list[str] = []
         for block in content:
-            if isinstance(block, dict):
-                text = block.get("text")
-            else:
-                text = getattr(block, "text", None)
+            text = block.get("text") if isinstance(block, dict) else getattr(block, "text", None)
             if isinstance(text, str):
                 text_parts.append(text)
         result_text = "".join(text_parts)

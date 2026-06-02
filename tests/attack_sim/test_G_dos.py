@@ -20,6 +20,7 @@ import pytest
 import rolemesh.agent  # noqa: F401
 from rolemesh.db import list_safety_decisions
 from rolemesh.safety.types import SafetyContext, Stage
+import contextlib
 
 # ---------------------------------------------------------------------------
 # G3. Oversized tool_input
@@ -80,10 +81,8 @@ def test_G5_registry_lookup_is_constant_time() -> None:
     # We just measure the lookup path; the error is expected and cheap.
     t0 = time.monotonic()
     for _ in range(10_000):
-        try:
+        with contextlib.suppress(UnknownCheckError):
             registry.get("nonexistent")
-        except UnknownCheckError:
-            pass
     elapsed = time.monotonic() - t0
     assert elapsed < 0.5, (
         f"10k registry lookups took {elapsed:.2f}s — expected <0.5s for O(1)"

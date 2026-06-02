@@ -24,6 +24,12 @@ ignore = [
     "RUF003", # ambiguous-unicode-character-comment
 ]
 
+[lint.per-file-ignores]
+# Test code legitimately uses domain-driven names (variables mirroring wire
+# fields like ModelName / CORRECT, helper functions, fixtures), where pep8
+# naming adds noise rather than catching bugs. Keep N enforced in src/.
+"tests/**" = ["N"]
+
 [lint.isort]
 known-first-party = ["rolemesh", "agent_runner", "webui"]
 

@@ -132,7 +132,7 @@ async def test_list_schedules_excludes_other_tenants() -> None:
     # tenant B's tasks even though both rows live in the same table.
     # Catches a missed WHERE tenant_id at the handler layer (RLS
     # enforces it too, but the test makes the contract explicit).
-    user_a, cw_a = await _make_user_and_coworker("cta")
+    user_a, _cw_a = await _make_user_and_coworker("cta")
     user_b, cw_b = await _make_user_and_coworker("ctb")
     other = await _seed_task(
         tenant_id=user_b.tenant_id, coworker_id=cw_b, prompt="other",

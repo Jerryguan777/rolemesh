@@ -449,7 +449,7 @@ async def test_coworker_skills_rejects_cross_tenant_binding() -> None:
     pre-03b ``skills_check_coworker_tenant`` trigger.
     """
     tenant_a, _ = await _make_tenant_with_coworker("xta")
-    tenant_b, coworker_b = await _make_tenant_with_coworker("xtb")
+    _tenant_b, coworker_b = await _make_tenant_with_coworker("xtb")
     skill_a = await create_skill(
         tenant_id=tenant_a, name="forged-bind",
         frontmatter_common={"description": _GOOD_DESC},
@@ -471,7 +471,7 @@ async def test_enable_skill_for_coworker_rejects_foreign_tenant() -> None:
     blow up.
     """
     tenant_a, _ = await _make_tenant_with_coworker("eta")
-    tenant_b, coworker_b = await _make_tenant_with_coworker("etb")
+    _tenant_b, coworker_b = await _make_tenant_with_coworker("etb")
     skill_a = await create_skill(
         tenant_id=tenant_a, name="cross",
         frontmatter_common={"description": _GOOD_DESC},
