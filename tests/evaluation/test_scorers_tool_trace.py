@@ -10,6 +10,14 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+
+# The eval extra (inspect-ai) is nightly-only: PR CI runs
+# `uv sync --extra dev --extra pi --extra safety-ml` without it. Skip the
+# whole module cleanly when inspect_ai is unavailable rather than failing
+# collection — mirrors the boto3 guard in
+# tests/test_agent_runner/test_amazon_bedrock_tool_limit.py.
+pytest.importorskip("inspect_ai")
+
 from inspect_ai.model import ModelName, ModelOutput
 from inspect_ai.scorer import CORRECT, INCORRECT, Target
 from inspect_ai.solver import TaskState
