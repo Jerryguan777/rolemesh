@@ -22,6 +22,8 @@ import pytest
 from rolemesh.core.skills import SKILL_MANIFEST_NAME, SKILL_MD_FILENAME
 from rolemesh.core.skills_consts_pin import (
     SKILL_FILE_PATH_RE,
+)
+from rolemesh.core.skills_consts_pin import (
     SKILL_MANIFEST_NAME as PIN_NAME,
 )
 

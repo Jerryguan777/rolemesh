@@ -85,10 +85,10 @@ _CLOSE_NOT_FOUND = 4004
 # ---------------------------------------------------------------------------
 
 
-_js: "JetStreamContext | None" = None
+_js: JetStreamContext | None = None
 
 
-def set_jetstream(js: "JetStreamContext | None") -> None:
+def set_jetstream(js: JetStreamContext | None) -> None:
     """Attach or detach the process-wide JetStream context."""
     global _js
     _js = js
@@ -648,7 +648,7 @@ async def _handle_request_run(
     payload: WsTicketPayload,
     conv: Any,
     binding_id: str,
-    js: "JetStreamContext",
+    js: JetStreamContext,
     active_run_lock: asyncio.Lock,
 ) -> str | None:
     """Process a ``request.run`` frame.

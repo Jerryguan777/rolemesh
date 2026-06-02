@@ -59,11 +59,11 @@ from pi.coding_agent.core.extensions.loader import create_extension_runtime
 from pi.coding_agent.core.extensions.runner import ExtensionRunner
 from pi.coding_agent.core.extensions.types import Extension
 from pi.coding_agent.core.resource_loader import DefaultResourceLoader, DefaultResourceLoaderOptions
-from rolemesh.ipc.skill_mount import PI_SKILLS_PATH
 from pi.coding_agent.core.sdk import CreateAgentSessionOptions, create_agent_session
 from pi.coding_agent.core.session_manager import SessionManager
 from pi.mcp import McpServerConnection, load_mcp_tools
 from rolemesh.ipc.protocol import AgentInitData, McpServerSpec
+from rolemesh.ipc.skill_mount import PI_SKILLS_PATH
 
 from .backend import (
     BackendEvent,

@@ -34,12 +34,10 @@ import pytest
 # grab _filter_env_allowlist triggers a circular re-entry because the
 # agent package's __init__ imports back into the runner mid-flight.
 import rolemesh.agent  # noqa: F401  (import for side effect)
+from rolemesh.container.runner import _filter_env_allowlist
+from rolemesh.core.config import CONTAINER_ENV_ALLOWLIST
 
-from rolemesh.container.runner import _filter_env_allowlist  # noqa: E402
-from rolemesh.core.config import CONTAINER_ENV_ALLOWLIST  # noqa: E402
-
-from .conftest import skip_without_safety_ml  # noqa: E402
-
+from .conftest import skip_without_safety_ml
 
 # ---------------------------------------------------------------------------
 # B1. Env-variable allowlist — rogue backend cannot smuggle secrets

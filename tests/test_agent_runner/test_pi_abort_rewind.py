@@ -34,7 +34,6 @@ This file now tests the mechanism at two levels:
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any

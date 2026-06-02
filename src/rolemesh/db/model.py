@@ -74,7 +74,7 @@ class CredentialRow:
     updated_at: datetime
 
 
-def _record_to_model(row: "asyncpg.Record") -> ModelRow:
+def _record_to_model(row: asyncpg.Record) -> ModelRow:
     return ModelRow(
         id=str(row["id"]),
         provider=row["provider"],

@@ -31,10 +31,10 @@ if TYPE_CHECKING:
 logger = get_logger()
 
 
-_js: "JetStreamContext | None" = None
+_js: JetStreamContext | None = None
 
 
-def set_jetstream(js: "JetStreamContext | None") -> None:
+def set_jetstream(js: JetStreamContext | None) -> None:
     """Attach or detach the process-wide JetStream context.
 
     Called from ``webui.main.lifespan`` after the connection comes

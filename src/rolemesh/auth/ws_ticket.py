@@ -32,7 +32,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Final
 
 import jwt
@@ -121,7 +121,7 @@ def issue_ws_ticket(
         ttl_seconds = 1
     if ttl_seconds > _MAX_TTL_S:
         ttl_seconds = _MAX_TTL_S
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     payload: dict[str, object] = {
         "iat": int(now.timestamp()),
         "exp": int((now + timedelta(seconds=ttl_seconds)).timestamp()),

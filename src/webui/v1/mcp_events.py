@@ -47,7 +47,7 @@ def _get_publisher():
     """
     from webui import admin
 
-    return admin._mcp_publisher  # noqa: SLF001
+    return admin._mcp_publisher
 
 
 async def publish_mcp_server_changed(*, action: str, row: MCPServerRow) -> None:

@@ -131,7 +131,7 @@ class RemoteCredentialResolver:
                 body,
                 timeout=self._timeout_s,
             )
-        except Exception as exc:  # noqa: BLE001 — any transport
+        except Exception as exc:
             # failure surfaces as 502 upstream (RuntimeError chain).
             logger.warning(
                 "remote_credentials: RPC failed",

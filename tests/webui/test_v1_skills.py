@@ -20,7 +20,6 @@ where the helper silently returns wrong data through the JSON.
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import httpx
@@ -37,9 +36,6 @@ from rolemesh.db import (
 from webui.api_v1 import router as api_v1_router
 from webui.dependencies import get_current_user
 from webui.v1.errors import install_error_handler
-
-if TYPE_CHECKING:
-    pass
 
 pytestmark = pytest.mark.usefixtures("test_db")
 

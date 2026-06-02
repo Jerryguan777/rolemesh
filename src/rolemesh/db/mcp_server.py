@@ -77,7 +77,7 @@ def _parse_jsonb(value: Any) -> dict[str, Any]:
     return {}
 
 
-def _row_to_dataclass(row: "asyncpg.Record") -> MCPServerRow:
+def _row_to_dataclass(row: asyncpg.Record) -> MCPServerRow:
     return MCPServerRow(
         id=str(row["id"]),
         tenant_id=str(row["tenant_id"]),

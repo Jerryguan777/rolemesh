@@ -41,7 +41,6 @@ from typing import Any
 
 import pytest
 
-
 # claude_agent_sdk is only shipped inside the agent container image. Stub it
 # in sys.modules BEFORE importing claude_backend so the module-level
 # `from claude_agent_sdk import ...` resolves. The individual tests replace
@@ -57,7 +56,6 @@ sys.modules.setdefault("claude_agent_sdk", _fake_sdk)
 
 from agent_runner import claude_backend  # noqa: E402
 from agent_runner.backend import BackendEvent, ResultEvent, StoppedEvent  # noqa: E402
-
 
 # ---------------------------------------------------------------------------
 # Fake SDK message types — duck-typed to what claude_backend inspects.

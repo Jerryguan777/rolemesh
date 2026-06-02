@@ -15,7 +15,7 @@ import pytest
 # doesn't have them installed, skip cleanly rather than blowing up
 # at import time. The container that actually runs Pi backend has
 # boto3 baked in.
-boto3 = pytest.importorskip("boto3")  # noqa: F841
+boto3 = pytest.importorskip("boto3")
 
 from pi.ai.providers.amazon_bedrock import _convert_tool_config
 from pi.ai.types import Tool

@@ -31,7 +31,7 @@ from nats.js.api import StreamConfig
 # from PR runs; nightly / explicit ``-m integration`` flips it on.
 pytestmark = pytest.mark.integration
 
-from agent_runner.backend import BackendEvent, ErrorEvent, ResultEvent, SessionInitEvent
+from agent_runner.backend import BackendEvent, ResultEvent, SessionInitEvent
 from agent_runner.main import (
     ContainerOutput,
     drain_nats_input,

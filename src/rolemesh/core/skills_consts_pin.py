@@ -17,4 +17,4 @@ from __future__ import annotations
 
 from rolemesh.core.skills import SKILL_FILE_PATH_RE, SKILL_MANIFEST_NAME
 
-__all__ = ["SKILL_MANIFEST_NAME", "SKILL_FILE_PATH_RE"]
+__all__ = ["SKILL_FILE_PATH_RE", "SKILL_MANIFEST_NAME"]

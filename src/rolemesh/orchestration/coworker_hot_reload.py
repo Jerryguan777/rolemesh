@@ -31,7 +31,8 @@ from __future__ import annotations
 
 import contextlib
 import json
-from typing import TYPE_CHECKING, Awaitable, Callable
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 
 from rolemesh.core.logger import get_logger
 from rolemesh.core.orchestrator_state import CoworkerState, OrchestratorState
@@ -69,9 +70,9 @@ async def reload_coworker_into_state(
     coworker_id: str,
     tenant_id: str,
     state: OrchestratorState,
-    fetch_coworker: Callable[[str, str], Awaitable["Coworker | None"]],
+    fetch_coworker: Callable[[str, str], Awaitable[Coworker | None]],
     fetch_mcp_configs: (
-        Callable[[str, str], Awaitable[list["McpServerConfig"]]] | None
+        Callable[[str, str], Awaitable[list[McpServerConfig]]] | None
     ) = None,
 ) -> bool:
     """Re-fetch the coworker row and replace the in-memory config.
@@ -95,7 +96,7 @@ async def reload_coworker_into_state(
     if cw is None:
         return False
 
-    mcp_configs: list["McpServerConfig"] | None = None
+    mcp_configs: list[McpServerConfig] | None = None
     if fetch_mcp_configs is not None:
         mcp_configs = await fetch_mcp_configs(coworker_id, tenant_id)
 
@@ -130,7 +131,7 @@ async def reload_coworker_skills_into_state(
     tenant_id: str,
     state: OrchestratorState,
     fetch_skills: Callable[
-        [str, str], Awaitable[list["Skill"]]
+        [str, str], Awaitable[list[Skill]]
     ],
 ) -> bool:
     """Refresh only ``CoworkerState.skills`` for ``coworker_id``.
@@ -155,7 +156,7 @@ async def reload_coworker_mcp_into_state(
     tenant_id: str,
     state: OrchestratorState,
     fetch_mcp_configs: Callable[
-        [str, str], Awaitable[list["McpServerConfig"]]
+        [str, str], Awaitable[list[McpServerConfig]]
     ],
 ) -> bool:
     """Refresh only ``CoworkerState.mcp_configs`` for ``coworker_id``.
@@ -177,14 +178,14 @@ async def reload_coworker_mcp_into_state(
 
 
 async def subscribe_coworker_restart(
-    js: "JetStreamContext",
+    js: JetStreamContext,
     *,
     state: OrchestratorState,
-    fetch_coworker: Callable[[str, str], Awaitable["Coworker | None"]],
+    fetch_coworker: Callable[[str, str], Awaitable[Coworker | None]],
     fetch_mcp_configs: (
-        Callable[[str, str], Awaitable[list["McpServerConfig"]]] | None
+        Callable[[str, str], Awaitable[list[McpServerConfig]]] | None
     ) = None,
-) -> "Subscription":
+) -> Subscription:
     """Subscribe to ``web.coworker.restart`` on JetStream.
 
     The caller owns the returned ``Subscription`` and is responsible
@@ -198,7 +199,7 @@ async def subscribe_coworker_restart(
     flow doesn't leave the cache half-stale.
     """
 
-    async def _on_message(msg: "NatsMsg") -> None:
+    async def _on_message(msg: NatsMsg) -> None:
         try:
             payload = json.loads(msg.data.decode("utf-8") or "{}")
         except json.JSONDecodeError:
@@ -261,13 +262,13 @@ async def subscribe_coworker_restart(
 
 
 async def subscribe_coworker_mcp_changed(
-    js: "JetStreamContext",
+    js: JetStreamContext,
     *,
     state: OrchestratorState,
     fetch_mcp_configs: Callable[
-        [str, str], Awaitable[list["McpServerConfig"]]
+        [str, str], Awaitable[list[McpServerConfig]]
     ],
-) -> "Subscription":
+) -> Subscription:
     """Subscribe to ``web.coworker.mcp_changed``.
 
     Mirrors :func:`subscribe_coworker_restart` but only refreshes the
@@ -278,7 +279,7 @@ async def subscribe_coworker_mcp_changed(
     "small staleness window" rather than "permanent divergence".
     """
 
-    async def _on_message(msg: "NatsMsg") -> None:
+    async def _on_message(msg: NatsMsg) -> None:
         try:
             payload = json.loads(msg.data.decode("utf-8") or "{}")
         except json.JSONDecodeError:
@@ -341,11 +342,11 @@ async def subscribe_coworker_mcp_changed(
 
 
 async def subscribe_coworker_skills_changed(
-    js: "JetStreamContext",
+    js: JetStreamContext,
     *,
     state: OrchestratorState,
-    fetch_skills: Callable[[str, str], Awaitable[list["Skill"]]],
-) -> "Subscription":
+    fetch_skills: Callable[[str, str], Awaitable[list[Skill]]],
+) -> Subscription:
     """Subscribe to ``web.coworker.skills_changed``.
 
     Mirrors :func:`subscribe_coworker_mcp_changed` but refreshes the
@@ -358,7 +359,7 @@ async def subscribe_coworker_skills_changed(
     in-memory cache or a process restart re-seeds it.
     """
 
-    async def _on_message(msg: "NatsMsg") -> None:
+    async def _on_message(msg: NatsMsg) -> None:
         try:
             payload = json.loads(msg.data.decode("utf-8") or "{}")
         except json.JSONDecodeError:

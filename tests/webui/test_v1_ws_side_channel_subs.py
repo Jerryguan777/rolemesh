@@ -37,7 +37,7 @@ import asyncio
 import json
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import jwt
@@ -48,7 +48,6 @@ from fastapi.testclient import TestClient
 from rolemesh.auth.bootstrap_users import (
     BootstrapUserSpec,
     _reset_for_tests,
-    ensure_bootstrap_user_row,
     init_bootstrap_users,
 )
 from webui.v1 import ws_stream
@@ -280,8 +279,8 @@ def stub_conv(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
 
 def _mint_ticket(*, tenant_id: str, conv_id: str, user_id: str) -> str:
     payload = {
-        "iat": int(datetime.now(timezone.utc).timestamp()),
-        "exp": int((datetime.now(timezone.utc) + timedelta(seconds=60)).timestamp()),
+        "iat": int(datetime.now(UTC).timestamp()),
+        "exp": int((datetime.now(UTC) + timedelta(seconds=60)).timestamp()),
         "aud": "rolemesh-ws",
         "sub": user_id,
         "tenant_id": tenant_id,
@@ -339,18 +338,17 @@ def test_web_outbound_publish_is_forwarded_as_event_message_appended(
     )
     app = _build_app()
 
-    with TestClient(app) as client:
-        with client.websocket_connect(
-            f"/api/v1/conversations/{conv_id}/stream?ticket={ticket}"
-        ) as ws:
-            frame = ws.receive_json()
-            assert frame["type"] == "event.message.appended", (
-                f"expected event.message.appended, got {frame!r}. "
-                "If you see this fail with no frame received at all, "
-                "the v1 ws_stream regressed and stopped subscribing to "
-                "web.outbound.* — the original 2026-05-20 v1.1 cutover "
-                "bug returned."
-            )
-            assert frame["content"] == "⏰ reminder fired"
-            assert frame["source"] == "scheduled_task"
-            assert "timestamp" in frame
+    with TestClient(app) as client, client.websocket_connect(
+        f"/api/v1/conversations/{conv_id}/stream?ticket={ticket}"
+    ) as ws:
+        frame = ws.receive_json()
+        assert frame["type"] == "event.message.appended", (
+            f"expected event.message.appended, got {frame!r}. "
+            "If you see this fail with no frame received at all, "
+            "the v1 ws_stream regressed and stopped subscribing to "
+            "web.outbound.* — the original 2026-05-20 v1.1 cutover "
+            "bug returned."
+        )
+        assert frame["content"] == "⏰ reminder fired"
+        assert frame["source"] == "scheduled_task"
+        assert "timestamp" in frame
