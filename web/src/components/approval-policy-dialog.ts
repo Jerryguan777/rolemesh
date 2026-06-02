@@ -21,11 +21,13 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 
 import './dialog.js';
+import './combobox.js';
 import { ApiError, getApiClient } from '../api/client.js';
 import type {
   ApprovalPolicy,
   ApprovalPolicyCreate,
   ApprovalPolicyUpdate,
+  MCPServer,
 } from '../api/client.js';
 import {
   CONDITION_OPS,
@@ -61,6 +63,10 @@ export class ApprovalPolicyDialog extends LitElement {
   @state() private conditionEditable = true;
   @state() private busy = false;
   @state() private err: string | null = null;
+  /** Tenant's configured MCP servers, fetched on open to seed the server /
+   *  tool suggestion lists. Best-effort: empty on fetch failure (the fields
+   *  stay free-text regardless). */
+  @state() private servers: MCPServer[] = [];
 
   private readonly api = getApiClient();
 
@@ -73,7 +79,31 @@ export class ApprovalPolicyDialog extends LitElement {
       this.seedForm();
       this.err = null;
       this.busy = false;
+      void this.loadServers();
     }
+  }
+
+  /** Load the tenant's MCP servers to seed the suggestion lists. Best-effort —
+   *  a failure just means no suggestions; the fields are still usable. */
+  private async loadServers(): Promise<void> {
+    try {
+      this.servers = await this.api.listMCPServers();
+    } catch {
+      this.servers = [];
+    }
+  }
+
+  /** Tool-name suggestions for the currently-typed server: the `*` wildcard
+   *  plus the keys of that server's `tool_reversibility` map (the tool names
+   *  the operator declared). There is no live tool list — tools are only known
+   *  inside a connected container — so these declared names are the best
+   *  always-available source, and they work even before the server connects.
+   *  Returns just `*` when the typed server isn't a configured one; the field
+   *  stays free-text either way. */
+  private suggestedTools(): string[] {
+    const match = this.servers.find((s) => s.name === this.mcpServerName);
+    const declared = match ? Object.keys(match.tool_reversibility ?? {}) : [];
+    return ['*', ...declared.filter((t) => t && t !== '*')];
   }
 
   /** The policy the form should seed from: the edit target, else the
@@ -359,34 +389,38 @@ export class ApprovalPolicyDialog extends LitElement {
           Require a human to sign off before a coworker runs a specific tool
           call. Approvals time out after 5 minutes and auto-reject.
         </p>
-        <div class="mb-3">
-          <label class="block text-[12.5px] font-medium mb-1">MCP server name</label>
-          <input
-            type="text"
-            class=${INPUT_CLASS}
-            placeholder="e.g. stripe"
-            data-testid="mcp-server-name"
-            .value=${this.mcpServerName}
-            @input=${(e: Event) => {
-              this.mcpServerName = (e.target as HTMLInputElement).value;
-            }}
-            ?disabled=${this.busy}
-          />
+        <div class="mb-1 flex gap-3">
+          <div class="flex-1 min-w-0">
+            <label class="block text-[12.5px] font-medium mb-1">MCP server name</label>
+            <rm-combobox
+              .value=${this.mcpServerName}
+              .options=${this.servers.map((s) => s.name)}
+              placeholder="e.g. stripe"
+              testid="mcp-server-name"
+              ?disabled=${this.busy}
+              @change=${(e: CustomEvent<{ value: string }>) => {
+                this.mcpServerName = e.detail.value;
+              }}
+            ></rm-combobox>
+          </div>
+          <div class="flex-1 min-w-0">
+            <label class="block text-[12.5px] font-medium mb-1">Tool name</label>
+            <rm-combobox
+              mono
+              .value=${this.toolName}
+              .options=${this.suggestedTools()}
+              placeholder="exact tool, or *"
+              testid="tool-name"
+              ?disabled=${this.busy}
+              @change=${(e: CustomEvent<{ value: string }>) => {
+                this.toolName = e.detail.value;
+              }}
+            ></rm-combobox>
+          </div>
         </div>
-        <div class="mb-3">
-          <label class="block text-[12.5px] font-medium mb-1">Tool name</label>
-          <input
-            type="text"
-            class="${INPUT_CLASS} font-mono"
-            placeholder="exact tool name, or * for every tool"
-            data-testid="tool-name"
-            .value=${this.toolName}
-            @input=${(e: Event) => {
-              this.toolName = (e.target as HTMLInputElement).value;
-            }}
-            ?disabled=${this.busy}
-          />
-        </div>
+        <p class="mb-3 text-[11px] text-ink-3 dark:text-d-ink-3">
+          Pick a configured server/tool, or type one that isn't connected yet.
+        </p>
         <div class="mb-3">
           <label class="block text-[12.5px] font-medium mb-1">Require approval</label>
           ${this.renderConditionBuilder()}
