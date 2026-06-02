@@ -24,6 +24,7 @@ interface MockSocket {
   onclose: ((e: CloseEvent) => void) | null;
   onerror: ((e: Event) => void) | null;
   onmessage: ((e: MessageEvent) => void) | null;
+  sent: string[];
   close: () => void;
   send: (s: string) => void;
 }
@@ -40,7 +41,10 @@ function makeMockWebSocket() {
     this.close = () => {
       this.readyState = 3;
     };
-    this.send = () => {};
+    this.sent = [];
+    this.send = (s: string) => {
+      this.sent.push(s);
+    };
     instances.push(this);
   } as unknown as { new (url: string): MockSocket } & {
     OPEN: number;
@@ -76,6 +80,11 @@ class TestClient extends WsClientBase {
 
   stop(): void {
     this.closeAndTeardown();
+  }
+
+  /** Public passthrough so tests can exercise the buffer-or-send path. */
+  send(frame: Record<string, unknown>): void {
+    this.queueOrSend(frame);
   }
 
   protected async fetchTicket(): Promise<string> {
@@ -231,4 +240,24 @@ describe('WsClientBase lifecycle', () => {
     expect(WS.instances).toHaveLength(1);
     client.stop();
   });
+
+  it('buffers frames sent while not open and flushes them in order on open', async () => {
+    const WS = makeMockWebSocket();
+    const client = new TestClient({
+      WebSocket: WS as unknown as typeof WebSocket,
+      wsOrigin: 'ws://t',
+      reconnectDelayMs: 60_000,
+    });
+    // Queued before any socket exists — must be delivered, not dropped.
+    client.send({ type: 'a', n: 1 });
+    client.send({ type: 'a', n: 2 });
+    await client.start();
+    const inst = openSocket(WS);
+    expect(inst.sent.map((s) => JSON.parse(s))).toEqual([
+      { type: 'a', n: 1 },
+      { type: 'a', n: 2 },
+    ]);
+    client.stop();
+  });
+
 });

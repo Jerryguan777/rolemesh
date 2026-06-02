@@ -183,8 +183,16 @@ describe('V1WsClient — request.run idempotency', () => {
     expect(sent[2].idempotency_key).toBe('uuid-2');
   });
 
-  it('dispatches event.run.error when send() is called while the socket is not open', async () => {
-    const { fn: fetchFn } = makeFetch({});
+  it('buffers a send() made while not open and flushes it on connect (no drop, no error)', async () => {
+    // Regression: the old behaviour dropped the frame + dispatched WS_NOT_OPEN,
+    // so a message typed in a reconnect gap was silently lost. Now it is queued
+    // and delivered on (re)connect.
+    const { fn: fetchFn } = makeFetch({
+      '/api/v1/auth/ws-ticket': () =>
+        new Response(JSON.stringify({ ticket: 't', expires_in_s: 60 }), {
+          status: 200,
+        }),
+    });
     const WS = makeMockWebSocket();
     const client = new V1WsClient(
       { conversationId: 'conv-A', getToken: () => null },
@@ -196,10 +204,23 @@ describe('V1WsClient — request.run idempotency', () => {
     );
     const errors: ServerEvent[] = [];
     client.onEvent('event.run.error', (e) => errors.push(e));
-    // Never connected — socket is null.
+
+    // Not connected yet — the frame must be buffered, not dropped or errored.
     client.send('hi');
-    expect(errors).toHaveLength(1);
-    expect((errors[0] as { code: string }).code).toBe('WS_NOT_OPEN');
+    expect(errors).toHaveLength(0);
+
+    // Connect + open → the buffered request.run is flushed in order.
+    await client.connect();
+    const inst = openMock(WS);
+    expect(errors).toHaveLength(0);
+    const sent = inst.sent.map((s) => JSON.parse(s));
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      type: 'request.run',
+      input: 'hi',
+      idempotency_key: 'k',
+    });
+    client.disconnect();
   });
 });
 
