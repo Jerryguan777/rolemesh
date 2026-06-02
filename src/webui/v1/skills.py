@@ -16,10 +16,11 @@ single-binding edits broadcast for the one coworker only.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import asyncpg
 from fastapi import APIRouter, Depends, Response
 
-from rolemesh.auth.provider import AuthenticatedUser
 from rolemesh.core.skills import (
     SKILL_MANIFEST_NAME,
     SkillValidationError,
@@ -55,6 +56,9 @@ from webui.schemas_v1 import (
 )
 from webui.v1 import coworker_events
 from webui.v1.errors import ErrorResponseException, raise_error_response
+
+if TYPE_CHECKING:
+    from rolemesh.auth.provider import AuthenticatedUser
 
 skills_router = APIRouter(prefix="/skills", tags=["Skills"])
 coworker_skills_router = APIRouter(

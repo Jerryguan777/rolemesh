@@ -17,8 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import nats
 import pytest
@@ -40,6 +39,9 @@ from agent_runner.main import (
 )
 from agent_runner.tools.context import ToolContext
 from rolemesh.ipc.protocol import AgentInitData
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 NATS_URL = "nats://localhost:4222"
 

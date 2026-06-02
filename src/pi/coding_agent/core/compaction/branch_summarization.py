@@ -8,14 +8,11 @@ a summary of the branch being left so context isn't lost.
 
 from __future__ import annotations
 
-import asyncio
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from pi.agent.types import AgentMessage
 from pi.ai.stream import complete_simple
-from pi.ai.types import Model
 
 from .compaction import estimate_tokens
 from .utils import (
@@ -27,6 +24,12 @@ from .utils import (
     format_file_operations,
     serialize_conversation,
 )
+
+if TYPE_CHECKING:
+    import asyncio
+
+    from pi.agent.types import AgentMessage
+    from pi.ai.types import Model
 
 # ============================================================================
 # Types

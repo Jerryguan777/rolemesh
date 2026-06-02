@@ -24,13 +24,14 @@ layer keeps the strict shape.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from rolemesh.core.types import McpServerConfig
 from rolemesh.db._pool import tenant_conn
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     import asyncpg
 
 __all__ = [

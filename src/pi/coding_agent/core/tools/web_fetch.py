@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from markdownify import markdownify
@@ -12,6 +11,9 @@ from pi.agent.types import AgentTool, AgentToolResult, AgentToolUpdateCallback
 from pi.ai.types import TextContent
 
 from .truncate import truncate_tail
+
+if TYPE_CHECKING:
+    import asyncio
 
 USER_AGENT = "PPI/1.0 (compatible)"
 DEFAULT_MAX_LENGTH = 50000

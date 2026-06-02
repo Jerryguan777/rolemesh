@@ -34,9 +34,7 @@ This file now tests the mechanism at two levels:
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -53,6 +51,10 @@ from pi.ai.types import (
 )
 from pi.coding_agent.core.agent_session import AgentSession, AgentSessionConfig
 from pi.coding_agent.core.session_manager import SessionManager
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+    from pathlib import Path
 
 
 def _assistant(text: str, stop_reason: str = "stop") -> AssistantMessage:

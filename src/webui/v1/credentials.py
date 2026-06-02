@@ -10,10 +10,11 @@ affected coworker so the orchestrator hot-reloads.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from fastapi import APIRouter, Depends, Response
 
 from rolemesh.auth.credential_vault import get_credential_vault
-from rolemesh.auth.provider import AuthenticatedUser
 from rolemesh.core.logger import get_logger
 from rolemesh.db import (
     CredentialRow,
@@ -27,6 +28,9 @@ from webui.schemas_v1 import CredentialResponse, CredentialUpsert, ModelProvider
 from webui.v1 import coworker_events
 from webui.v1._log_sanitize import sanitize_for_log
 from webui.v1.errors import raise_error_response
+
+if TYPE_CHECKING:
+    from rolemesh.auth.provider import AuthenticatedUser
 
 logger = get_logger()
 

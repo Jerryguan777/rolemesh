@@ -15,12 +15,13 @@ decryption is the route layer's responsibility via
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from typing import TYPE_CHECKING
 
 from rolemesh.db._pool import admin_conn, tenant_conn
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     import asyncpg
 
 

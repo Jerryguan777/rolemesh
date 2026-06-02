@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from rolemesh.db._pool import tenant_conn
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     import asyncpg
 
 

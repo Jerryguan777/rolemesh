@@ -12,9 +12,8 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from pi.agent.types import AgentMessage
 from pi.ai.types import (
     AssistantMessage,
     ImageContent,
@@ -25,6 +24,9 @@ from pi.ai.types import (
     UserMessage,
     deserialize_message,
 )
+
+if TYPE_CHECKING:
+    from pi.agent.types import AgentMessage
 
 logger = logging.getLogger(__name__)
 

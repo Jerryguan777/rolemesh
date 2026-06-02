@@ -7,12 +7,14 @@ call, but the business logic lives in rolemesh_tools.py.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
 from . import rolemesh_tools as rt
-from .context import ToolContext
+
+if TYPE_CHECKING:
+    from .context import ToolContext
 
 
 def create_rolemesh_mcp_server(

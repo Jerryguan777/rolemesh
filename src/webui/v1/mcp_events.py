@@ -10,10 +10,13 @@ through every test fixture.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from rolemesh.core.logger import get_logger
-from rolemesh.db import MCPServerRow
+
+if TYPE_CHECKING:
+    from rolemesh.db import MCPServerRow
 
 logger = get_logger()
 

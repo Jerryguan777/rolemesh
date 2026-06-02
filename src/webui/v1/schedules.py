@@ -15,11 +15,11 @@ list and only refreshes on schedule fire).
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import asyncpg
 from fastapi import APIRouter, Depends, Query
 
-from rolemesh.auth.provider import AuthenticatedUser
-from rolemesh.core.types import ScheduledTask as ScheduledTaskDataclass
 from rolemesh.db import (
     get_all_tasks,
     get_task_by_id,
@@ -28,6 +28,10 @@ from rolemesh.db import (
 from webui.dependencies import get_current_user
 from webui.schemas_v1 import ScheduledTask
 from webui.v1.errors import raise_error_response
+
+if TYPE_CHECKING:
+    from rolemesh.auth.provider import AuthenticatedUser
+    from rolemesh.core.types import ScheduledTask as ScheduledTaskDataclass
 
 router = APIRouter(prefix="/schedules", tags=["Schedules"])
 

@@ -17,11 +17,12 @@ import json
 import re
 import time
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from croniter import croniter
 
-from .context import ToolContext
+if TYPE_CHECKING:
+    from .context import ToolContext
 
 # Type alias for MCP-style tool results.
 ToolResult = dict[str, Any]

@@ -9,10 +9,12 @@ import re
 import secrets
 import signal as _signal
 import tempfile
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Any, Protocol, runtime_checkable
+from typing import IO, TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 # Default max bytes before output is truncated and saved to a temp file.
 DEFAULT_MAX_BYTES = 200 * 1024  # 200 KB

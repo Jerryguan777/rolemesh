@@ -11,14 +11,16 @@ import contextlib
 import json
 import secrets
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
 import httpx
 
 from pi.ai.oauth.pkce import generate_pkce
 from pi.ai.oauth.types import OAuthAuthInfo, OAuthCredentials, OAuthLoginCallbacks, OAuthPrompt
-from pi.ai.types import Model
+
+if TYPE_CHECKING:
+    from pi.ai.types import Model
 
 _CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 _AUTHORIZE_URL = "https://auth.openai.com/oauth/authorize"

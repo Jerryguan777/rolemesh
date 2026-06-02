@@ -7,10 +7,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 from pi.ai.models import register_models
 from pi.ai.types import Model, ModelCost, OpenAICompletionsCompat
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 MODELS: Mapping[str, Mapping[str, Model]] = {
     "amazon-bedrock": {

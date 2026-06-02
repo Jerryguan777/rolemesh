@@ -11,11 +11,9 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from pi.agent.types import AgentMessage
 from pi.ai.stream import complete_simple
-from pi.ai.types import Model, Usage
 
 from .utils import (
     SUMMARIZATION_SYSTEM_PROMPT,
@@ -26,6 +24,10 @@ from .utils import (
     format_file_operations,
     serialize_conversation,
 )
+
+if TYPE_CHECKING:
+    from pi.agent.types import AgentMessage
+    from pi.ai.types import Model, Usage
 
 # ============================================================================
 # Types

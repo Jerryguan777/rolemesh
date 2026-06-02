@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
 from pi.agent.types import AgentTool, AgentToolResult, AgentToolUpdateCallback
 from pi.ai.types import TextContent
+
+if TYPE_CHECKING:
+    import asyncio
 
 TAVILY_API_URL = "https://api.tavily.com/search"
 DEFAULT_NUM_RESULTS = 5

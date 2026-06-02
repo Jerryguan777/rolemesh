@@ -4,14 +4,17 @@ Pi backend adapter — wraps shared tool functions as pi.agent.types.AgentTool i
 
 from __future__ import annotations
 
-import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pi.agent.types import AgentTool, AgentToolResult
 from pi.ai.types import TextContent
 
 from . import rolemesh_tools as rt
-from .context import ToolContext
+
+if TYPE_CHECKING:
+    import asyncio
+
+    from .context import ToolContext
 
 
 class RoleMeshAgentTool(AgentTool):

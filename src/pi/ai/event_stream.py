@@ -7,9 +7,12 @@ Uses asyncio.Queue for push-based async iteration.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
 
 from pi.ai.types import AssistantMessage, AssistantMessageEvent, DoneEvent, ErrorEvent
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 
 class EventStream[T, R]:

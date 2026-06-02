@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import os
 import shutil
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from rolemesh.container.runtime import VolumeMount
@@ -45,6 +44,8 @@ from rolemesh.db import list_skills_for_coworker
 from rolemesh.ipc.skill_mount import CONTAINER_TARGETS_BY_BACKEND
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from rolemesh.core.types import Coworker, Skill
 
 

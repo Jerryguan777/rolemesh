@@ -43,10 +43,9 @@ import asyncio
 import logging
 import os
 import sys
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pi.agent.types import (
     MessageEndEvent,
@@ -54,7 +53,6 @@ from pi.agent.types import (
     ToolExecutionStartEvent,
 )
 from pi.ai.types import AssistantMessage, TextContent
-from pi.coding_agent.core.agent_session import AgentSession, AgentSessionEvent
 from pi.coding_agent.core.extensions.loader import create_extension_runtime
 from pi.coding_agent.core.extensions.runner import ExtensionRunner
 from pi.coding_agent.core.extensions.types import Extension
@@ -62,7 +60,6 @@ from pi.coding_agent.core.resource_loader import DefaultResourceLoader, DefaultR
 from pi.coding_agent.core.sdk import CreateAgentSessionOptions, create_agent_session
 from pi.coding_agent.core.session_manager import SessionManager
 from pi.mcp import McpServerConnection, load_mcp_tools
-from rolemesh.ipc.protocol import AgentInitData, McpServerSpec
 from rolemesh.ipc.skill_mount import PI_SKILLS_PATH
 
 from .backend import (
@@ -89,8 +86,15 @@ from .hooks import (
 from .hooks import (
     ToolResultEvent as HookToolResultEvent,
 )
-from .tools.context import ToolContext
 from .tools.pi_adapter import create_rolemesh_tools
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from pi.coding_agent.core.agent_session import AgentSession, AgentSessionEvent
+    from rolemesh.ipc.protocol import AgentInitData, McpServerSpec
+
+    from .tools.context import ToolContext
 
 _log_pylog = logging.getLogger(__name__)
 

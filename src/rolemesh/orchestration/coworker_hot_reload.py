@@ -31,13 +31,14 @@ from __future__ import annotations
 
 import contextlib
 import json
-from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from rolemesh.core.logger import get_logger
 from rolemesh.core.orchestrator_state import CoworkerState, OrchestratorState
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from nats.aio.msg import Msg as NatsMsg
     from nats.js.client import JetStreamContext
     from nats.js.subscription import Subscription

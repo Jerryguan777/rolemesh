@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
-from pi.ai.types import Message
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from pi.ai.types import Message
 
 
 def infer_copilot_initiator(messages: Sequence[Message]) -> str:

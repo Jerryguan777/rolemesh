@@ -22,10 +22,11 @@ attached the chain above runs in full.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Response
 
-from rolemesh.auth.provider import AuthenticatedUser
 from rolemesh.core.backend_capabilities import BackendCompatError, validate_combo
 from rolemesh.db import (
     create_coworker,
@@ -40,6 +41,9 @@ from webui.dependencies import get_current_user
 from webui.schemas_v1 import Coworker, CoworkerCreate, CoworkerUpdate
 from webui.v1 import coworker_events
 from webui.v1.errors import ErrorResponseException, raise_error_response
+
+if TYPE_CHECKING:
+    from rolemesh.auth.provider import AuthenticatedUser
 
 router = APIRouter(prefix="/coworkers", tags=["Coworkers"])
 

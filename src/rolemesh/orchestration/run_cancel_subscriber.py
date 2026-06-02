@@ -50,7 +50,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from nats.js.api import ConsumerConfig
@@ -60,6 +59,8 @@ from rolemesh.db import tenant_conn
 from rolemesh.runs import terminate_run_via_user_cancel
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from nats.aio.msg import Msg as NatsMsg
     from nats.js.client import JetStreamContext
     from nats.js.subscription import Subscription
