@@ -6,6 +6,7 @@ between the Orchestrator and container Agents.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 import nats
@@ -25,6 +26,11 @@ _STREAM_MAX_AGE_S = 3600.0
 # KV TTL: 1 hour in seconds
 _KV_TTL_SECONDS = 3600.0
 
+# Bound the INITIAL connect so a missing NATS fails boot fast with a helpful
+# error, instead of blocking forever under max_reconnect_attempts=-1. Steady-
+# state reconnects (after a connection has been established) stay unbounded.
+_CONNECT_TIMEOUT_S = 10.0
+
 
 class NatsTransport:
     """NATS transport for Orchestrator-side IPC.
@@ -43,17 +49,42 @@ class NatsTransport:
         Raises ConnectionError if NATS is unreachable.
         """
 
-        async def _quiet_error(exc: Exception) -> None:
-            logger.debug("NATS connection attempt failed", error=str(exc))
+        async def _on_error(exc: Exception) -> None:
+            # Per-attempt errors stay at DEBUG: with infinite reconnect this
+            # fires on every retry during an outage, so a higher level would
+            # spam. The once-per-event callbacks below carry the visible signal.
+            logger.debug("NATS connection error", error=str(exc))
+
+        async def _on_disconnected() -> None:
+            logger.warning("NATS disconnected — reconnecting", url=self._url)
+
+        async def _on_reconnected() -> None:
+            # Durable consumers persist server-side across a NATS restart, so
+            # push subscriptions resume on reconnect with no resubscribe needed.
+            logger.info("NATS reconnected", url=self._url)
 
         try:
-            self._nc = await nats.connect(
-                self._url,
-                max_reconnect_attempts=3,
-                reconnect_time_wait=1,
-                error_cb=_quiet_error,
+            # Retry reconnects forever. The previous 3-attempt budget (~3s)
+            # meant any NATS outage longer than that exhausted the attempts and
+            # nats-py permanently closed the connection — the orchestrator kept
+            # running but was silently deaf to NATS until restarted.
+            #
+            # max_reconnect_attempts governs the INITIAL connect too, so under
+            # -1 a missing NATS would block boot forever. Bound only the first
+            # connect with wait_for to keep the fail-fast ConnectionError below;
+            # once connected, reconnects are unbounded.
+            self._nc = await asyncio.wait_for(
+                nats.connect(
+                    self._url,
+                    max_reconnect_attempts=-1,
+                    reconnect_time_wait=2,
+                    error_cb=_on_error,
+                    disconnected_cb=_on_disconnected,
+                    reconnected_cb=_on_reconnected,
+                ),
+                timeout=_CONNECT_TIMEOUT_S,
             )
-        except Exception as exc:
+        except Exception as exc:  # includes asyncio.TimeoutError (initial connect)
             raise ConnectionError(
                 f"Cannot connect to NATS at {self._url}. "
                 f"Start NATS with: docker compose -f docker-compose.dev.yml up -d"
