@@ -375,19 +375,11 @@ export class V1WsClient extends WsClientBase<ConnectionStatus> {
   }
 
   private rawSend(frame: Record<string, unknown>): void {
-    if (!this.ws || this.ws.readyState !== this.WebSocketCtor.OPEN) {
-      // request.run isn't queued — replaying after reconnect would
-      // either land in the same idempotency window (no-op) or be a
-      // duplicate the user no longer wants. Surface the dropped
-      // frame as an error event so chat-panel can warn the user.
-      this.dispatch({
-        type: 'event.run.error',
-        code: 'WS_NOT_OPEN',
-        message: 'socket not open; frame dropped',
-        details: { dropped_type: frame.type },
-      } as RunErrorEvent);
-      return;
-    }
-    this.ws.send(JSON.stringify(frame));
+    // Buffer when the socket isn't open and flush on (re)connect, instead of
+    // dropping (the old behaviour silently lost a message sent in a reconnect
+    // gap). request.run carries an idempotency_key, so a replay collapses to a
+    // single run server-side; request.stop/cancel/approval_decision are small
+    // control frames whose server handlers are first-wins/idempotent.
+    this.queueOrSend(frame);
   }
 }

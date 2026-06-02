@@ -69,6 +69,12 @@ export abstract class WsClientBase<S extends WsConnectionStatus = WsConnectionSt
   // and bail out if a teardown raced ahead.
   protected generation = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  // Frames buffered while the socket is not OPEN, flushed in order on (re)open
+  // so a message sent during a reconnect gap is delivered, not dropped.
+  private readonly sendQueue: string[] = [];
+
+  /** Bound on the buffered-frame queue; oldest dropped past this. */
+  private static readonly SEND_QUEUE_MAX = 50;
 
   private statusValue: S;
   private readonly statusHandlers = new Set<WsStatusHandler<S>>();
@@ -146,6 +152,7 @@ export abstract class WsClientBase<S extends WsConnectionStatus = WsConnectionSt
     ws.onopen = () => {
       if (gen !== this.generation) return;
       this.setStatus('open' as S);
+      this.flushSendQueue();
     };
     ws.onmessage = (evt: MessageEvent) => {
       if (gen !== this.generation) return;
@@ -182,6 +189,34 @@ export abstract class WsClientBase<S extends WsConnectionStatus = WsConnectionSt
     }, this.reconnectDelayMs);
   }
 
+  // --- Outbound frames (buffer across reconnects instead of dropping) ---
+
+  /** Send a frame, or buffer it (capped) when the socket isn't OPEN so it is
+   *  delivered on the next (re)connect rather than silently dropped. */
+  protected queueOrSend(frame: Record<string, unknown>): void {
+    const data = JSON.stringify(frame);
+    if (this.ws && this.ws.readyState === this.WebSocketCtor.OPEN) {
+      this.ws.send(data);
+      return;
+    }
+    this.sendQueue.push(data);
+    while (this.sendQueue.length > WsClientBase.SEND_QUEUE_MAX) {
+      this.sendQueue.shift(); // drop oldest under a sustained outage
+    }
+  }
+
+  private flushSendQueue(): void {
+    if (!this.ws || this.ws.readyState !== this.WebSocketCtor.OPEN) return;
+    const pending = this.sendQueue.splice(0);
+    for (const data of pending) {
+      try {
+        this.ws.send(data);
+      } catch {
+        // ignore — onclose will fire and the queue refills on next send
+      }
+    }
+  }
+
   /** Shared teardown — closes the socket, cancels reconnect, removes
    *  this client from `ConnectionState`. Subclasses can wrap this in
    *  their public `disconnect()` / `stop()` to retain the existing
@@ -189,6 +224,7 @@ export abstract class WsClientBase<S extends WsConnectionStatus = WsConnectionSt
   protected closeAndTeardown(): void {
     this.explicitlyClosed = true;
     this.generation += 1;
+    this.sendQueue.length = 0;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
