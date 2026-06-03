@@ -61,7 +61,7 @@ async def _seed_reference_data(
     # ``ON CONFLICT DO NOTHING`` makes the seed idempotent against
     # re-runs; rows are matched on the UNIQUE (provider, model_id)
     # constraint.
-    _MODEL_SEED: list[tuple[str, str, str, str]] = [
+    _MODEL_SEED: list[tuple[str, str, str, str]] = [  # noqa: N806
         ("anthropic", "claude-opus-4-7",            "claude", "Claude Opus 4.7"),
         ("anthropic", "claude-sonnet-4-6",          "claude", "Claude Sonnet 4.6"),
         ("anthropic", "claude-haiku-4-5-20251001",  "claude", "Claude Haiku 4.5"),

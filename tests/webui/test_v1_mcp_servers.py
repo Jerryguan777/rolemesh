@@ -258,7 +258,7 @@ async def test_create_publishes_egress_event(monkeypatch) -> None:
     user = await _make_user()
     seen: list[dict] = []
 
-    async def _capture(*, action: str, row) -> None:  # noqa: ANN001
+    async def _capture(*, action: str, row) -> None:
         seen.append({"action": action, "name": row.name})
 
     monkeypatch.setattr(
@@ -278,7 +278,7 @@ async def test_patch_publishes_updated_event(monkeypatch) -> None:
     user = await _make_user()
     seen: list[dict] = []
 
-    async def _capture(*, action: str, row) -> None:  # noqa: ANN001
+    async def _capture(*, action: str, row) -> None:
         seen.append({"action": action, "name": row.name, "url": row.url})
 
     monkeypatch.setattr(

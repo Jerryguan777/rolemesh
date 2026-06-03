@@ -294,7 +294,7 @@ async def test_delete_skill_file_refuses_skill_md() -> None:
         frontmatter_common={"description": _GOOD_DESC},
         frontmatter_backend={}, files=_basic_files(),
     )
-    with pytest.raises(ValueError, match="SKILL.md cannot be deleted"):
+    with pytest.raises(ValueError, match=r"SKILL\.md cannot be deleted"):
         await delete_skill_file(s.id, "SKILL.md", tenant_id=tenant_id)
 
 
@@ -335,7 +335,7 @@ async def test_delete_skill_cascades_to_files() -> None:
 
 async def test_create_without_skill_md_is_rejected() -> None:
     tenant_id, coworker_id = await _make_tenant_with_coworker("inv")
-    with pytest.raises(ValueError, match="SKILL.md"):
+    with pytest.raises(ValueError, match=r"SKILL\.md"):
         await create_skill_for_coworker(
             tenant_id=tenant_id, coworker_id=coworker_id, name="x",
             frontmatter_common={"description": _GOOD_DESC},
@@ -351,7 +351,7 @@ async def test_update_with_files_missing_skill_md_is_rejected() -> None:
         frontmatter_common={"description": _GOOD_DESC},
         frontmatter_backend={}, files=_basic_files(),
     )
-    with pytest.raises(ValueError, match="SKILL.md"):
+    with pytest.raises(ValueError, match=r"SKILL\.md"):
         await update_skill(
             s.id,
             tenant_id=tenant_id,
@@ -449,7 +449,7 @@ async def test_coworker_skills_rejects_cross_tenant_binding() -> None:
     pre-03b ``skills_check_coworker_tenant`` trigger.
     """
     tenant_a, _ = await _make_tenant_with_coworker("xta")
-    tenant_b, coworker_b = await _make_tenant_with_coworker("xtb")
+    _tenant_b, coworker_b = await _make_tenant_with_coworker("xtb")
     skill_a = await create_skill(
         tenant_id=tenant_a, name="forged-bind",
         frontmatter_common={"description": _GOOD_DESC},
@@ -471,7 +471,7 @@ async def test_enable_skill_for_coworker_rejects_foreign_tenant() -> None:
     blow up.
     """
     tenant_a, _ = await _make_tenant_with_coworker("eta")
-    tenant_b, coworker_b = await _make_tenant_with_coworker("etb")
+    _tenant_b, coworker_b = await _make_tenant_with_coworker("etb")
     skill_a = await create_skill(
         tenant_id=tenant_a, name="cross",
         frontmatter_common={"description": _GOOD_DESC},

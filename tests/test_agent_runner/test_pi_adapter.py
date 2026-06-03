@@ -7,14 +7,10 @@ tool failures as errors, not successes.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
-from unittest.mock import AsyncMock
-
-import pytest
 
 from agent_runner.tools.pi_adapter import RoleMeshAgentTool, create_rolemesh_tools
-from agent_runner.tools.rolemesh_tools import TOOL_DEFINITIONS, TOOL_FUNCTIONS
+from agent_runner.tools.rolemesh_tools import TOOL_DEFINITIONS
 
 
 class FakeJetStream:

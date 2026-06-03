@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -31,6 +30,8 @@ from rolemesh.db import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from rolemesh.core.types import Coworker, McpServerConfig, Skill
 
 

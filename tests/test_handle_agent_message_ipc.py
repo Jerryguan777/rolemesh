@@ -20,10 +20,7 @@ Two regimes share this handler:
 
 from __future__ import annotations
 
-import pytest
-
 from rolemesh.main import _handle_agent_message_ipc
-
 
 # ---------------------------------------------------------------------------
 # Interactive-turn drop (a67d3e6 contract)
@@ -42,7 +39,7 @@ async def test_interactive_payload_does_not_invoke_send_via_coworker() -> None:
     original = m._send_via_coworker
     called: list[tuple] = []
 
-    async def _boom(*args, **kwargs) -> None:  # noqa: ANN002, ANN003
+    async def _boom(*args, **kwargs) -> None:
         called.append((args, kwargs))
         raise AssertionError(
             "_send_via_coworker must NOT be called for interactive "
@@ -105,11 +102,11 @@ async def test_scheduled_task_payload_forwards_to_send_via_coworker() -> None:
     chat_jid + text. Without this branch, scheduled-task replies
     silently vanish (the original symptom that motivated the fix).
     """
+    import rolemesh.main as m
     from rolemesh.core.orchestrator_state import (
         CoworkerState,
         OrchestratorState,
     )
-    import rolemesh.main as m
 
     # Minimal in-memory state: one tenant, one coworker keyed by id.
     state = OrchestratorState()
@@ -119,7 +116,7 @@ async def test_scheduled_task_payload_forwards_to_send_via_coworker() -> None:
     original_send = m._send_via_coworker
     captured: list[tuple[object, str, str]] = []
 
-    async def _capture(cw_state, chat_id: str, text: str) -> None:  # noqa: ANN001
+    async def _capture(cw_state, chat_id: str, text: str) -> None:
         captured.append((cw_state, chat_id, text))
 
     m._state = state  # type: ignore[assignment]
@@ -153,12 +150,12 @@ async def test_scheduled_task_payload_falls_back_to_group_folder_lookup() -> Non
     lookup is). A regression here would silently drop scheduled-task
     deliveries whenever the agent runner omits the field.
     """
+    import rolemesh.main as m
     from rolemesh.core.orchestrator_state import (
         CoworkerState,
         OrchestratorState,
     )
     from rolemesh.core.types import Tenant
-    import rolemesh.main as m
 
     state = OrchestratorState()
     state.tenants["t-1"] = Tenant(
@@ -174,7 +171,7 @@ async def test_scheduled_task_payload_falls_back_to_group_folder_lookup() -> Non
     original_send = m._send_via_coworker
     captured: list[tuple] = []
 
-    async def _capture(cw_state, chat_id: str, text: str) -> None:  # noqa: ANN001
+    async def _capture(cw_state, chat_id: str, text: str) -> None:
         captured.append((cw_state, chat_id, text))
 
     m._state = state  # type: ignore[assignment]
@@ -204,15 +201,15 @@ async def test_scheduled_task_with_unresolvable_coworker_does_not_forward() -> N
     ``_send_via_coworker`` with ``None`` — that would crash inside
     the gateway lookup. Drop with a warning instead.
     """
-    from rolemesh.core.orchestrator_state import OrchestratorState
     import rolemesh.main as m
+    from rolemesh.core.orchestrator_state import OrchestratorState
 
     state = OrchestratorState()  # no coworkers
     original_state = m._state
     original_send = m._send_via_coworker
     called: list[tuple] = []
 
-    async def _capture(*args, **kwargs) -> None:  # noqa: ANN002, ANN003
+    async def _capture(*args, **kwargs) -> None:
         called.append((args, kwargs))
 
     m._state = state  # type: ignore[assignment]

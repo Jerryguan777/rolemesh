@@ -7,8 +7,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pi.ai import (
     get_models,
@@ -17,8 +16,12 @@ from pi.ai import (
     register_oauth_provider,
 )
 from pi.ai.types import Context, Model
-from pi.coding_agent.core.auth_storage import AuthStorage
 from pi.coding_agent.core.config import get_agent_dir
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from pi.coding_agent.core.auth_storage import AuthStorage
 
 # ============================================================================
 # Types

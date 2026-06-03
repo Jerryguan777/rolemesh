@@ -43,10 +43,9 @@ import asyncio
 import logging
 import os
 import sys
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pi.agent.types import (
     MessageEndEvent,
@@ -54,16 +53,14 @@ from pi.agent.types import (
     ToolExecutionStartEvent,
 )
 from pi.ai.types import AssistantMessage, TextContent
-from pi.coding_agent.core.agent_session import AgentSession, AgentSessionEvent
 from pi.coding_agent.core.extensions.loader import create_extension_runtime
 from pi.coding_agent.core.extensions.runner import ExtensionRunner
 from pi.coding_agent.core.extensions.types import Extension
 from pi.coding_agent.core.resource_loader import DefaultResourceLoader, DefaultResourceLoaderOptions
-from rolemesh.ipc.skill_mount import PI_SKILLS_PATH
 from pi.coding_agent.core.sdk import CreateAgentSessionOptions, create_agent_session
 from pi.coding_agent.core.session_manager import SessionManager
 from pi.mcp import McpServerConnection, load_mcp_tools
-from rolemesh.ipc.protocol import AgentInitData, McpServerSpec
+from rolemesh.ipc.skill_mount import PI_SKILLS_PATH
 
 from .backend import (
     BackendEvent,
@@ -89,8 +86,15 @@ from .hooks import (
 from .hooks import (
     ToolResultEvent as HookToolResultEvent,
 )
-from .tools.context import ToolContext
 from .tools.pi_adapter import create_rolemesh_tools
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from pi.coding_agent.core.agent_session import AgentSession, AgentSessionEvent
+    from rolemesh.ipc.protocol import AgentInitData, McpServerSpec
+
+    from .tools.context import ToolContext
 
 _log_pylog = logging.getLogger(__name__)
 
@@ -192,10 +196,7 @@ def _build_bridge_extension(hooks: HookRegistry) -> Extension:
         # .text attr) and dict shape (with "text" key).
         text_parts: list[str] = []
         for block in content:
-            if isinstance(block, dict):
-                text = block.get("text")
-            else:
-                text = getattr(block, "text", None)
+            text = block.get("text") if isinstance(block, dict) else getattr(block, "text", None)
             if isinstance(text, str):
                 text_parts.append(text)
         result_text = "".join(text_parts)
@@ -545,7 +546,7 @@ class PiBackend:
                 # Override model.base_url to route through credential proxy.
                 # Pi models have hardcoded base_urls (e.g. "https://api.openai.com/v1")
                 # which bypass the proxy. We replace them with the proxy URL from env vars.
-                _PROXY_ENV_MAP = {
+                _PROXY_ENV_MAP = {  # noqa: N806
                     "openai": "OPENAI_BASE_URL",
                     "anthropic": "ANTHROPIC_BASE_URL",
                 }
@@ -849,7 +850,7 @@ class PiBackend:
                 await self._session.prompt(prompt_text, streaming_behavior="followUp")
             else:
                 await self._session.prompt(prompt_text)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             _log(f"Follow-up error: {exc}")
 
     async def abort(self) -> None:

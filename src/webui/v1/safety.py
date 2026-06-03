@@ -17,12 +17,11 @@ enforces tenant scope at the DB level; the explicit
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import asyncpg
 from fastapi import APIRouter, Depends, Query
 
-from rolemesh.auth.provider import AuthenticatedUser
 from rolemesh.db import (
     count_safety_decisions,
     get_safety_decision,
@@ -33,7 +32,6 @@ from rolemesh.db import (
     list_visible_platform_rules,
 )
 from rolemesh.safety.registry import get_orchestrator_registry
-from rolemesh.safety.types import Rule as SafetyRuleDataclass
 from webui.dependencies import get_current_user
 from webui.schemas_v1 import (
     SafetyCheck,
@@ -46,6 +44,10 @@ from webui.schemas_v1 import (
     SafetyVerdictAction,
 )
 from webui.v1.errors import raise_error_response
+
+if TYPE_CHECKING:
+    from rolemesh.auth.provider import AuthenticatedUser
+    from rolemesh.safety.types import Rule as SafetyRuleDataclass
 
 router = APIRouter(prefix="/safety", tags=["Safety"])
 

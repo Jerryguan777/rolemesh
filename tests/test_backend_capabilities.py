@@ -22,7 +22,6 @@ from rolemesh.core.backend_capabilities import (
     validate_combo,
 )
 
-
 # ---------------------------------------------------------------------------
 # validate_combo: contract pin
 # ---------------------------------------------------------------------------

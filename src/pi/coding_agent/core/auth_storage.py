@@ -14,16 +14,19 @@ import contextlib
 import json
 import os
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 import filelock
 
 from pi.ai import get_env_api_key, get_oauth_api_key, get_oauth_provider, get_oauth_providers
-from pi.ai.oauth.types import OAuthCredentials, OAuthLoginCallbacks
 from pi.coding_agent.core.config import get_agent_dir
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+    from pathlib import Path
+
+    from pi.ai.oauth.types import OAuthCredentials, OAuthLoginCallbacks
 
 T = TypeVar("T")
 

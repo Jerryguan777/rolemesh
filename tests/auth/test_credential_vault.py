@@ -28,7 +28,6 @@ from rolemesh.auth.encryption import (
     load_vault_key_from_env,
 )
 
-
 # ---------------------------------------------------------------------------
 # INV-VAULT-1 — fail loud on missing env key
 # ---------------------------------------------------------------------------

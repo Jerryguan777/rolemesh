@@ -95,7 +95,7 @@ def _patch_orchestrator(
     send = AsyncMock()
     gateway = SimpleNamespace(send_message=send)
     enqueue = SimpleNamespace(
-        enqueue_message_check=lambda *a, **kw: None,  # noqa: ARG005
+        enqueue_message_check=lambda *a, **kw: None,
     )
     monkeypatch.setattr(orchestrator, "_state", state)
     monkeypatch.setattr(orchestrator, "_gateways", {"telegram": gateway})

@@ -373,7 +373,7 @@ async def test_reload_for_deleted_coworker_returns_false() -> None:
 async def _nats_available() -> bool:
     try:
         nc = await nats.connect(NATS_URL, connect_timeout=2)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
     await nc.close()
     return True
@@ -404,7 +404,7 @@ async def test_patch_model_id_round_trips_through_real_nats() -> None:
         await js.add_stream(
             StreamConfig(name="web-ipc", subjects=["web.>"], max_age=3600.0)
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
         await js.update_stream(
             StreamConfig(name="web-ipc", subjects=["web.>"], max_age=3600.0)
         )
@@ -448,8 +448,6 @@ async def test_patch_model_id_round_trips_through_real_nats() -> None:
         coworker_events.set_jetstream(None)
         await sub.unsubscribe()
         # Purge so other suites don't see stale messages.
-        try:
+        with contextlib.suppress(Exception):
             await js.delete_consumer("web-ipc", "orch-web-coworker-restart")
-        except Exception:
-            pass
         await nc.close()

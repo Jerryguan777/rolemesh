@@ -29,7 +29,7 @@ from typing import Any, TypeVar
 T = TypeVar("T")
 
 
-def from_dict_filter_unknown(cls: type[T], data: dict[str, Any]) -> T:
+def from_dict_filter_unknown[T](cls: type[T], data: dict[str, Any]) -> T:
     """Build a ``cls`` instance, silently dropping unknown keys.
 
     Raises ``KeyError`` if any field without a default or default_factory

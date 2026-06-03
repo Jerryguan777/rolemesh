@@ -16,11 +16,11 @@ no second filter; instead it asks the DB helper to scope, and
 from __future__ import annotations
 
 import uuid
+from typing import TYPE_CHECKING
 
 import asyncpg
 from fastapi import APIRouter, Depends, Response
 
-from rolemesh.auth.provider import AuthenticatedUser
 from rolemesh.db import (
     create_channel_binding,
     create_conversation,
@@ -41,6 +41,9 @@ from webui.schemas_v1 import (
 from webui.v1.approvals import _request_to_response
 from webui.v1.coworkers import _get_coworker_or_404
 from webui.v1.errors import raise_error_response
+
+if TYPE_CHECKING:
+    from rolemesh.auth.provider import AuthenticatedUser
 
 coworker_conversations_router = APIRouter(
     prefix="/coworkers", tags=["Conversations"]

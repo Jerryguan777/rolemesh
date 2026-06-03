@@ -10,9 +10,6 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from typing import Any
-from unittest.mock import AsyncMock
-
-import pytest
 
 from agent_runner.tools.context import ToolContext
 from agent_runner.tools.rolemesh_tools import (
@@ -147,7 +144,7 @@ class TestScheduleTask:
         assert "Invalid cron" in result["content"][0]["text"]
 
     async def test_valid_cron(self) -> None:
-        ctx, js = _make_ctx()
+        ctx, _js = _make_ctx()
         result = await schedule_task(
             {"prompt": "daily check", "schedule_type": "cron", "schedule_value": "0 9 * * *"},
             ctx,
@@ -223,7 +220,7 @@ class TestScheduleTask:
 class TestUpdateTask:
     async def test_update_prompt_only(self) -> None:
         """Updating only prompt should not trigger schedule validation."""
-        ctx, js = _make_ctx()
+        ctx, _js = _make_ctx()
         result = await update_task({"task_id": "t-1", "prompt": "new prompt"}, ctx)
         assert "isError" not in result
         assert "update requested" in result["content"][0]["text"]

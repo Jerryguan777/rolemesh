@@ -1,6 +1,11 @@
 target-version = "py312"
 line-length = 120
 
+# src/pi is a vendored copy of the Pi SDK (third-party, upstream-owned). We
+# vendor it in-tree rather than pip-installing it, but it shouldn't be held
+# to this repo's lint conventions any more than any other dependency would.
+extend-exclude = ["src/pi"]
+
 [lint]
 select = [
     "E",    # pycodestyle errors
@@ -17,10 +22,37 @@ select = [
 ]
 ignore = [
     "E501",   # line length handled by formatter
+    # Em-dash and other typographic Unicode in prose (docstrings / comments /
+    # the occasional string) is intentional, not a homoglyph hazard.
+    "RUF001", # ambiguous-unicode-character-string
+    "RUF002", # ambiguous-unicode-character-docstring
+    "RUF003", # ambiguous-unicode-character-comment
 ]
+
+[lint.per-file-ignores]
+# Test code legitimately uses domain-driven names (variables mirroring wire
+# fields like ModelName / CORRECT, helper functions, fixtures), where pep8
+# naming adds noise rather than catching bugs. Keep N enforced in src/.
+"tests/**" = ["N"]
 
 [lint.isort]
 known-first-party = ["rolemesh", "agent_runner", "webui"]
+
+[lint.flake8-bugbear]
+# FastAPI's dependency-injection markers are evaluated once at import and are
+# the framework's documented idiom in parameter defaults — not the mutable /
+# side-effecting call B008 targets.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Header",
+    "fastapi.Body",
+    "fastapi.Form",
+    "fastapi.File",
+    "fastapi.Cookie",
+    "fastapi.Security",
+]
 
 [format]
 quote-style = "double"

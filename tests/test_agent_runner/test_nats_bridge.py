@@ -17,8 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import nats
 import pytest
@@ -31,15 +30,20 @@ from nats.js.api import StreamConfig
 # from PR runs; nightly / explicit ``-m integration`` flips it on.
 pytestmark = pytest.mark.integration
 
-from agent_runner.backend import BackendEvent, ErrorEvent, ResultEvent, SessionInitEvent
-from agent_runner.main import (
+import contextlib  # noqa: E402
+
+from agent_runner.backend import BackendEvent, ResultEvent, SessionInitEvent  # noqa: E402
+from agent_runner.main import (  # noqa: E402
     ContainerOutput,
     drain_nats_input,
     publish_output,
     run_query_loop,
 )
-from agent_runner.tools.context import ToolContext
-from rolemesh.ipc.protocol import AgentInitData
+from agent_runner.tools.context import ToolContext  # noqa: E402
+from rolemesh.ipc.protocol import AgentInitData  # noqa: E402
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
 
 NATS_URL = "nats://localhost:4222"
 
@@ -128,15 +132,13 @@ async def nats_conn():
     )
     try:
         await js.add_stream(cfg)
-    except Exception:
+    except Exception:  # noqa: BLE001
         # Stream already exists with a stale subject list — update in place
         # so the new agent.*.interrupt subject gets routed.
         await js.update_stream(cfg)
     # Ensure KV bucket exists
-    try:
+    with contextlib.suppress(Exception):
         await js.create_key_value(bucket="agent-init")
-    except Exception:
-        pass
     yield nc, js
     await nc.close()
 
@@ -167,7 +169,7 @@ def _make_init(job_id: str, **overrides: Any) -> AgentInitData:
 class TestChannel1KVInit:
     async def test_write_and_read_init_data(self, nats_conn: tuple) -> None:
         """AgentInitData serialized to KV can be deserialized back."""
-        nc, js = nats_conn
+        _nc, js = nats_conn
         job_id = _unique_job_id()
         init = _make_init(job_id, prompt="test prompt", session_id="s-123")
 
@@ -192,7 +194,7 @@ class TestChannel1KVInit:
 class TestChannel2Results:
     async def test_publish_output_received_by_subscriber(self, nats_conn: tuple) -> None:
         """publish_output writes to JetStream; a subscriber receives it."""
-        nc, js = nats_conn
+        _nc, js = nats_conn
         job_id = _unique_job_id()
 
         sub = await js.subscribe(f"agent.{job_id}.results")
@@ -212,7 +214,7 @@ class TestChannel2Results:
         await sub.unsubscribe()
 
     async def test_error_output_format(self, nats_conn: tuple) -> None:
-        nc, js = nats_conn
+        _nc, js = nats_conn
         job_id = _unique_job_id()
 
         sub = await js.subscribe(f"agent.{job_id}.results")
@@ -240,7 +242,7 @@ class TestChannel2Results:
 class TestChannel3FollowUpInput:
     async def test_drain_nats_input_collects_pending(self, nats_conn: tuple) -> None:
         """drain_nats_input reads all pending messages from the input subject."""
-        nc, js = nats_conn
+        _nc, js = nats_conn
         job_id = _unique_job_id()
 
         # Publish 3 pending messages
@@ -257,7 +259,7 @@ class TestChannel3FollowUpInput:
         assert messages == ["pending-0", "pending-1", "pending-2"]
 
     async def test_drain_empty_returns_empty(self, nats_conn: tuple) -> None:
-        nc, js = nats_conn
+        _nc, js = nats_conn
         job_id = _unique_job_id()
         sub = await js.subscribe(f"agent.{job_id}.input")
         messages = await drain_nats_input(sub)
@@ -385,7 +387,7 @@ class TestChannel4CloseSignal:
 class TestChannel5And6ToolPublishes:
     async def test_send_message_tool_publishes_to_nats(self, nats_conn: tuple) -> None:
         """send_message tool publishes to agent.{id}.messages via real NATS."""
-        nc, js = nats_conn
+        _nc, js = nats_conn
         job_id = _unique_job_id()
 
         sub = await js.subscribe(f"agent.{job_id}.messages")
@@ -416,7 +418,7 @@ class TestChannel5And6ToolPublishes:
 
     async def test_schedule_task_tool_publishes_to_nats(self, nats_conn: tuple) -> None:
         """schedule_task tool publishes to agent.{id}.tasks via real NATS."""
-        nc, js = nats_conn
+        _nc, js = nats_conn
         job_id = _unique_job_id()
 
         sub = await js.subscribe(f"agent.{job_id}.tasks")
@@ -485,7 +487,7 @@ class TestBridgeFullCycle:
                     msg = await asyncio.wait_for(sub.next_msg(timeout=2), timeout=3)
                     await msg.ack()
                     results.append(json.loads(msg.data))
-                except Exception:
+                except Exception:  # noqa: BLE001
                     break
 
             # Close to exit

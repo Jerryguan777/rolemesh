@@ -35,10 +35,10 @@ logger = get_logger()
 WEB_RUN_CANCEL_SUBJECT_PREFIX = "web.run.cancel"
 
 
-_js: "JetStreamContext | None" = None
+_js: JetStreamContext | None = None
 
 
-def set_jetstream(js: "JetStreamContext | None") -> None:
+def set_jetstream(js: JetStreamContext | None) -> None:
     """Attach or detach the process-wide JetStream context."""
     global _js
     _js = js
@@ -77,7 +77,7 @@ async def publish_run_cancel(
     )
     try:
         await _js.publish(_subject_for(run_id), payload.encode("utf-8"))
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.warning(
             "Failed to publish web.run.cancel; run may remain running",
             run_id=run_id,

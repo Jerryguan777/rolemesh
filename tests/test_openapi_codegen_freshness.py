@@ -51,7 +51,7 @@ def _have_codegen() -> bool:
 )
 def test_committed_types_are_up_to_date(tmp_path: Path) -> None:
     out = tmp_path / "types.ts"
-    result = subprocess.run(  # noqa: S603 — explicit absolute path to local bin
+    result = subprocess.run(
         [str(BIN), str(YAML), "-o", str(out)],
         cwd=str(WEB),
         capture_output=True,
@@ -71,7 +71,7 @@ def test_committed_types_are_up_to_date(tmp_path: Path) -> None:
         # Show a head-of-diff so the failure message is actionable.
         # Diff at the line level — full file is ~850 lines and an
         # entire dump would drown the actual problem.
-        diff = subprocess.run(  # noqa: S603 — diff is a stable POSIX tool
+        diff = subprocess.run(
             ["diff", "-u", str(COMMITTED_TS), str(out)],
             capture_output=True,
             text=True,
@@ -81,7 +81,7 @@ def test_committed_types_are_up_to_date(tmp_path: Path) -> None:
         pytest.fail(
             "web/src/api/generated/types.ts is stale vs contracts/openapi.yaml.\n"
             "Re-run `npm run openapi:gen` in web/ and commit the result.\n"
-            f"--- diff (first 80 lines) ---\n"
+            "--- diff (first 80 lines) ---\n"
             + "\n".join(diff.stdout.splitlines()[:80])
         )
 

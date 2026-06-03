@@ -9,8 +9,6 @@ from __future__ import annotations
 
 import asyncio
 
-import pytest
-
 from agent_runner.message_stream import MessageStream
 
 

@@ -14,11 +14,11 @@ same 404 a non-existent id gets — no cross-tenant existence oracle.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import asyncpg
 from fastapi import APIRouter, Depends, Query, Response
 
-from agent_runner.approval.policy import ApprovalPolicy as ApprovalPolicyValue
-from rolemesh.auth.provider import AuthenticatedUser
 from rolemesh.db.approval import (
     ApprovalRequest as ApprovalRequestRow,
 )
@@ -38,6 +38,10 @@ from webui.schemas_v1 import (
     ApprovalRequest,
 )
 from webui.v1.errors import raise_error_response
+
+if TYPE_CHECKING:
+    from agent_runner.approval.policy import ApprovalPolicy as ApprovalPolicyValue
+    from rolemesh.auth.provider import AuthenticatedUser
 
 policies_router = APIRouter(prefix="/approval-policies", tags=["ApprovalPolicies"])
 requests_router = APIRouter(prefix="/approval-requests", tags=["ApprovalPolicies"])

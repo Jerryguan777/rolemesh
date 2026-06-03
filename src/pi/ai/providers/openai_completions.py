@@ -6,9 +6,8 @@ import contextlib
 import json
 import re
 import time
-from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pi.ai.env_api_keys import get_env_api_key
 from pi.ai.models import calculate_cost, supports_xhigh
@@ -49,6 +48,9 @@ from pi.ai.types import (
 )
 from pi.ai.utils.json_parse import parse_streaming_json
 from pi.ai.utils.sanitize_unicode import sanitize_surrogates
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
 
 
 @dataclass

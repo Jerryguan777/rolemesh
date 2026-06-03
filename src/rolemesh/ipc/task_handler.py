@@ -133,10 +133,7 @@ async def process_task_ipc(
         # "user X" rather than misattributing.
         raw_user_id = data.get("userId")
         created_by_user_id: str | None
-        if isinstance(raw_user_id, str) and raw_user_id:
-            created_by_user_id = raw_user_id
-        else:
-            created_by_user_id = None
+        created_by_user_id = raw_user_id if isinstance(raw_user_id, str) and raw_user_id else None
 
         await create_task(
             ScheduledTask(

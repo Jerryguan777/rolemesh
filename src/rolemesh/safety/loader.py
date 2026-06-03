@@ -25,7 +25,7 @@ from rolemesh.core.logger import get_logger
 # orchestrator-side tests can ``monkeypatch.setattr(loader,
 # "list_safety_rules_for_coworker", ...)`` — the agent container path
 # never calls it.
-try:
+try:  # noqa: SIM105
     from rolemesh.db import list_safety_rules_for_coworker  # noqa: F401
 except ModuleNotFoundError:
     # Agent container: rolemesh.db is not packaged. Leave the symbol
@@ -40,7 +40,7 @@ except ModuleNotFoundError:
 # the agent container hits the ModuleNotFoundError fallback (it never
 # calls fetch_safety_rule_snapshots — it receives the merged snapshot via
 # AgentInitData).
-try:
+try:  # noqa: SIM105
     from rolemesh.db.platform_safety import fetch_platform_rule_snapshots  # noqa: F401
 except ModuleNotFoundError:
     pass

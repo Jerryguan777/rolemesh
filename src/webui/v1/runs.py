@@ -17,16 +17,20 @@ so the write authority stays there.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import asyncpg
 from fastapi import APIRouter, Depends, Response
 
-from rolemesh.auth.provider import AuthenticatedUser
 from rolemesh.db import tenant_conn
 from rolemesh.runs import get_run
 from webui.dependencies import get_current_user
 from webui.schemas_v1 import Run
 from webui.v1 import run_events
 from webui.v1.errors import raise_error_response
+
+if TYPE_CHECKING:
+    from rolemesh.auth.provider import AuthenticatedUser
 
 router = APIRouter(prefix="/runs", tags=["Runs"])
 

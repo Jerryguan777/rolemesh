@@ -50,7 +50,7 @@ from __future__ import annotations
 
 import contextlib
 import json
-from typing import TYPE_CHECKING, Awaitable, Callable
+from typing import TYPE_CHECKING
 
 from nats.js.api import ConsumerConfig
 
@@ -59,6 +59,8 @@ from rolemesh.db import tenant_conn
 from rolemesh.runs import terminate_run_via_user_cancel
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from nats.aio.msg import Msg as NatsMsg
     from nats.js.client import JetStreamContext
     from nats.js.subscription import Subscription
@@ -77,8 +79,8 @@ _MAX_DELIVER = 3
 async def _handle_cancel_event(
     *,
     payload: dict[str, object],
-    runtime: "ContainerRuntime",
-    fetch_active_container: Callable[[str], "str | None"],
+    runtime: ContainerRuntime,
+    fetch_active_container: Callable[[str], str | None],
 ) -> None:
     """Core handler — separated from the NATS callback so tests can
     drive it directly without spinning up JetStream for unit-style
@@ -102,7 +104,7 @@ async def _handle_cancel_event(
     if container_name is not None:
         try:
             await runtime.stop(container_name)
-        except Exception:
+        except Exception:  # noqa: BLE001
             # runtime.stop can fail for benign reasons — container
             # already gone, docker daemon hiccup, etc. We do NOT
             # raise: the state machine still needs to advance to
@@ -144,11 +146,11 @@ async def _handle_cancel_event(
 
 
 async def subscribe_run_cancel(
-    js: "JetStreamContext",
+    js: JetStreamContext,
     *,
-    runtime: "ContainerRuntime",
-    fetch_active_container: Callable[[str], "str | None"],
-) -> "Subscription":
+    runtime: ContainerRuntime,
+    fetch_active_container: Callable[[str], str | None],
+) -> Subscription:
     """Subscribe to ``web.run.cancel.>`` on JetStream.
 
     ``fetch_active_container`` is injected (rather than reading
@@ -163,7 +165,7 @@ async def subscribe_run_cancel(
     same lifetime contract as ``subscribe_coworker_restart``.
     """
 
-    async def _on_message(msg: "NatsMsg") -> None:
+    async def _on_message(msg: NatsMsg) -> None:
         try:
             payload = json.loads(msg.data.decode("utf-8") or "{}")
         except json.JSONDecodeError:

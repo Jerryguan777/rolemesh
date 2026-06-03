@@ -51,12 +51,12 @@ if TYPE_CHECKING:
 
 
 __all__ = [
-    "terminate_run_via_ws_completed",
-    "terminate_run_via_ws_error",
-    "terminate_run_via_user_cancel",
-    "terminate_run_via_scheduled_completion",
     "terminate_run_via_container_crash",
     "terminate_run_via_reauth_required",
+    "terminate_run_via_scheduled_completion",
+    "terminate_run_via_user_cancel",
+    "terminate_run_via_ws_completed",
+    "terminate_run_via_ws_error",
 ]
 
 
@@ -64,7 +64,7 @@ async def terminate_run_via_ws_completed(
     *,
     run_id: str,
     usage: dict[str, Any] | None,
-    conn: "asyncpg.Connection",
+    conn: asyncpg.Connection,
 ) -> bool:
     """INV-6 path 1 — agent finished a turn and emitted a completed event."""
     return await update_run_terminal(
@@ -77,7 +77,7 @@ async def terminate_run_via_ws_error(
     run_id: str,
     error: dict[str, Any],
     usage: dict[str, Any] | None = None,
-    conn: "asyncpg.Connection",
+    conn: asyncpg.Connection,
 ) -> bool:
     """INV-6 path 2 — agent emitted an error event over the WS stream."""
     return await update_run_terminal(
@@ -92,7 +92,7 @@ async def terminate_run_via_ws_error(
 async def terminate_run_via_user_cancel(
     *,
     run_id: str,
-    conn: "asyncpg.Connection",
+    conn: asyncpg.Connection,
 ) -> bool:
     """INV-6 path 3 — user POSTed /cancel; orchestrator stopped the container."""
     return await update_run_terminal(
@@ -106,7 +106,7 @@ async def terminate_run_via_scheduled_completion(
     success: bool,
     usage: dict[str, Any] | None = None,
     error: dict[str, Any] | None = None,
-    conn: "asyncpg.Connection",
+    conn: asyncpg.Connection,
 ) -> bool:
     """INV-6 path 4 — scheduled run finished (success or failure).
 
@@ -130,7 +130,7 @@ async def terminate_run_via_container_crash(
     run_id: str,
     exit_code: int,
     signal: str | None = None,
-    conn: "asyncpg.Connection",
+    conn: asyncpg.Connection,
 ) -> bool:
     """INV-6 path 6 — coworker container crashed / OOM'd / timed out.
 
@@ -157,7 +157,7 @@ async def terminate_run_via_reauth_required(
     *,
     run_id: str,
     reason: str,
-    conn: "asyncpg.Connection",
+    conn: asyncpg.Connection,
 ) -> bool:
     """INV-6 path 7 — user-mode MCP credential is unrecoverable.
 

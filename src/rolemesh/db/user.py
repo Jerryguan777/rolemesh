@@ -354,14 +354,13 @@ async def delete_user(user_id: str, *, tenant_id: str) -> bool:
     """
     from rolemesh.db.task import cancel_tasks_for_user
 
-    async with tenant_conn(tenant_id) as conn:
-        async with conn.transaction():
-            await cancel_tasks_for_user(user_id, tenant_id, conn=conn)
-            result = await conn.execute(
-                "DELETE FROM users WHERE id = $1::uuid AND tenant_id = $2::uuid",
-                user_id,
-                tenant_id,
-            )
+    async with tenant_conn(tenant_id) as conn, conn.transaction():
+        await cancel_tasks_for_user(user_id, tenant_id, conn=conn)
+        result = await conn.execute(
+            "DELETE FROM users WHERE id = $1::uuid AND tenant_id = $2::uuid",
+            user_id,
+            tenant_id,
+        )
     return result == "DELETE 1"
 
 

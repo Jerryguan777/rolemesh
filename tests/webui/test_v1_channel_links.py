@@ -264,7 +264,7 @@ async def test_delete_others_identity_404s() -> None:
     a_links = await list_channel_identities_for_user(
         user_a.user_id, user_a.tenant_id
     )
-    assert any(l.id == identity_a.id for l in a_links)
+    assert any(link.id == identity_a.id for link in a_links)
 
 
 async def test_delete_missing_identity_404s() -> None:

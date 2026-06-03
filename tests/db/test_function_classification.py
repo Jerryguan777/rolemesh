@@ -30,13 +30,13 @@ def _admin_imports(tree: ast.Module) -> list[str]:
     """Return any names from ADMIN_NAMES imported by this module."""
     found: list[str] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module:
+        if isinstance(node, ast.ImportFrom) and node.module:  # noqa: SIM102
             if "rolemesh.db" in node.module or node.module == "pg":
                 for alias in node.names:
                     if alias.name in ADMIN_NAMES:
                         found.append(alias.name)
         if isinstance(node, ast.Import):
-            for alias in node.names:
+            for _ in node.names:
                 # Catch `from rolemesh.db import pg` — that's fine,
                 # but `admin_conn(...)` calls are a separate
                 # check (Attribute access).

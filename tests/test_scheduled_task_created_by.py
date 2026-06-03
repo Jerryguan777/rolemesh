@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
@@ -35,7 +35,6 @@ from rolemesh.auth.permissions import AgentPermissions
 from rolemesh.core.orchestrator_state import OrchestratorState
 from rolemesh.core.types import Coworker, ScheduledTask
 from rolemesh.db import (
-    _get_admin_pool,
     create_coworker,
     create_task,
     create_tenant,
@@ -272,8 +271,8 @@ async def test_run_task_stamps_agent_input_user_id_from_task() -> None:
         async def execute(
             self,
             inp: AgentInput,
-            on_process: Any,  # noqa: ARG002
-            on_output: Any,  # noqa: ARG002
+            on_process: Any,
+            on_output: Any,
         ) -> AgentOutput:
             captured["input"] = inp
             return AgentOutput(status="success", result="ok", is_final=True)

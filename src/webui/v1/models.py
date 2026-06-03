@@ -8,9 +8,10 @@ surfaces (``POST`` / ``PATCH``) are deferred to v2 per design §14.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from fastapi import APIRouter, Depends, Query
 
-from rolemesh.auth.provider import AuthenticatedUser
 from rolemesh.db import (
     ModelRow,
     get_model_by_id,
@@ -19,6 +20,9 @@ from rolemesh.db import (
 from webui.dependencies import get_current_user
 from webui.schemas_v1 import Model, ModelFamily, ModelProvider
 from webui.v1.errors import raise_error_response
+
+if TYPE_CHECKING:
+    from rolemesh.auth.provider import AuthenticatedUser
 
 router = APIRouter(prefix="/models", tags=["Models"])
 

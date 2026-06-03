@@ -7,12 +7,17 @@ from __future__ import annotations
 
 import base64
 import time
+from typing import TYPE_CHECKING
 
 import httpx
 
 from pi.ai.oauth.pkce import generate_pkce
 from pi.ai.oauth.types import OAuthAuthInfo, OAuthCredentials, OAuthLoginCallbacks
-from pi.ai.types import Model
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+
+    from pi.ai.types import Model
 
 _CLIENT_ID = base64.b64decode("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl").decode()
 _AUTHORIZE_URL = "https://claude.ai/oauth/authorize"
@@ -26,7 +31,6 @@ async def login_anthropic(
     on_prompt_code: object,  # Callable[[], Awaitable[str]]
 ) -> OAuthCredentials:
     """Login with Anthropic OAuth (manual code paste flow)."""
-    from collections.abc import Callable, Coroutine
     from typing import Any
 
     _on_auth_url: Callable[[str], None] = on_auth_url  # type: ignore[assignment]

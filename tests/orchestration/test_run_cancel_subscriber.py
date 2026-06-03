@@ -24,6 +24,7 @@ on a laptop without docker-compose; CI smoke must run it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import uuid
@@ -40,7 +41,6 @@ from rolemesh.db import (
     tenant_conn,
 )
 from rolemesh.orchestration.run_cancel_subscriber import (
-    WEB_RUN_CANCEL_SUBJECT_FILTER,
     subscribe_run_cancel,
 )
 from rolemesh.runs import create_run, update_run_terminal
@@ -84,7 +84,7 @@ class _MockRuntime:
 async def _nats_available() -> bool:
     try:
         nc = await nats.connect(NATS_URL, connect_timeout=2)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
     await nc.close()
     return True
@@ -137,7 +137,7 @@ async def _connect_js() -> tuple[Any, Any]:
         await js.add_stream(
             StreamConfig(name="web-ipc", subjects=["web.>"], max_age=3600.0)
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
         await js.update_stream(
             StreamConfig(name="web-ipc", subjects=["web.>"], max_age=3600.0)
         )
@@ -158,14 +158,10 @@ async def _purge_consumer(js: Any) -> None:
     (we WANT replay across orchestrator restarts) — this purge
     is purely for test hygiene.
     """
-    try:
+    with contextlib.suppress(Exception):
         await js.delete_consumer("web-ipc", "orch-web-run-cancel")
-    except Exception:
-        pass
-    try:
+    with contextlib.suppress(Exception):
         await js.purge_stream("web-ipc")
-    except Exception:
-        pass
 
 
 # ---------------------------------------------------------------------------
@@ -559,10 +555,10 @@ async def test_malformed_payload_acked_without_side_effects() -> None:
     )
     try:
         # Not JSON
-        await js.publish(f"web.run.cancel.bogus", b"not-json")
+        await js.publish("web.run.cancel.bogus", b"not-json")
         # JSON but missing fields
         await js.publish(
-            f"web.run.cancel.bogus2",
+            "web.run.cancel.bogus2",
             json.dumps({"only": "garbage"}).encode("utf-8"),
         )
         # Give it time to deliver + ack

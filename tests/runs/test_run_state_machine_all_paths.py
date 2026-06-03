@@ -29,7 +29,7 @@ parametrise over the public names listed in
 from __future__ import annotations
 
 import uuid
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -52,6 +52,9 @@ from rolemesh.runs import (
 )
 from rolemesh.runs import lifecycle as lifecycle_mod
 from rolemesh.runs import terminators as terminators_mod
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 pytestmark = pytest.mark.usefixtures("test_db")
 

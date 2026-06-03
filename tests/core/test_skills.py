@@ -20,7 +20,6 @@ from rolemesh.core.skills import (
     validate_skill_name,
 )
 
-
 # ---------------------------------------------------------------------------
 # Name validator
 # ---------------------------------------------------------------------------
@@ -345,7 +344,7 @@ def test_splitter_explains_yaml_boolean_trap_for_name(bool_literal: str) -> None
         f"description: {_GOOD_DESC}\n"
         "---\nbody"
     )
-    with pytest.raises(SkillValidationError, match="YAML 1.1"):
+    with pytest.raises(SkillValidationError, match=r"YAML 1\.1"):
         parse_inbound_skill_md(skill_md, expected_skill_name=bool_literal)
 
 
@@ -371,7 +370,7 @@ def test_splitter_explains_yaml_boolean_for_description() -> None:
         "description: yes\n"
         "---\nbody"
     )
-    with pytest.raises(SkillValidationError, match="YAML 1.1"):
+    with pytest.raises(SkillValidationError, match=r"YAML 1\.1"):
         parse_inbound_skill_md(skill_md, expected_skill_name="x")
 
 

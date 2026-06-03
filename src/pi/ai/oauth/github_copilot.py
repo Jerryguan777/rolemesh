@@ -9,13 +9,17 @@ import asyncio
 import base64
 import re
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import httpx
 
 from pi.ai.oauth.types import OAuthAuthInfo, OAuthCredentials, OAuthLoginCallbacks
-from pi.ai.types import Model
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+
+    from pi.ai.types import Model
 
 _CLIENT_ID = base64.b64decode("SXYxLmI1MDdhMDhjODdlY2ZlOTg=").decode()
 
@@ -191,7 +195,6 @@ async def login_github_copilot(
     signal: asyncio.Event | None = None,
 ) -> OAuthCredentials:
     """Login with GitHub Copilot OAuth (device code flow)."""
-    from collections.abc import Callable, Coroutine
 
     _on_auth: Callable[[str, str | None], None] = on_auth  # type: ignore[assignment]
     _on_prompt: Callable[[dict[str, Any]], Coroutine[Any, Any, str]] = on_prompt  # type: ignore[assignment]

@@ -191,7 +191,7 @@ async def test_cross_tenant_list_returns_404_for_coworker() -> None:
     # Tenant A asking about tenant B's coworker bindings must 404
     # (the coworker isn't in their tenant).
     user_a, _ = await _make_user_and_coworker("ta")
-    user_b, cw_b = await _make_user_and_coworker("tb")
+    _user_b, cw_b = await _make_user_and_coworker("tb")
     async with _client(_build_app(user_a)) as ac:
         resp = await ac.get(
             f"/api/v1/coworkers/{cw_b}/bindings", headers=_HDRS,
