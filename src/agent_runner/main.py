@@ -555,7 +555,7 @@ async def main() -> None:
         entry = await kv.get(JOB_ID)
         init = AgentInitData.deserialize(entry.value)
         log(f"Received input for group: {init.group_folder}")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         log(f"Failed to read initial input from NATS KV: {exc}")
         await publish_output(
             js, JOB_ID,
@@ -566,7 +566,7 @@ async def main() -> None:
 
     try:
         await run_query_loop(init, nc, js, JOB_ID)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         error_message = str(exc)
         log(f"Agent error: {error_message}")
         await publish_output(

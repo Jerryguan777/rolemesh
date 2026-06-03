@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from rolemesh.db._pool import tenant_conn
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     import asyncpg
 
 
@@ -77,7 +78,7 @@ def _parse_jsonb(value: Any) -> dict[str, Any]:
     return {}
 
 
-def _row_to_dataclass(row: "asyncpg.Record") -> MCPServerRow:
+def _row_to_dataclass(row: asyncpg.Record) -> MCPServerRow:
     return MCPServerRow(
         id=str(row["id"]),
         tenant_id=str(row["tenant_id"]),

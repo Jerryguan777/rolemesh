@@ -24,13 +24,14 @@ layer keeps the strict shape.
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from rolemesh.core.types import McpServerConfig
 from rolemesh.db._pool import tenant_conn
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     import asyncpg
 
 __all__ = [
@@ -39,7 +40,7 @@ __all__ = [
 ]
 
 
-def _row_to_mcp_config(row: "asyncpg.Record") -> McpServerConfig:
+def _row_to_mcp_config(row: asyncpg.Record) -> McpServerConfig:
     """Project a JOINed ``mcp_servers`` row into a ``McpServerConfig``.
 
     The auth_mode column is constrained by the v1 routes to the
@@ -150,16 +151,15 @@ async def replace_coworker_mcp_configs(
     No-op when ``mcp_configs`` is empty (step 1 still runs so callers
     can clear a coworker's bindings by passing ``[]``).
     """
-    async with tenant_conn(tenant_id) as conn:
-        async with conn.transaction():
-            await conn.execute(
-                "DELETE FROM coworker_mcp_servers "
-                "WHERE coworker_id = $1::uuid",
-                coworker_id,
-            )
-            for cfg in mcp_configs:
-                mcp_id_row = await conn.fetchrow(
-                    """
+    async with tenant_conn(tenant_id) as conn, conn.transaction():
+        await conn.execute(
+            "DELETE FROM coworker_mcp_servers "
+            "WHERE coworker_id = $1::uuid",
+            coworker_id,
+        )
+        for cfg in mcp_configs:
+            mcp_id_row = await conn.fetchrow(
+                """
                     INSERT INTO mcp_servers (
                         tenant_id, name, type, url, auth_mode,
                         extra_headers, tool_reversibility
@@ -177,18 +177,18 @@ async def replace_coworker_mcp_configs(
                         updated_at = NOW()
                     RETURNING id
                     """,
-                    tenant_id,
-                    cfg.name,
-                    cfg.type,
-                    cfg.url,
-                    cfg.auth_mode,
-                    json.dumps(dict(cfg.headers)),
-                    json.dumps(dict(cfg.tool_reversibility)),
-                )
-                assert mcp_id_row is not None
-                await conn.execute(
-                    "INSERT INTO coworker_mcp_servers "
-                    "(coworker_id, mcp_server_id, enabled_tools) "
-                    "VALUES ($1::uuid, $2::uuid, NULL)",
-                    coworker_id, mcp_id_row["id"],
-                )
+                tenant_id,
+                cfg.name,
+                cfg.type,
+                cfg.url,
+                cfg.auth_mode,
+                json.dumps(dict(cfg.headers)),
+                json.dumps(dict(cfg.tool_reversibility)),
+            )
+            assert mcp_id_row is not None
+            await conn.execute(
+                "INSERT INTO coworker_mcp_servers "
+                "(coworker_id, mcp_server_id, enabled_tools) "
+                "VALUES ($1::uuid, $2::uuid, NULL)",
+                coworker_id, mcp_id_row["id"],
+            )

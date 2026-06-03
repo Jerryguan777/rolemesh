@@ -49,64 +49,64 @@ def register_built_in_api_providers() -> None:
     register_api_provider(
         ApiProvider(
             api="anthropic-messages",
-            stream=cast(StreamFunction, stream_anthropic),
-            stream_simple=cast(StreamSimpleFunction, stream_simple_anthropic),
+            stream=cast("StreamFunction", stream_anthropic),
+            stream_simple=cast("StreamSimpleFunction", stream_simple_anthropic),
         )
     )
     register_api_provider(
         ApiProvider(
             api="openai-completions",
-            stream=cast(StreamFunction, stream_openai_completions),
-            stream_simple=cast(StreamSimpleFunction, stream_simple_openai_completions),
+            stream=cast("StreamFunction", stream_openai_completions),
+            stream_simple=cast("StreamSimpleFunction", stream_simple_openai_completions),
         )
     )
     register_api_provider(
         ApiProvider(
             api="openai-responses",
-            stream=cast(StreamFunction, stream_openai_responses),
-            stream_simple=cast(StreamSimpleFunction, stream_simple_openai_responses),
+            stream=cast("StreamFunction", stream_openai_responses),
+            stream_simple=cast("StreamSimpleFunction", stream_simple_openai_responses),
         )
     )
     register_api_provider(
         ApiProvider(
             api="azure-openai-responses",
-            stream=cast(StreamFunction, stream_azure_openai_responses),
-            stream_simple=cast(StreamSimpleFunction, stream_simple_azure_openai_responses),
+            stream=cast("StreamFunction", stream_azure_openai_responses),
+            stream_simple=cast("StreamSimpleFunction", stream_simple_azure_openai_responses),
         )
     )
     register_api_provider(
         ApiProvider(
             api="openai-codex-responses",
-            stream=cast(StreamFunction, stream_openai_codex_responses),
-            stream_simple=cast(StreamSimpleFunction, stream_simple_openai_codex_responses),
+            stream=cast("StreamFunction", stream_openai_codex_responses),
+            stream_simple=cast("StreamSimpleFunction", stream_simple_openai_codex_responses),
         )
     )
     register_api_provider(
         ApiProvider(
             api="google-generative-ai",
-            stream=cast(StreamFunction, stream_google),
-            stream_simple=cast(StreamSimpleFunction, stream_simple_google),
+            stream=cast("StreamFunction", stream_google),
+            stream_simple=cast("StreamSimpleFunction", stream_simple_google),
         )
     )
     register_api_provider(
         ApiProvider(
             api="google-gemini-cli",
-            stream=cast(StreamFunction, stream_google_gemini_cli),
-            stream_simple=cast(StreamSimpleFunction, stream_simple_google_gemini_cli),
+            stream=cast("StreamFunction", stream_google_gemini_cli),
+            stream_simple=cast("StreamSimpleFunction", stream_simple_google_gemini_cli),
         )
     )
     register_api_provider(
         ApiProvider(
             api="google-vertex",
-            stream=cast(StreamFunction, stream_google_vertex),
-            stream_simple=cast(StreamSimpleFunction, stream_simple_google_vertex),
+            stream=cast("StreamFunction", stream_google_vertex),
+            stream_simple=cast("StreamSimpleFunction", stream_simple_google_vertex),
         )
     )
     register_api_provider(
         ApiProvider(
             api="bedrock-converse-stream",
-            stream=cast(StreamFunction, stream_bedrock),
-            stream_simple=cast(StreamSimpleFunction, stream_simple_bedrock),
+            stream=cast("StreamFunction", stream_bedrock),
+            stream_simple=cast("StreamSimpleFunction", stream_simple_bedrock),
         )
     )
 

@@ -17,11 +17,11 @@ Wire vs. DB:
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import asyncpg
 from fastapi import APIRouter, Depends, Response
 
-from rolemesh.auth.provider import AuthenticatedUser
-from rolemesh.core.types import ChannelBinding as ChannelBindingDataclass
 from rolemesh.db import (
     create_channel_binding,
     delete_channel_binding,
@@ -37,6 +37,10 @@ from webui.schemas_v1 import (
     ChannelBindingUpdate,
 )
 from webui.v1.errors import ErrorResponseException, raise_error_response
+
+if TYPE_CHECKING:
+    from rolemesh.auth.provider import AuthenticatedUser
+    from rolemesh.core.types import ChannelBinding as ChannelBindingDataclass
 
 router = APIRouter(prefix="/coworkers/{coworker_id}/bindings", tags=["Coworkers"])
 

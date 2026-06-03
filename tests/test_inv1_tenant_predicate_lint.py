@@ -137,10 +137,7 @@ def _has_inv1_ok(src: str, line_no: int) -> bool:
     lines = src.splitlines()
     end = min(len(lines), line_no)
     start = max(0, end - _INV1_OK_LOOKBACK_LINES)
-    for i in range(start, end):
-        if "inv-1-ok" in lines[i]:
-            return True
-    return False
+    return any("inv-1-ok" in lines[i] for i in range(start, end))
 
 
 def _find_violations(path: Path) -> list[tuple[int, str, str]]:

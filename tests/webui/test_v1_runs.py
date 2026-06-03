@@ -206,7 +206,7 @@ async def test_get_run_with_unknown_uuid_returns_404() -> None:
 @pytest.mark.asyncio
 async def test_tenant_b_cannot_read_tenant_a_run() -> None:
     """Cross-tenant GET surfaces 404 even when the UUID is known."""
-    tid_a, uid_a, _, conv_a = await _seed_tenant_coworker_conversation()
+    tid_a, _uid_a, _, conv_a = await _seed_tenant_coworker_conversation()
     tid_b, uid_b, _, _ = await _seed_tenant_coworker_conversation()
     run_id = await _insert_running_run(tid_a, conv_a)
     app_b = _build_app(_authed(tid_b, uid_b))
@@ -302,7 +302,7 @@ async def test_tenant_b_cannot_cancel_tenant_a_run(
     js_capture: _CapturedJS,
 ) -> None:
     """Cross-tenant cancel surfaces 404 and does NOT publish."""
-    tid_a, uid_a, _, conv_a = await _seed_tenant_coworker_conversation()
+    tid_a, _uid_a, _, conv_a = await _seed_tenant_coworker_conversation()
     tid_b, uid_b, _, _ = await _seed_tenant_coworker_conversation()
     run_id = await _insert_running_run(tid_a, conv_a)
     app_b = _build_app(_authed(tid_b, uid_b))

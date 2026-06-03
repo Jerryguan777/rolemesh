@@ -17,11 +17,12 @@ import json
 import re
 import time
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from croniter import croniter
 
-from .context import ToolContext
+if TYPE_CHECKING:
+    from .context import ToolContext
 
 # Type alias for MCP-style tool results.
 ToolResult = dict[str, Any]
@@ -248,7 +249,7 @@ async def list_tasks(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
             for t in tasks
         ]
         return _text_result("Scheduled tasks:\n" + "\n".join(lines))
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         return _text_result(f"Error reading tasks: {exc}")
 
 

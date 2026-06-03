@@ -35,12 +35,10 @@ from __future__ import annotations
 import asyncio
 import sys
 import types
-from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
-
 
 # claude_agent_sdk is only shipped inside the agent container image. Stub it
 # in sys.modules BEFORE importing claude_backend so the module-level
@@ -58,6 +56,8 @@ sys.modules.setdefault("claude_agent_sdk", _fake_sdk)
 from agent_runner import claude_backend  # noqa: E402
 from agent_runner.backend import BackendEvent, ResultEvent, StoppedEvent  # noqa: E402
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 # ---------------------------------------------------------------------------
 # Fake SDK message types — duck-typed to what claude_backend inspects.

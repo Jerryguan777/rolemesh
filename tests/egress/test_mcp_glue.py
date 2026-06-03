@@ -15,7 +15,6 @@ focused on the publish / subscribe surface ``orch_glue`` uses.
 
 from __future__ import annotations
 
-import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -33,7 +32,6 @@ from rolemesh.egress.orch_glue import (
     publish_mcp_registry_changed,
     start_responders,
 )
-
 
 # ---------------------------------------------------------------------------
 # NATS stub

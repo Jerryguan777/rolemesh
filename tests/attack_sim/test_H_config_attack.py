@@ -17,7 +17,6 @@ import pytest
 
 import rolemesh.agent  # noqa: F401  (see test_B for rationale)
 
-
 # ---------------------------------------------------------------------------
 # H1. Cross-coworker task scheduling
 # ---------------------------------------------------------------------------

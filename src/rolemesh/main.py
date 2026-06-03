@@ -1953,7 +1953,7 @@ async def main() -> None:
         await _transport.js.add_stream(
             _WebStreamConfig(name="web-ipc", subjects=["web.>"], max_age=3600.0)
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
         with contextlib.suppress(Exception):
             await _transport.js.update_stream(
                 _WebStreamConfig(name="web-ipc", subjects=["web.>"], max_age=3600.0)

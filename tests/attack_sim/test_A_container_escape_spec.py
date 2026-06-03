@@ -35,7 +35,6 @@ from rolemesh.container.runner import build_container_spec
 from rolemesh.container.runtime import VolumeMount
 from rolemesh.core.types import ContainerConfig, Coworker
 
-
 # ---------------------------------------------------------------------------
 # Test utility: build a final (ContainerSpec, HostConfig) pair reflecting
 # what would be sent to dockerd.
@@ -256,7 +255,7 @@ def test_A6_spec_to_config_rejects_docker_sock_mount() -> None:
             )
         ],
     )
-    with pytest.raises(Exception):  # noqa: BLE001 — any exception is a pass
+    with pytest.raises(ValueError):
         DockerRuntime._spec_to_config(spec)
 
 

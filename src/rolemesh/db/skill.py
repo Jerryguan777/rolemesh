@@ -123,39 +123,38 @@ async def create_skill(
         raise ValueError(f"skill files must contain {SKILL_MANIFEST_NAME}")
     fc_json = json.dumps(frontmatter_common)
     fb_json = json.dumps(frontmatter_backend)
-    async with tenant_conn(tenant_id) as conn:
-        async with conn.transaction():
-            row = await conn.fetchrow(
-                """
+    async with tenant_conn(tenant_id) as conn, conn.transaction():
+        row = await conn.fetchrow(
+            """
                 INSERT INTO skills (tenant_id, name,
                                     frontmatter_common, frontmatter_backend,
                                     enabled, created_by_user_id)
                 VALUES ($1::uuid, $2, $3::jsonb, $4::jsonb, $5, $6::uuid)
                 RETURNING *
                 """,
-                tenant_id,
-                name,
-                fc_json,
-                fb_json,
-                enabled,
-                created_by_user_id,
-            )
-            assert row is not None
-            skill_id = row["id"]
-            await conn.executemany(
-                """
+            tenant_id,
+            name,
+            fc_json,
+            fb_json,
+            enabled,
+            created_by_user_id,
+        )
+        assert row is not None
+        skill_id = row["id"]
+        await conn.executemany(
+            """
                 INSERT INTO skill_files (skill_id, path, content, mime_type)
                 VALUES ($1::uuid, $2, $3, $4)
                 """,
-                [
-                    (skill_id, f.path, f.content, f.mime_type)
-                    for f in files.values()
-                ],
-            )
-            file_rows = await conn.fetch(
-                "SELECT * FROM skill_files WHERE skill_id = $1::uuid ORDER BY path",
-                skill_id,
-            )
+            [
+                (skill_id, f.path, f.content, f.mime_type)
+                for f in files.values()
+            ],
+        )
+        file_rows = await conn.fetch(
+            "SELECT * FROM skill_files WHERE skill_id = $1::uuid ORDER BY path",
+            skill_id,
+        )
     return _record_to_skill(row, [_record_to_skill_file(r) for r in file_rows])
 
 
@@ -187,47 +186,46 @@ async def create_skill_for_coworker(
         raise ValueError(f"skill files must contain {SKILL_MANIFEST_NAME}")
     fc_json = json.dumps(frontmatter_common)
     fb_json = json.dumps(frontmatter_backend)
-    async with tenant_conn(tenant_id) as conn:
-        async with conn.transaction():
-            row = await conn.fetchrow(
-                """
+    async with tenant_conn(tenant_id) as conn, conn.transaction():
+        row = await conn.fetchrow(
+            """
                 INSERT INTO skills (tenant_id, name,
                                     frontmatter_common, frontmatter_backend,
                                     enabled, created_by_user_id)
                 VALUES ($1::uuid, $2, $3::jsonb, $4::jsonb, $5, $6::uuid)
                 RETURNING *
                 """,
-                tenant_id,
-                name,
-                fc_json,
-                fb_json,
-                enabled,
-                created_by_user_id,
-            )
-            assert row is not None
-            skill_id = row["id"]
-            await conn.executemany(
-                """
+            tenant_id,
+            name,
+            fc_json,
+            fb_json,
+            enabled,
+            created_by_user_id,
+        )
+        assert row is not None
+        skill_id = row["id"]
+        await conn.executemany(
+            """
                 INSERT INTO skill_files (skill_id, path, content, mime_type)
                 VALUES ($1::uuid, $2, $3, $4)
                 """,
-                [
-                    (skill_id, f.path, f.content, f.mime_type)
-                    for f in files.values()
-                ],
-            )
-            await conn.execute(
-                """
+            [
+                (skill_id, f.path, f.content, f.mime_type)
+                for f in files.values()
+            ],
+        )
+        await conn.execute(
+            """
                 INSERT INTO coworker_skills (coworker_id, skill_id, enabled)
                 VALUES ($1::uuid, $2::uuid, TRUE)
                 """,
-                coworker_id,
-                skill_id,
-            )
-            file_rows = await conn.fetch(
-                "SELECT * FROM skill_files WHERE skill_id = $1::uuid ORDER BY path",
-                skill_id,
-            )
+            coworker_id,
+            skill_id,
+        )
+        file_rows = await conn.fetch(
+            "SELECT * FROM skill_files WHERE skill_id = $1::uuid ORDER BY path",
+            skill_id,
+        )
     return _record_to_skill(row, [_record_to_skill_file(r) for r in file_rows])
 
 

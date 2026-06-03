@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pi.ai.types import (
     AssistantMessage,
@@ -21,6 +20,9 @@ from pi.ai.types import (
     ToolResultMessage,
     Usage,
 )
+
+if TYPE_CHECKING:
+    import asyncio
 
 # ThinkingLevel for agents: extends pi.ai.ThinkingLevel with "off" (no reasoning)
 ThinkingLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh"]

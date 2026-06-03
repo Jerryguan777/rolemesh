@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pi.ai.models import calculate_cost
 from pi.ai.providers.transform_messages import transform_messages
@@ -33,6 +32,9 @@ from pi.ai.types import (
 )
 from pi.ai.utils.json_parse import parse_streaming_json
 from pi.ai.utils.sanitize_unicode import sanitize_surrogates
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator, Callable
 
 
 def _short_hash(s: str) -> str:

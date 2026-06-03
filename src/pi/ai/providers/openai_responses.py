@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import os
 import time
-from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pi.ai.env_api_keys import get_env_api_key
 from pi.ai.models import supports_xhigh
@@ -34,6 +33,9 @@ from pi.ai.types import (
     StreamOptions,
     Usage,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
 
 _OPENAI_TOOL_CALL_PROVIDERS: frozenset[str] = frozenset(["openai", "openai-codex", "opencode"])
 

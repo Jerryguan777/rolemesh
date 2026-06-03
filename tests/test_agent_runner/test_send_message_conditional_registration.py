@@ -126,7 +126,7 @@ def claude_recording_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _tool_names_claude(server: Any) -> list[str]:
-    return [getattr(t, "_tool_name") for t in server.tools]
+    return [t._tool_name for t in server.tools]
 
 
 def test_claude_interactive_container_excludes_send_message(

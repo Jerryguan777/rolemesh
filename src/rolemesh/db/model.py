@@ -15,12 +15,13 @@ decryption is the route layer's responsibility via
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from typing import TYPE_CHECKING
 
 from rolemesh.db._pool import admin_conn, tenant_conn
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     import asyncpg
 
 
@@ -74,7 +75,7 @@ class CredentialRow:
     updated_at: datetime
 
 
-def _record_to_model(row: "asyncpg.Record") -> ModelRow:
+def _record_to_model(row: asyncpg.Record) -> ModelRow:
     return ModelRow(
         id=str(row["id"]),
         provider=row["provider"],
@@ -82,7 +83,7 @@ def _record_to_model(row: "asyncpg.Record") -> ModelRow:
         model_family=row["model_family"],
         display_name=row["display_name"],
         is_active=bool(row["is_active"]),
-        created_at=row["created_at"] if "created_at" in row.keys() else None,
+        created_at=row.get("created_at", None),
     )
 
 

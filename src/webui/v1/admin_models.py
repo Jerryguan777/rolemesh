@@ -15,10 +15,11 @@ admin UI behind `me.role == "owner"` without having to special-case
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import asyncpg
 from fastapi import APIRouter, Depends, Response
 
-from rolemesh.auth.provider import AuthenticatedUser
 from rolemesh.db import (
     ModelRow,
     count_coworkers_using_model,
@@ -30,6 +31,9 @@ from rolemesh.db import (
 from webui.dependencies import get_current_user
 from webui.schemas_v1 import Model, ModelCreate, ModelUpdate
 from webui.v1.errors import ErrorResponseException, raise_error_response
+
+if TYPE_CHECKING:
+    from rolemesh.auth.provider import AuthenticatedUser
 
 router = APIRouter(prefix="/admin/models", tags=["Admin"])
 

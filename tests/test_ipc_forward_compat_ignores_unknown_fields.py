@@ -28,7 +28,6 @@ from rolemesh.ipc.web_protocol import (
     WebTypingMessage,
 )
 
-
 # ---------------------------------------------------------------------------
 # Forward-compat: unknown keys are dropped
 # ---------------------------------------------------------------------------

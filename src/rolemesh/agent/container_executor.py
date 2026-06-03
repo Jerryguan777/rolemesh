@@ -250,7 +250,7 @@ class ContainerAgentExecutor:
                         model_row.provider, model_row.provider,
                     )
                     pi_model_override = f"{pi_provider}/{model_row.model_id}"
-            except Exception:
+            except Exception:  # noqa: BLE001
                 logger.warning(
                     "Pi model_id resolution failed; falling back to "
                     "host PI_MODEL_ID",

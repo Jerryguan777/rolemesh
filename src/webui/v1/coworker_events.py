@@ -31,10 +31,10 @@ if TYPE_CHECKING:
 logger = get_logger()
 
 
-_js: "JetStreamContext | None" = None
+_js: JetStreamContext | None = None
 
 
-def set_jetstream(js: "JetStreamContext | None") -> None:
+def set_jetstream(js: JetStreamContext | None) -> None:
     """Attach or detach the process-wide JetStream context.
 
     Called from ``webui.main.lifespan`` after the connection comes
@@ -66,7 +66,7 @@ async def publish_coworker_restart(
     payload = json.dumps({"coworker_id": coworker_id, "tenant_id": tenant_id})
     try:
         await _js.publish(WEB_COWORKER_RESTART_SUBJECT, payload.encode("utf-8"))
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.warning(
             "Failed to publish web.coworker.restart; relying on next restart",
             coworker_id=coworker_id,
@@ -99,7 +99,7 @@ async def publish_coworker_skills_changed(
         await _js.publish(
             WEB_COWORKER_SKILLS_CHANGED_SUBJECT, payload.encode("utf-8"),
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.warning(
             "Failed to publish web.coworker.skills_changed",
             coworker_id=coworker_id,
@@ -133,7 +133,7 @@ async def publish_coworker_mcp_changed(
         await _js.publish(
             WEB_COWORKER_MCP_CHANGED_SUBJECT, payload.encode("utf-8"),
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.warning(
             "Failed to publish web.coworker.mcp_changed",
             coworker_id=coworker_id,

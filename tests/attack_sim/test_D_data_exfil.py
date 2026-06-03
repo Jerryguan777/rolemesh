@@ -15,8 +15,7 @@ from __future__ import annotations
 import pytest
 
 import rolemesh.agent  # noqa: F401  import for side-effect (see test_B)
-
-from rolemesh.safety.types import SafetyContext, Stage  # noqa: E402
+from rolemesh.safety.types import SafetyContext, Stage
 
 
 def _tool_ctx(tool_name: str, tool_input: dict) -> SafetyContext:

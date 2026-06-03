@@ -21,10 +21,10 @@ operations. Cross-user identity access is prevented at the DB layer
 from __future__ import annotations
 
 import uuid as _uuid
+from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, Response
 
-from rolemesh.auth.provider import AuthenticatedUser
 from rolemesh.db import (
     create_link_token,
     delete_channel_identity,
@@ -34,6 +34,9 @@ from rolemesh.db import (
 from webui.dependencies import get_current_user
 from webui.schemas_v1 import ChannelLinkIdentity, ChannelLinkToken
 from webui.v1.errors import raise_error_response
+
+if TYPE_CHECKING:
+    from rolemesh.auth.provider import AuthenticatedUser
 
 router = APIRouter(tags=["Auth"])
 

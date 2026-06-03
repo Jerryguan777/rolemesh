@@ -6,9 +6,10 @@ Ported from packages/ai/src/utils/oauth/types.ts.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
-from pi.ai.types import Model
+if TYPE_CHECKING:
+    from pi.ai.types import Model
 
 
 @dataclass

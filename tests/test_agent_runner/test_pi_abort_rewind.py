@@ -34,10 +34,7 @@ This file now tests the mechanism at two levels:
 from __future__ import annotations
 
 import asyncio
-import dataclasses
-from collections.abc import AsyncGenerator
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -54,6 +51,10 @@ from pi.ai.types import (
 )
 from pi.coding_agent.core.agent_session import AgentSession, AgentSessionConfig
 from pi.coding_agent.core.session_manager import SessionManager
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+    from pathlib import Path
 
 
 def _assistant(text: str, stop_reason: str = "stop") -> AssistantMessage:
@@ -317,9 +318,9 @@ async def test_abort_during_real_prompt_rewinds_session(tmp_path: Path) -> None:
     # Fire the Q1 prompt on a background task; it blocks inside stream_fn
     # on options.signal.wait() until abort is called.
     async def _run_q1() -> None:
-        try:
+        try:  # noqa: SIM105
             await session.prompt("Q1 gets aborted")
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass  # abort raises inside the stream; swallow here
 
     prompt_task = asyncio.create_task(_run_q1())

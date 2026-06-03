@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from pi.agent.types import AgentMessage
+if TYPE_CHECKING:
+    from pi.agent.types import AgentMessage
 
 # ============================================================================
 # File Operation Tracking

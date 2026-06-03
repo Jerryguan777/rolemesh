@@ -2,18 +2,20 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pi.agent.types import AgentTool, AgentToolResult, AgentToolUpdateCallback
 from pi.ai.types import ImageContent, TextContent
 
 from .path_utils import resolve_read_path
 from .truncate import DEFAULT_MAX_BYTES, TruncationResult, format_size, truncate_head
+
+if TYPE_CHECKING:
+    import asyncio
+    from collections.abc import Awaitable, Callable
 
 
 @dataclass

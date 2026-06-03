@@ -192,7 +192,7 @@ async def test_start_unique_violation_branch_still_marks_token_used() -> None:
     assert replay is None, "token must be marked used on UNIQUE branch too"
     # A's link is still intact (no DB corruption).
     a_links = await list_channel_identities_for_user(uid_a, tid)
-    assert {l.channel_id for l in a_links} == {"555"}
+    assert {link.channel_id for link in a_links} == {"555"}
 
 
 async def test_start_missing_chat_or_user_no_op() -> None:

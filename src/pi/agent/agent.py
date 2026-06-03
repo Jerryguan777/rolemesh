@@ -6,8 +6,7 @@ import asyncio
 import dataclasses
 import logging
 import time
-from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pi.agent.agent_loop import agent_loop, agent_loop_continue
 from pi.agent.types import (
@@ -39,6 +38,9 @@ from pi.ai.types import (
     Transport,
     UserMessage,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def _default_convert_to_llm(messages: list[AgentMessage]) -> list[Message]:

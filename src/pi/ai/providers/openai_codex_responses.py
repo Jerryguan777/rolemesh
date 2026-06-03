@@ -9,9 +9,8 @@ import json
 import os
 import re
 import time
-from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import httpx
 
@@ -37,6 +36,9 @@ from pi.ai.types import (
     StreamOptions,
     Usage,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
 
 # ---------------------------------------------------------------------------
 # Constants

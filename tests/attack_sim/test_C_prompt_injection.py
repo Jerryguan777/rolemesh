@@ -23,7 +23,6 @@ pytestmark = skip_without_safety_ml
 
 # Force the module import graph in the right order (same fix as test_B).
 import rolemesh.agent  # noqa: F401, E402
-
 from rolemesh.safety.types import SafetyContext, Stage  # noqa: E402
 
 

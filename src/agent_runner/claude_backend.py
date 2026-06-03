@@ -18,13 +18,10 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from claude_agent_sdk import ClaudeAgentOptions, HookMatcher, ToolUseBlock, query
-
-from rolemesh.ipc.protocol import AgentInitData, McpServerSpec
 
 from .backend import (
     BackendEvent,
@@ -48,7 +45,13 @@ from .hooks import (
 )
 from .message_stream import MessageStream
 from .tools.claude_adapter import create_rolemesh_mcp_server
-from .tools.context import ToolContext
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from rolemesh.ipc.protocol import AgentInitData, McpServerSpec
+
+    from .tools.context import ToolContext
 
 
 def _log(message: str) -> None:

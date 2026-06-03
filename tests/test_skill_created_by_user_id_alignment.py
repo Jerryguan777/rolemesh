@@ -25,7 +25,6 @@ import pytest
 from rolemesh.core.types import Skill
 from webui.schemas import SkillResponse
 
-
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 

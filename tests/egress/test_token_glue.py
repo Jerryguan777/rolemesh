@@ -17,7 +17,6 @@ import pytest
 from rolemesh.egress.orch_glue import start_token_responder
 from rolemesh.egress.remote_token_vault import TOKEN_ACCESS_REQUEST_SUBJECT
 
-
 # ---------------------------------------------------------------------------
 # Test doubles
 # ---------------------------------------------------------------------------

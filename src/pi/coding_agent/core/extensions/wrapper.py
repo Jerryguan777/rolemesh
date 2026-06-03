@@ -5,12 +5,15 @@ Port of packages/coding-agent/src/core/extensions/wrapper.ts.
 
 from __future__ import annotations
 
-import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pi.agent.types import AgentTool, AgentToolResult, AgentToolUpdateCallback
-from pi.coding_agent.core.extensions.runner import ExtensionRunner
 from pi.coding_agent.core.extensions.types import RegisteredTool, ToolCallEvent, ToolResultEvent
+
+if TYPE_CHECKING:
+    import asyncio
+
+    from pi.coding_agent.core.extensions.runner import ExtensionRunner
 
 
 class _WrappedRegisteredTool(AgentTool):

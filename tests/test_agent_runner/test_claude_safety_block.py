@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import sys
 import types
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 # Stub claude_agent_sdk BEFORE importing claude_backend.
 _fake_sdk = types.ModuleType("claude_agent_sdk")
@@ -48,8 +48,10 @@ sys.modules.setdefault("claude_agent_sdk", _fake_sdk)
 
 
 from agent_runner import claude_backend  # noqa: E402
-from agent_runner.backend import SafetyBlockEvent  # noqa: E402
 from agent_runner.hooks import HookRegistry, UserPromptEvent, UserPromptVerdict  # noqa: E402
+
+if TYPE_CHECKING:
+    from agent_runner.backend import SafetyBlockEvent
 
 
 class _FixedHookMatcher:
