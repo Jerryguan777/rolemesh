@@ -74,7 +74,7 @@ async def publish_mcp_server_changed(*, action: str, row: MCPServerRow) -> None:
         await publish_mcp_registry_changed(
             nc, action=action, entry=_build_entry(row),
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.warning(
             "Failed to publish egress.mcp.changed",
             action=action,
@@ -92,7 +92,7 @@ async def publish_mcp_server_deleted(*, name: str) -> None:
 
     try:
         await publish_mcp_registry_changed(nc, action="deleted", name=name)
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.warning(
             "Failed to publish egress.mcp.changed (deleted)",
             name=name,

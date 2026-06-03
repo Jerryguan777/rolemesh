@@ -194,9 +194,9 @@ def test_agent_backend_config_frozen() -> None:
 
 
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING  # noqa: E402
 
-from rolemesh.agent.executor import _pi_extra_env
+from rolemesh.agent.executor import _pi_extra_env  # noqa: E402
 
 if TYPE_CHECKING:
     import pytest

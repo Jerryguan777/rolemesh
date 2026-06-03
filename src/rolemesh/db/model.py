@@ -83,7 +83,7 @@ def _record_to_model(row: asyncpg.Record) -> ModelRow:
         model_family=row["model_family"],
         display_name=row["display_name"],
         is_active=bool(row["is_active"]),
-        created_at=row["created_at"] if "created_at" in row else None,
+        created_at=row.get("created_at", None),
     )
 
 

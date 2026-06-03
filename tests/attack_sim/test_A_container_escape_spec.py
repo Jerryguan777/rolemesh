@@ -255,7 +255,7 @@ def test_A6_spec_to_config_rejects_docker_sock_mount() -> None:
             )
         ],
     )
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         DockerRuntime._spec_to_config(spec)
 
 

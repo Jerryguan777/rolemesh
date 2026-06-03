@@ -99,7 +99,7 @@ async def put_credential_endpoint(
             await coworker_events.publish_coworker_restart(
                 coworker_id=cid, tenant_id=user.tenant_id,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.warning(
                 "Failed to publish web.coworker.restart after credential PUT",
                 coworker_id=cid,

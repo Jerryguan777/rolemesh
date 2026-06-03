@@ -546,7 +546,7 @@ class PiBackend:
                 # Override model.base_url to route through credential proxy.
                 # Pi models have hardcoded base_urls (e.g. "https://api.openai.com/v1")
                 # which bypass the proxy. We replace them with the proxy URL from env vars.
-                _PROXY_ENV_MAP = {
+                _PROXY_ENV_MAP = {  # noqa: N806
                     "openai": "OPENAI_BASE_URL",
                     "anthropic": "ANTHROPIC_BASE_URL",
                 }
@@ -850,7 +850,7 @@ class PiBackend:
                 await self._session.prompt(prompt_text, streaming_behavior="followUp")
             else:
                 await self._session.prompt(prompt_text)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             _log(f"Follow-up error: {exc}")
 
     async def abort(self) -> None:

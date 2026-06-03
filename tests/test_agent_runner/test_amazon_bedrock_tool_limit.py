@@ -17,8 +17,8 @@ import pytest
 # boto3 baked in.
 boto3 = pytest.importorskip("boto3")
 
-from pi.ai.providers.amazon_bedrock import _convert_tool_config
-from pi.ai.types import Tool
+from pi.ai.providers.amazon_bedrock import _convert_tool_config  # noqa: E402
+from pi.ai.types import Tool  # noqa: E402
 
 
 def _tool(name: str) -> Tool:

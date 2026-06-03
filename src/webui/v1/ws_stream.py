@@ -284,7 +284,7 @@ async def _terminate_run_completed(
             await terminate_run_via_ws_completed(
                 run_id=run_id, usage=usage_dict, conn=conn
             )
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.warning(
             "ws_stream: terminator UPDATE failed (run stays 'running'); "
             "investigate orchestrator side",
@@ -302,7 +302,7 @@ async def _terminate_run_errored(
             await terminate_run_via_ws_error(
                 run_id=run_id, error=error, conn=conn
             )
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.warning(
             "ws_stream: error terminator UPDATE failed",
             run_id=run_id,
@@ -727,7 +727,7 @@ async def _handle_request_run(
             await js.publish(
                 f"web.inbound.{binding_id}", inbound.to_bytes()
             )
-        except Exception:  # NATS hiccup — log but don't strand the run
+        except Exception:  # NATS hiccup — log but don't strand the run  # noqa: BLE001
             logger.warning(
                 "ws_stream: NATS publish failed; run row stays running",
                 run_id=run_id,

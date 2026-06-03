@@ -318,9 +318,9 @@ async def test_abort_during_real_prompt_rewinds_session(tmp_path: Path) -> None:
     # Fire the Q1 prompt on a background task; it blocks inside stream_fn
     # on options.signal.wait() until abort is called.
     async def _run_q1() -> None:
-        try:
+        try:  # noqa: SIM105
             await session.prompt("Q1 gets aborted")
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass  # abort raises inside the stream; swallow here
 
     prompt_task = asyncio.create_task(_run_q1())

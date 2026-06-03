@@ -84,7 +84,7 @@ class _MockRuntime:
 async def _nats_available() -> bool:
     try:
         nc = await nats.connect(NATS_URL, connect_timeout=2)
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False
     await nc.close()
     return True
@@ -137,7 +137,7 @@ async def _connect_js() -> tuple[Any, Any]:
         await js.add_stream(
             StreamConfig(name="web-ipc", subjects=["web.>"], max_age=3600.0)
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
         await js.update_stream(
             StreamConfig(name="web-ipc", subjects=["web.>"], max_age=3600.0)
         )

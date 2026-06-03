@@ -294,7 +294,7 @@ async def test_delete_skill_file_refuses_skill_md() -> None:
         frontmatter_common={"description": _GOOD_DESC},
         frontmatter_backend={}, files=_basic_files(),
     )
-    with pytest.raises(ValueError, match="SKILL.md cannot be deleted"):
+    with pytest.raises(ValueError, match=r"SKILL\.md cannot be deleted"):
         await delete_skill_file(s.id, "SKILL.md", tenant_id=tenant_id)
 
 
@@ -335,7 +335,7 @@ async def test_delete_skill_cascades_to_files() -> None:
 
 async def test_create_without_skill_md_is_rejected() -> None:
     tenant_id, coworker_id = await _make_tenant_with_coworker("inv")
-    with pytest.raises(ValueError, match="SKILL.md"):
+    with pytest.raises(ValueError, match=r"SKILL\.md"):
         await create_skill_for_coworker(
             tenant_id=tenant_id, coworker_id=coworker_id, name="x",
             frontmatter_common={"description": _GOOD_DESC},
@@ -351,7 +351,7 @@ async def test_update_with_files_missing_skill_md_is_rejected() -> None:
         frontmatter_common={"description": _GOOD_DESC},
         frontmatter_backend={}, files=_basic_files(),
     )
-    with pytest.raises(ValueError, match="SKILL.md"):
+    with pytest.raises(ValueError, match=r"SKILL\.md"):
         await update_skill(
             s.id,
             tenant_id=tenant_id,

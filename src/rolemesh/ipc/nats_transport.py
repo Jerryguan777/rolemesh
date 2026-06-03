@@ -98,7 +98,7 @@ class NatsTransport:
         )
         try:
             await self._js.add_stream(agent_stream)
-        except Exception:
+        except Exception:  # noqa: BLE001
             # Stream already exists with different config (e.g. older deploy
             # didn't include agent.*.interrupt) — update it instead of failing.
             await self._js.update_stream(agent_stream)

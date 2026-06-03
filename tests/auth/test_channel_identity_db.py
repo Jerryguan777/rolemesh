@@ -191,8 +191,8 @@ async def test_list_channel_identities_scoped_to_user_and_tenant() -> None:
     await create_channel_identity(tid_b, "telegram", "beta", uid_b)
     a_links = await list_channel_identities_for_user(uid_a, tid_a)
     b_links = await list_channel_identities_for_user(uid_b, tid_b)
-    assert {l.channel_id for l in a_links} == {"alpha"}
-    assert {l.channel_id for l in b_links} == {"beta"}
+    assert {link.channel_id for link in a_links} == {"alpha"}
+    assert {link.channel_id for link in b_links} == {"beta"}
 
 
 async def test_unbind_then_relink_with_new_token_succeeds() -> None:
@@ -213,7 +213,7 @@ async def test_unbind_then_relink_with_new_token_succeeds() -> None:
     assert new_identity.id != identity.id
     # And only the new row is live.
     links = await list_channel_identities_for_user(uid, tid)
-    assert [l.id for l in links] == [new_identity.id]
+    assert [link.id for link in links] == [new_identity.id]
 
 
 async def test_delete_channel_identity_nulls_corresponding_conv_user_id() -> None:
@@ -352,7 +352,7 @@ async def test_delete_channel_identity_rejects_other_users_id() -> None:
     assert deleted is False, "user B must not be able to delete user A's link"
     # And the row really still exists.
     links = await list_channel_identities_for_user(uid_a, tid)
-    assert any(l.id == identity.id for l in links)
+    assert any(link.id == identity.id for link in links)
 
 
 # ---------------------------------------------------------------------------

@@ -30,17 +30,17 @@ from nats.js.api import StreamConfig
 # from PR runs; nightly / explicit ``-m integration`` flips it on.
 pytestmark = pytest.mark.integration
 
-import contextlib
+import contextlib  # noqa: E402
 
-from agent_runner.backend import BackendEvent, ResultEvent, SessionInitEvent
-from agent_runner.main import (
+from agent_runner.backend import BackendEvent, ResultEvent, SessionInitEvent  # noqa: E402
+from agent_runner.main import (  # noqa: E402
     ContainerOutput,
     drain_nats_input,
     publish_output,
     run_query_loop,
 )
-from agent_runner.tools.context import ToolContext
-from rolemesh.ipc.protocol import AgentInitData
+from agent_runner.tools.context import ToolContext  # noqa: E402
+from rolemesh.ipc.protocol import AgentInitData  # noqa: E402
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -132,7 +132,7 @@ async def nats_conn():
     )
     try:
         await js.add_stream(cfg)
-    except Exception:
+    except Exception:  # noqa: BLE001
         # Stream already exists with a stale subject list — update in place
         # so the new agent.*.interrupt subject gets routed.
         await js.update_stream(cfg)
@@ -487,7 +487,7 @@ class TestBridgeFullCycle:
                     msg = await asyncio.wait_for(sub.next_msg(timeout=2), timeout=3)
                     await msg.ack()
                     results.append(json.loads(msg.data))
-                except Exception:
+                except Exception:  # noqa: BLE001
                     break
 
             # Close to exit

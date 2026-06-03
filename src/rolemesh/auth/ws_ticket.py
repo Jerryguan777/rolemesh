@@ -57,7 +57,7 @@ class WsTicketError(Exception):
             self.code = code
 
 
-class WsTicketExpired(WsTicketError):
+class WsTicketExpired(WsTicketError):  # noqa: N818
     code = "WS_TICKET_EXPIRED"
 
 

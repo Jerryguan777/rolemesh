@@ -104,7 +104,7 @@ async def _handle_cancel_event(
     if container_name is not None:
         try:
             await runtime.stop(container_name)
-        except Exception:
+        except Exception:  # noqa: BLE001
             # runtime.stop can fail for benign reasons — container
             # already gone, docker daemon hiccup, etc. We do NOT
             # raise: the state machine still needs to advance to

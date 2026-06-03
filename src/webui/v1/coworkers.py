@@ -179,12 +179,12 @@ async def create_coworker_endpoint(
     # gap: without this publish, the orchestrator's in-memory state
     # missed CREATEd coworkers and ``_handle_incoming`` silently dropped
     # every inbound message routed at them.
-    try:
+    try:  # noqa: SIM105
         await coworker_events.publish_coworker_restart(
             coworker_id=cw.id,
             tenant_id=user.tenant_id,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001
         # Same best-effort posture as PATCH — DB row is the source of
         # truth, the next process boot picks it up.
         pass

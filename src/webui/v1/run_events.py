@@ -77,7 +77,7 @@ async def publish_run_cancel(
     )
     try:
         await _js.publish(_subject_for(run_id), payload.encode("utf-8"))
-    except Exception:
+    except Exception:  # noqa: BLE001
         logger.warning(
             "Failed to publish web.run.cancel; run may remain running",
             run_id=run_id,

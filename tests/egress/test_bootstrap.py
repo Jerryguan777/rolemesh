@@ -82,7 +82,7 @@ def _make_gateway_inspect(
 ) -> dict[str, Any]:
     """Mimic the shape ``aiodocker.DockerContainer.show()`` returns."""
     networks: dict[str, Any]
-    if ip is not None:
+    if ip is not None:  # noqa: SIM108
         networks = {network_name: {"IPAddress": ip}}
     else:
         networks = {network_name: {}}  # exists but empty
