@@ -72,18 +72,12 @@ jobs:
         if: steps.spacy-cache.outputs.cache-hit != 'true'
         run: uv run python -m spacy download en_core_web_sm
 
-      # Ruff currently runs informationally — the project's ruff.toml
-      # selects TCH/BLE rules that have ~15 pre-existing baseline
-      # violations from before any CI gate existed. Hard-failing on them
-      # would block every PR (including this one) until a dedicated
-      # baseline-cleanup PR lands. Track that work separately; for now
-      # surface the warnings in the log so reviewers can see them, but
-      # let the run continue to pytest, which IS the load-bearing gate.
-      # Promote to hard failure (drop continue-on-error) once the
-      # baseline is clean.
+      # Ruff is a hard gate. The baseline was cleaned to zero (592 -> 0:
+      # safe autofixes, FastAPI/unicode config, vendored src/pi excluded,
+      # type-only imports guarded, and intentional blind-except / importorskip
+      # sites grandfathered with # noqa), so any NEW violation fails CI.
       - name: Ruff lint
         run: uv run ruff check src/ tests/
-        continue-on-error: true
 
       # --maxfail=10 stops cascades when one fixture bug takes out a
       # whole subtree, so the failure list stays readable.
