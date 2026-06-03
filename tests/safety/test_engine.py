@@ -74,7 +74,12 @@ class TestLoadRules:
             check_id="pii.regex", config={}, enabled=False,
         )
         engine = SafetyEngine(audit_sink=_CaptureSink())
-        assert await engine.load_rules_for_coworker(tenant.id, cw.id) == []
+        rules = await engine.load_rules_for_coworker(tenant.id, cw.id)
+        # The disabled tenant rule (the only pre_tool_call rule here) must
+        # be excluded. Platform default rules are always merged in and are
+        # unrelated — none of them binds to pre_tool_call — so we assert on
+        # the disabled rule's absence rather than an empty list.
+        assert all(r["stage"] != "pre_tool_call" for r in rules)
 
 
 class TestHandleSafetyEvent:

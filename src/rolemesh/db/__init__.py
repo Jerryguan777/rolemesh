@@ -19,6 +19,7 @@ from rolemesh.db.coworker_mcp import *  # noqa: F403
 from rolemesh.db.legacy import *  # noqa: F403
 from rolemesh.db.mcp_server import *  # noqa: F403
 from rolemesh.db.model import *  # noqa: F403
+from rolemesh.db.platform_safety import *  # noqa: F403
 from rolemesh.db.safety import *  # noqa: F403
 from rolemesh.db.schema import *  # noqa: F403
 from rolemesh.db.skill import *  # noqa: F403

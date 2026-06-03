@@ -77,6 +77,88 @@ async def _seed_reference_data(
             provider, model_id, family, display,
         )
 
+    # ----- Platform safety rules seed (default tier) ----------------------
+    await _seed_platform_safety_rules(conn)
+
+
+# Default-tier platform safety rules: "industry best-practice" detections
+# the platform ships ON for every tenant. Tenants cannot loosen them (the
+# table is read-only to the business role and the pipeline is monotonic —
+# adding a tenant rule can only add restrictions); a tenant tightens by
+# adding their own stricter ``safety_rules`` rows alongside.
+#
+# Config / action posture:
+#   - secret_scanner / prompt_injection / jailbreak / toxicity ship their
+#     natural ``block`` verdict — credential leakage, injection, known
+#     jailbreak phrases and toxic output are unambiguous platform risks.
+#   - pii.regex ships a non-disruptive ``warn`` baseline scoped to high-
+#     confidence identifiers (SSN / credit card). PII appears legitimately
+#     in prompts constantly, so a cross-tenant DEFAULT only surfaces it;
+#     a tenant can tighten warn→block by adding their own rule. EMAIL /
+#     PHONE / IP are deliberately left off the baseline (too false-
+#     positive-prone for an all-tenant default).
+#
+# Stages bind to wired hooks only: INPUT_PROMPT (container-side) and
+# MODEL_OUTPUT (orchestrator-side). Slow checks reach the orchestrator
+# registry via RemoteCheck / the in-process MODEL_OUTPUT pipeline.
+#
+# Tuple shape: (check_id, stage, config, priority, description).
+_PLATFORM_DEFAULT_RULES: list[tuple[str, str, dict[str, object], int, str]] = [
+    (
+        "secret_scanner", "model_output", {}, 1000,
+        "Block credential / API-key leakage in model output.",
+    ),
+    (
+        "pii.regex", "input_prompt",
+        {
+            "patterns": {"SSN": True, "CREDIT_CARD": True},
+            "action_override": "warn",
+        },
+        1000,
+        "Surface high-confidence PII (SSN / credit card) in user prompts.",
+    ),
+    (
+        "llm_guard.prompt_injection", "input_prompt", {"threshold": 0.9}, 1000,
+        "Block prompt-injection attempts in user prompts (OWASP LLM01).",
+    ),
+    (
+        "llm_guard.jailbreak", "input_prompt", {}, 1000,
+        "Block known jailbreak phrases in user prompts.",
+    ),
+    (
+        "llm_guard.toxicity", "model_output", {"threshold": 0.7}, 1000,
+        "Block toxic model output.",
+    ),
+]
+
+
+async def _seed_platform_safety_rules(
+    conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record],
+) -> None:
+    """Idempotent seed of the 5 default-tier platform safety rules.
+
+    Keyed on the UNIQUE ``(tier, check_id, stage)`` identity so re-runs
+    and post-``TRUNCATE`` re-seeds (``_reset_test_data``) are safe. Only
+    the ``default`` tier is seeded this phase; ``floor`` /
+    ``transparent_floor`` are carried in the schema for future use.
+    """
+    import json
+
+    for check_id, stage, config, priority, description in _PLATFORM_DEFAULT_RULES:
+        await conn.execute(
+            """
+            INSERT INTO platform_safety_rules
+                (tier, stage, check_id, config, priority, description)
+            VALUES ('default', $1, $2, $3::jsonb, $4, $5)
+            ON CONFLICT (tier, check_id, stage) DO NOTHING
+            """,
+            stage,
+            check_id,
+            json.dumps(config),
+            priority,
+            description,
+        )
+
 
 async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record]) -> None:
     """Create tables and indexes.
@@ -1028,6 +1110,52 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         "ON safety_rules (coworker_id) WHERE coworker_id IS NOT NULL"
     )
 
+    # --- Platform-level safety rules (cross-tenant, platform-owned) ---
+    # Platform-defined rules that apply across ALL tenants, owned by the
+    # platform rather than any tenant admin. Deliberately carries NO
+    # tenant_id / coworker_id: a platform rule is cross-tenant and all-
+    # coworker by definition. Mirrors the ``models`` catalog shape
+    # (platform-level, no RLS). The loader stamps the running job's
+    # tenant_id onto each snapshot at load time so the Safety Pipeline —
+    # which stays UNTOUCHED — treats platform and tenant rules
+    # identically. Access: the business role (rolemesh_app) may SELECT
+    # (the tenant-facing read API runs on that pool and must surface
+    # visible platform rules) but never write — see the REVOKE in the
+    # RLS section below. Writes go through admin_conn only.
+    #
+    # ``tier`` carries the three-tier model (see docs/15-safety-*):
+    #   - floor             : invisible + immutable to tenants
+    #   - transparent_floor : visible + immutable
+    #   - default           : visible; tenants cannot loosen but may add
+    #                         their own stricter tenant rules alongside
+    # This phase only seeds ``default`` rows; floor / transparent_floor
+    # are carried in the schema for future use.
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS platform_safety_rules (
+            id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            tier            TEXT NOT NULL
+                            CHECK (tier IN ('floor', 'transparent_floor', 'default')),
+            stage           TEXT NOT NULL,
+            check_id        TEXT NOT NULL,
+            config          JSONB NOT NULL DEFAULT '{}'::jsonb,
+            priority        INTEGER NOT NULL DEFAULT 1000,
+            enabled         BOOLEAN NOT NULL DEFAULT TRUE,
+            description     TEXT NOT NULL DEFAULT '',
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+    """)
+    # Identity for the idempotent seed: one platform rule per
+    # (tier, check_id, stage). The seed's ON CONFLICT keys on this.
+    await conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_platform_safety_rules_identity "
+        "ON platform_safety_rules (tier, check_id, stage)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_platform_safety_rules_active "
+        "ON platform_safety_rules (enabled, stage)"
+    )
+
     # Per-decision audit rows. We store only a SHA-256 digest of the
     # payload + a short human summary (tool name, prompt prefix) — not
     # the original text — so the audit table cannot double as a PII
@@ -1046,6 +1174,7 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             findings              JSONB NOT NULL DEFAULT '[]'::jsonb,
             context_digest        TEXT NOT NULL DEFAULT '',
             context_summary       TEXT NOT NULL DEFAULT '',
+            source                TEXT NOT NULL DEFAULT 'tenant',
             created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
         )
     """)
@@ -1053,6 +1182,14 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     # subsystem. Drop the column if an earlier deployment created it.
     await conn.execute(
         "ALTER TABLE safety_decisions DROP COLUMN IF EXISTS approval_context"
+    )
+    # ``source`` ('tenant' | 'platform') lets operators tell platform-rule
+    # hits from tenant-rule hits at a glance. Forward-migrate existing
+    # deployments. Populated at write time (see db.safety.insert_safety_
+    # decision) without touching the pipeline.
+    await conn.execute(
+        "ALTER TABLE safety_decisions "
+        "ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'tenant'"
     )
     await conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_safety_decisions_tenant_time "
@@ -1360,6 +1497,16 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     # second layer; the GRANT is the first.
     await conn.execute("REVOKE ALL ON external_tenant_map FROM rolemesh_app")
     await conn.execute("REVOKE ALL ON tenants FROM rolemesh_app")
+    # platform_safety_rules is a platform-owned catalog. Unlike tenants /
+    # external_tenant_map (full REVOKE), the business role KEEPS SELECT —
+    # the tenant-facing read API runs on rolemesh_app and must surface
+    # visible platform rules within its own pool (webui never uses
+    # admin_conn). It must never WRITE: platform rules are managed via
+    # admin_conn only. Floor-tier invisibility is enforced in the app-
+    # layer projection, not by this grant.
+    await conn.execute(
+        "REVOKE INSERT, UPDATE, DELETE ON platform_safety_rules FROM rolemesh_app"
+    )
 
     # Future tables created by migrations should inherit the same privs
     # automatically so we don't have to remember to GRANT after each DDL.

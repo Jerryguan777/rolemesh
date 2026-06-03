@@ -354,19 +354,35 @@ async def insert_safety_decision(
     Called by the safety_events subscriber for every decision the
     container publishes. Never raises on per-row validation — malformed
     inputs should be filtered upstream in ``SafetyEngine.handle_safety_event``.
+
+    ``source`` ('tenant' | 'platform') is derived here — NOT in the
+    pipeline — by checking whether any triggered rule id belongs to the
+    platform-owned ``platform_safety_rules`` catalog. ``rolemesh_app``
+    holds SELECT on that RLS-free table, so this is a single cheap EXISTS
+    inside the same connection. Keeping the derivation at the write layer
+    is what lets ``pipeline_core`` stay byte-unchanged.
     """
     async with tenant_conn(tenant_id) as conn:
+        source = "tenant"
+        if triggered_rule_ids:
+            is_platform = await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM platform_safety_rules "
+                "WHERE id = ANY($1::uuid[]))",
+                triggered_rule_ids,
+            )
+            if is_platform:
+                source = "platform"
         row = await conn.fetchrow(
             """
             INSERT INTO safety_decisions (
                 tenant_id, coworker_id, conversation_id, job_id,
                 stage, verdict_action, triggered_rule_ids,
-                findings, context_digest, context_summary
+                findings, context_digest, context_summary, source
             )
             VALUES (
                 $1::uuid, $2::uuid, $3, $4,
                 $5, $6, $7::uuid[],
-                $8::jsonb, $9, $10
+                $8::jsonb, $9, $10, $11
             )
             RETURNING id
             """,
@@ -380,6 +396,7 @@ async def insert_safety_decision(
             json.dumps(findings),
             context_digest,
             context_summary,
+            source,
         )
     assert row is not None
     return str(row["id"])
@@ -509,6 +526,7 @@ async def get_safety_decision(
         "findings": findings if isinstance(findings, list) else [],
         "context_digest": row["context_digest"],
         "context_summary": row["context_summary"],
+        "source": row["source"],
         "created_at": row["created_at"].isoformat() if row["created_at"] else "",
     }
 
@@ -628,6 +646,7 @@ async def list_safety_decisions(
                 "findings": findings if isinstance(findings, list) else [],
                 "context_digest": r["context_digest"],
                 "context_summary": r["context_summary"],
+                "source": r["source"],
                 "created_at": r["created_at"].isoformat() if r["created_at"] else "",
             }
         )

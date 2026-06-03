@@ -34,6 +34,17 @@ except ModuleNotFoundError:
     # code path still works when asyncpg + pg ARE present.
     pass
 
+# Same orchestrator-only import discipline for the platform-rule reader.
+# Exposed at module scope so orchestrator tests can
+# ``monkeypatch.setattr(loader, "fetch_platform_rule_snapshots", ...)``;
+# the agent container hits the ModuleNotFoundError fallback (it never
+# calls fetch_safety_rule_snapshots — it receives the merged snapshot via
+# AgentInitData).
+try:  # noqa: SIM105
+    from rolemesh.db.platform_safety import fetch_platform_rule_snapshots  # noqa: F401
+except ModuleNotFoundError:
+    pass
+
 if TYPE_CHECKING:
     from agent_runner.hooks.registry import HookRegistry
     from agent_runner.tools.context import ToolContext
@@ -85,6 +96,10 @@ async def fetch_safety_rule_snapshots(
 
     ``list_safety_rules_for_coworker`` already filters ``enabled=TRUE``
     in SQL, so no application-side filter is needed here.
+
+    Platform-level rules (``platform_safety_rules``) are merged in after
+    the tenant rules — this is the single seam where cross-tenant rules
+    enter the snapshot, keeping the pipeline oblivious to their origin.
     """
     # Resolve via ``globals()`` so orchestrator tests that
     # ``monkeypatch.setattr(loader, "list_safety_rules_for_coworker",
@@ -101,7 +116,21 @@ async def fetch_safety_rule_snapshots(
             "rolemesh.db is not packaged in this environment"
         )
     rules = await fn(tenant_id, coworker_id)
-    return [r.to_snapshot_dict() for r in rules]
+    snapshots = [r.to_snapshot_dict() for r in rules]
+
+    # Merge platform-level rules (cross-tenant, platform-owned) at this
+    # single seam. They are stamped with the running job's tenant_id (for
+    # audit attribution) and coworker_id=None (all coworkers). The Safety
+    # Pipeline is UNTOUCHED — it treats these snapshots identically to
+    # tenant rules; tenant rules cannot loosen them (the pipeline is
+    # monotonic and the platform table is read-only to the business
+    # role). Resolved via ``globals()`` so tests can monkeypatch the
+    # module attribute; ``None`` only in the agent container, which never
+    # reaches this function.
+    platform_fn = globals().get("fetch_platform_rule_snapshots")
+    if platform_fn is not None:
+        snapshots.extend(await platform_fn(tenant_id))
+    return snapshots
 
 
 async def load_safety_rules_snapshot(
