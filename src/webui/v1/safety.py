@@ -17,6 +17,8 @@ enforces tenant scope at the DB level; the explicit
 
 from __future__ import annotations
 
+from typing import Any
+
 import asyncpg
 from fastapi import APIRouter, Depends, Query
 
@@ -28,6 +30,7 @@ from rolemesh.db import (
     list_safety_decisions,
     list_safety_rules,
     list_safety_rules_audit,
+    list_visible_platform_rules,
 )
 from rolemesh.safety.registry import get_orchestrator_registry
 from rolemesh.safety.types import Rule as SafetyRuleDataclass
@@ -74,6 +77,38 @@ def _rule_to_response(r: SafetyRuleDataclass) -> SafetyRule:
         description=r.description,
         created_at=r.created_at,
         updated_at=r.updated_at,
+        source="tenant",
+        tier=None,
+        editable=True,
+    )
+
+
+def _platform_rule_to_response(row: dict[str, Any]) -> SafetyRule:
+    """Project a platform rule row onto the wire shape.
+
+    Platform rules are cross-tenant and have no owning tenant, so
+    ``tenant_id`` is rendered as an empty string (the "global / platform"
+    signal) and ``coworker_id`` is None. They are read-only on every
+    tenant surface: ``editable=False`` and ``source="platform"``. ``tier``
+    carries which of the visible tiers (default / transparent_floor) this
+    rule belongs to.
+    """
+    config = row["config"]
+    return SafetyRule(
+        id=str(row["id"]),
+        tenant_id="",
+        coworker_id=None,
+        stage=row["stage"],
+        check_id=str(row["check_id"]),
+        config=config if isinstance(config, dict) else {},
+        priority=int(row["priority"]),
+        enabled=bool(row["enabled"]),
+        description=str(row["description"]),
+        created_at=str(row.get("created_at", "")),
+        updated_at=str(row.get("updated_at", "")),
+        source="platform",
+        tier=row["tier"],
+        editable=False,
     )
 
 
@@ -120,6 +155,7 @@ def _decision_row_to_response(row: dict[str, object]) -> SafetyDecision:
         findings=findings,
         context_digest=str(row.get("context_digest", "") or ""),
         context_summary=str(row.get("context_summary", "") or ""),
+        source=row.get("source", "tenant"),  # type: ignore[arg-type]
         created_at=str(row.get("created_at", "") or ""),
     )
 
@@ -187,10 +223,19 @@ async def list_rules(
 ) -> list[SafetyRule]:
     """List safety rules for the caller's tenant.
 
-    Filters mirror the admin endpoint exactly so the SPA can render
-    the same list view against either surface during the migration
-    window. Ordering (``priority DESC, updated_at DESC``) lives in
-    the helper.
+    Returns the tenant's own rules PLUS the platform-owned rules that
+    apply across all tenants. Platform rules are read-only
+    (``editable=False``, ``source="platform"``) and only the visible
+    tiers (default / transparent_floor) are surfaced — floor-tier rules
+    enforce but are never shown. They honor the ``stage`` / ``enabled``
+    filters. Like tenant-wide (``coworker_id IS NULL``) rules, platform
+    rules are excluded when the caller filters by a specific
+    ``coworker_id`` — that filter is an exact-match narrowing, and
+    platform rules are not bound to any single coworker.
+
+    Tenant-rule filters mirror the admin endpoint exactly. Ordering
+    (``priority DESC, updated_at DESC``) lives in the helper; platform
+    rules are appended after, so the list groups tenant rules first.
     """
     rows = await list_safety_rules(
         user.tenant_id,
@@ -198,7 +243,16 @@ async def list_rules(
         stage=stage,
         enabled=enabled,
     )
-    return [_rule_to_response(r) for r in rows]
+    out = [_rule_to_response(r) for r in rows]
+
+    if coworker_id is None:
+        for prow in await list_visible_platform_rules(user.tenant_id):
+            if stage is not None and prow["stage"] != stage:
+                continue
+            if enabled is not None and bool(prow["enabled"]) != enabled:
+                continue
+            out.append(_platform_rule_to_response(prow))
+    return out
 
 
 @router.get("/rules/{rule_id}", response_model=SafetyRule)
@@ -208,11 +262,29 @@ async def get_rule(
 ) -> SafetyRule:
     """Single rule, scoped to the caller's tenant.
 
-    Cross-tenant lookups return 404 (not 403) so a UUID-guess probe
-    cannot infer the row's existence in another tenant.
+    Resolves a tenant-owned rule first; falls back to a visible platform
+    rule with this id so the ids returned by ``GET /rules`` are all
+    individually fetchable. Cross-tenant lookups (and floor-tier platform
+    ids) return 404 (not 403) so a UUID-guess probe cannot infer a row's
+    existence in another tenant.
     """
-    rule = await _get_rule_or_404(rule_id, tenant_id=user.tenant_id)
-    return _rule_to_response(rule)
+    try:
+        rule = await get_safety_rule(rule_id, tenant_id=user.tenant_id)
+    except asyncpg.DataError:
+        rule = None
+    if rule is not None:
+        return _rule_to_response(rule)
+
+    for prow in await list_visible_platform_rules(user.tenant_id):
+        if str(prow["id"]) == rule_id:
+            return _platform_rule_to_response(prow)
+
+    raise_error_response(
+        "NOT_FOUND",
+        "Safety rule not found.",
+        status_code=404,
+        details={"rule_id": rule_id},
+    )
 
 
 @router.get(

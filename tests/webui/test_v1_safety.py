@@ -23,11 +23,13 @@ from fastapi import FastAPI
 
 from rolemesh.auth.provider import AuthenticatedUser
 from rolemesh.db import (
+    admin_conn,
     create_coworker,
     create_safety_rule,
     create_tenant,
     create_user,
     delete_safety_rule,
+    fetch_platform_rule_snapshots,
     insert_safety_decision,
     update_safety_rule,
 )
@@ -203,10 +205,81 @@ async def test_list_rules_filters_by_stage_and_enabled() -> None:
             headers=_HDRS,
         )
     assert resp.status_code == 200
-    ids = {r["id"] for r in resp.json()}
-    assert ids == {on.id}
-    assert off.id not in ids
-    assert other_stage.id not in ids
+    rows = resp.json()
+    # Tenant-owned rows respect the exact filter.
+    tenant_ids = {r["id"] for r in rows if r["source"] == "tenant"}
+    assert tenant_ids == {on.id}
+    assert off.id not in tenant_ids
+    assert other_stage.id not in tenant_ids
+    # Platform default rules at this stage are also surfaced (read-only),
+    # honoring the same stage/enabled filter.
+    platform = [r for r in rows if r["source"] == "platform"]
+    assert platform, "expected platform input_prompt rules to be surfaced"
+    assert all(r["stage"] == "input_prompt" and r["enabled"] for r in platform)
+    assert all(r["editable"] is False and r["tier"] for r in platform)
+
+
+async def test_list_rules_surfaces_platform_rules_read_only() -> None:
+    """An unfiltered list returns the platform default rules, marked
+    read-only (source=platform, editable=False, tier set, tenant_id="").
+    Floor-tier rules enforce but must never appear.
+    """
+    user, _ = await _make_user("plat")
+    async with admin_conn() as conn:
+        await conn.execute(
+            "INSERT INTO platform_safety_rules (tier, stage, check_id) "
+            "VALUES ('floor', 'input_prompt', 'pii.regex') "
+            "ON CONFLICT (tier, check_id, stage) DO NOTHING"
+        )
+
+    async with _client(_build_app(user)) as ac:
+        resp = await ac.get("/api/v1/safety/rules", headers=_HDRS)
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()
+    platform = [r for r in rows if r["source"] == "platform"]
+    assert len(platform) == 5  # the 5 default-tier rules
+    assert all(r["editable"] is False for r in platform)
+    assert all(r["tenant_id"] == "" for r in platform)
+    assert all(r["tier"] in ("default", "transparent_floor") for r in platform)
+    # floor never surfaces, even though it enforces
+    assert all(r["tier"] != "floor" for r in platform)
+
+
+async def test_get_platform_rule_by_id() -> None:
+    """A platform rule id from the list is individually fetchable and
+    renders the same read-only projection.
+    """
+    user, _ = await _make_user("getp")
+    snaps = await fetch_platform_rule_snapshots(user.tenant_id)
+    platform_id = snaps[0]["id"]
+
+    async with _client(_build_app(user)) as ac:
+        resp = await ac.get(f"/api/v1/safety/rules/{platform_id}", headers=_HDRS)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["id"] == platform_id
+    assert body["source"] == "platform"
+    assert body["editable"] is False
+    assert body["tier"]
+
+
+async def test_get_floor_rule_returns_404() -> None:
+    """Floor-tier platform rules are invisible — fetching one by id 404s,
+    indistinguishable from a non-existent rule.
+    """
+    user, _ = await _make_user("floor")
+    async with admin_conn() as conn:
+        floor_id = await conn.fetchval(
+            "INSERT INTO platform_safety_rules (tier, stage, check_id) "
+            "VALUES ('floor', 'model_output', 'secret_scanner') "
+            "ON CONFLICT (tier, check_id, stage) DO UPDATE SET tier = 'floor' "
+            "RETURNING id"
+        )
+
+    async with _client(_build_app(user)) as ac:
+        resp = await ac.get(f"/api/v1/safety/rules/{floor_id}", headers=_HDRS)
+    assert resp.status_code == 404
+    assert resp.json()["code"] == "NOT_FOUND"
 
 
 async def test_get_rule_returns_full_shape() -> None:

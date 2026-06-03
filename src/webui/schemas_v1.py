@@ -780,6 +780,14 @@ class SafetyRule(BaseModel):
     description: str
     created_at: str
     updated_at: str
+    # Platform Safety Rules: ``source`` distinguishes tenant-owned rules
+    # (editable on the admin surface) from platform-owned ones (read-only,
+    # cross-tenant). ``tier`` is set only for platform rules. ``editable``
+    # is a convenience flag the SPA uses to show/hide edit / "tighten"
+    # controls without re-deriving from source.
+    source: Literal["tenant", "platform"] = "tenant"
+    tier: Literal["floor", "transparent_floor", "default"] | None = None
+    editable: bool = True
 
 
 class SafetyCheck(BaseModel):
@@ -827,6 +835,9 @@ class SafetyDecision(BaseModel):
     findings: list[SafetyFinding] = Field(default_factory=list)
     context_digest: str
     context_summary: str
+    # 'platform' when any triggered rule is a platform-owned rule, else
+    # 'tenant'. Lets the SPA / ops filter platform-rule hits at a glance.
+    source: Literal["tenant", "platform"] = "tenant"
     created_at: str
 
 
