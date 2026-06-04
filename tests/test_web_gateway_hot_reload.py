@@ -25,10 +25,13 @@ fired (the production effect), not which DB function was invoked.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from rolemesh.channels.web_nats_gateway import WebNatsGateway
 from rolemesh.core.types import ChannelBinding
+from rolemesh.ipc.web_protocol import WebInboundMessage
 
 
 class _FakeTransport:
@@ -157,3 +160,106 @@ async def test_db_lookup_failure_does_not_propagate(
     # Must not raise.
     registered = await gw._refresh_binding("any-id")  # type: ignore[attr-defined]
     assert registered is False
+
+
+# ---------------------------------------------------------------------------
+# Dispatch-path regression: the listener must call on_message with the exact
+# arity ``_handle_incoming`` accepts.
+# ---------------------------------------------------------------------------
+
+
+class _FakeMsg:
+    """Minimal JetStream message: subject + data + an ack counter."""
+
+    def __init__(self, subject: str, data: bytes) -> None:
+        self.subject = subject
+        self.data = data
+        self.ack_count = 0
+
+    async def ack(self) -> None:
+        self.ack_count += 1
+
+
+class _FakeSubscription:
+    def __init__(self, msgs: list[_FakeMsg]) -> None:
+        self._msgs = msgs
+
+    @property
+    async def messages(self):  # type: ignore[no-untyped-def]
+        for m in self._msgs:
+            yield m
+
+
+class _DispatchJS:
+    """JetStream stub that hands the inbound message only to the
+    ``web.inbound.*`` subscription; the stop/approval listeners get an
+    empty stream so they finish immediately."""
+
+    def __init__(self, inbound_msgs: list[_FakeMsg]) -> None:
+        self._inbound = inbound_msgs
+
+    async def delete_consumer(self, stream: str, durable: str) -> None:
+        return None
+
+    async def purge_stream(self, stream: str) -> None:
+        return None
+
+    async def subscribe(self, subject: str, **kwargs: object) -> _FakeSubscription:
+        if subject.startswith("web.inbound"):
+            return _FakeSubscription(self._inbound)
+        return _FakeSubscription([])
+
+
+class _DispatchTransport:
+    def __init__(self, inbound_msgs: list[_FakeMsg]) -> None:
+        self.js = _DispatchJS(inbound_msgs)
+
+
+@pytest.mark.asyncio
+async def test_inbound_dispatch_matches_handler_arity() -> None:
+    """Regression: web messages must reach ``on_message`` with the exact
+    positional args ``_handle_incoming`` takes.
+
+    The flat-permissions refactor dropped the ``is_group`` parameter from
+    ``_handle_incoming`` and every gateway, but ``web_nats_gateway`` kept
+    passing a trailing ``False`` — 8 args into a 7-arg callback. The
+    listener swallows the resulting ``TypeError`` and acks the message, so
+    the only symptom is silence: the user's "hello" gets no reply.
+
+    The callback here mirrors ``_handle_incoming``'s signature (7 positional
+    params, no ``*args``). Pre-fix, the extra arg raises ``TypeError`` inside
+    the listener, ``received`` stays empty, and the assertion fails. The
+    pre-existing tests used a ``*args`` callback that masked exactly this.
+    """
+    received: list[tuple[str, ...]] = []
+
+    async def _strict_on_message(  # type: ignore[no-untyped-def]
+        binding_id, chat_id, sender, sender_name, text, timestamp, msg_id
+    ):
+        received.append(
+            (binding_id, chat_id, sender, sender_name, text, timestamp, msg_id)
+        )
+
+    inbound = WebInboundMessage(
+        chat_id="chat-1",
+        sender_id="user-1",
+        sender_name="User",
+        text="hello",
+        timestamp="2026-06-04T00:00:00+00:00",
+        msg_id="m-1",
+    )
+    msg = _FakeMsg("web.inbound.bind-1", inbound.to_bytes())
+    transport = _DispatchTransport([msg])
+
+    gw = WebNatsGateway(on_message=_strict_on_message, transport=transport)  # type: ignore[arg-type]
+    # Pre-register the binding so dispatch skips the DB hot-reload path
+    # and exercises the on_message call directly.
+    gw._bindings["bind-1"] = _binding("bind-1")  # type: ignore[attr-defined]
+
+    await gw.start()
+    await asyncio.wait_for(gw._sub_task, timeout=2.0)  # type: ignore[attr-defined]
+
+    assert received == [
+        ("bind-1", "chat-1", "user-1", "User", "hello", "2026-06-04T00:00:00+00:00", "m-1")
+    ]
+    assert msg.ack_count == 1
