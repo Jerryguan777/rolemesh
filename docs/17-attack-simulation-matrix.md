@@ -117,7 +117,7 @@ Backed by [`6-auth-architecture.md`](6-auth-architecture.md) and [`15-safety-fra
 |---|---|---|---|---|
 | H1 | Agent schedules task for another coworker | `can_manage_task` + `task_manage_others` flag | `test_H_config_attack::test_H1_*` | ✅ |
 | H2 | Malformed / injected policy config via REST | Pydantic `config_model` + `extra='forbid'` | `test_H2_*` (6 cases, including `__class__` gadget) | ✅ |
-| H3 | `data_scope=self` agent reads tenant workspace | `build_volume_mounts` gates project-root on `data_scope=='tenant'` | `test_H3_data_scope_self_does_not_mount_project_root` | ✅ |
+| H3 | Agent reaches the host project root via a container mount | `build_volume_mounts` never mounts the host project root into any container, regardless of permissions | `test_H3_project_root_is_never_mounted` | ✅ |
 | H4 | Symlink escape from workspace | PID / mount namespace + mount allowlist | runbook only | 🔧 manual |
 
 ---

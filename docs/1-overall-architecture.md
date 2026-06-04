@@ -107,7 +107,7 @@ This is the third independent safety layer: even if a malicious agent escapes th
 
 ### Auth (AuthN + AuthZ)
 
-Authentication is delegated to a pluggable `AuthProvider` (External JWT, Builtin, OIDC). Authorization is always RoleMesh's own logic — `AgentPermissions` (4 fields: `data_scope`, `task_schedule`, `task_manage_others`, `agent_delegate`) controls what an agent can do; user roles (owner / admin / member) control what humans can do. Auth checks happen at four interception points (IPC handler, REST middleware, channel inbound, container spawn) and **nowhere else**.
+Authentication is delegated to a pluggable `AuthProvider` (External JWT, Builtin, OIDC). Authorization is always RoleMesh's own logic — `AgentPermissions` (3 flat boolean fields, all defaulting to `false` for least privilege: `task_schedule`, `task_manage_others`, `agent_delegate`) controls what an agent can do; user roles (owner / admin / member) control what humans can do. Task/snapshot visibility folds into `task_manage_others` (managing other agents' tasks requires seeing them). Auth checks happen at four interception points (IPC handler, REST middleware, channel inbound, container spawn) and **nowhere else**.
 
 → `docs/auth-architecture.md`
 
@@ -142,7 +142,7 @@ Schema lives in `src/rolemesh/db/schema.py`; per-entity CRUD is split into `db/{
 
 ### Scheduler (Cron)
 
-Cron-style task scheduler inside the orchestrator (croniter). Triggers spawn an agent container the same way a human message would, but flags `is_scheduled_task=true` in the init payload so the agent prompt is wrapped with `[SCHEDULED TASK]` framing. Tasks are stored in `scheduled_tasks` with RLS — agents can only see / manage their own tenant's tasks (further filtered by `data_scope`).
+Cron-style task scheduler inside the orchestrator (croniter). Triggers spawn an agent container the same way a human message would, but flags `is_scheduled_task=true` in the init payload so the agent prompt is wrapped with `[SCHEDULED TASK]` framing. Tasks are stored in `scheduled_tasks` with RLS — agents are always confined to their own tenant's tasks, and within that tenant an agent sees / manages all tasks only if it holds `task_manage_others`; otherwise it is restricted to its own tasks.
 
 ---
 
@@ -231,7 +231,7 @@ Done in-place on the NanoClaw codebase, eventually growing it past its single-us
 After step 6, the codebase was forked from NanoClaw and renamed to RoleMesh (project name + every code identifier). Subsequent work happened on the new repo:
 
 7. **WebUI.** FastAPI + WebSocket + Lit frontend, running as a separate process to keep HTTP concerns out of the orchestrator. See `docs/webui-architecture.md`.
-8. **AuthN + AuthZ.** Pluggable auth providers (External JWT / Builtin / OIDC), four-field `AgentPermissions` model, OIDC PKCE login. See `docs/auth-architecture.md`.
+8. **AuthN + AuthZ.** Pluggable auth providers (External JWT / Builtin / OIDC), flat three-bit `AgentPermissions` model, OIDC PKCE login. See `docs/auth-architecture.md`.
 9. **External MCP tools.** Credential proxy + token vault + token refresh, so the agent container never sees real auth tokens. See `docs/external-mcp-architecture.md`.
 10. **Switchable agent backend.** The Pi backend integration — second runtime alongside Claude SDK, controlled by `coworkers.agent_backend`. See `docs/switchable-agent-backend.md`.
 11. **Hooks.** Unified hook system across Claude SDK and Pi. See `docs/hooks-architecture.md`.
