@@ -328,6 +328,55 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /api/v1/coworkers/{id}/share:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    post:
+      tags: [Coworkers]
+      operationId: shareCoworker
+      summary: Make a coworker shared (tenant-wide)
+      description: |
+        Self-serve visibility flip to `shared` (feat/roles). A member
+        may share a coworker they created; owner/admin/platform_admin
+        may share any. Idempotent. Returns the updated coworker.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Coworker' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/coworkers/{id}/unshare:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    post:
+      tags: [Coworkers]
+      operationId: unshareCoworker
+      summary: Make a coworker private again (creator + managers only)
+      description: |
+        Visibility flip back to `private` (feat/roles). Same own-or-manage
+        gate as share. Returns the updated coworker.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Coworker' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /api/v1/coworkers/{id}/conversations:
     parameters:
       - $ref: '#/components/parameters/IdInPath'
@@ -799,6 +848,55 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/v1/skills/{id}/share:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    post:
+      tags: [Skills]
+      operationId: shareSkill
+      summary: Make a skill shared (tenant-wide)
+      description: |
+        Self-serve visibility flip to `shared` (feat/roles). A member
+        may share a skill they created; owner/admin/platform_admin may
+        share any. Idempotent. Returns the updated skill.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Skill' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/skills/{id}/unshare:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    post:
+      tags: [Skills]
+      operationId: unshareSkill
+      summary: Make a skill private again (creator + managers only)
+      description: |
+        Visibility flip back to `private` (feat/roles). Same
+        own-or-manage gate as share. Returns the updated skill.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Skill' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /api/v1/skills/{id}/files:
     parameters:
@@ -1869,6 +1967,16 @@ components:
       type: string
       enum: [active, paused, disabled]
 
+    Visibility:
+      type: string
+      enum: [private, shared]
+      description: |
+        Per-resource visibility (feat/roles). `private` — visible only
+        to the creator and role-managers (owner/admin/platform_admin);
+        `shared` — visible to and usable by every member of the tenant.
+        New resources default to `private`; legacy rows were backfilled
+        to `shared`.
+
     Coworker:
       type: object
       required:
@@ -1879,6 +1987,7 @@ components:
         - agent_backend
         - status
         - max_concurrent
+        - visibility
         - created_at
       properties:
         id: { type: string, format: uuid }
@@ -1901,6 +2010,7 @@ components:
           type: string
           format: uuid
           nullable: true
+        visibility: { $ref: '#/components/schemas/Visibility' }
         created_at: { type: string, format: date-time }
 
     CoworkerCreate:
@@ -2392,6 +2502,7 @@ components:
         - tenant_id
         - name
         - enabled
+        - visibility
         - created_at
         - updated_at
       properties:
@@ -2420,6 +2531,7 @@ components:
           type: string
           format: uuid
           nullable: true
+        visibility: { $ref: '#/components/schemas/Visibility' }
 
     SkillSummary:
       type: object
@@ -2433,6 +2545,7 @@ components:
         - description
         - enabled
         - bound_coworker_count
+        - visibility
         - created_at
         - updated_at
       properties:
@@ -2448,6 +2561,7 @@ components:
             Number of `coworker_skills` rows referencing this skill,
             any enabled state. The list page renders this so admins
             can spot orphaned vs heavily-shared skills.
+        visibility: { $ref: '#/components/schemas/Visibility' }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
 
