@@ -24,9 +24,11 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, StrictFloat
 
-from ..types import CostClass, Finding, Stage, Verdict
+from ..types import Action, ActionModel, CostClass, Finding, Stage, Verdict
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from ..types import SafetyContext
 
 
@@ -51,6 +53,21 @@ class LLMGuardPromptInjectionCheck:
     stages: frozenset[Stage] = frozenset({Stage.INPUT_PROMPT})
     cost_class: CostClass = "slow"
     supported_codes: frozenset[str] = frozenset({"PROMPT_INJECTION"})
+
+    # Action matrix (descriptive — see SafetyCheck Protocol). Fixed
+    # model: a hit always returns block today.
+    #                   natural   supported
+    # INPUT_PROMPT      block     block, allow, warn, require_approval
+    # (no redact: the scanner does not rewrite the prompt)
+    action_model: ActionModel = "fixed"
+    natural_actions: Mapping[Stage, Action] = {
+        Stage.INPUT_PROMPT: "block",
+    }
+    supported_actions: Mapping[Stage, frozenset[Action]] = {
+        Stage.INPUT_PROMPT: frozenset(
+            {"block", "allow", "warn", "require_approval"}
+        ),
+    }
     config_model: type[BaseModel] = LLMGuardPromptInjectionConfig
     # _sync = True → SafetyRpcServer dispatches to the thread pool so
     # the transformer inference doesn't block the asyncio loop.

@@ -72,6 +72,31 @@ Severity = Literal["info", "low", "medium", "high", "critical"]
 Action = Literal["allow", "block", "redact", "warn", "require_approval"]
 CostClass = Literal["cheap", "slow"]
 
+# How a check decides the action it returns on a hit. This is metadata
+# for the rule-editor UI — the pipeline does not consume it. The three
+# values map onto three genuinely different check architectures, and
+# the UI renders a different editor experience for each:
+#
+#   "fixed"         The action is hardcoded in check(): a hit always
+#                   returns the same action (today: always "block").
+#                   natural_actions[stage] is that action. UI shows
+#                   "This check defaults to: BLOCK".
+#
+#   "config_routed" The action is chosen per-finding by the rule's
+#                   config (e.g. presidio.pii block_codes vs
+#                   redact_codes). With the default/empty config a hit
+#                   is inert (returns "allow"), so natural_actions is
+#                   "allow" — UI shows "configure per-category below;
+#                   inert until configured" rather than a default badge.
+#
+#   "aggregated"    The check only votes; a separate layer decides the
+#                   effective verdict (egress.domain_rule returns
+#                   "allow" on a match; the gateway aggregator blocks
+#                   when no rule allowed). natural_actions is the
+#                   check's own return ("allow"); UI explains the
+#                   effective action is decided by aggregation.
+ActionModel = Literal["fixed", "config_routed", "aggregated"]
+
 
 class SafetyObservabilityCode(StrEnum):
     """Pipeline-level observability codes emitted on fail-open paths.
@@ -237,6 +262,37 @@ class SafetyCheck(Protocol):
     behaviour) — new checks are expected to provide one so that typos
     like ``{"SSN": "yes"}`` fail loud at REST time rather than acting
     subtly wrong at run-time.
+
+    Action metadata (``action_model`` / ``natural_actions`` /
+    ``supported_actions``) is **descriptive, not prescriptive**: it
+    reports what the check's current code does, and the pipeline does
+    not consume it. It exists so the rule-editor UI can show the
+    default action and grey out actions that cannot be carried out for
+    a given (check, stage). The cardinal rule is that these fields
+    describe the check — they must never drive a change to ``check()``
+    behaviour. Invariants (enforced by tests in
+    ``tests/safety/test_action_matrix.py``):
+
+      1. ``natural_actions.keys() == supported_actions.keys() ==
+         stages`` — every supported stage is declared once in each map.
+      2. ``natural_actions[stage] in supported_actions[stage]`` — the
+         default is always one of the offered actions.
+      3. Running ``check()`` on an input that fires, with a config that
+         enables detection but does NOT override the action, returns
+         ``natural_actions[ctx.stage]``. For ``config_routed`` /
+         ``aggregated`` checks that "firing under no action routing"
+         outcome is ``allow`` (the check is inert / only votes). The
+         matrix is anchored to real runtime behaviour, so drift fails
+         the test.
+
+    ``natural_actions`` is the action a hit produces under the default
+    (empty) config — see ``ActionModel`` for what "default" means for
+    each architecture. ``supported_actions`` is the set of actions a
+    rule on that (check, stage) can meaningfully produce, gated by real
+    capabilities: ``redact`` only where the check can emit a
+    ``modified_payload``; ``warn`` only where a stage consumes
+    ``appended_context``; ``require_approval`` only where the stage has
+    an approval surface; ``block`` / ``allow`` everywhere.
     """
 
     id: str
@@ -244,6 +300,9 @@ class SafetyCheck(Protocol):
     stages: frozenset[Stage]
     cost_class: CostClass
     supported_codes: frozenset[str]
+    action_model: ActionModel
+    natural_actions: Mapping[Stage, Action]
+    supported_actions: Mapping[Stage, frozenset[Action]]
     # Type is Any to keep this Protocol importable without pydantic at
     # module load. Concrete checks declare it as type[BaseModel] | None.
     config_model: Any
@@ -256,6 +315,7 @@ class SafetyCheck(Protocol):
 __all__ = [
     "CONTROL_STAGES",
     "Action",
+    "ActionModel",
     "CostClass",
     "Finding",
     "Rule",

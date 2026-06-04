@@ -18,7 +18,14 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, StrictFloat
 
-from ..types import CostClass, Finding, Stage, Verdict
+from ..types import (
+    Action,
+    ActionModel,
+    CostClass,
+    Finding,
+    Stage,
+    Verdict,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -64,6 +71,26 @@ class LLMGuardToxicityCheck:
     )
     cost_class: CostClass = "slow"
     supported_codes: frozenset[str] = frozenset({"TOXICITY"})
+
+    # Action matrix (descriptive — see SafetyCheck Protocol). Fixed
+    # model: a hit always returns block today on both stages.
+    #                   natural   supported
+    # INPUT_PROMPT      block     block, allow, warn, require_approval
+    # MODEL_OUTPUT      block     block, allow, require_approval  (no warn: post-output)
+    # (no redact: the scanner does not rewrite text)
+    action_model: ActionModel = "fixed"
+    natural_actions: Mapping[Stage, Action] = {
+        Stage.INPUT_PROMPT: "block",
+        Stage.MODEL_OUTPUT: "block",
+    }
+    supported_actions: Mapping[Stage, frozenset[Action]] = {
+        Stage.INPUT_PROMPT: frozenset(
+            {"block", "allow", "warn", "require_approval"}
+        ),
+        Stage.MODEL_OUTPUT: frozenset(
+            {"block", "allow", "require_approval"}
+        ),
+    }
     config_model: type[BaseModel] = LLMGuardToxicityConfig
     _sync: bool = True
 

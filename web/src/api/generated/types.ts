@@ -1623,6 +1623,8 @@ export interface components {
         /** @enum {string} */
         SafetyCheckCostClass: "cheap" | "slow";
         /** @enum {string} */
+        SafetyCheckActionModel: "fixed" | "config_routed" | "aggregated";
+        /** @enum {string} */
         SafetyFindingSeverity: "info" | "low" | "medium" | "high" | "critical";
         /** @enum {string} */
         SafetyRuleAuditAction: "created" | "updated" | "deleted";
@@ -1659,6 +1661,13 @@ export interface components {
             config_schema?: {
                 [key: string]: unknown;
             } | null;
+            action_model: components["schemas"]["SafetyCheckActionModel"];
+            natural_actions?: {
+                [key: string]: components["schemas"]["SafetyVerdictAction"];
+            };
+            supported_actions?: {
+                [key: string]: components["schemas"]["SafetyVerdictAction"][];
+            };
         };
         SafetyFinding: {
             code: string;

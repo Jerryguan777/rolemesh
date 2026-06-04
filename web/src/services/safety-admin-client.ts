@@ -22,6 +22,8 @@ export type SafetyVerdictAction =
   | 'warn'
   | 'require_approval';
 
+export type SafetyCheckActionModel = 'fixed' | 'config_routed' | 'aggregated';
+
 export interface SafetyCheckMeta {
   id: string;
   version: string;
@@ -29,6 +31,13 @@ export interface SafetyCheckMeta {
   cost_class: 'cheap' | 'slow';
   supported_codes: string[];
   config_schema: Record<string, unknown> | null;
+  // Descriptive action metadata (see SafetyCheck Protocol). Keyed by
+  // stage. ``natural_actions`` is the default action a hit produces;
+  // ``supported_actions`` is the set a rule on that (check, stage) can
+  // meaningfully produce, used to grey out invalid action overrides.
+  action_model: SafetyCheckActionModel;
+  natural_actions: Partial<Record<SafetyStage, SafetyVerdictAction>>;
+  supported_actions: Partial<Record<SafetyStage, SafetyVerdictAction[]>>;
 }
 
 export interface SafetyRule {

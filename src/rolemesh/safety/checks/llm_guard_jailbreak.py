@@ -16,11 +16,14 @@ BanSubstrings is per-config.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..types import CostClass, Finding, Stage, Verdict
+from ..types import Action, ActionModel, CostClass, Finding, Stage, Verdict
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 _DEFAULT_JAILBREAK_PHRASES: tuple[str, ...] = (
     "ignore all previous instructions",
@@ -58,6 +61,21 @@ class LLMGuardJailbreakCheck:
     stages: frozenset[Stage] = frozenset({Stage.INPUT_PROMPT})
     cost_class: CostClass = "slow"
     supported_codes: frozenset[str] = frozenset({"JAILBREAK"})
+
+    # Action matrix (descriptive — see SafetyCheck Protocol). Fixed
+    # model: a matched jailbreak phrase always returns block today.
+    #                   natural   supported
+    # INPUT_PROMPT      block     block, allow, warn, require_approval
+    # (no redact: the scanner does not rewrite the prompt)
+    action_model: ActionModel = "fixed"
+    natural_actions: Mapping[Stage, Action] = {
+        Stage.INPUT_PROMPT: "block",
+    }
+    supported_actions: Mapping[Stage, frozenset[Action]] = {
+        Stage.INPUT_PROMPT: frozenset(
+            {"block", "allow", "warn", "require_approval"}
+        ),
+    }
     config_model: type[BaseModel] = LLMGuardJailbreakConfig
     # Substring matching is cheap, but llm-guard scanners are
     # typically thread-pool dispatched to keep the loop clean.

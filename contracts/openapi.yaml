@@ -2593,6 +2593,10 @@ components:
       type: string
       enum: [cheap, slow]
 
+    SafetyCheckActionModel:
+      type: string
+      enum: [fixed, config_routed, aggregated]
+
     SafetyFindingSeverity:
       type: string
       enum: [info, low, medium, high, critical]
@@ -2641,6 +2645,7 @@ components:
         - version
         - stages
         - cost_class
+        - action_model
       properties:
         id: { type: string }
         version: { type: string }
@@ -2655,6 +2660,21 @@ components:
           type: object
           additionalProperties: true
           nullable: true
+        # Per-stage default action a hit produces under the default
+        # config. Descriptive metadata for the rule editor; the
+        # pipeline does not consume it.
+        action_model: { $ref: '#/components/schemas/SafetyCheckActionModel' }
+        natural_actions:
+          type: object
+          additionalProperties: { $ref: '#/components/schemas/SafetyVerdictAction' }
+        # Per-stage set of actions a rule on this (check, stage) can
+        # meaningfully produce, used by the editor to grey out invalid
+        # action overrides.
+        supported_actions:
+          type: object
+          additionalProperties:
+            type: array
+            items: { $ref: '#/components/schemas/SafetyVerdictAction' }
 
     SafetyFinding:
       type: object
