@@ -35,9 +35,9 @@ Tenant (organization)
 │   ├── Identified by independent bot identity per channel
 │   └── Can operate in multiple chat groups simultaneously
 │
-├── Conversation (a Coworker's context in a specific chat group)
+├── Conversation (a Coworker's 1:1 context in a specific chat)
 │   ├── Has independent session/memory
-│   └── requires_trigger flag (on for group chats, off for DMs / Web UI)
+│   └── The agent always responds (1:1 only — no @-mention trigger gating)
 │
 └── User (human team member)
     └── Can interact with multiple Coworkers
@@ -140,15 +140,14 @@ Everything is keyed by IDs, indexed by tenant and coworker. No ambiguity, no col
 ```python
 @dataclass
 class CoworkerConfig:
-    name: str                 # display name (trigger derived from this)
+    name: str                 # display name
     folder: str               # workspace path
     system_prompt: str | None
     tools: list[McpServerConfig]   # external MCP server bindings
     agent_backend: str        # "claude" or "pi"
     max_concurrent: int
     container_config: dict | None
-    agent_role: str           # "super_agent" | "agent"
-    permissions: AgentPermissions  # 4 fields (see auth-architecture.md)
+    permissions: AgentPermissions  # 3 boolean fields (see auth-architecture.md)
 ```
 
 All fields live on the `coworkers` table. No JOIN, no merge, no template layer. If multiple coworkers need the same config, they're configured independently — duplication is acceptable at this scale and is easier to reason about than a template inheritance system.
@@ -229,7 +228,7 @@ This section covers the *design intent* and the trust-boundary contract. The ful
 This document is about **how rows are scoped to a tenant**. The orthogonal questions — *which user can use which agent*, *which agent is allowed to do what*, *how a JWT/OIDC identity becomes a tenant context* — are covered in [`auth-architecture.md`](auth-architecture.md). The summary:
 
 - **User roles** (`owner` / `admin` / `member`) gate management actions on the platform itself.
-- **Agent permissions** are a 4-field model (`data_scope`, `task_schedule`, `task_manage_others`, `agent_delegate`) carried by every coworker. They control what the agent can do at IPC enforcement time. The IPC contract here — payloads carry `tenantId + coworkerId` and the orchestrator looks up the authoritative permissions — is documented in [`nats-ipc-architecture.md`](nats-ipc-architecture.md).
+- **Agent permissions** are a 3-field boolean model (`task_schedule`, `task_manage_others`, `agent_delegate`, all defaulting to `false`) carried by every coworker. They control what the agent can do at IPC enforcement time. The IPC contract here — payloads carry `tenantId + coworkerId` and the orchestrator looks up the authoritative permissions — is documented in [`nats-ipc-architecture.md`](nats-ipc-architecture.md).
 - **Tenant context propagation** — every business query goes through `tenant_conn(tenant_id)`; the GUC binds RLS, and any query that needs to cross tenants must use `admin_conn()` instead.
 
 ---
@@ -283,9 +282,9 @@ The schema below includes only columns with defined purpose — no placeholder f
 |-------|-------------|---------|
 | `tenants` | `id`, `name`, `slug`, `max_concurrent_containers`, `last_message_cursor` | Organizational boundary and limits |
 | `users` | `id`, `tenant_id`, `name`, `role`, `email`, `external_sub` | Human users + auth provider mapping |
-| `coworkers` | `id`, `tenant_id`, `name`, `folder`, `agent_backend`, `system_prompt`, `tools` (JSONB), `agent_role`, `permissions` (JSONB), `container_config`, `max_concurrent` | AI agents with full config |
+| `coworkers` | `id`, `tenant_id`, `name`, `folder`, `agent_backend`, `system_prompt`, `tools` (JSONB), `permissions` (JSONB), `container_config`, `max_concurrent` | AI agents with full config |
 | `channel_bindings` | `id`, `tenant_id`, `coworker_id`, `channel_type`, `credentials`, `bot_display_name` | Per-coworker bot identities |
-| `conversations` | `id`, `tenant_id`, `coworker_id`, `channel_binding_id`, `channel_chat_id`, `requires_trigger`, `last_agent_invocation`, `user_id` | Per-chat contexts with independent session |
+| `conversations` | `id`, `tenant_id`, `coworker_id`, `channel_binding_id`, `channel_chat_id`, `last_agent_invocation`, `user_id` | Per-chat contexts with independent session |
 | `sessions` | `conversation_id` (PK), `tenant_id`, `coworker_id`, `session_id` | Claude SDK / Pi session mapping per conversation |
 | `messages` | `id`, `tenant_id`, `conversation_id`, `sender`, `content`, `timestamp`, `input_tokens`, `output_tokens`, `cost_usd`, `model_id` | Chat message history + per-turn usage |
 | `scheduled_tasks` | `id`, `tenant_id`, `coworker_id`, `conversation_id`, `prompt`, `schedule_type`, `schedule_value`, `next_run` | Cron / interval / once tasks |
@@ -297,24 +296,22 @@ The schema below includes only columns with defined purpose — no placeholder f
 
 ## Message Flow
 
-A user message in a Telegram group becomes a turn through this path:
+A user message in a Telegram 1:1 chat becomes a turn through this path:
 
-1. **TelegramGateway** receives via the bot mentioned in the message (one token = one polling instance, fanned out to all associated bindings).
+1. **TelegramGateway** receives via the bot the message was sent to (one token = one polling instance, fanned out to all associated bindings).
 2. **Routing**: `binding_id → coworker_id + tenant_id`; `(binding_id, channel_chat_id) → conversation_id`. The internal routing key is `conversation_id` (a UUID), not `channel_chat_id`.
-3. **Inbound filtering** (multi-bot groups): if `requires_trigger` is set and the message doesn't match `@coworker.name`, drop it before storage.
-4. **Store** in `messages` (RLS-bound to tenant) and enqueue a turn for processing.
-5. **Concurrency check** (global + per-tenant + per-coworker — see [`agent-executor-and-container-runtime.md`](agent-executor-and-container-runtime.md)).
-6. **Spawn container** with the right workspace, session dir, and shared-space mounts; pass the coworker's permissions through `AgentInitData`.
-7. **Agent executes**, results flow back via NATS — see [`nats-ipc-architecture.md`](nats-ipc-architecture.md).
-8. **Reply** routes through the originating coworker's binding (by `coworker_id`, not by scanning all bindings for matching `chat_id`).
+3. **Store** in `messages` (RLS-bound to tenant) and enqueue a turn for processing. The product is 1:1-only (IM and WebUI never support group chat), so the agent always responds — there is no @-mention trigger gating.
+4. **Concurrency check** (global + per-tenant + per-coworker — see [`agent-executor-and-container-runtime.md`](agent-executor-and-container-runtime.md)).
+5. **Spawn container** with the right workspace, session dir, and shared-space mounts; pass the coworker's permissions through `AgentInitData`.
+6. **Agent executes**, results flow back via NATS — see [`nats-ipc-architecture.md`](nats-ipc-architecture.md).
+7. **Reply** routes through the originating coworker's binding (by `coworker_id`, not by scanning all bindings for matching `chat_id`).
 
 ### Critical Routing Rules (learned from implementation)
 
 1. **`conversation_id` is the internal routing key**, not `channel_chat_id`. In Telegram private chats, the same user talking to 3 different bots produces the same `chat_id` (user ID). Only `conversation_id` (UUID) is globally unique.
-2. **Inbound filtering before storage**: in multi-bot groups, every bot receives ALL messages. Each bot must filter — only store messages that match its own trigger pattern. Without this, coworkers accumulate irrelevant messages and activate on triggers meant for other coworkers.
-3. **Event-driven, not poll-driven**: inbound messages directly enqueue a turn after storage. The system does NOT rely on a polling cursor — per-tenant cursors cause race conditions when multiple apps receive the same message at slightly different times.
-4. **IPC reply routing by coworker**: when the agent sends a message via the `send_message` MCP tool, the reply is routed through the source coworker's own binding, not by scanning all bindings for a matching `chat_id`. This prevents replies going through the wrong bot in private chat scenarios.
-5. **Deduplication between output channels**: the agent has two output paths — `send_message` (immediate, via IPC) and the results stream (final, via NATS). The orchestrator tracks texts sent via IPC and skips duplicates in the results stream.
+2. **Event-driven, not poll-driven**: inbound messages directly enqueue a turn after storage. The system does NOT rely on a polling cursor — per-tenant cursors cause race conditions when multiple apps receive the same message at slightly different times.
+3. **IPC reply routing by coworker**: when the agent sends a message via the `send_message` MCP tool, the reply is routed through the source coworker's own binding, not by scanning all bindings for a matching `chat_id`. This prevents replies going through the wrong bot in private chat scenarios.
+4. **Deduplication between output channels**: the agent has two output paths — `send_message` (immediate, via IPC) and the results stream (final, via NATS). The orchestrator tracks texts sent via IPC and skips duplicates in the results stream.
 
 ---
 
@@ -326,18 +323,16 @@ The mapping from original NanoClaw concepts. This whole table belongs to **phase
 |---|---|---|
 | `RegisteredGroup` | `Coworker` + `Conversation` | Split: "who" separated from "where" |
 | `group.folder` | `coworker.folder` | Path: `groups/x/` → `tenants/{tid}/coworkers/x/` |
-| `group.trigger` | Derived from `coworker.name` | Trigger text = coworker name; `conversation.requires_trigger` controls on/off |
 | `chatJid` | `conversation.channel_chat_id` | 1:N instead of 1:1 |
 | `session` (per group) | `session` (per conversation) | Scope narrowed |
 | `ASSISTANT_NAME` | `coworker.name` | Global constant → per-entity config |
-| `TRIGGER_PATTERN` | From `coworker.name` | Derived from coworker identity |
 | `GroupQueue` | Three-level scheduler | Added tenant + coworker limits |
 | `Channel` singleton | `ChannelGateway` | One manager per type, multiple bots |
 | Module globals | `OrchestratorState` | Structured, indexed by ID |
-| `is_main` (bool) | `agent_role` + `AgentPermissions` | 1 boolean → 4 orthogonal fields (added in phase 2) |
+| `is_main` (bool) | `AgentPermissions` | 1 boolean → 3 orthogonal boolean fields (added in phase 2) |
 | Application-level `WHERE tenant_id` | Postgres RLS + dual-pool | Trust boundary moved into the database (added in phase 2) |
 
-The migration preserves backward compatibility through `DEFAULT_TENANT = "default"` defaults and a converter for legacy `is_main` payloads on the IPC wire.
+The migration preserves backward compatibility through `DEFAULT_TENANT = "default"` defaults.
 
 ---
 
@@ -361,7 +356,6 @@ Correspondingly, the database schema does NOT include columns for unimplemented 
 When upgrading across major changes, the migration path lives inline in `src/rolemesh/db/schema.py` (`_create_schema` is idempotent and handles existing tables in place). Notable migrations the file currently encodes:
 
 - Single-tenant → multi-tenant: detect legacy tables (e.g. `messages` with a `chat_jid` column), read data, drop old tables, create new tables, re-insert.
-- `is_admin` boolean → `agent_role` + `permissions` JSONB.
 - Inline conversion of `agent_backend = 'claude-code'` legacy values to the canonical `'claude'`.
 - Backfill `tenant_id` on `oidc_user_tokens` so RLS can apply post-D10.
 
