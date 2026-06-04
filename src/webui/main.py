@@ -91,8 +91,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # BOOTSTRAP_USERS multi-user fast-path (§5.2.1). Parsing happens
     # once at startup so a malformed spec fails the process boot
     # instead of intermittently failing requests. The function is a
-    # no-op when the env var is unset.
+    # no-op when the env var is unset, and aborts boot when set under
+    # ROLEMESH_ENV=production.
     init_bootstrap_users()
+
+    # Env-seed the first platform_admin (managed / IaC convenience).
+    # No-op unless ROLEMESH_SEED_ADMIN_EMAIL is set; idempotent and
+    # self-disabling. The canonical interactive path is the
+    # ``rolemesh-admin create-admin`` CLI.
+    from rolemesh.admin.core import ensure_seed_admin
+
+    await ensure_seed_admin()
 
     # Initialize TokenVault for OIDC token mirroring (mirrors orchestrator init).
     # This is per-process: orchestrator and webui each hold their own vault.

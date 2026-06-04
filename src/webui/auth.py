@@ -67,7 +67,7 @@ async def authenticate_ws(token: str) -> AuthenticatedUser | None:
     """
     from rolemesh.auth.provider import AuthenticatedUser as AuthUser
     from rolemesh.db import get_tenant_by_slug
-    from webui.config import ADMIN_BOOTSTRAP_TOKEN
+    from webui.config import ADMIN_BOOTSTRAP_TOKEN, IS_PRODUCTION
 
     spec = get_spec_for_token(token)
     if spec is not None:
@@ -85,6 +85,12 @@ async def authenticate_ws(token: str) -> AuthenticatedUser | None:
         )
 
     if ADMIN_BOOTSTRAP_TOKEN and token == ADMIN_BOOTSTRAP_TOKEN:
+        if IS_PRODUCTION:
+            # Fail closed: the static bootstrap token is a permanent,
+            # network-reachable owner backdoor and is disabled in
+            # production. Seed the first admin with
+            # ``rolemesh-admin create-admin`` instead.
+            return None
         tenant = await get_tenant_by_slug("default")
         tenant_id = tenant.id if tenant else "default"
         return AuthUser(

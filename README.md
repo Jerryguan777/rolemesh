@@ -162,12 +162,42 @@ channel with its bot tokens.
 
 ### Misc
 
-| Key                       | Purpose                                                                  |
-|---------------------------|--------------------------------------------------------------------------|
-| `ASSISTANT_NAME`          | Display name for your AI coworker.                                       |
-| `CONTAINER_NETWORK_NAME`  | Set to enable EC-2 (Internal=true) agent bridge with egress gateway.     |
-| `ADMIN_BOOTSTRAP_TOKEN`   | First-run admin token; rotate after the first sign-in.                   |
-| `ROLEMESH_AGENT_BACKEND`  | `claude` (default) or `pi`.                                              |
+| Key                          | Purpose                                                                  |
+|------------------------------|--------------------------------------------------------------------------|
+| `ASSISTANT_NAME`             | Display name for your AI coworker.                                       |
+| `CONTAINER_NETWORK_NAME`     | Set to enable EC-2 (Internal=true) agent bridge with egress gateway.     |
+| `ROLEMESH_ENV`               | `development` (default) or `production`. See note below.                 |
+| `ROLEMESH_SEED_ADMIN_EMAIL`  | If set, the WebUI seeds a `platform_admin` with this email at startup.   |
+| `ADMIN_BOOTSTRAP_TOKEN`      | DEPRECATED dev-only owner token; disabled when `ROLEMESH_ENV=production`.|
+| `ROLEMESH_AGENT_BACKEND`     | `claude` (default) or `pi`.                                              |
+
+### Seeding the first administrator
+
+On a fresh deployment nobody can log in yet, so the very first
+`platform_admin` is seeded out-of-band. Run the CLI against the same
+database (the schema is created idempotently on connect):
+
+```bash
+uv run rolemesh-admin create-admin --email you@example.com
+```
+
+This writes one privileged user row through the admin (BYPASSRLS)
+connection and is idempotent — re-running it is a no-op. The email is
+the identifier your IdP is matched against on login, **not** a
+credential; authentication still runs through the IdP. Pass
+`--external-sub` if you already know the IdP subject, otherwise the row
+is linked on the first OIDC login matching the email.
+
+For managed / IaC deploys, set `ROLEMESH_SEED_ADMIN_EMAIL` (plus optional
+`ROLEMESH_SEED_ADMIN_EXTERNAL_SUB` / `ROLEMESH_SEED_ADMIN_NAME`) and the
+WebUI seeds the same `platform_admin` at startup. Further admins and
+tenant owners are created from the platform_admin UI/API (or OIDC JIT) —
+the CLI is only for platform genesis and emergency recovery.
+
+> **Production hardening.** When `ROLEMESH_ENV=production`, the legacy
+> `ADMIN_BOOTSTRAP_TOKEN` stops authorizing (it is a permanent,
+> network-reachable owner backdoor) and a populated `BOOTSTRAP_USERS`
+> aborts startup. Both remain available in `development` for local use.
 
 See `docs/auth-architecture.md` for the full auth model.
 

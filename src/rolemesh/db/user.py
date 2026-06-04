@@ -20,6 +20,7 @@ __all__ = [
     "delete_user_oidc_tokens",
     "get_local_tenant_id",
     "get_user",
+    "get_user_by_email",
     "get_user_by_external_sub",
     "get_user_oidc_tokens",
     "get_users_for_tenant",
@@ -79,6 +80,26 @@ async def get_user_by_external_sub(external_sub: str) -> User | None:
     """Look up a user by their external OIDC subject identifier."""
     async with admin_conn() as conn:
         row = await conn.fetchrow("SELECT * FROM users WHERE external_sub = $1", external_sub)
+    if row is None:
+        return None
+    return _record_to_user(row)
+
+
+async def get_user_by_email(email: str, *, tenant_id: str) -> User | None:
+    """Look up a user by email within ``tenant_id`` (admin pool).
+
+    Cross-tenant maintenance helper (class C resolver): the
+    admin-provisioning core (``rolemesh.admin.core``) uses it to make
+    ``create-admin`` idempotent on the email identifier. ``email`` is
+    not unique on its own, so the lookup is scoped to a tenant. Not for
+    REST handlers — those go through the RLS-bound ``get_user``.
+    """
+    async with admin_conn() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM users WHERE tenant_id = $1::uuid AND email = $2",
+            tenant_id,
+            email,
+        )
     if row is None:
         return None
     return _record_to_user(row)
