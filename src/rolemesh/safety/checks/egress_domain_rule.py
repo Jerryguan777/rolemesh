@@ -29,7 +29,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..types import Finding, Stage, Verdict
 
 if TYPE_CHECKING:
-    from ..types import CostClass, SafetyContext
+    from collections.abc import Mapping
+
+    from ..types import Action, ActionModel, CostClass, SafetyContext
 
 
 class EgressDomainCode(StrEnum):
@@ -86,6 +88,25 @@ class EgressDomainRuleCheck:
     stages: frozenset[Stage] = frozenset({Stage.EGRESS_REQUEST})
     cost_class: CostClass = "cheap"
     supported_codes: frozenset[str] = frozenset(c.value for c in EgressDomainCode)
+
+    # Action matrix (descriptive — see SafetyCheck Protocol). Aggregated
+    # model: this check VOTES, it does not decide. ``check()`` returns
+    # "allow" on a domain match; the gateway aggregator produces the
+    # effective block when no rule allowed the request. natural_actions
+    # is therefore the check's own return ("allow"), NOT the aggregated
+    # outcome — the UI surfaces the effective semantics via action_model.
+    #                   natural   supported
+    # EGRESS_REQUEST    allow     block, allow
+    # (no warn: nobody reads appended_context at the gateway; no
+    #  require_approval: the gateway has no agent/human-in-the-loop UX;
+    #  no redact: a TCP/DNS attempt has no rewritable payload)
+    action_model: ActionModel = "aggregated"
+    natural_actions: Mapping[Stage, Action] = {
+        Stage.EGRESS_REQUEST: "allow",
+    }
+    supported_actions: Mapping[Stage, frozenset[Action]] = {
+        Stage.EGRESS_REQUEST: frozenset({"block", "allow"}),
+    }
     config_model: type[BaseModel] = EgressDomainRuleConfig
 
     async def check(

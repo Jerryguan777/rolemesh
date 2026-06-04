@@ -33,7 +33,14 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..types import CostClass, Finding, Stage, Verdict
+from ..types import (
+    Action,
+    ActionModel,
+    CostClass,
+    Finding,
+    Stage,
+    Verdict,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -154,6 +161,35 @@ class PresidioPIICheck:
     supported_codes: frozenset[str] = frozenset(
         c.value for c in PresidioPIICode
     )
+
+    # Action matrix (descriptive — see SafetyCheck Protocol).
+    # config_routed model: the action is chosen per-code by the rule's
+    # block_codes / redact_codes. With the default (empty) config a hit
+    # is inert and returns "allow" — so natural_actions is "allow" and
+    # the UI shows "configure per-category below", not a default badge.
+    # This is the only check that can emit a modified_payload, so it is
+    # the only one where redact is supported.
+    #                   natural   supported
+    # INPUT_PROMPT      allow     block, redact, allow, warn, require_approval
+    # POST_TOOL_RESULT  allow     block, redact, allow, warn  (no require_approval: tool already ran)
+    # MODEL_OUTPUT      allow     block, redact, allow, require_approval  (no warn: post-output)
+    action_model: ActionModel = "config_routed"
+    natural_actions: Mapping[Stage, Action] = {
+        Stage.INPUT_PROMPT: "allow",
+        Stage.POST_TOOL_RESULT: "allow",
+        Stage.MODEL_OUTPUT: "allow",
+    }
+    supported_actions: Mapping[Stage, frozenset[Action]] = {
+        Stage.INPUT_PROMPT: frozenset(
+            {"block", "redact", "allow", "warn", "require_approval"}
+        ),
+        Stage.POST_TOOL_RESULT: frozenset(
+            {"block", "redact", "allow", "warn"}
+        ),
+        Stage.MODEL_OUTPUT: frozenset(
+            {"block", "redact", "allow", "require_approval"}
+        ),
+    }
     config_model: type[BaseModel] = PresidioPIIConfig
     _sync: bool = True
 

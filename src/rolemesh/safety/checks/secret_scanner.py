@@ -29,7 +29,14 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict
 
-from ..types import CostClass, Finding, Stage, Verdict
+from ..types import (
+    Action,
+    ActionModel,
+    CostClass,
+    Finding,
+    Stage,
+    Verdict,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -124,6 +131,31 @@ class SecretScannerCheck:
     supported_codes: frozenset[str] = frozenset(
         c.value for c in SecretCode
     )
+
+    # Action matrix (descriptive — see SafetyCheck Protocol). Fixed
+    # model: a hit always returns block today.
+    #                   natural   supported
+    # INPUT_PROMPT      block     block, allow, warn, require_approval
+    # POST_TOOL_RESULT  block     block, allow, warn  (no require_approval: tool already ran)
+    # MODEL_OUTPUT      block     block, allow, require_approval  (no warn: post-output)
+    # (no redact on any stage by design — see SecretScannerConfig: partial
+    #  redaction of a secret can leave identifying fragments, so block is
+    #  the safe floor and this check never emits a modified_payload)
+    action_model: ActionModel = "fixed"
+    natural_actions: Mapping[Stage, Action] = {
+        Stage.INPUT_PROMPT: "block",
+        Stage.POST_TOOL_RESULT: "block",
+        Stage.MODEL_OUTPUT: "block",
+    }
+    supported_actions: Mapping[Stage, frozenset[Action]] = {
+        Stage.INPUT_PROMPT: frozenset(
+            {"block", "allow", "warn", "require_approval"}
+        ),
+        Stage.POST_TOOL_RESULT: frozenset({"block", "allow", "warn"}),
+        Stage.MODEL_OUTPUT: frozenset(
+            {"block", "allow", "require_approval"}
+        ),
+    }
     config_model: type[BaseModel] = SecretScannerConfig
     _sync: bool = True
 

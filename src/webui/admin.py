@@ -1141,6 +1141,15 @@ async def list_safety_checks_ep(
                 "cost_class": c.cost_class,
                 "supported_codes": sorted(c.supported_codes),
                 "config_schema": schema,
+                "action_model": c.action_model,
+                "natural_actions": {
+                    st.value: act
+                    for st, act in c.natural_actions.items()
+                },
+                "supported_actions": {
+                    st.value: sorted(acts)
+                    for st, acts in c.supported_actions.items()
+                },
             }
         )
     return out

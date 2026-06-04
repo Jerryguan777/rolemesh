@@ -754,6 +754,7 @@ SafetyVerdictAction = Literal[
     "require_approval",
 ]
 SafetyCheckCostClass = Literal["cheap", "slow"]
+SafetyCheckActionModel = Literal["fixed", "config_routed", "aggregated"]
 SafetyFindingSeverity = Literal["info", "low", "medium", "high", "critical"]
 SafetyRuleAuditAction = Literal["created", "updated", "deleted"]
 
@@ -796,6 +797,13 @@ class SafetyCheck(BaseModel):
     ``config_schema`` is the JSON Schema the check declared (None
     for legacy checks that accept arbitrary dicts). The UI uses it
     to render a config form without a second round-trip.
+
+    ``action_model`` / ``natural_actions`` / ``supported_actions`` are
+    descriptive action metadata (see the SafetyCheck Protocol). The
+    rule editor uses them to show the default action and grey out
+    actions that cannot be carried out for a given (check, stage).
+    ``supported_actions`` serialises each stage's frozenset as a sorted
+    list so dashboard caches stay byte-stable.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -806,6 +814,13 @@ class SafetyCheck(BaseModel):
     cost_class: SafetyCheckCostClass
     supported_codes: list[str] = Field(default_factory=list)
     config_schema: dict[str, object] | None = None
+    action_model: SafetyCheckActionModel
+    natural_actions: dict[SafetyStage, SafetyVerdictAction] = Field(
+        default_factory=dict
+    )
+    supported_actions: dict[SafetyStage, list[SafetyVerdictAction]] = Field(
+        default_factory=dict
+    )
 
 
 class SafetyFinding(BaseModel):

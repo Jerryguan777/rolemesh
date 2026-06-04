@@ -29,6 +29,8 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..types import (
+    Action,
+    ActionModel,
     CostClass,
     Finding,
     SafetyObservabilityCode,
@@ -127,6 +129,30 @@ class OpenAIModerationCheck:
         c.value for c in ModerationCode
     )
     config_model: type[BaseModel] = OpenAIModerationConfig
+
+    # Action matrix (descriptive — see SafetyCheck Protocol).
+    # config_routed model: the action is chosen per-category by the
+    # rule's block_categories / warn_categories. With the default
+    # (empty) config a hit is inert and returns "allow", so
+    # natural_actions is "allow" and the UI shows "configure per-
+    # category below".
+    #                   natural   supported
+    # INPUT_PROMPT      allow     block, allow, warn, require_approval
+    # MODEL_OUTPUT      allow     block, allow, require_approval  (no warn: post-output)
+    # (no redact: the moderation endpoint classifies, it does not rewrite text)
+    action_model: ActionModel = "config_routed"
+    natural_actions: Mapping[Stage, Action] = {
+        Stage.INPUT_PROMPT: "allow",
+        Stage.MODEL_OUTPUT: "allow",
+    }
+    supported_actions: Mapping[Stage, frozenset[Action]] = {
+        Stage.INPUT_PROMPT: frozenset(
+            {"block", "allow", "warn", "require_approval"}
+        ),
+        Stage.MODEL_OUTPUT: frozenset(
+            {"block", "allow", "require_approval"}
+        ),
+    }
     # Async call (httpx.AsyncClient) — stays on the main event loop.
     _sync: bool = False
 

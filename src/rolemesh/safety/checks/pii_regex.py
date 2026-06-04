@@ -26,7 +26,15 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
-from ..types import CostClass, Finding, SafetyContext, Stage, Verdict
+from ..types import (
+    Action,
+    ActionModel,
+    CostClass,
+    Finding,
+    SafetyContext,
+    Stage,
+    Verdict,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -172,6 +180,35 @@ class PIIRegexCheck:
     )
     cost_class: CostClass = "cheap"
     supported_codes: frozenset[str] = frozenset(c.value for c in PIICode)
+
+    # Action matrix (descriptive — see SafetyCheck Protocol). Fixed
+    # model: a hit always returns block today; ``supported`` lists what
+    # an action_override may turn that into per stage.
+    #                   natural   supported
+    # INPUT_PROMPT      block     block, allow, warn, require_approval
+    # PRE_TOOL_CALL     block     block, allow, warn, require_approval
+    # POST_TOOL_RESULT  block     block, allow, warn  (no require_approval: tool already ran)
+    # MODEL_OUTPUT      block     block, allow, require_approval  (no warn: post-output, appended_context unread)
+    # (no redact on any stage: pii.regex cannot emit a modified_payload — only presidio.pii can)
+    action_model: ActionModel = "fixed"
+    natural_actions: Mapping[Stage, Action] = {
+        Stage.INPUT_PROMPT: "block",
+        Stage.PRE_TOOL_CALL: "block",
+        Stage.POST_TOOL_RESULT: "block",
+        Stage.MODEL_OUTPUT: "block",
+    }
+    supported_actions: Mapping[Stage, frozenset[Action]] = {
+        Stage.INPUT_PROMPT: frozenset(
+            {"block", "allow", "warn", "require_approval"}
+        ),
+        Stage.PRE_TOOL_CALL: frozenset(
+            {"block", "allow", "warn", "require_approval"}
+        ),
+        Stage.POST_TOOL_RESULT: frozenset({"block", "allow", "warn"}),
+        Stage.MODEL_OUTPUT: frozenset(
+            {"block", "allow", "require_approval"}
+        ),
+    }
     config_model: type[BaseModel] = PIIRegexConfig
 
     async def check(

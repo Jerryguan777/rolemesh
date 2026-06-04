@@ -342,6 +342,15 @@ async def list_checks(
                 cost_class=c.cost_class,  # type: ignore[arg-type]
                 supported_codes=sorted(c.supported_codes),
                 config_schema=schema,
+                action_model=c.action_model,  # type: ignore[arg-type]
+                natural_actions={
+                    st.value: act  # type: ignore[misc]
+                    for st, act in c.natural_actions.items()
+                },
+                supported_actions={
+                    st.value: sorted(acts)  # type: ignore[misc]
+                    for st, acts in c.supported_actions.items()
+                },
             )
         )
     return out

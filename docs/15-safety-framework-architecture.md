@@ -165,6 +165,9 @@ class SafetyCheck(Protocol):
     stages: frozenset[Stage]         # which stages this check supports
     cost_class: CostClass            # "cheap" | "slow"
     supported_codes: frozenset[str]  # stable Finding codes this check may emit
+    action_model: ActionModel        # "fixed" | "config_routed" | "aggregated"
+    natural_actions: Mapping[Stage, Action]            # default action per stage
+    supported_actions: Mapping[Stage, frozenset[Action]]  # offerable actions per stage
     config_model: type[BaseModel] | None  # pydantic schema, REST validates rule.config
 
     async def check(ctx: SafetyContext, config: dict) -> Verdict: ...
@@ -174,6 +177,19 @@ class SafetyCheck(Protocol):
 - `supported_codes` is a **stable enum**, decoupled from the external library's internal taxonomy — a library upgrade introducing new categories is silently dropped at the mapping layer, never leaking into Finding
 - `version` starts at "1", **must bump on backward-incompatible code changes**
 - Every new adapter check (e.g. `presidio.pii`) must include a unit test that "mocks the external library returning an unknown type → should be dropped"
+
+#### Action metadata (`action_model` / `natural_actions` / `supported_actions`)
+
+These three fields are **descriptive, not prescriptive**. They report what a check's current code does so the rule-editor UI can (1) show the default action a hit produces and (2) grey out actions that cannot be carried out for a given `(check, stage)`. **The pipeline does not consume them** — they never change how a verdict is routed, and declaring them must never drive a change to `check()` behaviour. The single readable source of truth is the global matrix comment at the top of `src/rolemesh/safety/checks/__init__.py`; each check repeats its own slice next to the field declarations.
+
+- **`action_model`** — how the check decides its action, which maps onto three real architectures:
+  - `fixed` — the action is hardcoded in `check()`; a hit always returns the same action (today every fixed check returns `block`). `natural_actions[stage]` is that action. UI shows *"This check defaults to: BLOCK"*.
+  - `config_routed` — the action is chosen per-finding by the rule config (e.g. `presidio.pii` `block_codes` vs `redact_codes`). Under the default/empty config a hit is **inert** (`allow`), so `natural_actions` is `allow`; UI shows *"configure per-category below"* rather than a default badge.
+  - `aggregated` — the check only **votes**; a later layer decides the effective verdict (`egress.domain_rule` returns `allow` on a match and the gateway blocks when no rule allowed). `natural_actions` is the check's own return (`allow`).
+- **`natural_actions: Mapping[Stage, Action]`** — the action a hit produces under a config that enables detection but does **not** override the action. The UI uses it for the default badge.
+- **`supported_actions: Mapping[Stage, frozenset[Action]]`** — the actions a rule on that `(check, stage)` can meaningfully produce, gated by real capabilities: `redact` only where the check can emit a `modified_payload` (today `presidio.pii` alone); `warn` only where a stage consumes `appended_context` (excluded on `MODEL_OUTPUT` / `EGRESS_REQUEST`); `require_approval` only where the stage has an approval surface (excluded on `POST_TOOL_RESULT` and `EGRESS_REQUEST`); `block` / `allow` everywhere.
+
+Three invariants are enforced by `tests/safety/test_action_matrix.py`: (1) `natural_actions.keys() == supported_actions.keys() == stages`; (2) `natural_actions[stage] ∈ supported_actions[stage]`; (3) running `check()` on a firing input (config enables detection, does not override the action) returns `natural_actions[stage]` — the **runtime anchor** that fails the test if a check's behaviour drifts from its declared matrix. Plus a legality check that every `supported_actions` value is in the pipeline's `_V2_ALLOWED_ACTIONS`. The REST `/safety/checks` endpoints project all three fields (frozensets serialised as sorted lists for cache stability).
 
 ### Rule
 

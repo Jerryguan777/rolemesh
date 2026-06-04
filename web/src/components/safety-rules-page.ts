@@ -35,6 +35,28 @@ const EMPTY_DRAFT: DraftRule = {
   description: '',
 };
 
+// Full action set, in the order the picker lists them. Whether each is
+// offered for a given (check, stage) comes from the check's
+// server-driven ``supported_actions`` — we never hardcode that here.
+const ALL_ACTIONS = [
+  'block',
+  'redact',
+  'warn',
+  'allow',
+  'require_approval',
+] as const;
+
+// Why an action is unavailable for a (check, stage), shown as a tooltip
+// on the greyed-out picker option. The server is the source of truth for
+// WHICH are unavailable; these strings only explain the common reasons.
+const UNSUPPORTED_REASON: Record<string, string> = {
+  redact: 'this check cannot rewrite the payload',
+  warn: 'nothing consumes warning context at this stage',
+  require_approval: 'no approval step exists at this stage',
+  block: 'not meaningful for this check at this stage',
+  allow: 'not meaningful for this check at this stage',
+};
+
 @customElement('rm-safety-rules-page')
 export class SafetyRulesPage extends LitElement {
   @state() private rules: SafetyRule[] = [];
@@ -90,6 +112,63 @@ export class SafetyRulesPage extends LitElement {
 
   private checkMeta(id: string): SafetyCheck | null {
     return this.checks.find((c) => c.id === id) ?? null;
+  }
+
+  // -- Action matrix helpers (server-driven; see SafetyCheck Protocol) --
+
+  // True only when the config textarea holds a JSON object — the
+  // override picker writes into it, so we refuse to touch un-parseable
+  // JSON rather than clobber the operator's in-progress edit.
+  private configIsObject(): boolean {
+    try {
+      const o = JSON.parse(this.draft.config || '{}');
+      return typeof o === 'object' && o !== null && !Array.isArray(o);
+    } catch {
+      return false;
+    }
+  }
+
+  private currentActionOverride(): string {
+    try {
+      const o = JSON.parse(this.draft.config || '{}');
+      const v = (o as Record<string, unknown>)?.action_override;
+      return typeof v === 'string' ? v : '';
+    } catch {
+      return '';
+    }
+  }
+
+  // Patch (or clear, when action === '') the ``action_override`` key in
+  // the draft config JSON, keeping the textarea authoritative.
+  private setActionOverride(action: string): void {
+    let obj: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(this.draft.config || '{}');
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+        obj = parsed as Record<string, unknown>;
+      }
+    } catch {
+      obj = {};
+    }
+    if (action === '') delete obj['action_override'];
+    else obj['action_override'] = action;
+    this.draft = { ...this.draft, config: JSON.stringify(obj, null, 2) };
+  }
+
+  // The action a hit defaults to for the selected stage, or null when
+  // the stage is not declared by the check.
+  private naturalAction(meta: SafetyCheck, stage: SafetyStage): string | null {
+    const na = meta.natural_actions as
+      | Record<string, string | undefined>
+      | undefined;
+    return na?.[stage] ?? null;
+  }
+
+  private supportedActions(meta: SafetyCheck, stage: SafetyStage): string[] {
+    const sa = meta.supported_actions as
+      | Record<string, string[] | undefined>
+      | undefined;
+    return sa?.[stage] ?? [];
   }
 
   private openCreate(): void {
@@ -210,6 +289,77 @@ export class SafetyRulesPage extends LitElement {
     this.detailAudit = [];
   }
 
+  // Server-driven action panel: a "defaults to" badge whose wording
+  // depends on action_model, plus an override picker that greys out
+  // actions the check cannot carry out for the selected stage.
+  private renderActionPanel(meta: SafetyCheck | null) {
+    const stage = this.draft.stage;
+    if (!meta || !stage || !meta.stages.includes(stage as SafetyStage)) {
+      return nothing;
+    }
+    const st = stage as SafetyStage;
+    const natural = this.naturalAction(meta, st);
+    const supported = this.supportedActions(meta, st);
+    const model = meta.action_model;
+
+    const badge =
+      model === 'fixed'
+        ? html`This check defaults to:
+            <span class="font-mono font-semibold uppercase"
+              >${natural ?? 'allow'}</span
+            >`
+        : model === 'config_routed'
+          ? html`No fixed default — the action is chosen per-category in
+              the config below; the check is inert until configured.`
+          : html`This check votes
+              <span class="font-mono">allow</span> on a match; the gateway
+              blocks when no rule allows (effective action decided by
+              aggregation).`;
+
+    const override = this.currentActionOverride();
+    const canEdit = this.configIsObject();
+
+    return html`
+      <div
+        class="col-span-2 text-xs border rounded p-2 bg-surface-2 dark:bg-d-surface-2"
+        data-testid="action-panel"
+      >
+        <div class="mb-2" data-testid="action-badge">${badge}</div>
+        <label class="flex flex-col gap-1">
+          <span class="text-gray-500"
+            >Action override${canEdit
+              ? nothing
+              : html` <span class="text-amber-600"
+                  >(fix config JSON to edit)</span
+                >`}</span
+          >
+          <select
+            class="border rounded px-2 py-1 bg-transparent"
+            data-testid="action-override-select"
+            ?disabled=${!canEdit}
+            .value=${override}
+            @change=${(e: Event) =>
+              this.setActionOverride((e.target as HTMLSelectElement).value)}
+          >
+            <option value="">
+              (use default${natural ? `: ${natural}` : ''})
+            </option>
+            ${ALL_ACTIONS.map((a) => {
+              const ok = supported.includes(a);
+              return html`<option
+                value=${a}
+                ?disabled=${!ok}
+                title=${ok ? '' : (UNSUPPORTED_REASON[a] ?? '')}
+              >
+                ${a}${ok ? '' : ' — unavailable'}
+              </option>`;
+            })}
+          </select>
+        </label>
+      </div>
+    `;
+  }
+
   private renderDraftForm() {
     if (this.draftMode === 'closed') return nothing;
     const meta = this.checkMeta(this.draft.check_id);
@@ -259,6 +409,7 @@ export class SafetyRulesPage extends LitElement {
                 : nothing}
             </select>
           </label>
+          ${this.renderActionPanel(meta)}
           <label class="flex flex-col text-sm">
             Coworker
             <select

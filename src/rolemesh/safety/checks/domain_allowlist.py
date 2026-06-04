@@ -25,7 +25,15 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from ..types import CostClass, Finding, SafetyContext, Stage, Verdict
+from ..types import (
+    Action,
+    ActionModel,
+    CostClass,
+    Finding,
+    SafetyContext,
+    Stage,
+    Verdict,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -127,6 +135,21 @@ class DomainAllowlistCheck:
     stages: frozenset[Stage] = frozenset({Stage.PRE_TOOL_CALL})
     cost_class: CostClass = "cheap"
     supported_codes: frozenset[str] = frozenset({"DOMAIN_NOT_ALLOWED"})
+
+    # Action matrix (descriptive — see SafetyCheck Protocol). Fixed
+    # model: a non-allowed host always returns block today.
+    #                   natural   supported
+    # PRE_TOOL_CALL     block     block, allow, warn, require_approval
+    # (no redact: this check gates a tool call, there is no payload text to rewrite)
+    action_model: ActionModel = "fixed"
+    natural_actions: Mapping[Stage, Action] = {
+        Stage.PRE_TOOL_CALL: "block",
+    }
+    supported_actions: Mapping[Stage, frozenset[Action]] = {
+        Stage.PRE_TOOL_CALL: frozenset(
+            {"block", "allow", "warn", "require_approval"}
+        ),
+    }
     config_model: type[BaseModel] = DomainAllowlistConfig
 
     async def check(
