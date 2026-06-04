@@ -23,7 +23,7 @@ from rolemesh.db import (
     list_tenant_credentials,
     upsert_tenant_credential,
 )
-from webui.dependencies import get_current_user
+from webui.dependencies import require_action
 from webui.schemas_v1 import CredentialResponse, CredentialUpsert, ModelProvider
 from webui.v1 import coworker_events
 from webui.v1._log_sanitize import sanitize_for_log
@@ -47,7 +47,7 @@ def _credential_to_response(row: CredentialRow) -> CredentialResponse:
 
 @router.get("", response_model=list[CredentialResponse])
 async def list_credentials_endpoint(
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("credential.byok.manage")),
 ) -> list[CredentialResponse]:
     rows = await list_tenant_credentials(user.tenant_id)
     return [_credential_to_response(r) for r in rows]
@@ -57,7 +57,7 @@ async def list_credentials_endpoint(
 async def put_credential_endpoint(
     provider: ModelProvider,
     body: CredentialUpsert,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("credential.byok.manage")),
 ) -> CredentialResponse:
     """Set or rotate the credential for one provider.
 
@@ -114,7 +114,7 @@ async def put_credential_endpoint(
 @router.delete("/{provider}", status_code=204)
 async def delete_credential_endpoint(
     provider: ModelProvider,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("credential.byok.manage")),
 ) -> Response:
     """Delete a credential.
 

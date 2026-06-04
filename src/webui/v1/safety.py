@@ -32,7 +32,7 @@ from rolemesh.db import (
     list_visible_platform_rules,
 )
 from rolemesh.safety.registry import get_orchestrator_registry
-from webui.dependencies import get_current_user
+from webui.dependencies import require_action
 from webui.schemas_v1 import (
     SafetyCheck,
     SafetyDecision,
@@ -221,7 +221,7 @@ async def list_rules(
     coworker_id: str | None = None,
     stage: SafetyStage | None = None,
     enabled: bool | None = None,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("safety.read")),
 ) -> list[SafetyRule]:
     """List safety rules for the caller's tenant.
 
@@ -260,7 +260,7 @@ async def list_rules(
 @router.get("/rules/{rule_id}", response_model=SafetyRule)
 async def get_rule(
     rule_id: str,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("safety.read")),
 ) -> SafetyRule:
     """Single rule, scoped to the caller's tenant.
 
@@ -296,7 +296,7 @@ async def get_rule(
 async def list_rule_audit(
     rule_id: str,
     limit: int = Query(default=200, ge=1, le=500),
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("safety.read")),
 ) -> list[SafetyRuleAuditEntry]:
     """Change-history timeline for one rule, newest first.
 
@@ -316,7 +316,7 @@ async def list_rule_audit(
 
 @router.get("/checks", response_model=list[SafetyCheck])
 async def list_checks(
-    _user: AuthenticatedUser = Depends(get_current_user),
+    _user: AuthenticatedUser = Depends(require_action("safety.read")),
 ) -> list[SafetyCheck]:
     """Registered check metadata for the rule editor.
 
@@ -365,7 +365,7 @@ async def list_decisions(
     to_ts: str | None = None,
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("safety.read")),
 ) -> SafetyDecisionPage:
     """Paginated decisions list with a total-count envelope.
 
@@ -400,7 +400,7 @@ async def list_decisions(
 @router.get("/decisions/{decision_id}", response_model=SafetyDecision)
 async def get_decision(
     decision_id: str,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("safety.read")),
 ) -> SafetyDecision:
     """One safety decision detail row.
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Callable, Coroutine
+from typing import TYPE_CHECKING
 
 from fastapi import Depends, HTTPException, Request
 
@@ -10,6 +10,8 @@ from rolemesh.auth.permissions import user_can
 from webui import auth
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+
     from rolemesh.auth.provider import AuthenticatedUser
 
 

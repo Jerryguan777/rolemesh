@@ -30,7 +30,7 @@ from rolemesh.db import (
     get_coworker,
     update_channel_binding,
 )
-from webui.dependencies import get_current_user
+from webui.dependencies import get_current_user, require_action
 from webui.schemas_v1 import (
     ChannelBinding,
     ChannelBindingCreate,
@@ -107,7 +107,7 @@ async def list_bindings_endpoint(
 async def create_binding_endpoint(
     coworker_id: str,
     body: ChannelBindingCreate,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("agent.manage")),
 ) -> ChannelBinding:
     await _ensure_coworker(coworker_id, tenant_id=user.tenant_id)
     try:
@@ -153,7 +153,7 @@ async def update_binding_endpoint(
     coworker_id: str,
     binding_id: str,
     body: ChannelBindingUpdate,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("agent.manage")),
 ) -> ChannelBinding:
     await _ensure_coworker(coworker_id, tenant_id=user.tenant_id)
     await _get_binding_for_coworker(
@@ -183,7 +183,7 @@ async def update_binding_endpoint(
 async def delete_binding_endpoint(
     coworker_id: str,
     binding_id: str,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("agent.manage")),
 ) -> Response:
     await _ensure_coworker(coworker_id, tenant_id=user.tenant_id)
     await _get_binding_for_coworker(

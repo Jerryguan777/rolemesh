@@ -44,7 +44,11 @@ from rolemesh.db import (
     set_skill_file,
     update_skill,
 )
-from webui.dependencies import get_current_user
+from webui.dependencies import (
+    get_current_user,
+    require_action,
+    require_manage_or_owner,
+)
 from webui.schemas_v1 import (
     CoworkerSkillBinding,
     Skill,
@@ -171,7 +175,7 @@ async def _get_skill_or_404(skill_id: str, *, tenant_id: str) -> SkillDataclass:
     return skill
 
 
-async def _ensure_coworker(coworker_id: str, *, tenant_id: str) -> None:
+async def _get_coworker_or_404(coworker_id: str, *, tenant_id: str) -> object:
     try:
         cw = await get_coworker(coworker_id, tenant_id=tenant_id)
     except asyncpg.DataError:
@@ -183,6 +187,11 @@ async def _ensure_coworker(coworker_id: str, *, tenant_id: str) -> None:
             status_code=404,
             details={"coworker_id": coworker_id},
         )
+    return cw
+
+
+async def _ensure_coworker(coworker_id: str, *, tenant_id: str) -> None:
+    await _get_coworker_or_404(coworker_id, tenant_id=tenant_id)
 
 
 async def _broadcast_skills_changed(
@@ -221,7 +230,7 @@ async def list_skills_endpoint(
 @skills_router.post("", response_model=Skill, status_code=201)
 async def create_skill_endpoint(
     body: SkillCreate,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("skill.create")),
 ) -> Skill:
     try:
         validate_skill_name(body.name)
@@ -316,9 +325,14 @@ async def get_skill_endpoint(
 async def update_skill_endpoint(
     skill_id: str,
     body: SkillUpdate,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("skill.create")),
 ) -> Skill:
     existing = await _get_skill_or_404(skill_id, tenant_id=user.tenant_id)
+    # Ownership-escape: a member may edit a skill they created; reaching a
+    # shared/others' skill requires ``skill.manage``.
+    require_manage_or_owner(
+        manage_action="skill.manage", resource=existing, user=user,
+    )
     set_fields = body.model_fields_set
 
     # ``name`` is read-only on PATCH (see SkillUpdate docstring). Accept
@@ -454,9 +468,12 @@ async def update_skill_endpoint(
 @skills_router.delete("/{skill_id}", status_code=204)
 async def delete_skill_endpoint(
     skill_id: str,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("skill.create")),
 ) -> Response:
-    await _get_skill_or_404(skill_id, tenant_id=user.tenant_id)
+    skill = await _get_skill_or_404(skill_id, tenant_id=user.tenant_id)
+    require_manage_or_owner(
+        manage_action="skill.manage", resource=skill, user=user,
+    )
     coworker_ids = await list_coworkers_for_skill(
         skill_id, tenant_id=user.tenant_id,
     )
@@ -517,9 +534,12 @@ async def put_skill_file_endpoint(
     skill_id: str,
     path: str,
     body: SkillFileUpsert,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("skill.create")),
 ) -> SkillFile:
-    await _get_skill_or_404(skill_id, tenant_id=user.tenant_id)
+    skill = await _get_skill_or_404(skill_id, tenant_id=user.tenant_id)
+    require_manage_or_owner(
+        manage_action="skill.manage", resource=skill, user=user,
+    )
     try:
         validate_skill_file_path(path)
     except SkillValidationError as exc:
@@ -558,9 +578,12 @@ async def put_skill_file_endpoint(
 async def delete_skill_file_endpoint(
     skill_id: str,
     path: str,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("skill.create")),
 ) -> Response:
-    await _get_skill_or_404(skill_id, tenant_id=user.tenant_id)
+    skill = await _get_skill_or_404(skill_id, tenant_id=user.tenant_id)
+    require_manage_or_owner(
+        manage_action="skill.manage", resource=skill, user=user,
+    )
     if path == SKILL_MANIFEST_NAME:
         raise ErrorResponseException(
             status_code=409,
@@ -654,15 +677,21 @@ async def list_coworker_skills_endpoint(
 async def enable_coworker_skill_endpoint(
     coworker_id: str,
     skill_id: str,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("agent.use")),
 ) -> CoworkerSkillBinding:
     """Bind a catalog skill to this coworker (idempotent).
 
     Re-enabling an already-enabled binding is a no-op. Re-enabling
     a disabled binding flips the junction flag back to true. Both
     cases publish ``skills_changed``.
+
+    Mutates the coworker's skill set (agent config): the route requires
+    ``agent.use`` and the handler escalates to ``agent.manage``-or-own.
     """
-    await _ensure_coworker(coworker_id, tenant_id=user.tenant_id)
+    cw = await _get_coworker_or_404(coworker_id, tenant_id=user.tenant_id)
+    require_manage_or_owner(
+        manage_action="agent.manage", resource=cw, user=user,
+    )
     await _get_skill_or_404(skill_id, tenant_id=user.tenant_id)
     ok = await enable_skill_for_coworker(
         skill_id=skill_id,
@@ -689,14 +718,20 @@ async def enable_coworker_skill_endpoint(
 async def disable_coworker_skill_endpoint(
     coworker_id: str,
     skill_id: str,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("agent.use")),
 ) -> Response:
     """Remove the ``coworker_skills`` binding row.
 
     Distinct from "enable=false" — this deletes the binding outright,
     matching the v1 DELETE convention. The catalog skill survives.
+
+    Mutates the coworker's skill set (agent config): route ``agent.use``,
+    handler escalates to ``agent.manage``-or-own.
     """
-    await _ensure_coworker(coworker_id, tenant_id=user.tenant_id)
+    cw = await _get_coworker_or_404(coworker_id, tenant_id=user.tenant_id)
+    require_manage_or_owner(
+        manage_action="agent.manage", resource=cw, user=user,
+    )
     removed = await disable_skill_for_coworker(
         skill_id=skill_id,
         coworker_id=coworker_id,

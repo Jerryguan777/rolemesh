@@ -37,7 +37,11 @@ from rolemesh.db import (
     tenant_has_credential_for_provider,
     update_coworker,
 )
-from webui.dependencies import get_current_user
+from webui.dependencies import (
+    get_current_user,
+    require_action,
+    require_manage_or_owner,
+)
 from webui.schemas_v1 import Coworker, CoworkerCreate, CoworkerUpdate
 from webui.v1 import coworker_events
 from webui.v1.errors import ErrorResponseException, raise_error_response
@@ -134,7 +138,7 @@ async def list_coworkers(
 @router.post("", response_model=Coworker, status_code=201)
 async def create_coworker_endpoint(
     body: CoworkerCreate,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("agent.create")),
 ) -> Coworker:
     if body.model_id is not None:
         await _validate_model_and_credential(
@@ -243,7 +247,7 @@ async def get_coworker_endpoint(
 async def patch_coworker_endpoint(
     coworker_id: str,
     body: CoworkerUpdate,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("agent.use")),
 ) -> Coworker:
     """Update selected fields on a coworker.
 
@@ -256,6 +260,12 @@ async def patch_coworker_endpoint(
     even if the broadcast misses.
     """
     cw = await _get_coworker_or_404(coworker_id, user.tenant_id)
+    # Ownership-escape gate: the route requires only ``agent.use`` (member-
+    # reachable); a member may PATCH a coworker they created, but reaching
+    # someone else's / a shared one requires ``agent.manage``.
+    require_manage_or_owner(
+        manage_action="agent.manage", resource=cw, user=user,
+    )
     model_changed = body.model_id is not None and body.model_id != cw.model_id
 
     if body.model_id is not None:
@@ -313,14 +323,21 @@ async def patch_coworker_endpoint(
 @router.delete("/{coworker_id}", status_code=204)
 async def delete_coworker_endpoint(
     coworker_id: str,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("agent.use")),
 ) -> Response:
     """Delete a coworker. DB FK ON DELETE CASCADE handles dependents.
 
     Per design §3 "DELETE 语义" table, a coworker DELETE cascades to
     conversations / runs / messages. No 409 path on this endpoint —
     the design treats coworkers as roots of their own subtree.
+
+    Ownership-escape gate: the route requires only ``agent.use``; a member
+    may delete their OWN coworker, others'/shared ones require
+    ``agent.manage``.
     """
-    await _get_coworker_or_404(coworker_id, user.tenant_id)
+    cw = await _get_coworker_or_404(coworker_id, user.tenant_id)
+    require_manage_or_owner(
+        manage_action="agent.manage", resource=cw, user=user,
+    )
     await delete_coworker(coworker_id, tenant_id=user.tenant_id)
     return Response(status_code=204)

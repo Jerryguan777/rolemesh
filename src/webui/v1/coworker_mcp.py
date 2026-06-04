@@ -28,7 +28,7 @@ from rolemesh.db import (
     set_coworker_mcp_enabled_tools,
     unbind_coworker_mcp_server,
 )
-from webui.dependencies import get_current_user
+from webui.dependencies import get_current_user, require_action
 from webui.schemas_v1 import (
     CoworkerMCPBindingCreate,
     CoworkerMCPBindingResponse,
@@ -101,7 +101,7 @@ async def list_bindings_endpoint(
 async def bind_endpoint(
     coworker_id: str,
     body: CoworkerMCPBindingCreate,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("mcp.configure")),
 ) -> CoworkerMCPBindingResponse:
     """Bind ``mcp_server_id`` to this coworker.
 
@@ -142,7 +142,7 @@ async def patch_binding_endpoint(
     coworker_id: str,
     mcp_id: str,
     body: CoworkerMCPBindingUpdate,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("mcp.configure")),
 ) -> CoworkerMCPBindingResponse:
     """Change ``enabled_tools`` on an existing binding.
 
@@ -191,7 +191,7 @@ async def patch_binding_endpoint(
 async def unbind_endpoint(
     coworker_id: str,
     mcp_id: str,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("mcp.configure")),
 ) -> Response:
     await _ensure_coworker(coworker_id, tenant_id=user.tenant_id)
     removed = await unbind_coworker_mcp_server(

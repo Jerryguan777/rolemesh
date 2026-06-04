@@ -31,7 +31,7 @@ from rolemesh.db import (
     list_requests_for_conversation,
     tenant_conn,
 )
-from webui.dependencies import get_current_user
+from webui.dependencies import get_current_user, require_action
 from webui.schemas_v1 import (
     ApprovalRequest,
     Conversation,
@@ -133,7 +133,7 @@ async def list_coworker_conversations(
 async def create_coworker_conversation(
     coworker_id: str,
     body: ConversationCreate,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("agent.use")),
 ) -> Conversation:
     """Create a new web conversation under a coworker.
 
@@ -177,7 +177,7 @@ async def get_conversation_endpoint(
 @conversations_router.delete("/{conversation_id}", status_code=204)
 async def delete_conversation_endpoint(
     conversation_id: str,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("agent.use")),
 ) -> Response:
     """Delete a conversation; FK ON DELETE CASCADE removes messages and runs.
 

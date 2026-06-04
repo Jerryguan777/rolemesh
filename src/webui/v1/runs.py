@@ -24,7 +24,7 @@ from fastapi import APIRouter, Depends, Response
 
 from rolemesh.db import tenant_conn
 from rolemesh.runs import get_run
-from webui.dependencies import get_current_user
+from webui.dependencies import get_current_user, require_action
 from webui.schemas_v1 import Run
 from webui.v1 import run_events
 from webui.v1.errors import raise_error_response
@@ -106,7 +106,7 @@ async def get_run_endpoint(
 async def cancel_run_endpoint(
     run_id: str,
     response: Response,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("agent.use")),
 ) -> Run:
     """Request cancellation of an in-flight run.
 
