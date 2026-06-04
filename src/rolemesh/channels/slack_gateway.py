@@ -66,7 +66,9 @@ class _SlackAppInstance:
             chat_id = channel_id
             ts = event.get("ts", "0")
             timestamp = _slack_ts_to_iso(ts)
-            is_group = event.get("channel_type") != "im"
+            # Product is 1:1-only — ignore non-DM (channel/group) messages.
+            if event.get("channel_type") != "im":
+                return
             is_bot = bool(event.get("bot_id")) or event.get("user") == self._bot_user_id
 
             if is_bot:
@@ -83,7 +85,7 @@ class _SlackAppInstance:
                     content = f"@{bot_name} {content}"
 
             sender = event.get("user") or event.get("bot_id", "")
-            await self._on_message(binding_id, chat_id, sender, sender_name, content, timestamp, ts, is_group)
+            await self._on_message(binding_id, chat_id, sender, sender_name, content, timestamp, ts)
 
     async def start(self) -> None:
         """Connect the Slack app."""

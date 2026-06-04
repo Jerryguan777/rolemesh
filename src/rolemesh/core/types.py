@@ -148,7 +148,6 @@ class Coworker:
     max_concurrent: int = 2
     status: str = "active"
     created_at: str = ""
-    agent_role: str = "agent"  # "super_agent" | "agent"
     permissions: AgentPermissions | None = None  # filled by __post_init__; always non-None after init
     # Phase 1 (v1.1) — added so the /api/v1 surface can carry them
     # through. NULLABLE on the DB side; legacy admin code that builds
@@ -160,7 +159,7 @@ class Coworker:
         if self.permissions is None:
             from rolemesh.auth.permissions import AgentPermissions as _AgentPermissions
 
-            self.permissions = _AgentPermissions.for_role(self.agent_role)
+            self.permissions = _AgentPermissions()
 
 
 @dataclass
@@ -239,7 +238,6 @@ class Conversation:
     channel_binding_id: str
     channel_chat_id: str  # tg group ID / slack channel ID
     name: str | None = None
-    requires_trigger: bool = True
     last_agent_invocation: str | None = None
     created_at: str = ""
     user_id: str | None = None  # owner user (set for web conversations)
@@ -260,11 +258,8 @@ class RegisteredGroup:
 
     name: str
     folder: str
-    trigger: str
     added_at: str
     container_config: ContainerConfig | None = None
-    requires_trigger: bool = True
-    is_main: bool = False
 
 
 def registered_group_to_coworker(
@@ -279,7 +274,6 @@ def registered_group_to_coworker(
         name=group.name,
         folder=group.folder,
         container_config=group.container_config,
-        agent_role="super_agent" if group.is_main else "agent",
     )
 
 

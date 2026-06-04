@@ -319,15 +319,14 @@ async def create_conversation(
     channel_binding_id: str,
     channel_chat_id: str,
     name: str | None = None,
-    requires_trigger: bool = True,
     user_id: str | None = None,
 ) -> Conversation:
     """Create a conversation."""
     async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
             """
-            INSERT INTO conversations (tenant_id, coworker_id, channel_binding_id, channel_chat_id, name, requires_trigger, user_id)
-            VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7::uuid)
+            INSERT INTO conversations (tenant_id, coworker_id, channel_binding_id, channel_chat_id, name, user_id)
+            VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6::uuid)
             RETURNING *
             """,
             tenant_id,
@@ -335,7 +334,6 @@ async def create_conversation(
             channel_binding_id,
             channel_chat_id,
             name,
-            requires_trigger,
             user_id,
         )
     assert row is not None
@@ -352,7 +350,6 @@ def _record_to_conversation(row: asyncpg.Record) -> Conversation:
         channel_binding_id=str(row["channel_binding_id"]),
         channel_chat_id=row["channel_chat_id"],
         name=row["name"],
-        requires_trigger=bool(row["requires_trigger"]) if row["requires_trigger"] is not None else True,
         last_agent_invocation=lai.isoformat() if lai else None,
         created_at=row["created_at"].isoformat() if row["created_at"] else "",
         user_id=str(uid) if uid else None,

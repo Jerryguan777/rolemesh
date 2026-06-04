@@ -481,7 +481,7 @@ class PiBackend:
             append_system_prompt = init.system_prompt
 
         global_claude_md = Path("/workspace/global/CLAUDE.md")
-        if init.permissions.get("data_scope") != "tenant" and global_claude_md.exists():
+        if global_claude_md.exists():
             md_content = global_claude_md.read_text()
             if append_system_prompt:
                 append_system_prompt += "\n\n" + md_content

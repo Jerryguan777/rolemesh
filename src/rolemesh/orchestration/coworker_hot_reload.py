@@ -115,14 +115,6 @@ async def reload_coworker_into_state(
     cached.config = cw
     if mcp_configs is not None:
         cached.mcp_configs = list(mcp_configs)
-    # ``trigger_pattern`` is derived from the coworker's name; if a
-    # PATCH changed the name we'd need to recompute. The v1 schema
-    # forbids renaming via the same event path today, but rebuilding
-    # is cheap — keeps the cache honest if the WebUI grows broader
-    # hot-reload triggers.
-    from rolemesh.core.orchestrator_state import build_trigger_pattern
-
-    cached.trigger_pattern = build_trigger_pattern(cw.name)
     return True
 
 

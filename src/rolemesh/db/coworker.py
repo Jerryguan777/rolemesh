@@ -64,7 +64,6 @@ async def create_coworker(
     system_prompt: str | None = None,
     container_config: ContainerConfig | None = None,
     max_concurrent: int = 2,
-    agent_role: str = "agent",
     permissions: AgentPermissions | None = None,
     model_id: str | None = None,
     created_by_user_id: str | None = None,
@@ -92,15 +91,15 @@ async def create_coworker(
                 "timeout": container_config.timeout,
             }
         )
-    effective_perms = permissions or AgentPermissions.for_role(agent_role)
+    effective_perms = permissions or AgentPermissions()
     async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
             """
             INSERT INTO coworkers (tenant_id, name, folder, agent_backend, system_prompt,
-                container_config, max_concurrent, agent_role, permissions,
+                container_config, max_concurrent, permissions,
                 model_id, created_by_user_id)
-            VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7, $8, $9::jsonb,
-                $10::uuid, $11::uuid)
+            VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb,
+                $9::uuid, $10::uuid)
             RETURNING *
             """,
             tenant_id,
@@ -110,7 +109,6 @@ async def create_coworker(
             system_prompt,
             cc_json,
             max_concurrent,
-            agent_role,
             json.dumps(effective_perms.to_dict()),
             model_id,
             created_by_user_id,
@@ -120,15 +118,14 @@ async def create_coworker(
 
 
 def _record_to_coworker(row: asyncpg.Record) -> Coworker:
-    # Parse agent_role and permissions (new auth fields)
-    agent_role = row.get("agent_role") or "agent"
+    # Parse permissions (flat capability bits)
     perms_raw = row.get("permissions")
     if isinstance(perms_raw, dict):
         permissions = AgentPermissions.from_dict(perms_raw)
     elif isinstance(perms_raw, str) and perms_raw:
         permissions = AgentPermissions.from_dict(json.loads(perms_raw))
     else:
-        permissions = AgentPermissions.for_role(agent_role)
+        permissions = AgentPermissions()
     model_id_val = row.get("model_id") if hasattr(row, "get") else None
     created_by_val = (
         row.get("created_by_user_id") if hasattr(row, "get") else None
@@ -144,7 +141,6 @@ def _record_to_coworker(row: asyncpg.Record) -> Coworker:
         max_concurrent=row["max_concurrent"],
         status=row["status"] or "active",
         created_at=row["created_at"].isoformat() if row["created_at"] else "",
-        agent_role=agent_role,
         permissions=permissions,
         model_id=str(model_id_val) if model_id_val else None,
         created_by_user_id=str(created_by_val) if created_by_val else None,
@@ -208,7 +204,6 @@ async def update_coworker(
     system_prompt: str | None = None,
     max_concurrent: int | None = None,
     status: str | None = None,
-    agent_role: str | None = None,
     permissions: AgentPermissions | None = None,
     model_id: str | None | Any = _MODEL_ID_UNSET,
 ) -> Coworker | None:
@@ -244,10 +239,6 @@ async def update_coworker(
     if status is not None:
         fields.append(f"status = ${param_idx}")
         values.append(status)
-        param_idx += 1
-    if agent_role is not None:
-        fields.append(f"agent_role = ${param_idx}")
-        values.append(agent_role)
         param_idx += 1
     if permissions is not None:
         fields.append(f"permissions = ${param_idx}::jsonb")

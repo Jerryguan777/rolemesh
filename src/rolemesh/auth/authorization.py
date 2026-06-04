@@ -30,17 +30,6 @@ def can_manage_task(
     return permissions.task_manage_others
 
 
-def can_see_data(
-    permissions: AgentPermissions,
-    data_coworker_id: str,
-    self_coworker_id: str,
-) -> bool:
-    """Can this agent see data belonging to *data_coworker_id*?"""
-    if permissions.data_scope == "tenant":
-        return True
-    return data_coworker_id == self_coworker_id
-
-
 def can_delegate(permissions: AgentPermissions) -> bool:
     """Can this agent invoke other agents?"""
     return permissions.agent_delegate

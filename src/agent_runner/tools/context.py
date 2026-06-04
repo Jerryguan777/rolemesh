@@ -76,8 +76,8 @@ class ToolContext:
         task.add_done_callback(_publish_done)
 
     @property
-    def has_tenant_scope(self) -> bool:
-        return self.permissions.get("data_scope") == "tenant"
+    def can_manage_others(self) -> bool:
+        return bool(self.permissions.get("task_manage_others"))
 
     @property
     def can_schedule(self) -> bool:

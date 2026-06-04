@@ -8,9 +8,9 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     from rolemesh.core.types import ChannelBinding
 
-# Callback: (binding_id, chat_id, sender_id, sender_name, text, timestamp, msg_id, is_group) -> None
+# Callback: (binding_id, chat_id, sender_id, sender_name, text, timestamp, msg_id) -> None
 MessageCallback = Callable[
-    [str, str, str, str, str, str, str, bool],
+    [str, str, str, str, str, str, str],
     Awaitable[None],
 ]
 

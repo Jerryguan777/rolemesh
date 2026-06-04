@@ -51,17 +51,12 @@ def _parse_registered_group_record(
         return None
 
     container_config = _parse_container_config(row["container_config"])
-    requires_trigger = bool(row["requires_trigger"]) if row["requires_trigger"] is not None else True
-    is_main = bool(row["is_main"]) if row["is_main"] is not None else False
 
     return jid, RegisteredGroup(
         name=row["name"],
         folder=folder,
-        trigger=row["trigger_pattern"],
         added_at=row["added_at"],
         container_config=container_config,
-        requires_trigger=requires_trigger,
-        is_main=is_main,
     )
 
 
@@ -85,26 +80,20 @@ async def set_registered_group(jid: str, group: RegisteredGroup) -> None:
     async with admin_conn() as conn:
         await conn.execute(
             """
-            INSERT INTO registered_groups (tenant_id, jid, name, folder, trigger_pattern, added_at, container_config, requires_trigger, is_main)
-            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9)
+            INSERT INTO registered_groups (tenant_id, jid, name, folder, added_at, container_config)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb)
             ON CONFLICT (tenant_id, jid) DO UPDATE SET
                 name = EXCLUDED.name,
                 folder = EXCLUDED.folder,
-                trigger_pattern = EXCLUDED.trigger_pattern,
                 added_at = EXCLUDED.added_at,
-                container_config = EXCLUDED.container_config,
-                requires_trigger = EXCLUDED.requires_trigger,
-                is_main = EXCLUDED.is_main
+                container_config = EXCLUDED.container_config
             """,
             DEFAULT_TENANT,
             jid,
             group.name,
             group.folder,
-            group.trigger,
             group.added_at,
             container_config_json,
-            group.requires_trigger,
-            group.is_main,
         )
 
 

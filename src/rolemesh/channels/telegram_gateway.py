@@ -311,7 +311,6 @@ class _BotInstance:
             sender_name = user.first_name if user else "Unknown"
             sender = str(user.id) if user else ""
             msg_id = str(msg.message_id)
-            is_group = chat.type in ("group", "supergroup")
 
             # Translate @bot_username mentions to @display_name for trigger matching
             has_bot_mention = False
@@ -330,7 +329,7 @@ class _BotInstance:
                 if has_bot_mention:
                     display_name = self._display_names.get(bid, self._bot_username or "")
                     bid_content = f"@{display_name} {content}"
-                await self._on_message(bid, chat_id, sender, sender_name, bid_content, timestamp, msg_id, is_group)
+                await self._on_message(bid, chat_id, sender, sender_name, bid_content, timestamp, msg_id)
 
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _on_text))
 
@@ -363,7 +362,6 @@ class _BotInstance:
                 sender_name = user.first_name if user else "Unknown"
                 sender = str(user.id) if user else ""
                 caption = f" {msg.caption}" if msg.caption else ""
-                is_group = chat.type in ("group", "supergroup")
                 for bid in self._binding_ids:
                     await self._on_message(
                         bid,
@@ -373,7 +371,6 @@ class _BotInstance:
                         f"{_ph}{caption}",
                         timestamp,
                         str(msg.message_id),
-                        is_group,
                     )
 
             app.add_handler(MessageHandler(filt, _media_handler))
