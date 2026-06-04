@@ -1134,9 +1134,9 @@ export class RmChatShell extends LitElement {
         /* Coworker menu pops out to the right of the switcher button
          * (top:0; left:100%). The min-width override is load-bearing:
          * the default .cs-menu min-width is 220px which used to fit
-         * the old "operations" / "super_agent" subtitle, but the new
-         * "Backend · Model display_name" can hit ~38 characters and
-         * was forcing a 2-line wrap. */
+         * a shorter subtitle, but the new "Backend · Model
+         * display_name" can hit ~38 characters and was forcing a
+         * 2-line wrap. */
         rm-chat-shell .cs-menu.coworker {
           top: 0;
           left: 100%;

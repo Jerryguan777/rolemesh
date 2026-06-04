@@ -73,7 +73,6 @@ const CREATED_COWORKER: Coworker = {
   agent_backend: 'claude',
   model_id: MODELS[0]!.id,
   status: 'active',
-  agent_role: 'agent',
   max_concurrent: 2,
   created_at: '2026-05-23T12:00:00Z',
 };
