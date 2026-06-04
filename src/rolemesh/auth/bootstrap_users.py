@@ -138,9 +138,19 @@ _upserted: set[tuple[str, str]] = set()
 
 
 def init_bootstrap_users(
-    env_value: str | None = None, auth_mode: str | None = None
+    env_value: str | None = None,
+    auth_mode: str | None = None,
+    rolemesh_env: str | None = None,
 ) -> None:
     """Parse BOOTSTRAP_USERS once at startup.
+
+    ``rolemesh_env`` is the deployment environment (``ROLEMESH_ENV``).
+    The multi-user bootstrap map maps opaque tokens straight to
+    privileged users with no IdP, so when ``rolemesh_env`` is
+    ``production`` a populated map is a fatal misconfiguration: we raise
+    ``BootstrapUsersConfigError`` to abort startup. Seed the first admin
+    with ``rolemesh-admin create-admin`` instead. Non-production keeps
+    the historic dev/test behaviour.
 
     ``auth_mode`` is the deployed AuthProvider mode. Per §5.2.1 the
     multi-user bootstrap map is intended for dev/test only; if the
@@ -154,6 +164,18 @@ def init_bootstrap_users(
     _specs_by_token = parse_bootstrap_users_env(env_value)
     _upserted = set()
     if _specs_by_token:
+        env = (
+            rolemesh_env
+            if rolemesh_env is not None
+            else os.environ.get("ROLEMESH_ENV", "development")
+        )
+        if env == "production":
+            raise BootstrapUsersConfigError(
+                "BOOTSTRAP_USERS must not be set when ROLEMESH_ENV=production: "
+                "it maps opaque bearer tokens directly to privileged users "
+                "with no IdP. Seed the first admin with "
+                "`rolemesh-admin create-admin` instead."
+            )
         mode = auth_mode if auth_mode is not None else os.environ.get(
             "AUTH_MODE", "external"
         )

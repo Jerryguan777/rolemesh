@@ -25,6 +25,7 @@ dependencies = [
 rolemesh = "rolemesh.main:main_sync"
 rolemesh-webui = "webui.main:main"
 rolemesh-eval = "rolemesh.evaluation.cli:main"
+rolemesh-admin = "rolemesh.admin.cli:main"
 
 [project.optional-dependencies]
 # Evaluation framework — Inspect AI based, manual / nightly only.
