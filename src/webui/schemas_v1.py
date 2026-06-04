@@ -24,7 +24,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 BackendName = Literal["claude", "pi"]
 ModelProvider = Literal["anthropic", "bedrock", "openai", "google"]
 ModelFamily = Literal["claude", "gpt", "gemini", "llama"]
-AgentRole = Literal["super_agent", "agent"]
 CoworkerStatus = Literal["active", "paused", "disabled"]
 AuthMode = Literal["external", "oidc", "builtin", "bootstrap"]
 UserRole = Literal["owner", "admin", "member"]
@@ -142,7 +141,6 @@ class Coworker(BaseModel):
     model_id: str | None = None
     system_prompt: str | None = None
     status: CoworkerStatus
-    agent_role: AgentRole
     max_concurrent: int = Field(ge=1)
     created_by_user_id: str | None = None
     created_at: str
@@ -167,7 +165,6 @@ class CoworkerCreate(BaseModel):
     model_id: str | None = None
     system_prompt: str | None = None
     max_concurrent: int = Field(default=2, ge=1, le=20)
-    agent_role: AgentRole = "agent"
 
 
 class CoworkerUpdate(BaseModel):
@@ -217,7 +214,6 @@ class Conversation(BaseModel):
     channel_binding_id: str
     channel_chat_id: str
     name: str | None = None
-    requires_trigger: bool = True
     created_at: str
 
 

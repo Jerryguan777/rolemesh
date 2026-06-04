@@ -217,7 +217,6 @@ def _coworker_from_state(cw_state: CoworkerState) -> Coworker:
         max_concurrent=c.max_concurrent,
         status=c.status,
         created_at=c.created_at,
-        agent_role=c.agent_role,
         permissions=c.permissions,
         model_id=c.model_id,
         created_by_user_id=c.created_by_user_id,
@@ -745,7 +744,6 @@ async def _land_web_conversation(
             channel_binding_id=binding_id,
             channel_chat_id=chat_id,
             name=f"Web Chat {chat_id[:8]}",
-            requires_trigger=False,
             user_id=None,
         )
     conv_state = ConversationState(conversation=conv)
@@ -814,37 +812,37 @@ async def _handle_incoming(
     text: str,
     timestamp: str,
     msg_id: str,
-    is_group: bool,
 ) -> None:
-    """Unified message handler for all channel gateways."""
+    """Unified message handler for all channel gateways.
+
+    All conversations are 1:1 (the product does not support group chat),
+    so the agent always responds — there is no trigger gating.
+    """
     # v6.1 §P1.5/§P1.6: For Telegram 1:1, gate admission BEFORE any
     # conversation lookup. Otherwise an admitted sender whose first
     # ever message arrives before a conv row exists (the common case
     # right after the §P1.3 reset wiped legacy IM convs) would
-    # silently drop. The Telegram gateway already short-circuits
-    # groups, so ``is_group=False`` is the only realistic branch
-    # here; the explicit guard is belt-and-braces.
+    # silently drop.
     #
     # ``binding`` lookup is admin_conn so this works even when the
     # binding's CoworkerState cache is empty (the cache populates
     # later via _auto_create_telegram_1on1_conversation).
     admitted_user_id: str | None = None
-    if not is_group:
-        from rolemesh.db import get_channel_binding_by_id_admin
+    from rolemesh.db import get_channel_binding_by_id_admin
 
-        binding = await get_channel_binding_by_id_admin(binding_id)
-        if binding is not None and binding.channel_type == "telegram":
-            gateway = _gateways.get("telegram")
-            if gateway is not None:
-                admitted_user_id = await admit_telegram_1on1(
-                    tenant_id=binding.tenant_id,
-                    sender_channel_id=sender,
-                    gateway=gateway,
-                    binding_id=binding_id,
-                    chat_id=chat_id,
-                )
-                if admitted_user_id is None:
-                    return  # admission denied — guidance reply already sent
+    binding = await get_channel_binding_by_id_admin(binding_id)
+    if binding is not None and binding.channel_type == "telegram":
+        gateway = _gateways.get("telegram")
+        if gateway is not None:
+            admitted_user_id = await admit_telegram_1on1(
+                tenant_id=binding.tenant_id,
+                sender_channel_id=sender,
+                gateway=gateway,
+                binding_id=binding_id,
+                chat_id=chat_id,
+            )
+            if admitted_user_id is None:
+                return  # admission denied — guidance reply already sent
 
     # Find conversation
     result = _state.find_conversation_by_binding_and_chat(binding_id, chat_id)
@@ -860,15 +858,8 @@ async def _handle_incoming(
         if not result:
             return
 
-    cw_state, conv_state = result
+    _cw_state, conv_state = result
     conv = conv_state.conversation
-
-    # In groups with multiple bots, each bot receives all messages.
-    # Only store the message if it's relevant to THIS coworker:
-    # - conversation doesn't require trigger (DM or admin), OR
-    # - message content matches this coworker's trigger pattern
-    if is_group and conv.requires_trigger and not cw_state.trigger_pattern.search(text.strip()):
-        return  # Not for this coworker — skip silently
 
     # v6.1 §P1.6 lazy backfill + §P1.4 identity-reassignment
     # correction (defense-in-depth complement to the same-transaction
@@ -931,19 +922,6 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
 
     if not missed_messages:
         return True
-
-    if config.agent_role != "super_agent" and conv.requires_trigger:
-        # v6.1 §P1.5: the sender allowlist that used to gate non-self
-        # senders is gone (decision #14); the trigger pattern alone
-        # decides. For Telegram 1:1 ``requires_trigger`` is False by
-        # construction so this path only fires for Slack groups —
-        # which keep current behaviour.
-        has_trigger = any(
-            cw_state.trigger_pattern.search(m.content.strip())
-            for m in missed_messages
-        )
-        if not has_trigger:
-            return True
 
     prompt = format_messages(missed_messages, TIMEZONE)
 
@@ -1601,21 +1579,6 @@ async def _message_loop(shutdown_event: asyncio.Event) -> None:
                     config = cw_state.config
                     conv = conv_state.conversation
                     chat_id = conv.channel_chat_id
-
-                    needs_trigger = config.agent_role != "super_agent" and conv.requires_trigger
-
-                    if needs_trigger:
-                        conv_messages = [msg for cid, msg in results if cid == conv_id]
-                        # v6.1 §P1.5: trigger pattern alone — no
-                        # per-sender allowlist (see the parallel
-                        # branch in ``_process_conversation_messages``
-                        # for the same simplification).
-                        has_trigger = any(
-                            cw_state.trigger_pattern.search(m.content.strip())
-                            for m in conv_messages
-                        )
-                        if not has_trigger:
-                            continue
 
                     # Try piping to active container first
                     all_pending = await get_messages_since(

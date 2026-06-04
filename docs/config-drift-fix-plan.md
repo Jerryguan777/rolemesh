@@ -50,7 +50,7 @@ v1.1 02a 给 multi-tenant credential 加了 schema + Fernet vault primitive；v2
 | 实体 | DB 表 | 内容 | 状态 |
 |---|---|---|---|
 | Tenant | `tenants` | name / plan / max_concurrent_containers | ✅ 表 ⚠️ 部分字段未消费（见 §3 D3） |
-| Coworker | `coworkers` | name / folder / agent_backend / model_id / system_prompt / status / agent_role | ✅ 表 ⚠️ model_id 对 Pi 未消费（见 §3 D2） |
+| Coworker | `coworkers` | name / folder / agent_backend / model_id / system_prompt / status / permissions | ✅ 表 ⚠️ model_id 对 Pi 未消费（见 §3 D2） |
 | User | `users` | per-user identity | ✅ |
 | Models 目录 | `models` | 平台级 provider × family × model_id | ✅ |
 | LLM credentials | `tenant_model_credentials` | per-tenant Fernet-encrypted credential_data BYTEA | ✅ 表 + UI ❌ **运行时 0 callers**（D1） |

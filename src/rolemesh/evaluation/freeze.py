@@ -63,19 +63,17 @@ def _coworker_to_dict(
     """Behavior-affecting fields only — name/folder/created_at omitted.
 
     ``tools`` come from the relation-table projection (not the dropped
-    JSONB column); ``permissions`` and ``agent_role`` gate which tools
-    the container actually permits. ``container_config`` carries
-    timeout and resource limits that change runtime semantics. Anything
-    purely cosmetic (id, name, status, created_at) is left out so two
-    differently-named coworkers with identical behavior produce the
-    same hash.
+    JSONB column); ``permissions`` gates which tools the container
+    actually permits. ``container_config`` carries timeout and resource
+    limits that change runtime semantics. Anything purely cosmetic (id,
+    name, status, created_at) is left out so two differently-named
+    coworkers with identical behavior produce the same hash.
     """
     perms = c.permissions
     perms_dict = perms.to_dict() if perms is not None else {}
     return {
         "agent_backend": c.agent_backend,
         "system_prompt": c.system_prompt,
-        "agent_role": c.agent_role,
         "permissions": perms_dict,
         "tools": [
             {

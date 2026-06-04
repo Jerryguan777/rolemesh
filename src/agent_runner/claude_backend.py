@@ -384,7 +384,7 @@ class ClaudeBackend:
         # Load global CLAUDE.md
         global_claude_md_path = Path("/workspace/global/CLAUDE.md")
         global_claude_md: str | None = None
-        if init.permissions.get("data_scope") != "tenant" and global_claude_md_path.exists():
+        if global_claude_md_path.exists():
             global_claude_md = global_claude_md_path.read_text()
 
         # Discover extra directories

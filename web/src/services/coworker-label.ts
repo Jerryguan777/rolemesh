@@ -1,12 +1,8 @@
 // Coworker subtitle formatter — shared by the chat-shell sidebar
 // switcher and the composer's coworker dropdown.
 //
-// Before v2-C: the subtitle was the AgentRole enum string (`agent` /
-// `super_agent`). v2-A locked agent_role as "do not surface to users"
-// (it's an internal A2A orchestration concept), so showing it was
-// always a UX accident. v2-C replaces it with what users actually
-// care about: which backend + which model is wired up to this
-// coworker.
+// The subtitle shows what users actually care about: which backend +
+// which model is wired up to this coworker.
 //
 // Format:    "Claude · Claude Opus 4.7"
 //            "Pi · GPT-4o"

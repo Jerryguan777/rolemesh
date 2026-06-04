@@ -32,7 +32,7 @@ vi.mock('../api/client.js', async () => {
   };
 });
 
-function makeCoworker(id: string, name: string, role = 'agent'): Coworker {
+function makeCoworker(id: string, name: string): Coworker {
   return {
     id,
     tenant_id: 't1',
@@ -40,7 +40,6 @@ function makeCoworker(id: string, name: string, role = 'agent'): Coworker {
     folder: name.toLowerCase(),
     agent_backend: 'claude',
     status: 'active',
-    agent_role: role,
     max_concurrent: 1,
     created_at: '2026-01-01T00:00:00Z',
   } as unknown as Coworker;
@@ -106,8 +105,8 @@ describe('<rm-message-editor>', () => {
     listModelsSpy.mockReset();
     listModelsSpy.mockResolvedValue([]);
     listCoworkersSpy.mockResolvedValue([
-      makeCoworker('cw-a', 'Ops coworker', 'operations'),
-      makeCoworker('cw-b', 'Finance coworker', 'finance'),
+      makeCoworker('cw-a', 'Ops coworker'),
+      makeCoworker('cw-b', 'Finance coworker'),
     ]);
     loc = stubLocation('?agent_id=cw-a');
   });
@@ -134,12 +133,12 @@ describe('<rm-message-editor>', () => {
     expect(chip?.textContent).toContain('Ops coworker');
   });
 
-  it('coworker dropdown row subtitle is Backend · Model (not agent_role)', async () => {
+  it('coworker dropdown row subtitle is Backend · Model', async () => {
     listCoworkersSpy.mockResolvedValue([
       // model_id pins one row to a known model in the catalogue;
       // the other has no model so we verify the graceful fallback.
-      makeCoworker('cw-a', 'Ops coworker', 'operations'),
-      { ...makeCoworker('cw-b', 'Finance coworker', 'finance'), model_id: 'mdl-1' },
+      makeCoworker('cw-a', 'Ops coworker'),
+      { ...makeCoworker('cw-b', 'Finance coworker'), model_id: 'mdl-1' },
     ]);
     listModelsSpy.mockResolvedValue([
       {
@@ -166,9 +165,6 @@ describe('<rm-message-editor>', () => {
     // Row 1 (cw-b, model resolved) — "Claude · GPT-4o".
     expect(opts[1].textContent).toContain('Claude');
     expect(opts[1].textContent).toContain('GPT-4o');
-    // Neither row should still say agent_role.
-    expect(opts[0].textContent ?? '').not.toContain('operations');
-    expect(opts[1].textContent ?? '').not.toContain('finance');
   });
 
   it('opens the coworker menu on chip click and lists every coworker', async () => {

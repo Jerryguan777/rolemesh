@@ -117,7 +117,7 @@
 |---|---|---|---|---|
 | H1 | Agent 为另一 coworker 调度任务 | `can_manage_task` + `task_manage_others` 标志 | `test_H_config_attack::test_H1_*` | ✅ |
 | H2 | 通过 REST 注入畸形策略配置 | Pydantic `config_model` + `extra='forbid'` | `test_H2_*`（6 种用例，含 `__class__` gadget） | ✅ |
-| H3 | `data_scope=self` 的 agent 读取租户工作区 | `build_volume_mounts` 仅在 `data_scope=='tenant'` 时挂载项目根 | `test_H3_data_scope_self_does_not_mount_project_root` | ✅ |
+| H3 | agent 通过容器挂载触及宿主项目根 | `build_volume_mounts` 永不把宿主项目根挂载进任何容器，无论权限如何 | `test_H3_project_root_is_never_mounted` | ✅ |
 | H4 | 从工作区符号链接逃逸 | PID / mount namespace + 挂载允许列表 | 仅 runbook | 🔧 manual |
 
 ---

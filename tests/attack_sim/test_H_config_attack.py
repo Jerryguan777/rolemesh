@@ -6,9 +6,9 @@ Attacks exploiting the admin / REST / DB configuration surface.
       → AgentPermissions.task_manage_others guard
   H2. Inject malformed policy JSON to cause runtime explosion
       → Pydantic config_model on every check rejects at REST time
-  H3. data_scope=self agent reads tenant-wide workspace
-      → Mount builder only attaches the project root when
-        ``permissions.data_scope == "tenant"``
+  H3. Agent reads the host project root
+      → Mount builder never attaches the host project root to any
+        container
 """
 
 from __future__ import annotations
@@ -34,7 +34,6 @@ def test_H1_cross_coworker_schedule_requires_permission() -> None:
     from rolemesh.auth.permissions import AgentPermissions
 
     perms = AgentPermissions(
-        data_scope="self",
         task_schedule=True,
         task_manage_others=False,
         agent_delegate=False,
@@ -93,15 +92,14 @@ def test_H2_pii_regex_config_rejects_bad_inputs() -> None:
 
 
 # ---------------------------------------------------------------------------
-# H3. data_scope=self tries to access tenant-wide data
+# H3. Agent must never reach the host project root
 # ---------------------------------------------------------------------------
 
 
-def test_H3_data_scope_self_does_not_mount_project_root() -> None:
-    """Attacker: a coworker configured with ``data_scope=self`` should
-    only see its own workspace, not the tenant-wide project root.
-    Defense: build_volume_mounts conditionally attaches the project
-    root only when data_scope == 'tenant'."""
+def test_H3_project_root_is_never_mounted() -> None:
+    """Attacker: any coworker, regardless of permissions, must never get
+    the host project root mounted into its container. Defense:
+    build_volume_mounts no longer attaches the project root at all."""
     from rolemesh.auth.permissions import AgentPermissions
     from rolemesh.container.runner import build_volume_mounts
     from rolemesh.core.types import Coworker
@@ -112,33 +110,21 @@ def test_H3_data_scope_self_does_not_mount_project_root() -> None:
         name="Agent",
         folder="agent-folder",
     )
-    # data_scope=self
-    self_perms = AgentPermissions(
-        data_scope="self",
-        task_schedule=False,
-        task_manage_others=False,
-        agent_delegate=False,
+    # Even the most-privileged permission set must not mount the host
+    # project root.
+    privileged = AgentPermissions(
+        task_schedule=True,
+        task_manage_others=True,
+        agent_delegate=True,
     )
-    mounts_self = build_volume_mounts(
+    mounts = build_volume_mounts(
         cw,
         tenant_id="t",
         conversation_id="conv",
-        permissions=self_perms,
+        permissions=privileged,
         backend_config=None,
     )
-    # No mount should expose the tenant-wide project root.
-    for m in mounts_self:
-        assert "/workspace/project-root" not in m.container_path, (
-            "data_scope=self must NOT mount project-root"
+    for m in mounts:
+        assert "/workspace/project" not in m.container_path, (
+            "the host project root must NOT be mounted into any container"
         )
-
-    # data_scope=tenant — project-root can appear (the mount builder
-    # may add a tenant-scoped shared dir). We don't assert its
-    # presence (depends on config), only that the self-case excludes
-    # the sensitive path.
-    _ = AgentPermissions(
-        data_scope="tenant",
-        task_schedule=False,
-        task_manage_others=False,
-        agent_delegate=False,
-    )

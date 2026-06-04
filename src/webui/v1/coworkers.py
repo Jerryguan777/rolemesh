@@ -67,7 +67,6 @@ def _coworker_to_response(cw: object) -> Coworker:
         model_id=cw.model_id,
         system_prompt=cw.system_prompt,
         status=cw.status,  # type: ignore[arg-type]
-        agent_role=cw.agent_role,  # type: ignore[arg-type]
         max_concurrent=cw.max_concurrent,
         created_by_user_id=cw.created_by_user_id,
         created_at=cw.created_at,
@@ -151,7 +150,6 @@ async def create_coworker_endpoint(
             agent_backend=body.agent_backend,
             system_prompt=body.system_prompt,
             max_concurrent=body.max_concurrent,
-            agent_role=body.agent_role,
             model_id=body.model_id,
             created_by_user_id=(
                 user.user_id if _looks_like_uuid(user.user_id) else None

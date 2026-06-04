@@ -377,31 +377,12 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         "UPDATE coworkers SET agent_backend = 'claude' "
         "WHERE agent_backend = 'claude-code'"
     )
-    # --- Auth: add agent_role + permissions to coworkers ---
-    await conn.execute(
-        "ALTER TABLE coworkers ADD COLUMN IF NOT EXISTS agent_role TEXT DEFAULT 'agent'"
-    )
+    # --- Auth: flat permission bits on coworkers (least-privilege default) ---
     await conn.execute(
         "ALTER TABLE coworkers ADD COLUMN IF NOT EXISTS permissions JSONB "
-        "DEFAULT '{\"data_scope\":\"self\",\"task_schedule\":false,"
+        "DEFAULT '{\"task_schedule\":false,"
         "\"task_manage_others\":false,\"agent_delegate\":false}'"
     )
-    # Backfill legacy is_admin→agent_role before dropping the column.
-    # Idempotent: only runs when the column still exists (fresh deploy from an
-    # older schema that had is_admin=TRUE rows but never ran the backfill).
-    await conn.execute("""
-        DO $$
-        BEGIN
-            IF EXISTS (SELECT 1 FROM information_schema.columns
-                       WHERE table_name = 'coworkers' AND column_name = 'is_admin') THEN
-                UPDATE coworkers SET
-                    agent_role = 'super_agent',
-                    permissions = '{"data_scope":"tenant","task_schedule":true,"task_manage_others":true,"agent_delegate":true}'
-                WHERE is_admin = TRUE AND agent_role = 'agent';
-            END IF;
-        END $$
-    """)
-    await conn.execute("ALTER TABLE coworkers DROP COLUMN IF EXISTS is_admin")
     # v1.1 §2.2: link coworkers to the platform model catalog and the
     # creating user. Both NULLABLE — the model selector is wired in
     # Phase 2 and audit FK (created_by_user_id) is the L6 nullable-on-
@@ -774,7 +755,6 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             channel_binding_id UUID NOT NULL REFERENCES channel_bindings(id),
             channel_chat_id TEXT NOT NULL,
             name TEXT,
-            requires_trigger BOOLEAN DEFAULT TRUE,
             last_agent_invocation TIMESTAMPTZ,
             created_at TIMESTAMPTZ DEFAULT now(),
             UNIQUE (channel_binding_id, channel_chat_id)

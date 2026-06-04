@@ -6,6 +6,7 @@ import uuid
 
 import pytest
 
+from rolemesh.auth.permissions import AgentPermissions
 from rolemesh.core.types import McpServerConfig, ScheduledTask, TaskRunLog
 from rolemesh.db import (
     create_channel_binding,
@@ -126,7 +127,7 @@ async def test_create_and_get_coworker() -> None:
         tenant_id=t.id,
         name="Ops Bot",
         folder="ops-bot",
-        agent_role="super_agent",
+        permissions=AgentPermissions(task_manage_others=True),
         max_concurrent=3,
     )
     # MCP configs now live in coworker_mcp_servers + mcp_servers
@@ -145,7 +146,7 @@ async def test_create_and_get_coworker() -> None:
         ],
     )
     assert cw.id
-    assert cw.agent_role == "super_agent"
+    assert cw.permissions is not None and cw.permissions.task_manage_others is True
     assert cw.max_concurrent == 3
     assert cw.agent_backend == "claude"
 
@@ -196,7 +197,6 @@ async def test_conversation_crud() -> None:
     conv = await get_conversation(convid, tenant_id=_tid)
     assert conv is not None
     assert conv.channel_chat_id == "12345"
-    assert conv.requires_trigger is True
 
     by_bc = await get_conversation_by_binding_and_chat(bid, "12345", tenant_id=_tid)
     assert by_bc is not None

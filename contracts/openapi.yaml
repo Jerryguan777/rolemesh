@@ -1865,10 +1865,6 @@ components:
             only Pi sets this).
           items: { $ref: '#/components/schemas/ModelFamily' }
 
-    AgentRole:
-      type: string
-      enum: [super_agent, agent]
-
     CoworkerStatus:
       type: string
       enum: [active, paused, disabled]
@@ -1882,7 +1878,6 @@ components:
         - folder
         - agent_backend
         - status
-        - agent_role
         - max_concurrent
         - created_at
       properties:
@@ -1899,7 +1894,6 @@ components:
           type: string
           nullable: true
         status: { $ref: '#/components/schemas/CoworkerStatus' }
-        agent_role: { $ref: '#/components/schemas/AgentRole' }
         max_concurrent:
           type: integer
           minimum: 1
@@ -1935,8 +1929,6 @@ components:
           minimum: 1
           maximum: 20
           default: 2
-        agent_role:
-          $ref: '#/components/schemas/AgentRole'
 
     CoworkerUpdate:
       type: object
@@ -1980,9 +1972,6 @@ components:
         name:
           type: string
           nullable: true
-        requires_trigger:
-          type: boolean
-          default: true
         created_at: { type: string, format: date-time }
 
     ConversationCreate:

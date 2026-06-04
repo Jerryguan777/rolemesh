@@ -35,9 +35,9 @@ Tenant (organization)
 │   ├── Identified by independent bot identity per channel
 │   └── Can operate in multiple chat groups simultaneously
 │
-├── Conversation (a Coworker's context in a specific chat group)
+├── Conversation (a Coworker's 1:1 context in a specific chat)
 │   ├── Has independent session/memory
-│   └── requires_trigger flag (on for group chats, off for DMs / Web UI)
+│   └── The agent always responds (1:1 only — no @-mention trigger gating)
 │
 └── User (human team member)
     └── Can interact with multiple Coworkers
@@ -140,15 +140,14 @@ class CoworkerState:
 ```python
 @dataclass
 class CoworkerConfig:
-    name: str                 # display name (trigger derived from this)
+    name: str                 # display name
     folder: str               # workspace path
     system_prompt: str | None
     tools: list[McpServerConfig]   # external MCP server bindings
     agent_backend: str        # "claude" or "pi"
     max_concurrent: int
     container_config: dict | None
-    agent_role: str           # "super_agent" | "agent"
-    permissions: AgentPermissions  # 4 fields (see auth-architecture.md)
+    permissions: AgentPermissions  # 3 boolean fields (see auth-architecture.md)
 ```
 
 所有字段都位于 `coworkers` 表。没有 JOIN，没有合并，没有模板层。如果多个 Coworker 需要相同配置，则各自独立配置——在当前规模下重复是可以接受的，并且比模板继承系统更易于推理。
@@ -229,7 +228,7 @@ async with admin_conn() as conn:
 本文档讨论的是**行如何按租户作用域化**。正交的问题——*哪个 user 可以使用哪个 agent*、*某个 agent 被允许做什么*、*JWT/OIDC 身份如何变成租户上下文*——在 [`auth-architecture.md`](auth-architecture.md) 中讨论。摘要：
 
 - **用户角色**（`owner` / `admin` / `member`）控制平台自身的管理动作。
-- **Agent 权限**是一个 4 字段模型（`data_scope`、`task_schedule`、`task_manage_others`、`agent_delegate`），由每个 Coworker 携带。它们在 IPC 强制时控制 agent 能做什么。这里的 IPC 契约——payload 携带 `tenantId + coworkerId`，由 orchestrator 查找权威权限——记录在 [`nats-ipc-architecture.md`](nats-ipc-architecture.md)。
+- **Agent 权限**是一个 3 字段布尔模型（`task_schedule`、`task_manage_others`、`agent_delegate`，全部默认为 `false`），由每个 Coworker 携带。它们在 IPC 强制时控制 agent 能做什么。这里的 IPC 契约——payload 携带 `tenantId + coworkerId`，由 orchestrator 查找权威权限——记录在 [`nats-ipc-architecture.md`](nats-ipc-architecture.md)。
 - **租户上下文传播**——每条业务查询都通过 `tenant_conn(tenant_id)`；GUC 绑定 RLS，任何需要跨租户的查询必须改用 `admin_conn()`。
 
 ---
@@ -283,9 +282,9 @@ async with admin_conn() as conn:
 |-------|-------------|---------|
 | `tenants` | `id`、`name`、`slug`、`max_concurrent_containers`、`last_message_cursor` | 组织边界与限制 |
 | `users` | `id`、`tenant_id`、`name`、`role`、`email`、`external_sub` | 人类用户 + 认证提供者映射 |
-| `coworkers` | `id`、`tenant_id`、`name`、`folder`、`agent_backend`、`system_prompt`、`tools`（JSONB）、`agent_role`、`permissions`（JSONB）、`container_config`、`max_concurrent` | 带完整配置的 AI Agent |
+| `coworkers` | `id`、`tenant_id`、`name`、`folder`、`agent_backend`、`system_prompt`、`tools`（JSONB）、`permissions`（JSONB）、`container_config`、`max_concurrent` | 带完整配置的 AI Agent |
 | `channel_bindings` | `id`、`tenant_id`、`coworker_id`、`channel_type`、`credentials`、`bot_display_name` | 按 Coworker 的 bot 身份 |
-| `conversations` | `id`、`tenant_id`、`coworker_id`、`channel_binding_id`、`channel_chat_id`、`requires_trigger`、`last_agent_invocation`、`user_id` | 每个聊天的上下文，带独立 session |
+| `conversations` | `id`、`tenant_id`、`coworker_id`、`channel_binding_id`、`channel_chat_id`、`last_agent_invocation`、`user_id` | 每个聊天的上下文，带独立 session |
 | `sessions` | `conversation_id`（PK）、`tenant_id`、`coworker_id`、`session_id` | 每个 Conversation 的 Claude SDK / Pi session 映射 |
 | `messages` | `id`、`tenant_id`、`conversation_id`、`sender`、`content`、`timestamp`、`input_tokens`、`output_tokens`、`cost_usd`、`model_id` | 聊天消息历史 + 每轮使用量 |
 | `scheduled_tasks` | `id`、`tenant_id`、`coworker_id`、`conversation_id`、`prompt`、`schedule_type`、`schedule_value`、`next_run` | Cron / 间隔 / 一次性任务 |
@@ -297,24 +296,22 @@ async with admin_conn() as conn:
 
 ## 消息流
 
-Telegram 群组中的一条用户消息按以下路径变成一轮 turn：
+Telegram 1:1 私聊中的一条用户消息按以下路径变成一轮 turn：
 
-1. **TelegramGateway** 通过消息中提及的那个 bot 接收（一个 token = 一个 polling 实例，扇出到所有关联的绑定）。
+1. **TelegramGateway** 通过消息发往的那个 bot 接收（一个 token = 一个 polling 实例，扇出到所有关联的绑定）。
 2. **路由**：`binding_id → coworker_id + tenant_id`；`(binding_id, channel_chat_id) → conversation_id`。内部路由 key 是 `conversation_id`（UUID），而非 `channel_chat_id`。
-3. **入站过滤**（多 bot 群组）：如果设置了 `requires_trigger` 且消息不匹配 `@coworker.name`，在存储前就丢弃。
-4. **存储**到 `messages`（按 RLS 绑定到租户）并入队一轮 turn 待处理。
-5. **并发检查**（全局 + 按租户 + 按 Coworker——见 [`agent-executor-and-container-runtime.md`](agent-executor-and-container-runtime.md)）。
-6. **创建容器**，挂载正确的工作空间、session 目录、共享空间；通过 `AgentInitData` 传入 Coworker 的权限。
-7. **Agent 执行**，结果通过 NATS 流回——见 [`nats-ipc-architecture.md`](nats-ipc-architecture.md)。
-8. **回复**通过来源 Coworker 的绑定路由（按 `coworker_id`，而非通过扫描所有绑定查找匹配的 `chat_id`）。
+3. **存储**到 `messages`（按 RLS 绑定到租户）并入队一轮 turn 待处理。本产品仅支持 1:1（IM 与 WebUI 都不支持群聊），因此 agent 始终响应——不存在 @提及的触发门控。
+4. **并发检查**（全局 + 按租户 + 按 Coworker——见 [`agent-executor-and-container-runtime.md`](agent-executor-and-container-runtime.md)）。
+5. **创建容器**，挂载正确的工作空间、session 目录、共享空间；通过 `AgentInitData` 传入 Coworker 的权限。
+6. **Agent 执行**，结果通过 NATS 流回——见 [`nats-ipc-architecture.md`](nats-ipc-architecture.md)。
+7. **回复**通过来源 Coworker 的绑定路由（按 `coworker_id`，而非通过扫描所有绑定查找匹配的 `chat_id`）。
 
 ### 关键路由规则（从实现中习得）
 
 1. **`conversation_id` 是内部路由 key**，不是 `channel_chat_id`。在 Telegram 私聊中，同一个用户与 3 个不同 bot 对话产生的 `chat_id` 相同（用户 ID）。只有 `conversation_id`（UUID）才是全局唯一的。
-2. **存储前入站过滤**：在多 bot 群组中，每个 bot 都会收到所有消息。每个 bot 必须自行过滤——只存储匹配自己触发模式的消息。否则 Coworker 会累积无关消息，并被本属于其他 Coworker 的触发激活。
-3. **事件驱动，而非轮询驱动**：入站消息在存储后直接入队一轮 turn。系统**不**依赖 polling 游标——按租户的游标在多个 app 略有时差地收到同一条消息时会引发竞态。
-4. **IPC 回复按 Coworker 路由**：当 agent 通过 `send_message` MCP 工具发送消息时，回复经由源 Coworker 自己的绑定路由，而非通过扫描所有绑定查找匹配 `chat_id`。这避免了在私聊场景中回复被错误地通过另一个 bot 发出。
-5. **输出通道之间的去重**：agent 拥有两条输出路径——`send_message`（即时，通过 IPC）与结果流（最终，通过 NATS）。orchestrator 追踪通过 IPC 发送的文本，并在结果流中跳过重复。
+2. **事件驱动，而非轮询驱动**：入站消息在存储后直接入队一轮 turn。系统**不**依赖 polling 游标——按租户的游标在多个 app 略有时差地收到同一条消息时会引发竞态。
+3. **IPC 回复按 Coworker 路由**：当 agent 通过 `send_message` MCP 工具发送消息时，回复经由源 Coworker 自己的绑定路由，而非通过扫描所有绑定查找匹配 `chat_id`。这避免了在私聊场景中回复被错误地通过另一个 bot 发出。
+4. **输出通道之间的去重**：agent 拥有两条输出路径——`send_message`（即时，通过 IPC）与结果流（最终，通过 NATS）。orchestrator 追踪通过 IPC 发送的文本，并在结果流中跳过重复。
 
 ---
 
@@ -326,18 +323,16 @@ Telegram 群组中的一条用户消息按以下路径变成一轮 turn：
 |---|---|---|
 | `RegisteredGroup` | `Coworker` + `Conversation` | 拆分："谁"与"在哪"分离 |
 | `group.folder` | `coworker.folder` | 路径：`groups/x/` → `tenants/{tid}/coworkers/x/` |
-| `group.trigger` | 由 `coworker.name` 派生 | 触发文本 = Coworker 名称；`conversation.requires_trigger` 控制开关 |
 | `chatJid` | `conversation.channel_chat_id` | 1:N 而非 1:1 |
 | `session`（按群组） | `session`（按 Conversation） | 作用域收窄 |
 | `ASSISTANT_NAME` | `coworker.name` | 全局常量 → 按实体配置 |
-| `TRIGGER_PATTERN` | 来自 `coworker.name` | 由 Coworker 身份派生 |
 | `GroupQueue` | 三级调度器 | 加入了租户与 Coworker 的限制 |
 | `Channel` 单例 | `ChannelGateway` | 每种类型一个管理器，多个 bot |
 | 模块全局 | `OrchestratorState` | 结构化、按 ID 索引 |
-| `is_main`（bool） | `agent_role` + `AgentPermissions` | 1 个布尔 → 4 个正交字段（在阶段 2 中加入） |
+| `is_main`（bool） | `AgentPermissions` | 1 个布尔 → 3 个正交布尔字段（在阶段 2 中加入） |
 | 应用级 `WHERE tenant_id` | Postgres RLS + 双连接池 | 信任边界移入数据库（在阶段 2 中加入） |
 
-迁移通过 `DEFAULT_TENANT = "default"` 默认值以及一个用于在 IPC 线上转换历史 `is_main` payload 的转换器，保持向后兼容。
+迁移通过 `DEFAULT_TENANT = "default"` 默认值保持向后兼容。
 
 ---
 
@@ -361,7 +356,6 @@ Telegram 群组中的一条用户消息按以下路径变成一轮 turn：
 跨大版本升级时，迁移路径以行内方式存在于 `src/rolemesh/db/schema.py`（`_create_schema` 是幂等的，能就地处理已存在的表）。该文件目前编码的显著迁移：
 
 - 单租户 → 多租户：检测旧表（例如带 `chat_jid` 列的 `messages`），读取数据，删除旧表，创建新表，重新插入。
-- `is_admin` 布尔 → `agent_role` + `permissions` JSONB。
 - 将 `agent_backend = 'claude-code'` 这种旧值就地转换为规范的 `'claude'`。
 - 在 `oidc_user_tokens` 上回填 `tenant_id`，让 RLS 在 D10 之后能够生效。
 

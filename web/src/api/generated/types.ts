@@ -1134,8 +1134,6 @@ export interface components {
             supported_model_families: components["schemas"]["ModelFamily"][] | null;
         };
         /** @enum {string} */
-        AgentRole: "super_agent" | "agent";
-        /** @enum {string} */
         CoworkerStatus: "active" | "paused" | "disabled";
         Coworker: {
             /** Format: uuid */
@@ -1149,7 +1147,6 @@ export interface components {
             model_id?: string | null;
             system_prompt?: string | null;
             status: components["schemas"]["CoworkerStatus"];
-            agent_role: components["schemas"]["AgentRole"];
             max_concurrent: number;
             /** Format: uuid */
             created_by_user_id?: string | null;
@@ -1165,7 +1162,6 @@ export interface components {
             system_prompt?: string | null;
             /** @default 2 */
             max_concurrent: number;
-            agent_role?: components["schemas"]["AgentRole"];
         };
         CoworkerUpdate: {
             name?: string;
@@ -1188,8 +1184,6 @@ export interface components {
             channel_binding_id: string;
             channel_chat_id: string;
             name?: string | null;
-            /** @default true */
-            requires_trigger: boolean;
             /** Format: date-time */
             created_at: string;
         };

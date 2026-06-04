@@ -252,9 +252,7 @@ export class CoworkersPage extends LitElement {
             <span class="rm-ic">${(c.name?.[0] ?? '?').toUpperCase()}</span>
             <span class="rm-mn">
               <b>${c.name}</b>
-              <span>${c.agent_backend} · ${c.id.slice(0, 8)}${
-                c.agent_role === 'super_agent' ? ' · super' : ''
-              }</span>
+              <span>${c.agent_backend} · ${c.id.slice(0, 8)}</span>
             </span>
             <span class=${this.pillClass(c.status)}>${c.status}</span>
             <span class="rm-row-acts">

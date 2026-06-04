@@ -59,7 +59,7 @@ def test_parse_container_output_non_bool_is_final_falls_back_true() -> None:
 
 
 def test_agent_input_frozen() -> None:
-    perms = AgentPermissions.for_role("super_agent").to_dict()
+    perms = AgentPermissions(task_manage_others=True).to_dict()
     inp = AgentInput(prompt="hello", group_folder="g", chat_jid="j", permissions=perms)
     try:
         inp.prompt = "other"  # type: ignore[misc]
@@ -69,7 +69,7 @@ def test_agent_input_frozen() -> None:
 
 
 def test_agent_input_optional_fields() -> None:
-    perms = AgentPermissions.for_role("agent").to_dict()
+    perms = AgentPermissions().to_dict()
     inp = AgentInput(prompt="p", group_folder="g", chat_jid="j", permissions=perms)
     assert inp.session_id is None
     assert inp.is_scheduled_task is False
@@ -80,7 +80,7 @@ def test_agent_input_optional_fields() -> None:
 
 
 def test_agent_input_all_fields() -> None:
-    perms = AgentPermissions.for_role("super_agent").to_dict()
+    perms = AgentPermissions(task_manage_others=True).to_dict()
     inp = AgentInput(
         prompt="hello",
         group_folder="grp",
@@ -94,7 +94,7 @@ def test_agent_input_all_fields() -> None:
         role_config={"role": "coder"},
     )
     assert inp.prompt == "hello"
-    assert inp.permissions["data_scope"] == "tenant"
+    assert inp.permissions["task_manage_others"] is True
     assert inp.user_id == "user-1"
     assert inp.system_prompt == "You are helpful"
     assert inp.role_config == {"role": "coder"}

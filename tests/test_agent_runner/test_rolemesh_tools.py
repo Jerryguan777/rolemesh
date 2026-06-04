@@ -47,15 +47,15 @@ class FakeJetStream:
 def _make_ctx(
     *,
     can_schedule: bool = True,
-    has_tenant_scope: bool = False,
+    can_manage_others: bool = False,
     js: FakeJetStream | None = None,
 ) -> tuple[ToolContext, FakeJetStream]:
     fake_js = js or FakeJetStream()
     permissions: dict[str, object] = {}
     if can_schedule:
         permissions["task_schedule"] = True
-    if has_tenant_scope:
-        permissions["data_scope"] = "tenant"
+    if can_manage_others:
+        permissions["task_manage_others"] = True
     ctx = ToolContext(
         js=fake_js,  # type: ignore[arg-type]
         job_id="job-123",
@@ -399,7 +399,7 @@ class TestListTasks:
         assert "No scheduled tasks" in result["content"][0]["text"]
 
     async def test_self_scope_filters_own_tasks(self) -> None:
-        """Agent without tenant scope only sees its own tasks."""
+        """Agent without task_manage_others only sees its own tasks."""
         tasks_data = json.dumps([
             {"id": "t-mine", "prompt": "my task", "coworkerFolder": "test-group",
              "schedule_type": "cron", "schedule_value": "* * * * *", "status": "active"},
@@ -407,14 +407,14 @@ class TestListTasks:
              "schedule_type": "cron", "schedule_value": "* * * * *", "status": "active"},
         ]).encode()
         fake_js = FakeJetStreamWithKV(tasks_data)
-        ctx, _ = _make_ctx(js=fake_js, has_tenant_scope=False)
+        ctx, _ = _make_ctx(js=fake_js, can_manage_others=False)
         result = await list_tasks({}, ctx)
         text = result["content"][0]["text"]
         assert "t-mine" in text
         assert "t-other" not in text
 
-    async def test_tenant_scope_sees_all_tasks(self) -> None:
-        """Agent with tenant scope sees all tasks."""
+    async def test_manage_others_sees_all_tasks(self) -> None:
+        """Agent with task_manage_others sees all tenant tasks."""
         tasks_data = json.dumps([
             {"id": "t-mine", "prompt": "my task", "coworkerFolder": "test-group",
              "schedule_type": "cron", "schedule_value": "* * * * *", "status": "active"},
@@ -422,7 +422,7 @@ class TestListTasks:
              "schedule_type": "cron", "schedule_value": "* * * * *", "status": "active"},
         ]).encode()
         fake_js = FakeJetStreamWithKV(tasks_data)
-        ctx, _ = _make_ctx(js=fake_js, has_tenant_scope=True)
+        ctx, _ = _make_ctx(js=fake_js, can_manage_others=True)
         result = await list_tasks({}, ctx)
         text = result["content"][0]["text"]
         assert "t-mine" in text

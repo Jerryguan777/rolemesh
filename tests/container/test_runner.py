@@ -24,13 +24,12 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-def _make_coworker(folder: str = "test-group", agent_role: str = "agent") -> Coworker:
+def _make_coworker(folder: str = "test-group") -> Coworker:
     return Coworker(
         id="cw-1",
         tenant_id="t-1",
         name="Test Coworker",
         folder=folder,
-        agent_role=agent_role,
     )
 
 
@@ -39,38 +38,31 @@ class TestBuildVolumeMounts:
         coworker = _make_coworker()
         tenant_dir = tmp_path / "tenants" / "t-1" / "coworkers" / coworker.folder
         tenant_dir.mkdir(parents=True)
-        with (
-            patch("rolemesh.container.runner.DATA_DIR", tmp_path),
-            patch("rolemesh.container.runner.PROJECT_ROOT", tmp_path),
-        ):
-            mounts = build_volume_mounts(coworker, "t-1", "conv-1", permissions=AgentPermissions.for_role("agent"))
+        with patch("rolemesh.container.runner.DATA_DIR", tmp_path):
+            mounts = build_volume_mounts(coworker, "t-1", "conv-1", permissions=AgentPermissions())
         container_paths = [m.container_path for m in mounts]
         assert "/workspace/group" in container_paths
 
-    def test_super_agent_has_project_and_group(self, tmp_path: Path) -> None:
-        coworker = _make_coworker(agent_role="super_agent")
+    def test_no_project_root_is_mounted(self, tmp_path: Path) -> None:
+        """The host project root must never be mounted into a container."""
+        coworker = _make_coworker()
         tenant_dir = tmp_path / "tenants" / "t-1" / "coworkers" / coworker.folder
         tenant_dir.mkdir(parents=True)
-        with (
-            patch("rolemesh.container.runner.DATA_DIR", tmp_path),
-            patch("rolemesh.container.runner.PROJECT_ROOT", tmp_path),
-        ):
+        with patch("rolemesh.container.runner.DATA_DIR", tmp_path):
             mounts = build_volume_mounts(
-                coworker, "t-1", "conv-1", permissions=AgentPermissions.for_role("super_agent")
+                coworker, "t-1", "conv-1",
+                permissions=AgentPermissions(task_manage_others=True),
             )
         container_paths = [m.container_path for m in mounts]
-        assert "/workspace/project" in container_paths
+        assert "/workspace/project" not in container_paths
         assert "/workspace/group" in container_paths
 
     def test_backend_config_skip_claude_session(self, tmp_path: Path) -> None:
         coworker = _make_coworker()
         config = AgentBackendConfig(name="test", image="test:latest", skip_claude_session=True)
-        with (
-            patch("rolemesh.container.runner.DATA_DIR", tmp_path),
-            patch("rolemesh.container.runner.PROJECT_ROOT", tmp_path),
-        ):
+        with patch("rolemesh.container.runner.DATA_DIR", tmp_path):
             mounts = build_volume_mounts(
-                coworker, "t-1", "conv-1", permissions=AgentPermissions.for_role("agent"), backend_config=config
+                coworker, "t-1", "conv-1", permissions=AgentPermissions(), backend_config=config
             )
         container_paths = [m.container_path for m in mounts]
         assert not any(".claude" in p for p in container_paths)
@@ -82,23 +74,17 @@ class TestBuildVolumeMounts:
             image="test:latest",
             extra_mounts=[("/extra/host", "/extra/container", True)],
         )
-        with (
-            patch("rolemesh.container.runner.DATA_DIR", tmp_path),
-            patch("rolemesh.container.runner.PROJECT_ROOT", tmp_path),
-        ):
+        with patch("rolemesh.container.runner.DATA_DIR", tmp_path):
             mounts = build_volume_mounts(
-                coworker, "t-1", "conv-1", permissions=AgentPermissions.for_role("agent"), backend_config=config
+                coworker, "t-1", "conv-1", permissions=AgentPermissions(), backend_config=config
             )
         container_paths = [m.container_path for m in mounts]
         assert "/extra/container" in container_paths
 
     def test_session_and_logs_dirs_created(self, tmp_path: Path) -> None:
         coworker = _make_coworker()
-        with (
-            patch("rolemesh.container.runner.DATA_DIR", tmp_path),
-            patch("rolemesh.container.runner.PROJECT_ROOT", tmp_path),
-        ):
-            mounts = build_volume_mounts(coworker, "t-1", "conv-1", permissions=AgentPermissions.for_role("agent"))
+        with patch("rolemesh.container.runner.DATA_DIR", tmp_path):
+            mounts = build_volume_mounts(coworker, "t-1", "conv-1", permissions=AgentPermissions())
         container_paths = [m.container_path for m in mounts]
         assert "/workspace/sessions" in container_paths
         assert "/workspace/logs" in container_paths
@@ -107,24 +93,10 @@ class TestBuildVolumeMounts:
         coworker = _make_coworker()
         shared = tmp_path / "tenants" / "t-1" / "shared"
         shared.mkdir(parents=True)
-        with (
-            patch("rolemesh.container.runner.DATA_DIR", tmp_path),
-            patch("rolemesh.container.runner.PROJECT_ROOT", tmp_path),
-        ):
-            mounts = build_volume_mounts(coworker, "t-1", "conv-1", permissions=AgentPermissions.for_role("agent"))
+        with patch("rolemesh.container.runner.DATA_DIR", tmp_path):
+            mounts = build_volume_mounts(coworker, "t-1", "conv-1", permissions=AgentPermissions())
         container_paths = [m.container_path for m in mounts]
         assert "/workspace/shared" in container_paths
-
-    def test_legacy_is_main_param_still_works(self, tmp_path: Path) -> None:
-        """Legacy is_main=True param should produce project mount (backward compat)."""
-        coworker = _make_coworker()
-        with (
-            patch("rolemesh.container.runner.DATA_DIR", tmp_path),
-            patch("rolemesh.container.runner.PROJECT_ROOT", tmp_path),
-        ):
-            mounts = build_volume_mounts(coworker, "t-1", "conv-1", is_main=True)
-        container_paths = [m.container_path for m in mounts]
-        assert "/workspace/project" in container_paths
 
 
 class TestBuildContainerSpec:

@@ -54,7 +54,6 @@ def _coworker_with_tools(
         max_concurrent=2,
         status="active",
         created_at="",
-        agent_role="agent",
         permissions=None,
     )
     return cw, tools

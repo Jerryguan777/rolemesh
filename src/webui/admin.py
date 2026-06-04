@@ -207,7 +207,6 @@ def _coworker_to_response(
         ],
         max_concurrent=cw.max_concurrent,
         status=cw.status,
-        agent_role=cw.agent_role,
         permissions=cw.permissions.to_dict() if cw.permissions else {},
         created_at=cw.created_at,
     )
@@ -233,7 +232,6 @@ def _coworker_to_summary(cw: Coworker) -> AgentSummary:
         name=cw.name,
         folder=cw.folder,
         status=cw.status,
-        agent_role=cw.agent_role,
     )
 
 
@@ -258,7 +256,6 @@ def _conversation_to_response(c: Conversation) -> ConversationResponse:
         channel_binding_id=c.channel_binding_id,
         channel_chat_id=c.channel_chat_id,
         name=c.name,
-        requires_trigger=c.requires_trigger,
         created_at=c.created_at,
     )
 
@@ -459,7 +456,6 @@ async def create_agent(
             agent_backend=body.agent_backend,
             system_prompt=body.system_prompt,
             max_concurrent=body.max_concurrent,
-            agent_role=body.agent_role,
             permissions=permissions,
         )
     except asyncpg.UniqueViolationError as exc:
@@ -514,7 +510,6 @@ async def update_agent(
         system_prompt=body.system_prompt,
         max_concurrent=body.max_concurrent,
         status=body.status,
-        agent_role=body.agent_role,
         permissions=permissions,
     )
     if updated is None:
@@ -692,7 +687,6 @@ async def create_conversation(
         channel_binding_id=body.channel_binding_id,
         channel_chat_id=body.channel_chat_id,
         name=body.name,
-        requires_trigger=body.requires_trigger,
     )
     return _conversation_to_response(conv)
 

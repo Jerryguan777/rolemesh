@@ -237,7 +237,7 @@ async def list_tasks(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         all_tasks: list[dict[str, Any]] = json.loads(entry.value)
         tasks = (
             all_tasks
-            if ctx.has_tenant_scope
+            if ctx.can_manage_others
             else [t for t in all_tasks if t.get("coworkerFolder") == ctx.group_folder]
         )
         if not tasks:

@@ -70,7 +70,6 @@ const CONV_OPS: Conversation = {
   channel_binding_id: 'ch-1',
   channel_chat_id: 'web:conv-ops',
   name: 'Q2 ad spend review',
-  requires_trigger: true,
   created_at: '2026-05-30T00:00:00Z',
 } as unknown as Conversation;
 

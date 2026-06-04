@@ -400,8 +400,8 @@ export class CoworkerWizard extends LitElement {
           agent_backend: this.draft.agentBackend!,
           model_id: this.draft.modelId,
           system_prompt: this.draft.instructions.trim() || null,
-          // max_concurrent / agent_role intentionally not surfaced
-          // (locked decisions #10 / #13 — backend default applies).
+          // max_concurrent intentionally not surfaced
+          // (locked decision #10 — backend default applies).
           max_concurrent: 2,
         };
         coworker = await this.api.createCoworker(body);

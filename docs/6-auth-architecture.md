@@ -4,7 +4,7 @@ This document describes how RoleMesh authenticates users, authorizes operations,
 
 ## The Problem
 
-RoleMesh started with a single boolean: `is_main`. Admin coworkers could do everything — see all tasks, manage other agents' schedules, register new conversations, access the project root filesystem. Non-admin coworkers could do nothing beyond their own scope.
+RoleMesh started with a single boolean (`is_main`). "Admin" coworkers could do everything — see all tasks, manage other agents' schedules, register new conversations. Non-admin coworkers could do nothing beyond their own scope.
 
 This worked for a single-user setup. It broke down when we needed:
 
@@ -210,30 +210,28 @@ We considered three approaches for agent authorization:
 | Approach | Pros | Cons |
 |----------|------|------|
 | **Single boolean** (`is_main`) | Simple | All-or-nothing. Can't have an agent that schedules tasks but can't manage others' tasks. |
-| **Full RBAC** (roles + permissions + resources) | Maximally flexible | Overkill for 4 capabilities. Combinatorial explosion. Hard to reason about. |
-| **Role as template + flat overrides** | Simple to understand, covers real use cases, no abstraction overhead | Can't express deeply nested policies (but we don't need to) |
+| **Full RBAC** (roles + permissions + resources) | Maximally flexible | Overkill for 3 capabilities. Combinatorial explosion. Hard to reason about. |
+| **Flat capability bits** | Simple to understand, covers real use cases, no abstraction overhead | Can't express deeply nested policies (but we don't need to) |
 
-We chose **role as template + flat overrides**. An agent has a role (`super_agent` or `agent`) that fills in default permissions. Individual permissions can be overridden per agent.
+We chose **flat capability bits**. An agent carries three booleans that default to least-privilege (all `false`); each is granted explicitly. There is no role template — an earlier `super_agent`/`agent` role and a `data_scope` axis were removed as over-design (the role only packed defaults, and `data_scope` doubled as a host-filesystem mount switch and a full-tenant data window that conflicted with the sandbox-isolation model).
 
-The legacy `is_admin` column has been fully removed. The sole authority is `agent_role` + the permissions JSONB.
+The legacy `is_admin` column and the `agent_role` column have both been fully removed. The sole authority is the permissions JSONB.
 
-### The Four Permission Fields
+### The Three Permission Fields
 
 ```python
 @dataclass(frozen=True)
 class AgentPermissions:
-    data_scope: Literal["tenant", "self"] = "self"
     task_schedule: bool = False
     task_manage_others: bool = False
     agent_delegate: bool = False
 ```
 
-| Permission | `super_agent` default | `agent` default | What it controls |
-|-----------|:---:|:---:|---|
-| `data_scope` | `tenant` | `self` | Task/snapshot visibility. `tenant` = see all coworkers' data. `self` = own only. Also controls project root mount. |
-| `task_schedule` | `true` | `false` | Can create scheduled tasks (cron, interval, once). |
-| `task_manage_others` | `true` | `false` | Can pause/resume/cancel/update other agents' tasks. |
-| `agent_delegate` | `true` | `false` | Can invoke other agents (for future multi-agent orchestration). |
+| Permission | Default | What it controls |
+|-----------|:---:|---|
+| `task_schedule` | `false` | Can create scheduled tasks (cron, interval, once). |
+| `task_manage_others` | `false` | Can pause/resume/cancel/update other agents' tasks. **Also** grants visibility of other agents' tasks in the snapshot — managing requires seeing. |
+| `agent_delegate` | `false` | Can invoke other agents (reserved for a future frontdesk agent; not yet enabled). |
 
 ### What is NOT in Agent Permissions
 
@@ -250,9 +248,9 @@ This is at least as important as what is in: keeping permissions thin (Design Pr
 
 ### Storage and IPC contract
 
-Permissions are stored as a JSONB column on the `coworkers` table alongside `agent_role`. They flow into a running agent through `AgentInitData` (the NATS KV bootstrap payload — see [`2-nats-ipc-architecture.md`](2-nats-ipc-architecture.md)). The IPC contract is one sentence: **payloads carry `tenantId + coworkerId` but never carry the permissions themselves; the orchestrator looks up the authoritative permissions for that coworker before honoring any Channel 4 / Channel 5 request**, so an agent cannot escalate by editing the payload.
+Permissions are stored as a JSONB column on the `coworkers` table. They flow into a running agent through `AgentInitData` (the NATS KV bootstrap payload — see [`2-nats-ipc-architecture.md`](2-nats-ipc-architecture.md)). The IPC contract is one sentence: **payloads carry `tenantId + coworkerId` but never carry the permissions themselves; the orchestrator looks up the authoritative permissions for that coworker before honoring any Channel 4 / Channel 5 request**, so an agent cannot escalate by editing the payload.
 
-A legacy `is_main: true/false` field is still accepted on deserialize (converted to the equivalent `AgentPermissions` template) so older containers can still bootstrap during a rolling deploy.
+Missing or empty permissions on deserialize coerce to the least-privilege default (all `false`).
 
 ## MCP Token Forwarding: TokenVault
 
@@ -330,19 +328,21 @@ These functions have no side effects, no DB access, no logging. They return `boo
 
 ### 3. IPC Message Handler
 
-In the orchestrator's message dispatch path: all agents can only send messages to their own conversations. There is no admin bypass — even `super_agent`'s `data_scope=tenant` does not unlock cross-conversation messaging, because that's an architectural choice, not a permission (see "What is NOT in Agent Permissions").
+In the orchestrator's message dispatch path: all agents can only send messages to their own conversations. There is no admin bypass — no permission unlocks cross-conversation messaging, because that's an architectural choice, not a permission (see "What is NOT in Agent Permissions").
 
 ### 4. Container Builder
 
-`src/rolemesh/container/runner.py:build_volume_mounts()` gates volume mounts and snapshot visibility by `data_scope`:
+`src/rolemesh/container/runner.py:build_volume_mounts()` never mounts the host project root into any container. Snapshot visibility is gated by `task_manage_others`:
 
 ```python
-def build_volume_mounts(coworker, tenant_id, conversation_id, permissions=None):
-    if permissions.data_scope == "tenant":
-        mounts.append(VolumeMount("/workspace/project", readonly=True))
+async def write_tasks_snapshot(transport, tenant_id, coworker_folder, permissions=None, tasks=None):
+    if permissions.task_manage_others:
+        filtered = tasks                      # see all tenant tasks
+    else:
+        filtered = [t for t in tasks if t["coworkerFolder"] == coworker_folder]
 ```
 
-Agents with `data_scope="self"` never see the project root or other agents' tasks in snapshots — the orchestrator pre-filters Channel 6's snapshots so even a buggy `list_tasks` call cannot read another tenant's data.
+Agents without `task_manage_others` only see their own tasks in snapshots — the orchestrator pre-filters Channel 6's snapshots so even a buggy `list_tasks` call cannot read another agent's data.
 
 ## Permission Propagation
 
@@ -357,12 +357,12 @@ The full IPC payload contract — including how `tenantId` / `coworkerId` are se
 | Table | Purpose |
 |-------|---------|
 | `users` | User accounts (local ID, `external_sub` for OIDC, role, `password_hash` for builtin) |
-| `coworkers` | Agent definitions (`agent_role`, `permissions` JSONB, tools, container_config) |
+| `coworkers` | Agent definitions (`permissions` JSONB, tools, container_config) |
 | `user_agent_assignments` | Many-to-many user ↔ coworker mapping |
 | `external_tenant_map` | Maps `(provider, external_tenant_id) → local tenant_id` for OIDC multi-tenant |
 | `oidc_user_tokens` | Encrypted per-user refresh_token + cached access_token for TokenVault |
 
-Schema migration mechanics (`is_admin → agent_role` backfill, default-tenant creation, idempotent `_create_schema()` shape) are described in [`4-multi-tenant-architecture.md`](4-multi-tenant-architecture.md).
+Schema mechanics (default-tenant creation, idempotent `_create_schema()` shape) are described in [`4-multi-tenant-architecture.md`](4-multi-tenant-architecture.md).
 
 ## Admin API
 
@@ -372,8 +372,8 @@ Schema migration mechanics (`is_admin → agent_role` backfill, default-tenant c
 
 | File | Purpose |
 |------|---------|
-| `src/rolemesh/auth/permissions.py` | `AgentPermissions`, `AgentRole`, `UserRole`, `user_can()` |
-| `src/rolemesh/auth/authorization.py` | Pure auth functions: `can_schedule_task()`, `can_manage_task()`, `can_see_data()`, `can_delegate()` |
+| `src/rolemesh/auth/permissions.py` | `AgentPermissions`, `UserRole`, `user_can()` |
+| `src/rolemesh/auth/authorization.py` | Pure auth functions: `can_schedule_task()`, `can_manage_task()`, `can_delegate()` |
 | `src/rolemesh/auth/provider.py` | `AuthProvider` protocol, `AuthenticatedUser` dataclass |
 | `src/rolemesh/auth/external_jwt_provider.py` | Validates external SaaS JWTs |
 | `src/rolemesh/auth/builtin_provider.py` | Stub for future builtin auth |

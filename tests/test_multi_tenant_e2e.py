@@ -22,7 +22,6 @@ from rolemesh.core.orchestrator_state import (
     ConversationState,
     CoworkerState,
     OrchestratorState,
-    build_trigger_pattern,
 )
 from rolemesh.core.types import (
     ChannelBinding,
@@ -34,6 +33,8 @@ from rolemesh.core.types import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
+
+    from rolemesh.auth.permissions import AgentPermissions
 
 
 # ---------------------------------------------------------------------------
@@ -85,12 +86,11 @@ async def _create_coworker_full(
     tenant_id: str,
     name: str,
     folder: str,
-    agent_role: str = "agent",
+    permissions: AgentPermissions | None = None,
     max_concurrent: int = 2,
     channel_type: str = "telegram",
     credentials: dict[str, str] | None = None,
     chat_ids: list[str] | None = None,
-    requires_trigger: bool = True,
 ) -> tuple[Coworker, ChannelBinding, list[Conversation]]:
     """Create coworker + binding + conversations in DB. Returns all entities."""
     from rolemesh.db import create_channel_binding, create_conversation, create_coworker
@@ -99,7 +99,7 @@ async def _create_coworker_full(
         tenant_id=tenant_id,
         name=name,
         folder=folder,
-        agent_role=agent_role,
+        permissions=permissions,
         max_concurrent=max_concurrent,
     )
     binding = await create_channel_binding(
@@ -117,7 +117,6 @@ async def _create_coworker_full(
             channel_binding_id=binding.id,
             channel_chat_id=chat_id,
             name=f"Chat {chat_id}",
-            requires_trigger=requires_trigger,
         )
         conversations.append(conv)
     return cw, binding, conversations
@@ -362,8 +361,8 @@ class TestTwoCoworkersSameGroup:
         assert gateway.sent[0].binding_id == ops_bind.id
         assert "Shipment" in gateway.sent[0].text
 
-    async def test_message_without_any_trigger_ignored_by_both(self, env: Path) -> None:
-        """A message without @mention triggers neither bot."""
+    async def test_message_without_mention_still_processed(self, env: Path) -> None:
+        """1:1 only: the agent always responds, even without an @mention."""
         tenant = await _create_tenant_in_db("Acme", "acme-notrig")
 
         ops_cw, ops_bind, ops_convs = await _create_coworker_full(
@@ -386,19 +385,17 @@ class TestTwoCoworkersSameGroup:
 
         result = await m._process_conversation_messages(ops_convs[0].id)
         assert result is True
-        assert len(executor.executions) == 0  # Neither bot invoked
+        assert len(executor.executions) == 1  # Agent always responds (1:1)
 
-    async def test_admin_coworker_skips_trigger_check(self, env: Path) -> None:
-        """Admin coworker (is_main) responds to any message, no trigger needed."""
+    async def test_coworker_responds_to_any_message(self, env: Path) -> None:
+        """Any coworker responds to any message — no trigger gating."""
         tenant = await _create_tenant_in_db("Acme", "acme-admin")
 
         admin_cw, admin_bind, admin_convs = await _create_coworker_full(
             tenant.id,
             "Admin Bot",
             "admin-bot",
-            agent_role="super_agent",
             chat_ids=["-1003000"],
-            requires_trigger=False,
         )
 
         state = OrchestratorState(global_limit=10)
@@ -437,9 +434,7 @@ class TestSessionIsolation:
             tenant.id,
             "Ops Bot",
             "ops-sess",
-            agent_role="super_agent",
             chat_ids=["-100A", "-100B"],
-            requires_trigger=False,
         )
 
         state = OrchestratorState(global_limit=10)
@@ -492,9 +487,7 @@ class TestSessionIsolation:
             tenant.id,
             "Ops Bot",
             "ops-rb",
-            agent_role="super_agent",
             chat_ids=["-200A", "-200B"],
-            requires_trigger=False,
         )
 
         state = OrchestratorState(global_limit=10)
@@ -648,7 +641,7 @@ class TestRegisterConversation:
         await process_task_ipc(
             {"type": "register_conversation", "channel_chat_id": "-999"},
             "some-folder",
-            AgentPermissions.for_role("super_agent"),
+            AgentPermissions(task_schedule=True, task_manage_others=True, agent_delegate=True),
             FakeDeps(),  # type: ignore[arg-type]
         )
 
@@ -685,11 +678,8 @@ class TestMigration:
                     jid TEXT NOT NULL,
                     name TEXT NOT NULL,
                     folder TEXT NOT NULL,
-                    trigger_pattern TEXT NOT NULL,
                     added_at TEXT NOT NULL,
                     container_config JSONB,
-                    requires_trigger BOOLEAN DEFAULT TRUE,
-                    is_main BOOLEAN DEFAULT FALSE,
                     PRIMARY KEY (tenant_id, jid),
                     UNIQUE (tenant_id, folder)
                 )
@@ -709,10 +699,7 @@ class TestMigration:
             RegisteredGroup(
                 name="Main Group",
                 folder="main-group",
-                trigger="@Andy",
                 added_at="2024-01-01T00:00:00Z",
-                is_main=True,
-                requires_trigger=False,
             ),
         )
         await set_registered_group(
@@ -720,9 +707,7 @@ class TestMigration:
             RegisteredGroup(
                 name="Team Chat",
                 folder="team-chat",
-                trigger="@Andy",
                 added_at="2024-01-01T00:00:00Z",
-                is_main=False,
             ),
         )
         await set_session_legacy("main-group", "sess-legacy-001")
@@ -761,7 +746,6 @@ class TestMigration:
                 tenant_id=tenant.id,
                 name=group.name,
                 folder=group.folder,
-                agent_role="super_agent" if group.is_main else "agent",
             )
             binding = await create_channel_binding(
                 coworker_id=coworker.id,
@@ -775,7 +759,6 @@ class TestMigration:
                 channel_binding_id=binding.id,
                 channel_chat_id=chat_id,
                 name=group.name,
-                requires_trigger=group.requires_trigger,
             )
 
             from rolemesh.db import get_session_legacy
@@ -799,18 +782,15 @@ class TestMigration:
 
         main_cw = next((c for c in coworkers if c.folder == "main-group"), None)
         assert main_cw is not None
-        assert main_cw.agent_role == "super_agent"
 
         team_cw = next((c for c in coworkers if c.folder == "team-chat"), None)
         assert team_cw is not None
-        assert team_cw.agent_role == "agent"
 
         conversations = await get_all_conversations()
         assert len(conversations) == 2
 
         main_conv = next((c for c in conversations if c.channel_chat_id == "-1001"), None)
         assert main_conv is not None
-        assert main_conv.requires_trigger is False
 
         # Session migrated
         sess = await get_session(main_conv.id, tenant_id=tenant.id)
@@ -843,12 +823,9 @@ class TestVolumeMountPaths:
             folder="bot-vol",
         )
 
-        with (
-            patch("rolemesh.container.runner.DATA_DIR", tmp_path),
-            patch("rolemesh.container.runner.PROJECT_ROOT", tmp_path),
-        ):
-            mounts_a = build_volume_mounts(cw, "t1", "conv-aaa", is_main=False)
-            mounts_b = build_volume_mounts(cw, "t1", "conv-bbb", is_main=False)
+        with patch("rolemesh.container.runner.DATA_DIR", tmp_path):
+            mounts_a = build_volume_mounts(cw, "t1", "conv-aaa")
+            mounts_b = build_volume_mounts(cw, "t1", "conv-bbb")
 
         def _find(mounts: list[object], container_path: str) -> str:
             for m in mounts:
@@ -880,11 +857,8 @@ class TestVolumeMountPaths:
             folder="bot-tp",
         )
 
-        with (
-            patch("rolemesh.container.runner.DATA_DIR", tmp_path),
-            patch("rolemesh.container.runner.PROJECT_ROOT", tmp_path),
-        ):
-            mounts = build_volume_mounts(cw, "t-acme", "conv-1", is_main=False)
+        with patch("rolemesh.container.runner.DATA_DIR", tmp_path):
+            mounts = build_volume_mounts(cw, "t-acme", "conv-1")
 
         host_paths = [m.host_path for m in mounts]
         # All paths should contain tenants/t-acme/coworkers/bot-tp
@@ -901,11 +875,8 @@ class TestVolumeMountPaths:
 
         cw = Coworker(id="cw1", tenant_id="t1", name="Bot", folder="bot-sh")
 
-        with (
-            patch("rolemesh.container.runner.DATA_DIR", tmp_path),
-            patch("rolemesh.container.runner.PROJECT_ROOT", tmp_path),
-        ):
-            mounts = build_volume_mounts(cw, "t1", "conv-1", is_main=False)
+        with patch("rolemesh.container.runner.DATA_DIR", tmp_path):
+            mounts = build_volume_mounts(cw, "t1", "conv-1")
 
         shared_mount = next((m for m in mounts if m.container_path == "/workspace/shared"), None)
         assert shared_mount is not None
@@ -983,7 +954,7 @@ class TestTaskSchedulingPerCoworker:
             tenant.id,
             "Ops Bot",
             "ops-task",
-            agent_role="super_agent",
+            permissions=AgentPermissions(task_manage_others=True),
             chat_ids=["-400"],
         )
 
@@ -1005,7 +976,7 @@ class TestTaskSchedulingPerCoworker:
                 "targetCoworkerId": cw.id,
             },
             "ops-task",
-            AgentPermissions.for_role("super_agent"),
+            AgentPermissions(task_schedule=True, task_manage_others=True, agent_delegate=True),
             FakeDeps(),  # type: ignore[arg-type]
             tenant_id=tenant.id,
             coworker_id=cw.id,
@@ -1040,7 +1011,7 @@ class TestTaskSchedulingPerCoworker:
                 "targetCoworkerId": "other-coworker-id",
             },
             "my-folder",
-            AgentPermissions.for_role("agent"),
+            AgentPermissions(task_schedule=True),
             FakeDeps(),  # type: ignore[arg-type]
             tenant_id=tenant.id,
             coworker_id="my-coworker-id",
@@ -1049,46 +1020,6 @@ class TestTaskSchedulingPerCoworker:
         # Should not have created any task
         tasks = await get_all_tasks(tenant.id)
         assert len(tasks) == 0
-
-
-# ===========================================================================
-# Scenario 9: Trigger pattern derived from coworker name
-#
-# User story: "I named my coworker 'Sales AI'. Users should @mention
-# '@Sales AI' to trigger it. Case-insensitive."
-# ===========================================================================
-
-
-class TestTriggerPatternFromName:
-    def test_trigger_pattern_matches_coworker_name(self) -> None:
-        """Trigger pattern derived from coworker name, case-insensitive."""
-        pattern = build_trigger_pattern("Sales AI")
-        assert pattern.search("@Sales AI what's our revenue?")
-        assert pattern.search("@sales ai please help")
-        assert not pattern.search("Hey sales team")  # No @mention
-        assert not pattern.search("@SalesBot help")  # Wrong name
-
-    def test_trigger_pattern_with_dot_in_name(self) -> None:
-        """Dots in names are literal, not regex wildcards."""
-        pattern = build_trigger_pattern("Bot.v2")
-        assert pattern.search("@Bot.v2 help me")
-        assert not pattern.search("@BotXv2 help me")  # Dot must be literal
-
-    def test_trigger_pattern_ending_in_non_word_char_known_limitation(self) -> None:
-        """Known: \\b after non-word chars (like ')') won't match space boundary.
-
-        This is a regex limitation. In practice, coworker names rarely end with
-        special chars. Document the behavior rather than work around it.
-        """
-        pattern = build_trigger_pattern("Bot (v2.0)")
-        # \b after ) is a non-word/non-word boundary, so it doesn't fire before space
-        assert pattern.search("@Bot (v2.0)") is None  # Known limitation
-
-    def test_trigger_pattern_boundary(self) -> None:
-        """@mention must be word-bounded (not just a prefix)."""
-        pattern = build_trigger_pattern("Andy")
-        assert pattern.search("@Andy help")
-        assert not pattern.search("@Andybot help")  # "Andy" is prefix but not word
 
 
 # ===========================================================================

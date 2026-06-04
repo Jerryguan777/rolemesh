@@ -70,7 +70,6 @@ const COWORKER_A: Coworker = {
   folder: 'ops',
   agent_backend: 'claude',
   status: 'idle',
-  agent_role: 'operations',
   max_concurrent: 1,
   created_at: '2025-01-01T00:00:00Z',
 };
@@ -80,7 +79,6 @@ const COWORKER_B: Coworker = {
   id: 'cw-b',
   name: 'Finance coworker',
   folder: 'finance',
-  agent_role: 'finance',
 };
 
 const ME: Me = {
@@ -99,7 +97,6 @@ function conv(id: string, name: string, when: Date): Conversation {
     channel_binding_id: 'ch-1',
     channel_chat_id: 'web:' + id,
     name,
-    requires_trigger: true,
     created_at: when.toISOString(),
   };
 }
@@ -940,11 +937,9 @@ describe('<rm-chat-shell>', () => {
     expect(dot()?.getAttribute('data-connected')).toBe('false');
   });
 
-  it('renders the coworker subtitle as Backend · Model, not agent_role', async () => {
-    // Pin the v2-C label change: the sidebar coworker switcher used
-    // to surface c.agent_role ("agent" / "super_agent"), which the
-    // v2 design explicitly hides. Now subtitle is "Backend · Model
-    // display_name", looked up via the models map.
+  it('renders the coworker subtitle as Backend · Model', async () => {
+    // Pin the v2-C label: the sidebar coworker switcher subtitle is
+    // "Backend · Model display_name", looked up via the models map.
     listCoworkersSpy.mockResolvedValue([
       // agent_backend=claude, model_id=mdl-1
       { ...COWORKER_A, model_id: 'mdl-1' },
@@ -965,8 +960,6 @@ describe('<rm-chat-shell>', () => {
     );
     expect(switcher?.textContent).toContain('Claude');
     expect(switcher?.textContent).toContain('Claude Sonnet 4.7');
-    // The forbidden value must NOT leak through.
-    expect(switcher?.textContent ?? '').not.toMatch(/operations|super_agent/);
   });
 
   it('renders a 2-tone wordmark (Role + Mesh) without the legacy R square', async () => {

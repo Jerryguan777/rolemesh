@@ -6,7 +6,6 @@ with structured, multi-tenant-aware state objects.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -19,11 +18,6 @@ if TYPE_CHECKING:
         Skill,
         Tenant,
     )
-
-
-def build_trigger_pattern(name: str) -> re.Pattern[str]:
-    """Build the @-mention regex for a coworker name."""
-    return re.compile(rf"@{re.escape(name)}\b", re.IGNORECASE)
 
 
 @dataclass
@@ -40,9 +34,8 @@ class CoworkerState:
     """Per-coworker runtime state.
 
     ``config`` is the DB-row shape (``Coworker``) used as the single source of
-    truth for all coworker fields. Derived/computed values such as the
-    @-mention ``trigger_pattern`` live as sibling fields here, not on
-    ``config`` — keeping the DB shape and the runtime cache cleanly separated.
+    truth for all coworker fields — keeping the DB shape and the runtime
+    cache cleanly separated.
 
     ``mcp_configs`` is the projected list of MCP server bindings (the
     junction-joined view returned by
@@ -61,7 +54,6 @@ class CoworkerState:
     """
 
     config: Coworker
-    trigger_pattern: re.Pattern[str]
     conversations: dict[str, ConversationState] = field(default_factory=dict)
     channel_bindings: dict[str, ChannelBinding] = field(default_factory=dict)
     mcp_configs: list[McpServerConfig] = field(default_factory=list)
@@ -76,7 +68,6 @@ class CoworkerState:
         """Build a fresh ``CoworkerState`` from a ``Coworker`` DB row."""
         return CoworkerState(
             config=cw,
-            trigger_pattern=build_trigger_pattern(cw.name),
             mcp_configs=list(mcp_configs) if mcp_configs else [],
             skills=list(skills) if skills else [],
         )

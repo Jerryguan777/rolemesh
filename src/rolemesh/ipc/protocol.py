@@ -93,14 +93,8 @@ class AgentInitData:
                 from_dict_filter_unknown(McpServerSpec, s) for s in mcp_raw
             ]
 
-        # Legacy ``is_main`` bool is translated into the permissions dict
-        # before the field filter runs.
-        if "is_main" in raw and "permissions" not in raw:
-            raw["permissions"] = AgentPermissions.for_role(
-                "super_agent" if raw["is_main"] else "agent"
-            ).to_dict()
-        # Falsy permissions (missing/None/empty dict) → default-role
-        # permissions, matching the pre-refactor ``raw.get(...) or ...``
+        # Falsy permissions (missing/None/empty dict) → least-privilege
+        # defaults, matching the pre-refactor ``raw.get(...) or ...``
         # semantics.
         if not raw.get("permissions"):
             raw["permissions"] = AgentPermissions().to_dict()

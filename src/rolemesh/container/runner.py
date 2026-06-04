@@ -35,7 +35,6 @@ from rolemesh.core.config import (
     EGRESS_GATEWAY_CONTAINER_NAME,
     EGRESS_GATEWAY_FORWARD_PORT,
     NATS_URL,
-    PROJECT_ROOT,
     TIMEZONE,
 )
 from rolemesh.core.logger import get_logger
@@ -82,24 +81,15 @@ def build_volume_mounts(
     conversation_id: str,
     permissions: AgentPermissions | None = None,
     backend_config: AgentBackendConfig | None = None,
-    # Legacy parameter — ignored if permissions is set
-    is_main: bool = False,
 ) -> list[VolumeMount]:
     """Build volume mounts for a container invocation.
 
     Paths: data/tenants/{tid}/coworkers/{folder}/
     """
-    # Resolve effective permissions
     if permissions is None:
-        permissions = AgentPermissions.for_role("super_agent" if is_main else "agent")
-
-    has_tenant_scope = permissions.data_scope == "tenant"
-    # Mount r/w policy uses agent_role (not data_scope) to avoid granting
-    # write access when only data_scope is overridden to "tenant".
-    is_super_agent = coworker.agent_role == "super_agent"
+        permissions = AgentPermissions()
 
     mounts: list[VolumeMount] = []
-    project_root = PROJECT_ROOT
     tenant_dir = DATA_DIR / "tenants" / tenant_id
     coworker_dir = tenant_dir / "coworkers" / coworker.folder
     shared_dir = tenant_dir / "shared"
@@ -108,25 +98,6 @@ def build_volume_mounts(
     # Workspace: per-coworker, shared across conversations
     workspace_dir = coworker_dir / "workspace"
     workspace_dir.mkdir(parents=True, exist_ok=True)
-
-    if has_tenant_scope:
-        mounts.append(
-            VolumeMount(
-                host_path=str(project_root),
-                container_path="/workspace/project",
-                readonly=True,
-            )
-        )
-        # Shadow .env so the agent cannot read secrets
-        env_file = project_root / ".env"
-        if env_file.exists():
-            mounts.append(
-                VolumeMount(
-                    host_path="/dev/null",
-                    container_path="/workspace/project/.env",
-                    readonly=True,
-                )
-            )
 
     mounts.append(
         VolumeMount(
@@ -200,7 +171,6 @@ def build_volume_mounts(
         validated_mounts = validate_additional_mounts(
             coworker.container_config.additional_mounts,
             coworker.name,
-            is_super_agent=is_super_agent,
         )
         for m in validated_mounts:
             mounts.append(
@@ -654,25 +624,23 @@ async def write_tasks_snapshot(
     coworker_folder: str,
     permissions: AgentPermissions | None = None,
     tasks: list[dict[str, object]] | None = None,
-    # Legacy parameter — ignored if permissions is set
-    is_main: bool = False,
 ) -> None:
     """Write filtered tasks to NATS KV for the agent to read.
 
-    Tenant-scope sees all tasks, self-scope only sees own.
+    Agents with ``task_manage_others`` see all tenant tasks; everyone else
+    only sees their own (manage requires visibility).
     Key: snapshots.{tenant_id}.{coworker_folder}.tasks
     """
     if tasks is None:
         tasks = []
 
-    # Resolve effective permissions
     if permissions is None:
-        permissions = AgentPermissions.for_role("super_agent" if is_main else "agent")
+        permissions = AgentPermissions()
 
-    has_tenant_scope = permissions.data_scope == "tenant"
+    can_manage_others = permissions.task_manage_others
 
     filtered_tasks: list[dict[str, object]]
-    filtered_tasks = tasks if has_tenant_scope else [t for t in tasks if t.get("coworkerFolder") == coworker_folder]
+    filtered_tasks = tasks if can_manage_others else [t for t in tasks if t.get("coworkerFolder") == coworker_folder]
 
     kv = await transport.js.key_value("snapshots")
     key = f"{tenant_id}.{coworker_folder}.tasks"
