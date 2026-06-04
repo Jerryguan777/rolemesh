@@ -6,7 +6,7 @@ The result is collected by iterating the stream to completion.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import AsyncIterator
 
 from pi.ai.api_registry import ApiProvider, get_api_provider
 from pi.ai.types import (
@@ -19,9 +19,6 @@ from pi.ai.types import (
     SimpleStreamOptions,
     StreamOptions,
 )
-
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
 
 
 def _resolve_api_provider(api: str) -> ApiProvider:

@@ -4,7 +4,7 @@ from pi.mcp.client import McpServerConnection
 from pi.mcp.tool_bridge import McpProxiedTool, load_mcp_tools
 
 __all__ = [
-    "McpProxiedTool",
     "McpServerConnection",
+    "McpProxiedTool",
     "load_mcp_tools",
 ]

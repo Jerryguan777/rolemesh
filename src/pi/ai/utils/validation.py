@@ -7,10 +7,9 @@ from __future__ import annotations
 
 import copy
 import json
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from pi.ai.types import Tool, ToolCall
+from pi.ai.types import Tool, ToolCall
 
 try:
     import jsonschema

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from dataclasses import replace
-from typing import TYPE_CHECKING
 
 from pi.ai.types import (
     AssistantContentBlock,
@@ -16,9 +16,6 @@ from pi.ai.types import (
     ToolCall,
     ToolResultMessage,
 )
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 
 def transform_messages(
