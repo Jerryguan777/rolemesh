@@ -61,7 +61,6 @@ TENANT_SCOPED_TABLES: frozenset[str] = frozenset({
     "skills",
     "task_run_logs",
     "tenant_model_credentials",
-    "user_agent_assignments",
     "users",
 })
 

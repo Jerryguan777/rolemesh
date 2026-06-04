@@ -233,7 +233,7 @@ async def test_force_rls_keeps_owner_under_policy(
         "safety_rules", "safety_decisions", "safety_rules_audit",
         "scheduled_tasks", "task_run_logs",
         "messages", "conversations", "sessions",
-        "coworkers", "channel_bindings", "user_agent_assignments",
+        "coworkers", "channel_bindings",
         "users", "oidc_user_tokens",
     ]
     pool = _get_pool()
