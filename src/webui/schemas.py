@@ -56,7 +56,6 @@ class AgentSummary(BaseModel):
     name: str
     folder: str
     status: str
-    agent_role: str
 
 
 class UserDetailResponse(UserResponse):
@@ -78,7 +77,6 @@ class AgentResponse(BaseModel):
     tools: list[dict[str, object]] = Field(default_factory=list)
     max_concurrent: int
     status: str
-    agent_role: str
     permissions: dict[str, object] = Field(default_factory=dict)
     created_at: str
 
@@ -101,7 +99,6 @@ class ConversationResponse(BaseModel):
     channel_binding_id: str
     channel_chat_id: str
     name: str | None = None
-    requires_trigger: bool
     created_at: str
 
 
@@ -117,7 +114,6 @@ class AgentCreate(BaseModel):
     system_prompt: str | None = None
     tools: list[dict[str, object]] = Field(default_factory=list)
     max_concurrent: int = Field(2, ge=1, le=20)
-    agent_role: str = Field("agent", pattern=r"^(super_agent|agent)$")
     permissions: dict[str, object] | None = None
 
 
@@ -127,7 +123,6 @@ class AgentUpdate(BaseModel):
     tools: list[dict[str, object]] | None = None
     max_concurrent: int | None = Field(None, ge=1, le=20)
     status: str | None = Field(None, pattern=r"^(active|paused|disabled)$")
-    agent_role: str | None = Field(None, pattern=r"^(super_agent|agent)$")
     permissions: dict[str, object] | None = None
 
 
@@ -157,7 +152,6 @@ class ConversationCreate(BaseModel):
     channel_binding_id: str
     channel_chat_id: str
     name: str | None = None
-    requires_trigger: bool = True
 
 
 # ---------------------------------------------------------------------------

@@ -62,7 +62,6 @@ def _conversation_to_response(conv: object) -> Conversation:
         channel_binding_id=conv.channel_binding_id,  # type: ignore[attr-defined]
         channel_chat_id=conv.channel_chat_id,  # type: ignore[attr-defined]
         name=conv.name,  # type: ignore[attr-defined]
-        requires_trigger=bool(conv.requires_trigger),  # type: ignore[attr-defined]
         created_at=conv.created_at,  # type: ignore[attr-defined]
     )
 
@@ -140,9 +139,8 @@ async def create_coworker_conversation(
 
     The SPA passes at most a display ``name``. The server auto-
     provisions the ``web`` channel binding (if not already present)
-    and generates a unique ``channel_chat_id``. ``requires_trigger``
-    is set to ``False`` because v1 web chat is 1:1 — no trigger
-    pattern gating like Telegram / Slack group chats.
+    and generates a unique ``channel_chat_id``. All conversations are
+    1:1 — the agent always responds.
     """
     cw = await _get_coworker_or_404(coworker_id, user.tenant_id)
     binding_id = await _ensure_web_binding(cw.id, user.tenant_id)  # type: ignore[attr-defined]
@@ -153,7 +151,6 @@ async def create_coworker_conversation(
         channel_binding_id=binding_id,
         channel_chat_id=chat_id,
         name=body.name,
-        requires_trigger=False,
         user_id=(
             user.user_id if _looks_like_uuid(user.user_id) else None
         ),

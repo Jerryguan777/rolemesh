@@ -295,9 +295,8 @@ class _BotInstance:
             if msg is None or chat is None or msg.text is None:
                 return
             # v6.1 §P1.5: 1:1 only. Replies the guidance and drops
-            # before any binding sees the message. Group support is
-            # paused (not removed) so the requires_trigger machinery
-            # in main.py stays available for a future opt-in revival.
+            # before any binding sees the message — the product does
+            # not support group chat.
             if await _short_circuit_group(update):
                 return
             if msg.text.startswith("/"):
