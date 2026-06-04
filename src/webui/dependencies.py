@@ -89,6 +89,41 @@ def require_manage_or_owner(
     )
 
 
+def user_can_see_resource(
+    *, manage_action: str, resource: object, user: AuthenticatedUser
+) -> bool:
+    """Single source of truth for "may this user SEE/USE this resource".
+
+    feat/roles PR3. A resource (coworker or skill) is visible/usable to a
+    caller when ANY of the following holds:
+
+    * it is ``shared`` (every tenant member may see and use it), OR
+    * the caller created it (``created_by_user_id == user.user_id``), OR
+    * the caller holds the manage capability (``manage_action``) — owner /
+      admin / platform_admin reach every row regardless of visibility.
+
+    USE is intentionally BROADER than the ``require_manage_or_owner``
+    write-gate: a shared resource is usable by everyone, but a member still
+    may not *manage* (edit/delete/share) it without the capability or
+    ownership. The two helpers therefore differ only in the ``shared``
+    clause, and both share the same three-valued-logic treatment of
+    ``created_by_user_id IS NULL`` (NULL never equals the caller, so an
+    un-attributed private row is invisible to members).
+
+    Every list / fetch / use / skill-bind path routes its visibility
+    decision through this helper (the LIST path mirrors the exact same
+    predicate in SQL so NULL does not leak — see
+    ``rolemesh.db.coworker.get_coworkers_for_tenant``). Keep them in sync.
+    """
+    visibility = getattr(resource, "visibility", "shared")
+    if visibility == "shared":
+        return True
+    created_by = getattr(resource, "created_by_user_id", None)
+    if created_by is not None and created_by == user.user_id:
+        return True
+    return user_can(user.role, manage_action)  # type: ignore[arg-type]
+
+
 # Pre-built dependencies for common use
 require_manage_tenant = require_action("manage_tenant")  # owner only
 require_manage_agents = require_action("manage_agents")  # admin+

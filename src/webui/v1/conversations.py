@@ -118,7 +118,9 @@ async def list_coworker_conversations(
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> list[Conversation]:
     """List conversations for a coworker, ordered by ``created_at``."""
-    await _get_coworker_or_404(coworker_id, user.tenant_id)
+    # USE/SEE enforcement: a member may not enumerate conversations of a
+    # coworker they cannot see (another member's private one) — 404.
+    await _get_coworker_or_404(coworker_id, user.tenant_id, user=user)
     convs = await get_conversations_for_coworker(
         coworker_id, tenant_id=user.tenant_id
     )
@@ -142,7 +144,12 @@ async def create_coworker_conversation(
     and generates a unique ``channel_chat_id``. All conversations are
     1:1 — the agent always responds.
     """
-    cw = await _get_coworker_or_404(coworker_id, user.tenant_id)
+    # USE enforcement (feat/roles PR3 feed-forward): a member must NOT be
+    # able to open a conversation against another member's PRIVATE
+    # coworker. ``_get_coworker_or_404(user=...)`` collapses not-visible
+    # to 404 so existence is not leaked; a shared coworker or the
+    # member's own private one passes.
+    cw = await _get_coworker_or_404(coworker_id, user.tenant_id, user=user)
     binding_id = await _ensure_web_binding(cw.id, user.tenant_id)  # type: ignore[attr-defined]
     chat_id = str(uuid.uuid4())
     conv = await create_conversation(

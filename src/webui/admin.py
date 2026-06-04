@@ -457,6 +457,12 @@ async def create_agent(
             system_prompt=body.system_prompt,
             max_concurrent=body.max_concurrent,
             permissions=permissions,
+            # feat/roles PR3: the legacy admin surface provisions
+            # tenant-wide agents (no per-user draft concept), so they are
+            # 'shared' — keeping them visible to members, as they were
+            # before the visibility column existed. The 'private'-by-
+            # default belongs to the self-serve /api/v1 create path.
+            visibility="shared",
         )
     except asyncpg.UniqueViolationError as exc:
         raise HTTPException(status_code=409, detail="Agent with this folder already exists in tenant") from exc
