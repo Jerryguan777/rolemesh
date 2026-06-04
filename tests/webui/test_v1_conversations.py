@@ -115,7 +115,6 @@ async def test_create_then_list_conversation() -> None:
         body = resp.json()
         assert body["coworker_id"] == cw_id
         assert body["name"] == "First chat"
-        assert body["requires_trigger"] is False
         # Server-generated channel_chat_id must be a UUID
         uuid.UUID(body["channel_chat_id"])
         conv_id = body["id"]

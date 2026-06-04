@@ -15,7 +15,6 @@ import pytest
 from rolemesh.core.orchestrator_state import (
     CoworkerState,
     OrchestratorState,
-    build_trigger_pattern,
 )
 from rolemesh.core.types import Coworker, Skill
 from rolemesh.orchestration.coworker_hot_reload import (
@@ -55,7 +54,6 @@ async def test_reload_skills_replaces_projection_on_existing_state() -> None:
     state = OrchestratorState()
     state.coworkers[cw.id] = CoworkerState(
         config=cw,
-        trigger_pattern=build_trigger_pattern(cw.name),
         skills=[_make_skill("old", tenant_id=cw.tenant_id)],
     )
     state.coworkers[cw.id].conversations["sentinel"] = "kept"  # type: ignore[assignment]

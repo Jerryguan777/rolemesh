@@ -566,7 +566,6 @@ async def test_outer_finally_cleans_up_on_exception(
         name: str = "Bot"
         folder: str = "bot"
         agent_backend: str = "claude"
-        agent_role: str = "agent"
         permissions: object = None
         tools: object = ()
         container_config: object = None
@@ -583,7 +582,7 @@ async def test_outer_finally_cleans_up_on_exception(
         prompt="hi",
         group_folder="bot",
         chat_jid="x@g.us",
-        permissions={"data_scope": "self", "task_schedule": False,
+        permissions={"task_schedule": False,
                      "task_manage_others": False, "agent_delegate": False},
         tenant_id="t-1",
         coworker_id="cw-1",

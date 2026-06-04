@@ -113,8 +113,8 @@ def test_agent_init_drops_unknown_field_inside_mcp_server_spec() -> None:
 
 
 def test_agent_init_falls_back_to_default_permissions_when_empty() -> None:
-    # Pre-refactor semantics: an explicitly empty dict triggers the
-    # default-role fallback, not the empty dict itself.
+    # An explicitly empty dict triggers the least-privilege fallback,
+    # not the empty dict itself.
     payload = {
         "prompt": "p",
         "group_folder": "g",
@@ -122,20 +122,9 @@ def test_agent_init_falls_back_to_default_permissions_when_empty() -> None:
         "permissions": {},
     }
     out = AgentInitData.deserialize(_to_bytes(payload))
-    assert out.permissions["data_scope"] == "self"
     assert out.permissions["task_schedule"] is False
-
-
-def test_agent_init_legacy_is_main_translates_to_permissions() -> None:
-    payload = {
-        "prompt": "p",
-        "group_folder": "g",
-        "chat_jid": "j",
-        "is_main": True,
-    }
-    out = AgentInitData.deserialize(_to_bytes(payload))
-    assert out.permissions["data_scope"] == "tenant"
-    assert out.permissions["agent_delegate"] is True
+    assert out.permissions["task_manage_others"] is False
+    assert out.permissions["agent_delegate"] is False
 
 
 # ---------------------------------------------------------------------------

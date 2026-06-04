@@ -180,7 +180,6 @@ async def test_process_task_ipc_writes_created_by_user_id() -> None:
     tid, uid, cw_id = await _seed_scheduling_ground("ipc-stamp")
     deps = _DepsStub()
     permissions = AgentPermissions(
-        data_scope="self",
         task_schedule=True,
         task_manage_others=False,
         agent_delegate=False,
@@ -217,7 +216,7 @@ async def test_process_task_ipc_with_empty_user_id_stores_null() -> None:
     tid, _uid, cw_id = await _seed_scheduling_ground("ipc-null")
     deps = _DepsStub()
     permissions = AgentPermissions(
-        data_scope="self", task_schedule=True,
+        task_schedule=True,
         task_manage_others=False, agent_delegate=False,
     )
     task_id = str(uuid.uuid4())
@@ -260,7 +259,7 @@ async def test_run_task_stamps_agent_input_user_id_from_task() -> None:
         agent_backend="claude", system_prompt=None,
         container_config=None, max_concurrent=1, status="active",
         permissions=AgentPermissions(
-            data_scope="self", task_schedule=True,
+            task_schedule=True,
             task_manage_others=False, agent_delegate=False,
         ),
     )
@@ -327,7 +326,7 @@ async def test_run_task_passes_empty_string_when_task_has_null_creator() -> None
         agent_backend="claude", system_prompt=None,
         container_config=None, max_concurrent=1, status="active",
         permissions=AgentPermissions(
-            data_scope="self", task_schedule=True,
+            task_schedule=True,
             task_manage_others=False, agent_delegate=False,
         ),
     )

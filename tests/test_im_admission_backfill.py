@@ -138,7 +138,6 @@ async def test_unlinked_sender_admission_denies_and_replies_guidance(
         text="hello",
         timestamp="2026-05-28T00:00:00Z",
         msg_id="msg-1",
-        is_group=False,
     )
 
     # Guidance reply went out to the right binding+chat.
@@ -187,7 +186,6 @@ async def test_linked_sender_lazy_backfills_conv_user_id(
         text="hello",
         timestamp="2026-05-28T00:00:00Z",
         msg_id="msg-1",
-        is_group=False,
     )
 
     # No guidance reply — admission admitted.
@@ -259,7 +257,6 @@ async def test_admission_corrects_conv_user_id_after_identity_handover(
         text="hello",
         timestamp="2026-05-28T00:00:00Z",
         msg_id="msg-1",
-        is_group=False,
     )
 
     # Conv was restamped to B in both DB and in-memory.
@@ -303,6 +300,5 @@ async def test_lazy_backfill_fills_null_user_id(
         text="hello",
         timestamp="2026-05-28T00:00:00Z",
         msg_id="msg-1",
-        is_group=False,
     )
     assert await _conv_user_id(s["conv"].id) == s["user_id"]

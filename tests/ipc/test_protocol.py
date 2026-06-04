@@ -8,7 +8,9 @@ from rolemesh.ipc.protocol import AgentInitData
 
 def test_agent_init_data_roundtrip() -> None:
     """AgentInitData serializes and deserializes correctly."""
-    perms = AgentPermissions.for_role("super_agent").to_dict()
+    perms = AgentPermissions(
+        task_schedule=True, task_manage_others=True, agent_delegate=True
+    ).to_dict()
     init = AgentInitData(
         prompt="Hello world",
         group_folder="mygroup",
@@ -37,7 +39,7 @@ def test_agent_init_data_roundtrip() -> None:
 
 def test_agent_init_data_optional_fields() -> None:
     """AgentInitData handles missing optional fields."""
-    perms = AgentPermissions.for_role("agent").to_dict()
+    perms = AgentPermissions().to_dict()
     init = AgentInitData(
         prompt="Test",
         group_folder="group",
@@ -60,7 +62,7 @@ def test_agent_init_data_frozen() -> None:
         prompt="p",
         group_folder="g",
         chat_jid="j",
-        permissions=AgentPermissions.for_role("super_agent").to_dict(),
+        permissions=AgentPermissions(task_manage_others=True).to_dict(),
     )
     try:
         init.prompt = "other"  # type: ignore[misc]
@@ -69,34 +71,16 @@ def test_agent_init_data_frozen() -> None:
         pass
 
 
-def test_agent_init_data_backward_compat_is_main_true() -> None:
-    """Legacy is_main=True in raw JSON converts to super_agent permissions."""
+def test_agent_init_data_missing_permissions_defaults_to_least_privilege() -> None:
+    """Missing/empty permissions in raw JSON coerce to all-False defaults."""
     import json
 
     raw = json.dumps({
         "prompt": "test",
         "group_folder": "g",
         "chat_jid": "j",
-        "is_main": True,
-        "tenant_id": "t1",
     }).encode()
     restored = AgentInitData.deserialize(raw)
-    assert restored.permissions["data_scope"] == "tenant"
-    assert restored.permissions["task_schedule"] is True
-    assert restored.permissions["task_manage_others"] is True
-    assert restored.permissions["agent_delegate"] is True
-
-
-def test_agent_init_data_backward_compat_is_main_false() -> None:
-    """Legacy is_main=False in raw JSON converts to agent permissions."""
-    import json
-
-    raw = json.dumps({
-        "prompt": "test",
-        "group_folder": "g",
-        "chat_jid": "j",
-        "is_main": False,
-    }).encode()
-    restored = AgentInitData.deserialize(raw)
-    assert restored.permissions["data_scope"] == "self"
     assert restored.permissions["task_schedule"] is False
+    assert restored.permissions["task_manage_others"] is False
+    assert restored.permissions["agent_delegate"] is False

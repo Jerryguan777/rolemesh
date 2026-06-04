@@ -24,7 +24,7 @@ async def test_schedule_task_missing_fields() -> None:
     await process_task_ipc(
         {"type": "schedule_task"},  # Missing required fields
         "test-group",
-        AgentPermissions.for_role("super_agent"),
+        AgentPermissions(task_schedule=True, task_manage_others=True, agent_delegate=True),
         deps,  # type: ignore[arg-type]
     )
     # Should not raise, just silently skip
@@ -44,6 +44,6 @@ async def test_unknown_task_type() -> None:
     await process_task_ipc(
         {"type": "unknown_type"},
         "test-group",
-        AgentPermissions.for_role("super_agent"),
+        AgentPermissions(task_schedule=True, task_manage_others=True, agent_delegate=True),
         deps,  # type: ignore[arg-type]
     )

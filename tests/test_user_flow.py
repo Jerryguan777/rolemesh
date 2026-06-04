@@ -70,6 +70,7 @@ class TestScenarioFirstTimeUser:
 
     async def test_full_entity_creation_flow(self, env: Path) -> None:
         """Create tenant → role → coworker → binding → conversation → session."""
+        from rolemesh.auth.permissions import AgentPermissions
         from rolemesh.db import (
             create_channel_binding,
             create_conversation,
@@ -84,7 +85,7 @@ class TestScenarioFirstTimeUser:
             tenant_id=t.id,
             name="Ops Bot",
             folder="ops-bot",
-            agent_role="super_agent",
+            permissions=AgentPermissions(task_manage_others=True),
         )
         b = await create_channel_binding(
             coworker_id=cw.id,
@@ -98,7 +99,6 @@ class TestScenarioFirstTimeUser:
             channel_binding_id=b.id,
             channel_chat_id="-1001234",
             name="Ops Team",
-            requires_trigger=True,
         )
 
         # Set and get session
@@ -106,8 +106,7 @@ class TestScenarioFirstTimeUser:
         assert await get_session(conv.id, tenant_id=t.id) == "sess-001"
 
         # Verify all fields
-        assert cw.agent_role == "super_agent"
-        assert conv.requires_trigger is True
+        assert cw.permissions is not None and cw.permissions.task_manage_others is True
         assert b.channel_type == "telegram"
 
 
@@ -195,7 +194,7 @@ class TestScenarioIPCFromContainer:
                 "targetCoworkerId": cw.id,
             },
             "bot",
-            AgentPermissions.for_role("super_agent"),
+            AgentPermissions(task_schedule=True, task_manage_others=True, agent_delegate=True),
             FakeDeps(),  # type: ignore[arg-type]
             tenant_id=t.id,
             coworker_id=cw.id,
@@ -342,7 +341,6 @@ class TestScenarioMountSecurity:
             reset_cache()
             result = validate_mount(
                 AdditionalMount(host_path="/etc/shadow", container_path="/mnt/shadow"),
-                is_super_agent=True,
             )
             assert not result.allowed
 

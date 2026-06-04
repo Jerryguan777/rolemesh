@@ -61,6 +61,7 @@ async def e2e_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pg_url: str) 
 
 async def test_multi_tenant_schema_creation(e2e_env: Path) -> None:
     """All new tables are created correctly."""
+    from rolemesh.auth.permissions import AgentPermissions
     from rolemesh.db import (
         create_channel_binding,
         create_conversation,
@@ -77,10 +78,10 @@ async def test_multi_tenant_schema_creation(e2e_env: Path) -> None:
         tenant_id=tenant.id,
         name="Test Bot",
         folder="test-bot",
-        agent_role="super_agent",
+        permissions=AgentPermissions(task_manage_others=True),
     )
     assert coworker.id
-    assert coworker.agent_role == "super_agent"
+    assert coworker.permissions is not None and coworker.permissions.task_manage_others is True
 
     binding = await create_channel_binding(
         coworker_id=coworker.id,
@@ -97,10 +98,8 @@ async def test_multi_tenant_schema_creation(e2e_env: Path) -> None:
         channel_binding_id=binding.id,
         channel_chat_id="12345",
         name="Test Chat",
-        requires_trigger=False,
     )
     assert conv.id
-    assert conv.requires_trigger is False
 
 
 async def test_session_per_conversation(e2e_env: Path) -> None:
