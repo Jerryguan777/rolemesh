@@ -33,9 +33,7 @@ from webui.schemas import (
     AgentCreate,
     AgentDetailResponse,
     AgentResponse,
-    AgentSummary,
     AgentUpdate,
-    AssignRequest,
     BindingCreate,
     BindingResponse,
     BindingUpdate,
@@ -226,15 +224,6 @@ async def _load_mcp_configs(
     )
 
 
-def _coworker_to_summary(cw: Coworker) -> AgentSummary:
-    return AgentSummary(
-        id=cw.id,
-        name=cw.name,
-        folder=cw.folder,
-        status=cw.status,
-    )
-
-
 def _binding_to_response(b: ChannelBinding) -> BindingResponse:
     return BindingResponse(
         id=b.id,
@@ -380,12 +369,7 @@ async def get_user_detail(
     target = await db.get_user(user_id, tenant_id=user.tenant_id)
     if target is None:
         raise HTTPException(status_code=404, detail="User not found")
-    agents = await db.get_agents_for_user(user_id, tenant_id=user.tenant_id)
-    resp = UserDetailResponse(
-        **_user_to_response(target).model_dump(),
-        assigned_agents=[_coworker_to_summary(a) for a in agents],
-    )
-    return resp
+    return UserDetailResponse(**_user_to_response(target).model_dump())
 
 
 @router.patch("/users/{user_id}", response_model=UserResponse)
@@ -547,47 +531,6 @@ async def delete_agent(
 ) -> None:
     await _get_agent_or_404(agent_id, user.tenant_id)
     await db.delete_coworker(agent_id, tenant_id=user.tenant_id)
-
-
-# ---------------------------------------------------------------------------
-# Assignment endpoints (admin+)
-# ---------------------------------------------------------------------------
-
-
-@router.get("/agents/{agent_id}/users", response_model=list[UserResponse])
-async def list_assigned_users(
-    agent_id: str,
-    user: AdminUser,
-) -> list[UserResponse]:
-    await _get_agent_or_404(agent_id, user.tenant_id)
-    users = await db.get_users_for_agent(agent_id, tenant_id=user.tenant_id)
-    return [_user_to_response(u) for u in users]
-
-
-@router.post("/agents/{agent_id}/assign", status_code=204)
-async def assign_agent(
-    agent_id: str,
-    body: AssignRequest,
-    user: AdminUser,
-) -> None:
-    await _get_agent_or_404(agent_id, user.tenant_id)
-    target = await db.get_user(body.user_id, tenant_id=user.tenant_id)
-    if target is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    await db.assign_agent_to_user(body.user_id, agent_id, user.tenant_id)
-
-
-@router.delete("/agents/{agent_id}/assign/{user_id}", status_code=204)
-async def unassign_agent(
-    agent_id: str,
-    user_id: str,
-    user: AdminUser,
-) -> None:
-    await _get_agent_or_404(agent_id, user.tenant_id)
-    target = await db.get_user(user_id, tenant_id=user.tenant_id)
-    if target is None:
-        raise HTTPException(status_code=404, detail="User not found")
-    await db.unassign_agent_from_user(user_id, agent_id, tenant_id=user.tenant_id)
 
 
 # ---------------------------------------------------------------------------

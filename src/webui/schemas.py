@@ -51,15 +51,10 @@ class UserUpdate(BaseModel):
     role: str | None = Field(None, pattern=r"^(owner|admin|member)$")
 
 
-class AgentSummary(BaseModel):
-    id: str
-    name: str
-    folder: str
-    status: str
-
-
 class UserDetailResponse(UserResponse):
-    assigned_agents: list[AgentSummary] = Field(default_factory=list)
+    """Detailed user view. Currently identical to ``UserResponse``; the former
+    per-user agent-grant list was removed with the user-agent assignment
+    mechanism (access is governed by coworker visibility + ownership)."""
 
 
 # ---------------------------------------------------------------------------
@@ -172,15 +167,6 @@ class TaskResponse(BaseModel):
     last_run: str | None = None
     status: str
     created_at: str
-
-
-# ---------------------------------------------------------------------------
-# Assignment
-# ---------------------------------------------------------------------------
-
-
-class AssignRequest(BaseModel):
-    user_id: str
 
 
 # ---------------------------------------------------------------------------
