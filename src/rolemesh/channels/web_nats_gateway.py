@@ -258,7 +258,6 @@ class WebNatsGateway:
                         inbound.text,
                         inbound.timestamp,
                         inbound.msg_id,
-                        False,  # web chat is never a group
                     )
                     await msg.ack()
                 except Exception:
