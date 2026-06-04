@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, Coroutine
 
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Request
 
 from rolemesh.auth.permissions import user_can
 from webui import auth
@@ -26,16 +26,65 @@ async def get_current_user(request: Request) -> AuthenticatedUser:
     return user
 
 
-def require_action(action: str):
-    """Factory that returns a dependency requiring a specific permission action."""
+def require_action(
+    action: str,
+) -> Callable[[AuthenticatedUser], Coroutine[None, None, AuthenticatedUser]]:
+    """Factory that returns a dependency requiring a specific permission action.
 
-    async def _check(request: Request) -> AuthenticatedUser:
-        user = await get_current_user(request)
+    The returned dependency resolves the caller via ``get_current_user`` as a
+    *sub-dependency* (not a direct call) so that FastAPI dependency overrides
+    in tests flow through, and so the capability gate composes cleanly with the
+    rest of the dependency chain.
+
+    The inner function is tagged with ``_required_action`` so the default-deny
+    meta-test (``tests/webui/test_v1_default_deny.py``) can walk a route's
+    dependency tree and confirm every ``/api/v1`` mutation is gated. Do not
+    rename or drop that attribute without updating the meta-test.
+    """
+
+    async def _check(
+        user: AuthenticatedUser = Depends(get_current_user),
+    ) -> AuthenticatedUser:
         if not user_can(user.role, action):  # type: ignore[arg-type]
-            raise HTTPException(status_code=403, detail=f"Insufficient permissions: requires {action}")
+            raise HTTPException(
+                status_code=403,
+                detail=f"Insufficient permissions: requires {action}",
+            )
         return user
 
+    # Tag so route introspection (meta-test) can detect the gate and which
+    # action it enforces.
+    _check._required_action = action  # type: ignore[attr-defined]
     return _check
+
+
+def require_manage_or_owner(
+    *, manage_action: str, resource: object, user: AuthenticatedUser
+) -> None:
+    """Ownership-escape gate: allow when the caller holds ``manage_action`` OR
+    owns the already-loaded ``resource``.
+
+    Called from *inside* a handler (it needs the loaded row), as the complement
+    to the route-level capability gate. The route should carry the lowest
+    sensible capability (e.g. ``agent.use``); this helper then lets a member
+    who created the resource manage their OWN copy while still blocking them
+    from others'/shared ones.
+
+    Three-valued logic is load-bearing: a resource whose ``created_by_user_id``
+    is NULL is treated as "not mine" — NULL never equals the caller, so such a
+    resource falls through to requiring ``manage_action``. This prevents a
+    member from claiming ownership of an un-attributed (system/legacy) row.
+
+    Raises 403 when neither the capability nor ownership holds.
+    """
+    created_by = getattr(resource, "created_by_user_id", None)
+    owns = created_by is not None and created_by == user.user_id
+    if user_can(user.role, manage_action) or owns:  # type: ignore[arg-type]
+        return
+    raise HTTPException(
+        status_code=403,
+        detail=f"Insufficient permissions: requires {manage_action} or resource ownership",
+    )
 
 
 # Pre-built dependencies for common use

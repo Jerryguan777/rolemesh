@@ -13,14 +13,14 @@ is idempotent so re-runs are safe. This replaces the static
 backdoor — with an explicit, auditable operator action bound to whoever
 already holds host + DB access.
 
-Role-model dependency (task §5): the four-role / platform-vs-tenant
-*scope* model is owned by a separate "role-model redesign" task. This
-module only *references* the ``platform_admin`` role value as a string;
-it does not define a scope column or wire authorization recognition of
-``platform_admin`` — that is left to that task ("引用,不接线"). Until it
-lands, a ``platform_admin`` row is anchored to the existing ``default``
-tenant to satisfy the NOT NULL ``users.tenant_id`` constraint; the
-eventual tenant-less / scoped representation is a later migration.
+Role-model dependency: the four-role / platform-vs-tenant *scope*
+model is now wired (``rolemesh.auth.permissions`` recognizes
+``platform_admin`` as the superset role). ``platform_admin`` is
+platform-scoped and has no tenant of its own, but ``users.tenant_id``
+is NOT NULL, so its row is anchored to a reserved sentinel tenant
+(slug ``__platform__``) created idempotently here — never to a real
+business tenant, and never NULL. The eventual tenant-less / scoped
+representation is a later migration.
 """
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ import os
 from dataclasses import dataclass
 
 from rolemesh.db import (
-    DEFAULT_TENANT,
     admin_conn,
     create_tenant,
     create_user_with_external_sub,
@@ -41,9 +40,15 @@ from rolemesh.db import (
 
 logger = logging.getLogger(__name__)
 
-# The platform-plane role. Referenced as a plain string; the role model
-# that gives it scope + authorization meaning is a separate task.
+# The platform-plane role — superset of every tenant capability
+# (see ``rolemesh.auth.permissions``).
 PLATFORM_ADMIN_ROLE = "platform_admin"
+
+# Reserved sentinel tenant that anchors platform_admin rows. The leading/
+# trailing double-underscore slug is not a legal user-chosen tenant slug, so it
+# can never collide with a real business tenant. Created idempotently on first
+# platform_admin provisioning; reused on every subsequent run.
+PLATFORM_TENANT_SLUG = "__platform__"
 
 # Tenant-plane roles recognized by the existing role model. ``--role``
 # accepts these as an emergency escape hatch (scripts / tests / platform
@@ -124,16 +129,17 @@ async def create_admin(
 
     # Resolve the tenant the row hangs off. platform_admin is
     # platform-scoped and has no tenant of its own, but users.tenant_id
-    # is NOT NULL, so we anchor it to the default tenant until the
-    # role-model task introduces a scope representation. Tenant-scoped
+    # is NOT NULL, so we anchor it to the reserved ``__platform__``
+    # sentinel tenant (created idempotently). It never accepts an
+    # arbitrary --tenant; passing one is a usage error. Tenant-scoped
     # roles require an explicit --tenant.
     if role == PLATFORM_ADMIN_ROLE:
-        if tenant is not None and tenant != DEFAULT_TENANT:
+        if tenant is not None and tenant != PLATFORM_TENANT_SLUG:
             raise AdminProvisionError(
                 "platform_admin is platform-scoped; --tenant is only valid "
                 "for tenant-scoped roles (owner/admin/member)"
             )
-        tenant_slug = DEFAULT_TENANT
+        tenant_slug = PLATFORM_TENANT_SLUG
     else:
         if not tenant:
             raise AdminProvisionError(
