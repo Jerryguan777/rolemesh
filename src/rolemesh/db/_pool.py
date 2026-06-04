@@ -183,7 +183,6 @@ async def _init_test_database(
         await conn.execute("DROP TABLE IF EXISTS external_tenant_map CASCADE")
         await conn.execute("DROP TABLE IF EXISTS skill_files CASCADE")
         await conn.execute("DROP TABLE IF EXISTS skills CASCADE")
-        await conn.execute("DROP TABLE IF EXISTS user_agent_assignments CASCADE")
         await conn.execute("DROP TABLE IF EXISTS task_run_logs CASCADE")
         await conn.execute("DROP TABLE IF EXISTS messages CASCADE")
         await conn.execute("DROP TABLE IF EXISTS scheduled_tasks CASCADE")

@@ -1,4 +1,4 @@
-"""Coworker CRUD + user-agent assignments."""
+"""Coworker CRUD."""
 
 from __future__ import annotations
 
@@ -6,25 +6,20 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from rolemesh.auth.permissions import AgentPermissions
-from rolemesh.core.types import ContainerConfig, Coworker, User
+from rolemesh.core.types import ContainerConfig, Coworker
 from rolemesh.db._pool import admin_conn, tenant_conn
-from rolemesh.db.user import _record_to_user
 
 if TYPE_CHECKING:
     import asyncpg
 
 __all__ = [
-    "assign_agent_to_user",
     "create_coworker",
     "delete_coworker",
-    "get_agents_for_user",
     "get_all_coworkers",
     "get_coworker",
     "get_coworker_by_folder",
     "get_coworkers_for_tenant",
-    "get_users_for_agent",
     "set_coworker_visibility",
-    "unassign_agent_from_user",
     "update_coworker",
 ]
 
@@ -352,74 +347,5 @@ async def delete_coworker(coworker_id: str, *, tenant_id: str) -> bool:
             tenant_id,
         )
     return result == "DELETE 1"
-
-
-
-
-# ---------------------------------------------------------------------------
-# User-Agent assignment CRUD
-# ---------------------------------------------------------------------------
-
-
-async def assign_agent_to_user(user_id: str, coworker_id: str, tenant_id: str) -> None:
-    """Assign a coworker (agent) to a user."""
-    async with tenant_conn(tenant_id) as conn:
-        await conn.execute(
-            """
-            INSERT INTO user_agent_assignments (user_id, coworker_id, tenant_id)
-            VALUES ($1::uuid, $2::uuid, $3::uuid)
-            ON CONFLICT (user_id, coworker_id) DO NOTHING
-            """,
-            user_id,
-            coworker_id,
-            tenant_id,
-        )
-
-
-async def unassign_agent_from_user(
-    user_id: str, coworker_id: str, *, tenant_id: str
-) -> None:
-    """Remove a coworker assignment from a user."""
-    async with tenant_conn(tenant_id) as conn:
-        await conn.execute(
-            "DELETE FROM user_agent_assignments "
-            "WHERE user_id = $1::uuid AND coworker_id = $2::uuid "
-            "AND tenant_id = $3::uuid",
-            user_id,
-            coworker_id,
-            tenant_id,
-        )
-
-
-async def get_agents_for_user(user_id: str, *, tenant_id: str) -> list[Coworker]:
-    """Get all coworkers assigned to a user, scoped to ``tenant_id``."""
-    async with tenant_conn(tenant_id) as conn:
-        rows = await conn.fetch(
-            """
-            SELECT c.* FROM coworkers c
-            JOIN user_agent_assignments uaa ON c.id = uaa.coworker_id
-            WHERE uaa.user_id = $1::uuid AND uaa.tenant_id = $2::uuid
-            ORDER BY c.name
-            """,
-            user_id,
-            tenant_id,
-        )
-    return [_record_to_coworker(row) for row in rows]
-
-
-async def get_users_for_agent(coworker_id: str, *, tenant_id: str) -> list[User]:
-    """Get all users assigned to a coworker, scoped to ``tenant_id``."""
-    async with tenant_conn(tenant_id) as conn:
-        rows = await conn.fetch(
-            """
-            SELECT u.* FROM users u
-            JOIN user_agent_assignments uaa ON u.id = uaa.user_id
-            WHERE uaa.coworker_id = $1::uuid AND uaa.tenant_id = $2::uuid
-            ORDER BY u.name
-            """,
-            coworker_id,
-            tenant_id,
-        )
-    return [_record_to_user(row) for row in rows]
 
 

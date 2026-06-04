@@ -41,7 +41,6 @@ class OIDCAuthProvider:
         self._client_id = config.client_id
         self._audience = config.audience or config.client_id
         self._provider_key = config.provider_key
-        self._auto_assign_to_all = config.auto_assign_to_all
         self._jwks = JWKSManager(config.discovery_url)
         self._adapter: OIDCAdapter = adapter or DefaultOIDCAdapter()  # type: ignore[assignment]
 
@@ -203,23 +202,5 @@ class OIDCAuthProvider:
         )
         await self._adapter.on_user_provisioned(user.id, tenant_id, claims)
         logger.info("OIDC user provisioned", user_id=user.id, sub=external_sub)
-
-        # Auto-assign new users to every coworker in the tenant. Only fires on
-        # first-time creation; subsequent logins do not re-assign because an
-        # admin may have intentionally unassigned the user.
-        if self._auto_assign_to_all:
-            from rolemesh.db import (
-                assign_agent_to_user,
-                get_coworkers_for_tenant,
-            )
-
-            coworkers = await get_coworkers_for_tenant(tenant_id)
-            for cw in coworkers:
-                await assign_agent_to_user(user.id, cw.id, tenant_id)
-            logger.info(
-                "OIDC user auto-assigned to coworkers",
-                user_id=user.id,
-                count=len(coworkers),
-            )
 
         return user

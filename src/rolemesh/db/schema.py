@@ -432,19 +432,12 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             END IF;
         END $$
     """)
-    # User-agent assignment table
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_agent_assignments (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            coworker_id UUID NOT NULL REFERENCES coworkers(id) ON DELETE CASCADE,
-            tenant_id UUID NOT NULL REFERENCES tenants(id),
-            assigned_at TIMESTAMPTZ DEFAULT now(),
-            UNIQUE (user_id, coworker_id)
-        )
-    """)
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_uaa_user ON user_agent_assignments(user_id)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_uaa_coworker ON user_agent_assignments(coworker_id)")
+    # The user-agent assignment table was removed (feat/roles): access is
+    # governed by coworker visibility + created_by_user_id ownership, never an
+    # explicit per-user grant table. Drop it idempotently so upgraded
+    # deployments that already created it shed the table (fresh DBs never
+    # create it in the first place).
+    await conn.execute("DROP TABLE IF EXISTS user_agent_assignments CASCADE")
 
     # Coworker <-> MCP server association (v1.1 §2.1). ``enabled_tools``
     # = NULL means "all tools enabled" (the common case); an empty
@@ -1576,7 +1569,6 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     await _enable_rls_on(conn, "sessions")
     await _enable_rls_on(conn, "coworkers")            # D8
     await _enable_rls_on(conn, "channel_bindings")
-    await _enable_rls_on(conn, "user_agent_assignments")
     await _enable_rls_on(conn, "users")                # D9
     await _enable_rls_on(conn, "oidc_user_tokens")     # D10 (tenant_id backfilled above)
     await _enable_rls_on(conn, "skills")               # skills feature: standard tenant_id scope
