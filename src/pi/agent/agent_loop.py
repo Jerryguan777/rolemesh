@@ -5,10 +5,12 @@ Uses async generators instead of EventStream.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import inspect
 import time
-from typing import TYPE_CHECKING, Any
+from collections.abc import AsyncGenerator
+from typing import Any
 
 from pi.agent.types import (
     AgentContext,
@@ -42,10 +44,6 @@ from pi.ai.types import (
     ToolResultMessage,
 )
 from pi.ai.utils.validation import validate_tool_arguments
-
-if TYPE_CHECKING:
-    import asyncio
-    from collections.abc import AsyncGenerator
 
 
 async def _call_async(fn: Any, *args: Any) -> Any:

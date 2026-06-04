@@ -5,19 +5,16 @@ from __future__ import annotations
 import asyncio
 import glob as glob_module
 import shutil
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from pi.agent.types import AgentTool, AgentToolResult, AgentToolUpdateCallback
 from pi.ai.types import TextContent
 
 from .path_utils import resolve_to_cwd
-
-if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
-    from .truncate import TruncationResult
+from .truncate import TruncationResult
 
 
 @dataclass

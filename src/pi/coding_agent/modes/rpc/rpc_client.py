@@ -12,17 +12,15 @@ import logging
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+from pi.agent.types import ThinkingLevel
+from pi.ai.types import ImageContent
 from pi.coding_agent.modes.rpc.rpc_types import (
     RpcResponse,
     deserialize_rpc_response,
     serialize_rpc_session_state,
 )
-
-if TYPE_CHECKING:
-    from pi.agent.types import ThinkingLevel
-    from pi.ai.types import ImageContent
 
 logger = logging.getLogger(__name__)
 

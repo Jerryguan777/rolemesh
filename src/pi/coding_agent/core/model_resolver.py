@@ -8,12 +8,11 @@ from __future__ import annotations
 import fnmatch
 import sys
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from pi.agent.types import ThinkingLevel
-    from pi.ai.types import Model
-    from pi.coding_agent.core.model_registry import ModelRegistry
+from pi.agent.types import ThinkingLevel
+from pi.ai.types import Model
+from pi.coding_agent.core.model_registry import ModelRegistry
 
 # ============================================================================
 # Default models per provider

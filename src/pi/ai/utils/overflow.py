@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from pi.ai.types import AssistantMessage
+from pi.ai.types import AssistantMessage
 
 OVERFLOW_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"prompt is too long", re.IGNORECASE),

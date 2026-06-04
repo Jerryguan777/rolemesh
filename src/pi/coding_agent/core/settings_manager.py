@@ -10,16 +10,14 @@ from __future__ import annotations
 import json
 import os
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
 import filelock
 
 from pi.coding_agent.core.config import CONFIG_DIR_NAME, get_agent_dir
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 # ============================================================================
 # Settings dataclasses

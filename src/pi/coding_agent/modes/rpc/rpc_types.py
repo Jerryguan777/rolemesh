@@ -8,12 +8,10 @@ between dataclass instances and plain JSON-serializable dicts.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
+from pi.agent.types import ThinkingLevel
 from pi.ai.types import ImageContent, Model, deserialize_model, serialize_model
-
-if TYPE_CHECKING:
-    from pi.agent.types import ThinkingLevel
 
 # ---------------------------------------------------------------------------
 # RpcCommand variants

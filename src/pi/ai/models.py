@@ -7,12 +7,9 @@ via register_models() or individually.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Mapping
 
-if TYPE_CHECKING:
-    from collections.abc import Mapping
-
-    from pi.ai.types import Model, Usage, UsageCost
+from pi.ai.types import Model, Usage, UsageCost
 
 # Provider -> (ModelId -> Model)
 # Note: module-level mutable state. Safe for single-threaded asyncio use.

@@ -271,7 +271,7 @@ class AgentSession:
     @property
     def state(self) -> AgentState:
         """Full agent state."""
-        return cast("AgentState", self._agent.state)
+        return cast(AgentState, self._agent.state)
 
     @property
     def model(self) -> Model | None:
@@ -291,7 +291,7 @@ class AgentSession:
     @property
     def messages(self) -> list[AgentMessage]:
         """All messages including custom types."""
-        return cast("list[AgentMessage]", self._agent.state.messages)
+        return cast(list[AgentMessage], self._agent.state.messages)
 
     @property
     def session_id(self) -> str:

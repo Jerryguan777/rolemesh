@@ -9,8 +9,9 @@ import asyncio
 import contextlib
 import copy
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
+from pi.agent.types import AgentMessage
 from pi.coding_agent.core.extensions.types import (
     BeforeAgentStartEvent,
     ContextEvent,
@@ -38,9 +39,6 @@ from pi.coding_agent.core.extensions.types import (
     UserBashEventResult,
     is_session_before_event,
 )
-
-if TYPE_CHECKING:
-    from pi.agent.types import AgentMessage
 
 ExtensionErrorListener = Callable[[ExtensionError], None]
 
