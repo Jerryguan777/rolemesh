@@ -42,8 +42,12 @@ __all__ = [
     "list_skills_for_coworker",
     "list_skills_for_tenant",
     "set_skill_file",
+    "set_skill_visibility",
     "update_skill",
 ]
+
+# The two-valued visibility domain (mirrors the DB CHECK constraint).
+_VALID_VISIBILITY: frozenset[str] = frozenset({"private", "shared"})
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +80,10 @@ def _record_to_skill(row: asyncpg.Record, files: list[SkillFile] | None = None) 
             str(row["created_by_user_id"])
             if row["created_by_user_id"] else None
         ),
+        # ``.get`` defaults to None for any legacy row that pre-dates the
+        # column (none in practice — it is NOT NULL — but keeps the
+        # projection total); collapse to the private default.
+        visibility=row.get("visibility") or "private",
         files={f.path: f for f in (files or [])},
     )
 
@@ -103,8 +111,13 @@ async def create_skill(
     files: dict[str, SkillFile],
     enabled: bool = True,
     created_by_user_id: str | None = None,
+    visibility: str = "private",
 ) -> Skill:
     """Create a per-tenant skill plus its files in a single transaction.
+
+    ``visibility`` (feat/roles PR3) defaults to ``'private'`` — a new
+    skill is a personal draft until shared. Validated against the
+    ``{'private','shared'}`` domain the DB CHECK enforces.
 
     Caller is expected to have run the frontmatter splitter and
     ``validate_skill_*`` helpers from ``rolemesh.core.skills``
@@ -121,6 +134,8 @@ async def create_skill(
     """
     if SKILL_MANIFEST_NAME not in files:
         raise ValueError(f"skill files must contain {SKILL_MANIFEST_NAME}")
+    if visibility not in _VALID_VISIBILITY:
+        raise ValueError(f"invalid visibility {visibility!r}")
     fc_json = json.dumps(frontmatter_common)
     fb_json = json.dumps(frontmatter_backend)
     async with tenant_conn(tenant_id) as conn, conn.transaction():
@@ -128,8 +143,8 @@ async def create_skill(
             """
                 INSERT INTO skills (tenant_id, name,
                                     frontmatter_common, frontmatter_backend,
-                                    enabled, created_by_user_id)
-                VALUES ($1::uuid, $2, $3::jsonb, $4::jsonb, $5, $6::uuid)
+                                    enabled, created_by_user_id, visibility)
+                VALUES ($1::uuid, $2, $3::jsonb, $4::jsonb, $5, $6::uuid, $7)
                 RETURNING *
                 """,
             tenant_id,
@@ -138,6 +153,7 @@ async def create_skill(
             fb_json,
             enabled,
             created_by_user_id,
+            visibility,
         )
         assert row is not None
         skill_id = row["id"]
@@ -168,6 +184,7 @@ async def create_skill_for_coworker(
     files: dict[str, SkillFile],
     enabled: bool = True,
     created_by_user_id: str | None = None,
+    visibility: str = "shared",
 ) -> Skill:
     """Transactional convenience: catalog create + coworker bind.
 
@@ -181,9 +198,18 @@ async def create_skill_for_coworker(
     Returns the ``Skill`` dataclass for the freshly-created catalog
     row. The binding (``coworker_skills.enabled = TRUE``) is implicit
     and not surfaced on the return value.
+
+    ``visibility`` defaults to ``'shared'`` here (NOT ``'private'`` like
+    :func:`create_skill`): this is the admin / fixture "make + bind"
+    shape that historically produced a tenant-visible skill, and the
+    binding to a coworker already implies it's meant to be used. The
+    personal-draft default belongs on the bare :func:`create_skill`
+    catalog write that the v1 router calls.
     """
     if SKILL_MANIFEST_NAME not in files:
         raise ValueError(f"skill files must contain {SKILL_MANIFEST_NAME}")
+    if visibility not in _VALID_VISIBILITY:
+        raise ValueError(f"invalid visibility {visibility!r}")
     fc_json = json.dumps(frontmatter_common)
     fb_json = json.dumps(frontmatter_backend)
     async with tenant_conn(tenant_id) as conn, conn.transaction():
@@ -191,8 +217,8 @@ async def create_skill_for_coworker(
             """
                 INSERT INTO skills (tenant_id, name,
                                     frontmatter_common, frontmatter_backend,
-                                    enabled, created_by_user_id)
-                VALUES ($1::uuid, $2, $3::jsonb, $4::jsonb, $5, $6::uuid)
+                                    enabled, created_by_user_id, visibility)
+                VALUES ($1::uuid, $2, $3::jsonb, $4::jsonb, $5, $6::uuid, $7)
                 RETURNING *
                 """,
             tenant_id,
@@ -201,6 +227,7 @@ async def create_skill_for_coworker(
             fb_json,
             enabled,
             created_by_user_id,
+            visibility,
         )
         assert row is not None
         skill_id = row["id"]
@@ -260,18 +287,38 @@ async def list_skills_for_tenant(
     tenant_id: str,
     *,
     with_files: bool = False,
+    requesting_user_id: str | None = None,
+    include_all: bool = True,
 ) -> list[Skill]:
-    """List every catalog skill for ``tenant_id``.
+    """List catalog skills for ``tenant_id``.
 
     Backs the v1 flat ``GET /api/v1/skills``. ``with_files`` defaults
     False because the list shape drops body content; the per-skill
     detail endpoint passes True.
+
+    ``include_all`` (the DEFAULT) preserves the historical unfiltered
+    behavior for internal/admin callers. The v1 list endpoint opts into
+    visibility scoping by passing ``include_all=False`` +
+    ``requesting_user_id``; the predicate is the SQL mirror of
+    :func:`webui.dependencies.user_can_see_resource` for a non-manager
+    (``visibility = 'shared' OR created_by_user_id = :requesting_user_id``)
+    and is NULL-safe (a NULL ``created_by_user_id`` never equals the
+    caller, so an un-attributed private skill stays hidden).
     """
     async with tenant_conn(tenant_id) as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM skills WHERE tenant_id = $1::uuid ORDER BY name",
-            tenant_id,
-        )
+        if include_all:
+            rows = await conn.fetch(
+                "SELECT * FROM skills WHERE tenant_id = $1::uuid ORDER BY name",
+                tenant_id,
+            )
+        else:
+            rows = await conn.fetch(
+                "SELECT * FROM skills WHERE tenant_id = $1::uuid "
+                "AND (visibility = 'shared' OR created_by_user_id = $2::uuid) "
+                "ORDER BY name",
+                tenant_id,
+                requesting_user_id,
+            )
         result: list[Skill] = []
         if with_files and rows:
             ids = [r["id"] for r in rows]
@@ -450,6 +497,30 @@ async def update_skill(
             skill_id,
         )
     return _record_to_skill(row, [_record_to_skill_file(r) for r in file_rows])
+
+
+async def set_skill_visibility(
+    skill_id: str, *, visibility: str, tenant_id: str
+) -> Skill | None:
+    """Flip a skill's ``visibility`` (share / unshare).
+
+    Validates against ``{'private','shared'}`` before the write. Returns
+    the updated catalog row (without files), or ``None`` when no skill
+    with that id exists in ``tenant_id``.
+    """
+    if visibility not in _VALID_VISIBILITY:
+        raise ValueError(f"invalid visibility {visibility!r}")
+    async with tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow(
+            "UPDATE skills SET visibility = $1, updated_at = now() "
+            "WHERE id = $2::uuid AND tenant_id = $3::uuid RETURNING *",
+            visibility,
+            skill_id,
+            tenant_id,
+        )
+    if row is None:
+        return None
+    return _record_to_skill(row)
 
 
 async def delete_skill(skill_id: str, *, tenant_id: str) -> bool:

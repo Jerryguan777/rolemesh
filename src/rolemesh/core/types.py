@@ -154,6 +154,11 @@ class Coworker:
     # Coworker instances directly leaves them at None.
     model_id: str | None = None
     created_by_user_id: str | None = None
+    # feat/roles PR3 visibility: 'private' (creator + managers only) or
+    # 'shared' (whole tenant). New rows default to 'private' at the DB
+    # layer; legacy rows were backfilled to 'shared'. Kept last with a
+    # default so admin-side constructors that omit it stay valid.
+    visibility: str = "private"
 
     def __post_init__(self) -> None:
         if self.permissions is None:
@@ -195,6 +200,8 @@ class Skill:
     created_at: str = ""
     updated_at: str = ""
     created_by_user_id: str | None = None
+    # feat/roles PR3 visibility — see ``Coworker.visibility``.
+    visibility: str = "private"
     files: dict[str, SkillFile] = field(default_factory=dict)
 
 
