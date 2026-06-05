@@ -795,10 +795,46 @@ export interface paths {
          *     (create/update/delete) stay on the admin surface because
          *     rule mutation is an admin-only operation; see the design
          *     doc for the locked decision.
+         *
+         *     All filters combine with AND; omitting every filter returns
+         *     the full set. `check_id` + `coworker_id` + `stage` together
+         *     are the surface a client uses to detect a same-scope rule
+         *     before creating a new one.
          */
         get: operations["listSafetyRules"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/safety/rules:validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Dry-run a safety rule create/update (validate + warn)
+         * @description Side-effect-free preview of a rule write. The body is the same
+         *     `SafetyRuleCreate` the admin write path takes, and validation
+         *     runs the identical validator the write path uses — so a body
+         *     that validates here is guaranteed to be accepted on save, and
+         *     vice-versa. No DB write, no webhook, no audit.
+         *
+         *     Returns `200` + `{valid: true, warnings, info}` when acceptable,
+         *     or `422` + `{valid: false, errors}` when not. `errors`/`warnings`
+         *     cover what the per-rule JSON Schema can't: cross-rule conflicts
+         *     (a same-scope duplicate, a platform-tier overlap) and derived
+         *     metadata. Pass `?rule_id=` on a PATCH dry-run so the
+         *     duplicate-scope warning excludes the rule being edited.
+         */
+        post: operations["validateSafetyRule"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1690,6 +1726,77 @@ export interface components {
              * @default true
              */
             editable: boolean;
+        };
+        /**
+         * @description Body for creating a safety rule (admin write path) and for the
+         *     `rules:validate` dry-run. The effective action is encoded via the
+         *     check's natural action plus an optional `config.action_override`
+         *     — there is no top-level `action` field.
+         */
+        SafetyRuleCreate: {
+            stage: components["schemas"]["SafetyStage"];
+            check_id: string;
+            config?: {
+                [key: string]: unknown;
+            };
+            /**
+             * @description `null` (or omitted) makes the rule tenant-wide; non-null binds
+             *     it to a single coworker.
+             */
+            coworker_id?: string | null;
+            /** @default 100 */
+            priority: number;
+            /** @default true */
+            enabled: boolean;
+            /** @default  */
+            description: string;
+        };
+        /**
+         * @description One blocking error. Shape mirrors a FastAPI/Pydantic error so the
+         *     SPA's existing parser consumes it unchanged; `loc` is rooted at
+         *     `body`, e.g. `["body", "config", "allowed_hosts"]`.
+         */
+        SafetyRuleValidationError: {
+            type: string;
+            loc?: string[];
+            msg: string;
+            /**
+             * @description Forward-compat slot for a one-line human hint. Always null in
+             *     v1 — the SPA maps `loc` → field on its own for now.
+             */
+            friendly_hint?: string | null;
+        };
+        /**
+         * @description One non-blocking advisory — a cross-rule signal the per-rule
+         *     schema can't express (same-scope duplicate, platform overlap).
+         */
+        SafetyRuleValidationWarning: {
+            type: string;
+            message: string;
+            related_rule_ids?: string[];
+            /** @enum {string} */
+            severity: "low" | "medium" | "high";
+        };
+        /** @description Derived, display-only metadata the SPA can't compute itself. */
+        SafetyRuleValidationInfo: {
+            /**
+             * @description Effective action — a valid `config.action_override` wins, else
+             *     the check's natural action for the stage.
+             */
+            action_resolution?: string | null;
+            stage_supported_actions?: string[];
+        };
+        /**
+         * @description Response of `POST /api/v1/safety/rules:validate`. `valid` is true
+         *     iff `errors` is empty iff the identical body would be accepted by
+         *     the admin write path. `warnings`/`info` are populated only on the
+         *     valid path.
+         */
+        SafetyRuleValidationResult: {
+            valid: boolean;
+            errors?: components["schemas"]["SafetyRuleValidationError"][];
+            warnings?: components["schemas"]["SafetyRuleValidationWarning"][];
+            info?: components["schemas"]["SafetyRuleValidationInfo"] | null;
         };
         SafetyCheck: {
             id: string;
@@ -3588,7 +3695,15 @@ export interface operations {
     listSafetyRules: {
         parameters: {
             query?: {
+                /**
+                 * @description Exact-match coworker scope. The literal `__null__` filters
+                 *     to tenant-wide rules (`coworker_id IS NULL`). Any
+                 *     `coworker_id` filter (a uuid OR `__null__`) excludes
+                 *     platform-tier rules from the result.
+                 */
                 coworker_id?: string;
+                /** @description Exact-match check id, e.g. `domain_allowlist`. */
+                check_id?: string;
                 stage?: components["schemas"]["SafetyStage"];
                 enabled?: boolean;
             };
@@ -3608,6 +3723,46 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+        };
+    };
+    validateSafetyRule: {
+        parameters: {
+            query?: {
+                /**
+                 * @description When previewing an UPDATE, the id of the rule being edited so
+                 *     the duplicate-scope check excludes it from the conflict set.
+                 */
+                rule_id?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SafetyRuleCreate"];
+            };
+        };
+        responses: {
+            /** @description Rule body is valid (may carry warnings / info). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SafetyRuleValidationResult"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description Rule body is invalid; `errors` is non-empty. */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SafetyRuleValidationResult"];
+                };
+            };
         };
     };
     getSafetyRule: {

@@ -6,6 +6,11 @@ rule writes (create/update/delete) stay on
 privileged operation. See ``docs/webui-backend-v1.1-design.md``
 §3 Phase 4 for the locked decision.
 
+The lone exception is ``POST /rules:validate`` — a side-effect-free
+dry-run (no DB write, no webhook, no audit) that previews whether a
+rule body would be accepted on save and surfaces cross-rule warnings.
+It does not mutate state, so it does not breach the read-only contract.
+
 Every handler is a thin shim over the shared
 :mod:`rolemesh.db.safety` helpers — the same helpers the admin
 endpoints call. Centralising query logic there avoids the double-
@@ -20,10 +25,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 import asyncpg
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 
 from rolemesh.db import (
     count_safety_decisions,
+    get_coworker,
     get_safety_decision,
     get_safety_rule,
     list_safety_decisions,
@@ -33,6 +39,15 @@ from rolemesh.db import (
 )
 from rolemesh.safety.registry import get_orchestrator_registry
 from webui.dependencies import get_current_user
+from webui.safety_validation import (
+    collect_rule_errors,
+    compute_info,
+    compute_warnings,
+)
+
+# Runtime import (not TYPE_CHECKING): FastAPI evaluates the request-body
+# annotation at startup to build the validator.
+from webui.schemas import SafetyRuleCreate  # noqa: TC001
 from webui.schemas_v1 import (
     SafetyCheck,
     SafetyDecision,
@@ -40,6 +55,10 @@ from webui.schemas_v1 import (
     SafetyFinding,
     SafetyRule,
     SafetyRuleAuditEntry,
+    SafetyRuleValidationError,
+    SafetyRuleValidationInfo,
+    SafetyRuleValidationResult,
+    SafetyRuleValidationWarning,
     SafetyStage,
     SafetyVerdictAction,
 )
@@ -216,32 +235,52 @@ async def _get_rule_or_404(
 # ---------------------------------------------------------------------------
 
 
+# Sentinel the SPA sends to query tenant-wide rules (``coworker_id IS
+# NULL``) — a real coworker_id is always a UUID, so this can never
+# collide with one. See the P0-3 "create-time duplicate detection" flow:
+# the rule editor narrows by (check_id, coworker_id, stage) and uses this
+# value when the scope is "all coworkers".
+_COWORKER_ID_NULL = "__null__"
+
+
 @router.get("/rules", response_model=list[SafetyRule])
 async def list_rules(
     coworker_id: str | None = None,
+    check_id: str | None = None,
     stage: SafetyStage | None = None,
     enabled: bool | None = None,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> list[SafetyRule]:
     """List safety rules for the caller's tenant.
 
+    All filters combine with AND. Omitting every filter returns the full
+    set (the prior behavior). ``coworker_id`` is matched exactly, except
+    the ``__null__`` sentinel which filters to tenant-wide rules
+    (``coworker_id IS NULL``). ``check_id`` is the P0-3 addition that,
+    together with ``coworker_id`` + ``stage``, lets the rule editor
+    detect a same-surface duplicate before the user saves.
+
     Returns the tenant's own rules PLUS the platform-owned rules that
     apply across all tenants. Platform rules are read-only
     (``editable=False``, ``source="platform"``) and only the visible
     tiers (default / transparent_floor) are surfaced — floor-tier rules
-    enforce but are never shown. They honor the ``stage`` / ``enabled``
-    filters. Like tenant-wide (``coworker_id IS NULL``) rules, platform
-    rules are excluded when the caller filters by a specific
-    ``coworker_id`` — that filter is an exact-match narrowing, and
-    platform rules are not bound to any single coworker.
+    enforce but are never shown. They honor the ``check_id`` / ``stage``
+    / ``enabled`` filters. Platform rules are appended only when the
+    caller does not narrow by ``coworker_id`` at all: any ``coworker_id``
+    filter — a specific id OR ``__null__`` — is an exact-match narrowing
+    on tenant rules, and platform rules are not bound to any single
+    coworker scope.
 
     Tenant-rule filters mirror the admin endpoint exactly. Ordering
     (``priority DESC, updated_at DESC``) lives in the helper; platform
     rules are appended after, so the list groups tenant rules first.
     """
+    is_null = coworker_id == _COWORKER_ID_NULL
     rows = await list_safety_rules(
         user.tenant_id,
-        coworker_id=coworker_id,
+        coworker_id=None if is_null else coworker_id,
+        coworker_id_is_null=is_null,
+        check_id=check_id,
         stage=stage,
         enabled=enabled,
     )
@@ -249,12 +288,98 @@ async def list_rules(
 
     if coworker_id is None:
         for prow in await list_visible_platform_rules(user.tenant_id):
+            if check_id is not None and prow["check_id"] != check_id:
+                continue
             if stage is not None and prow["stage"] != stage:
                 continue
             if enabled is not None and bool(prow["enabled"]) != enabled:
                 continue
             out.append(_platform_rule_to_response(prow))
     return out
+
+
+@router.post("/rules:validate", response_model=SafetyRuleValidationResult)
+async def validate_rule(
+    body: SafetyRuleCreate,
+    response: Response,
+    rule_id: str | None = Query(default=None),
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> SafetyRuleValidationResult:
+    """Dry-run a rule create/update — validate + warn, never write.
+
+    The body is the same ``SafetyRuleCreate`` the admin write path takes,
+    and validation runs the identical
+    :func:`webui.safety_validation.collect_rule_errors` the write path
+    uses — so a body that validates here is guaranteed to be accepted on
+    save and vice-versa (the P0-2 invariant). No side effects: no DB
+    write, no webhook, no audit.
+
+    Returns ``200`` + ``{valid: true, warnings, info}`` when acceptable,
+    or ``422`` + ``{valid: false, errors}`` when not. Pass
+    ``?rule_id=sr-5`` on a PATCH dry-run so the duplicate-scope warning
+    excludes the rule being edited rather than flagging it against
+    itself.
+    """
+    config = dict(body.config)
+    errors: list[SafetyRuleValidationError] = []
+
+    # An unknown / cross-tenant coworker_id surfaces as a field error
+    # rather than the admin path's 404, because the dry-run always
+    # answers with the {valid, errors} envelope. The lookup is tenant-
+    # scoped, so a foreign id simply reads as "not found"; a malformed
+    # uuid is treated the same way instead of bubbling a 500.
+    if body.coworker_id is not None:
+        try:
+            cw = await get_coworker(body.coworker_id, tenant_id=user.tenant_id)
+        except asyncpg.DataError:
+            cw = None
+        if cw is None:
+            errors.append(
+                SafetyRuleValidationError(
+                    type="coworker_not_found",
+                    loc=["body", "coworker_id"],
+                    msg=f"Unknown coworker_id: {body.coworker_id}",
+                )
+            )
+
+    errors.extend(
+        SafetyRuleValidationError(**e)
+        for e in await collect_rule_errors(
+            body.check_id,
+            body.stage,
+            config,
+            tenant_id=user.tenant_id,
+            coworker_id=body.coworker_id,
+        )
+    )
+
+    valid = not errors
+    warnings: list[SafetyRuleValidationWarning] = []
+    info: SafetyRuleValidationInfo | None = None
+    if valid:
+        warnings = [
+            SafetyRuleValidationWarning(**w)
+            for w in await compute_warnings(
+                body.check_id,
+                body.stage,
+                config,
+                tenant_id=user.tenant_id,
+                coworker_id=body.coworker_id,
+                exclude_rule_id=rule_id,
+            )
+        ]
+        raw_info = compute_info(body.check_id, body.stage, config)
+        if raw_info is not None:
+            info = SafetyRuleValidationInfo(**raw_info)
+    else:
+        # Semantically-invalid rule → 422 with the {valid:false,...}
+        # body (distinct from FastAPI's own 422 for a malformed request
+        # body, which never reaches this handler).
+        response.status_code = 422
+
+    return SafetyRuleValidationResult(
+        valid=valid, errors=errors, warnings=warnings, info=info
+    )
 
 
 @router.get("/rules/{rule_id}", response_model=SafetyRule)

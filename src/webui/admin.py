@@ -784,110 +784,28 @@ async def _validate_safety_rule_body(
     V2 P1.1: ``action_override`` is validated against the closed set
     {block, warn, require_approval}. ``redact`` is refused because an
     override cannot synthesize a modified_payload.
+
+    The rule-by-rule checks live in
+    :func:`webui.safety_validation.collect_rule_errors` so the v1
+    ``rules:validate`` dry-run runs the exact same logic — the P0-2
+    invariant ("validate passed but save failed" is impossible). Here
+    we collapse a non-empty result back into the historical single-
+    string 400 ``detail`` so existing admin clients are byte-unchanged.
     """
-    # Lazy import avoids a WebUI → rolemesh.safety cycle at module load.
-    from pydantic import ValidationError
+    from webui.safety_validation import collect_rule_errors
 
-    from rolemesh.safety.registry import get_orchestrator_registry
-    from rolemesh.safety.tool_reversibility import get_tool_reversibility
-    from rolemesh.safety.types import Stage
-
-    registry = get_orchestrator_registry()
-    if not registry.has(check_id):
+    errors = await collect_rule_errors(
+        check_id,
+        stage,
+        config,
+        tenant_id=tenant_id,
+        coworker_id=coworker_id,
+    )
+    if errors:
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown safety check_id: {check_id}",
+            detail="; ".join(e["msg"] for e in errors),
         )
-    check = registry.get(check_id)
-    try:
-        stage_enum = Stage(stage)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400, detail=f"Unknown stage: {stage}"
-        ) from exc
-    if stage_enum not in check.stages:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Check {check_id} does not support stage {stage}; "
-                f"valid stages: {sorted(s.value for s in check.stages)}"
-            ),
-        )
-    if not isinstance(config, dict):
-        raise HTTPException(
-            status_code=400, detail="config must be a JSON object"
-        )
-    # Pydantic validation (unknown keys, wrong types) — the check's
-    # declared config_model is the source of truth. Older checks
-    # without a model are tolerated, matching the permissive run-time
-    # contract.
-    config_model = getattr(check, "config_model", None)
-    if config_model is not None:
-        try:
-            config_model.model_validate(config)
-        except ValidationError as exc:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid config for {check_id}: {exc.errors()}",
-            ) from exc
-
-    # V2 P1.1: action_override whitelist. redact is explicitly refused
-    # because the check did not produce a modified_payload.
-    override = config.get("action_override") if isinstance(config, dict) else None
-    if override is not None:
-        valid = {"block", "warn", "require_approval"}
-        if override not in valid:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Invalid action_override {override!r}; "
-                    f"must be one of {sorted(valid)} "
-                    f"(redact cannot be synthesized via override)"
-                ),
-            )
-
-    # V2 P0.4: reversibility guard at admin time. Only runs when the
-    # check is slow AND the stage is PRE_TOOL_CALL — other combinations
-    # have no budget conflict. Scope expansion:
-    #   coworker_id is None → tenant-wide rule → union of every
-    #     coworker's MCP bindings
-    #   coworker_id is set  → single coworker's MCP bindings
-    if (
-        getattr(check, "cost_class", "cheap") == "slow"
-        and stage_enum == Stage.PRE_TOOL_CALL
-    ):
-        scope_coworkers: list[Coworker] = []
-        if coworker_id is not None:
-            cw = await db.get_coworker(coworker_id, tenant_id=tenant_id)
-            if cw is not None:
-                scope_coworkers.append(cw)
-        else:
-            scope_coworkers.extend(
-                await db.get_coworkers_for_tenant(tenant_id)
-            )
-        for cw_any in scope_coworkers:
-            tools = await db.list_coworker_mcp_configs(
-                cw_any.id, tenant_id=tenant_id,
-            )
-            for mcp in tools:
-                overrides = dict(mcp.tool_reversibility or {})
-                # Builtins win — operator can't flip a stock tool's
-                # reversibility via MCP override. The helper does that
-                # layering for us; we just scan the declared bare
-                # names per MCP server.
-                for bare_name in overrides:
-                    if get_tool_reversibility(bare_name, overrides):
-                        raise HTTPException(
-                            status_code=400,
-                            detail=(
-                                f"Rule with slow check {check_id!r} at "
-                                f"PRE_TOOL_CALL is blocked: coworker "
-                                f"{cw_any.name!r} configures reversible tool "
-                                f"{bare_name!r} which exceeds the "
-                                "100 ms budget. Narrow the rule scope "
-                                "or use a different stage."
-                            ),
-                        )
 
 
 # ---------------------------------------------------------------------------

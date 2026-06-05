@@ -851,6 +851,76 @@ class SafetyCheck(BaseModel):
     )
 
 
+class SafetyRuleValidationError(BaseModel):
+    """One blocking error from the ``rules:validate`` dry-run.
+
+    Shape mirrors a FastAPI/Pydantic error (``type`` / ``loc`` / ``msg``)
+    so the SPA's existing error parser consumes it unchanged. ``loc`` is
+    rooted at ``body`` exactly like a POST-failure loc, e.g.
+    ``["body", "config", "allowed_hosts"]``. ``friendly_hint`` is a
+    forward-compat slot for a one-line human hint — always null in v1
+    (the frontend maps loc → field on its own for now).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: str
+    loc: list[str] = Field(default_factory=list)
+    msg: str
+    friendly_hint: str | None = None
+
+
+class SafetyRuleValidationWarning(BaseModel):
+    """One non-blocking advisory from the dry-run.
+
+    Cross-rule signals the per-rule schema can't express — a same-scope
+    duplicate, a platform-tier overlap. ``related_rule_ids`` points at
+    the rules the warning is about so the SPA can deep-link them.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: str
+    message: str
+    related_rule_ids: list[str] = Field(default_factory=list)
+    severity: Literal["low", "medium", "high"]
+
+
+class SafetyRuleValidationInfo(BaseModel):
+    """Derived, display-only metadata the SPA can't compute itself.
+
+    ``action_resolution`` is the effective action (a valid
+    ``action_override`` wins, else the check's natural action for the
+    stage). ``stage_supported_actions`` is the action set the
+    ``(check, stage)`` accepts. Typed as plain strings (not the closed
+    verdict Literal) so a check whose natural action sits outside the
+    verdict enum can never 500 the response.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    action_resolution: str | None = None
+    stage_supported_actions: list[str] = Field(default_factory=list)
+
+
+class SafetyRuleValidationResult(BaseModel):
+    """Response of ``POST /api/v1/safety/rules:validate``.
+
+    ``valid`` is true ⇔ ``errors`` is empty ⇔ the identical body would be
+    accepted by ``POST /api/admin/safety/rules`` — both paths call the
+    same validator, so the two can never disagree. Returned with HTTP 200
+    when valid, 422 when not. ``warnings`` / ``info`` are populated only
+    on the valid path (an invalid body has no meaningful derived info).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    valid: bool
+    errors: list[SafetyRuleValidationError] = Field(default_factory=list)
+    warnings: list[SafetyRuleValidationWarning] = Field(default_factory=list)
+    info: SafetyRuleValidationInfo | None = None
+
+
 class SafetyFinding(BaseModel):
     """One finding inside a ``SafetyDecision.findings`` array."""
 

@@ -91,8 +91,11 @@ class OpenAIModerationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     api_key_env: str = "OPENAI_API_KEY"
-    block_categories: list[str] = Field(default_factory=list)
-    warn_categories: list[str] = Field(default_factory=list)
+    # Typed as the closed ModerationCode enum (not bare str) so the JSON
+    # Schema dumps ``items.enum`` — the frontend reads the legal
+    # MODERATION.* code set straight off the schema.
+    block_categories: list[ModerationCode] = Field(default_factory=list)
+    warn_categories: list[ModerationCode] = Field(default_factory=list)
     timeout_ms: int = 2000
     action_override: str | None = None
 

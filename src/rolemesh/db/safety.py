@@ -144,15 +144,29 @@ async def list_safety_rules(
     tenant_id: str,
     *,
     coworker_id: str | None = None,
+    coworker_id_is_null: bool = False,
+    check_id: str | None = None,
     stage: str | None = None,
     enabled: bool | None = None,
 ) -> list[SafetyRule]:
-    """List rules for a tenant, optionally filtered."""
+    """List rules for a tenant, optionally filtered (all filters AND).
+
+    ``coworker_id_is_null=True`` filters to tenant-wide rules
+    (``coworker_id IS NULL``) and takes precedence over ``coworker_id``
+    — it is the DB-side expression of the REST ``coworker_id=__null__``
+    sentinel. The two are mutually exclusive in practice: the REST
+    layer sets exactly one.
+    """
     clauses = ["tenant_id = $1::uuid"]
     params: list[Any] = [tenant_id]
-    if coworker_id is not None:
+    if coworker_id_is_null:
+        clauses.append("coworker_id IS NULL")
+    elif coworker_id is not None:
         params.append(coworker_id)
         clauses.append(f"coworker_id = ${len(params)}::uuid")
+    if check_id is not None:
+        params.append(check_id)
+        clauses.append(f"check_id = ${len(params)}")
     if stage is not None:
         params.append(stage)
         clauses.append(f"stage = ${len(params)}")

@@ -466,10 +466,26 @@ async def test_list_checks_returns_metadata() -> None:
         assert isinstance(c["version"], str)
         assert c["cost_class"] in ("cheap", "slow")
         assert isinstance(c["stages"], list)
+        # P0-1: every check exposes a config_schema (a non-empty JSON
+        # Schema object, or null for a legacy model-less check) so the
+        # SPA renders the form from the authoritative source.
+        schema = c["config_schema"]
+        assert schema is None or (isinstance(schema, dict) and schema)
+        if isinstance(schema, dict):
+            # extra='forbid' must surface so the client validator can
+            # reject stray keys.
+            assert schema.get("additionalProperties") is False
         # Alphabetical ordering on id — anchors the
         # "stable for dashboard caches" contract.
     ids = [c["id"] for c in rows]
     assert ids == sorted(ids)
+
+    # P0-1: pii.regex (always registered) expresses its closed pattern-key
+    # set as propertyNames so the frontend never hardcodes the key list.
+    by_id = {c["id"]: c for c in rows}
+    if "pii.regex" in by_id:
+        patterns = by_id["pii.regex"]["config_schema"]["properties"]["patterns"]
+        assert "propertyNames" in patterns
 
 
 # ---------------------------------------------------------------------------
@@ -640,3 +656,203 @@ async def test_get_decision_findings_round_trip() -> None:
     assert codes == {"PII.SSN", "TOOL.SLOW"}
     pii = next(f for f in body["findings"] if f["code"] == "PII.SSN")
     assert pii["metadata"] == {"position": 42}
+
+
+# ---------------------------------------------------------------------------
+# Rules: P0-3 filters (check_id + __null__ coworker sentinel)
+# ---------------------------------------------------------------------------
+
+
+async def test_list_rules_filters_by_check_id() -> None:
+    """``?check_id`` narrows to one check — the collision-check surface."""
+    user, cw = await _make_user("fchk")
+    target = await create_safety_rule(
+        tenant_id=user.tenant_id, coworker_id=cw,
+        stage="pre_tool_call", check_id="domain_allowlist", config={},
+    )
+    other = await create_safety_rule(
+        tenant_id=user.tenant_id, coworker_id=cw,
+        stage="pre_tool_call", check_id="pii.regex", config={},
+    )
+    async with _client(_build_app(user)) as ac:
+        resp = await ac.get(
+            "/api/v1/safety/rules?check_id=domain_allowlist", headers=_HDRS,
+        )
+    assert resp.status_code == 200, resp.text
+    ids = {r["id"] for r in resp.json()}
+    assert target.id in ids
+    assert other.id not in ids
+
+
+async def test_list_rules_null_sentinel_returns_tenant_wide_only() -> None:
+    """``coworker_id=__null__`` ⇒ only tenant-wide (coworker_id IS NULL)
+    rules, and platform rules are excluded (it's a coworker narrowing)."""
+    user, cw = await _make_user("fnull")
+    tenant_wide = await create_safety_rule(
+        tenant_id=user.tenant_id,
+        stage="pre_tool_call", check_id="domain_allowlist", config={},
+    )
+    bound = await create_safety_rule(
+        tenant_id=user.tenant_id, coworker_id=cw,
+        stage="pre_tool_call", check_id="domain_allowlist", config={},
+    )
+    async with _client(_build_app(user)) as ac:
+        resp = await ac.get(
+            "/api/v1/safety/rules?coworker_id=__null__", headers=_HDRS,
+        )
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()
+    ids = {r["id"] for r in rows}
+    assert tenant_wide.id in ids
+    assert bound.id not in ids
+    # __null__ is a coworker narrowing ⇒ no platform rows.
+    assert all(r["source"] == "tenant" for r in rows)
+
+
+async def test_list_rules_collision_triple_filter() -> None:
+    """check_id + coworker_id + stage together isolate the exact surface
+    the rule editor checks before creating a new rule."""
+    user, cw = await _make_user("ftriple")
+    match = await create_safety_rule(
+        tenant_id=user.tenant_id, coworker_id=cw,
+        stage="pre_tool_call", check_id="domain_allowlist", config={},
+    )
+    # same check+coworker, different stage — must NOT match
+    await create_safety_rule(
+        tenant_id=user.tenant_id, coworker_id=cw,
+        stage="post_tool_result", check_id="domain_allowlist", config={},
+    )
+    async with _client(_build_app(user)) as ac:
+        resp = await ac.get(
+            f"/api/v1/safety/rules?check_id=domain_allowlist"
+            f"&coworker_id={cw}&stage=pre_tool_call",
+            headers=_HDRS,
+        )
+    assert resp.status_code == 200, resp.text
+    assert {r["id"] for r in resp.json()} == {match.id}
+
+
+# ---------------------------------------------------------------------------
+# Rules: P0-2 dry-run validate
+# ---------------------------------------------------------------------------
+
+
+async def test_validate_valid_rule_returns_200() -> None:
+    user, cw = await _make_user("vok")
+    async with _client(_build_app(user)) as ac:
+        resp = await ac.post(
+            "/api/v1/safety/rules:validate",
+            headers=_HDRS,
+            json={
+                "stage": "pre_tool_call",
+                "check_id": "domain_allowlist",
+                "config": {"allowed_hosts": ["api.stripe.com"]},
+                "coworker_id": cw,
+            },
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["valid"] is True
+    assert body["errors"] == []
+    # info carries the derived action metadata the SPA can't compute.
+    assert body["info"] is not None
+    assert "block" in body["info"]["stage_supported_actions"]
+
+
+async def test_validate_invalid_rule_returns_422_with_structured_errors() -> None:
+    """The P0-2 invalid-case shape: 422 + per-field errors (wrong key +
+    missing required), each loc rooted at body/config."""
+    user, _ = await _make_user("vbad")
+    async with _client(_build_app(user)) as ac:
+        resp = await ac.post(
+            "/api/v1/safety/rules:validate",
+            headers=_HDRS,
+            json={
+                "stage": "pre_tool_call",
+                "check_id": "domain_allowlist",
+                "config": {"hosts": ["api.stripe.com"]},  # wrong key
+            },
+        )
+    assert resp.status_code == 422, resp.text
+    body = resp.json()
+    assert body["valid"] is False
+    types = {e["type"] for e in body["errors"]}
+    assert "extra_forbidden" in types  # 'hosts'
+    assert "missing" in types  # 'allowed_hosts'
+    for e in body["errors"]:
+        assert e["loc"][:2] == ["body", "config"]
+
+
+async def test_validate_has_no_side_effects() -> None:
+    """A dry-run must not write a rule."""
+    user, cw = await _make_user("vnoside")
+    payload = {
+        "stage": "pre_tool_call",
+        "check_id": "domain_allowlist",
+        "config": {"allowed_hosts": ["api.stripe.com"]},
+        "coworker_id": cw,
+    }
+    async with _client(_build_app(user)) as ac:
+        await ac.post(
+            "/api/v1/safety/rules:validate", headers=_HDRS, json=payload
+        )
+        listing = await ac.get(
+            "/api/v1/safety/rules?check_id=domain_allowlist", headers=_HDRS,
+        )
+    assert listing.status_code == 200
+    assert [r for r in listing.json() if r["source"] == "tenant"] == []
+
+
+async def test_validate_warns_on_duplicate_scope() -> None:
+    """An existing rule on the same (check_id, coworker_id, stage) surface
+    raises a duplicate_scope warning pointing at it."""
+    user, cw = await _make_user("vdup")
+    existing = await create_safety_rule(
+        tenant_id=user.tenant_id, coworker_id=cw,
+        stage="pre_tool_call", check_id="domain_allowlist",
+        config={"allowed_hosts": ["a.com"]},
+    )
+    async with _client(_build_app(user)) as ac:
+        resp = await ac.post(
+            "/api/v1/safety/rules:validate",
+            headers=_HDRS,
+            json={
+                "stage": "pre_tool_call",
+                "check_id": "domain_allowlist",
+                "config": {"allowed_hosts": ["b.com"]},
+                "coworker_id": cw,
+            },
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["valid"] is True
+    dup = [w for w in body["warnings"] if w["type"] == "duplicate_scope"]
+    assert dup, body["warnings"]
+    assert existing.id in dup[0]["related_rule_ids"]
+
+
+async def test_validate_excludes_self_on_update_dry_run() -> None:
+    """``?rule_id=`` makes the duplicate-scope check ignore the rule being
+    edited so a PATCH dry-run doesn't flag the rule against itself."""
+    user, cw = await _make_user("vself")
+    existing = await create_safety_rule(
+        tenant_id=user.tenant_id, coworker_id=cw,
+        stage="pre_tool_call", check_id="domain_allowlist",
+        config={"allowed_hosts": ["a.com"]},
+    )
+    async with _client(_build_app(user)) as ac:
+        resp = await ac.post(
+            f"/api/v1/safety/rules:validate?rule_id={existing.id}",
+            headers=_HDRS,
+            json={
+                "stage": "pre_tool_call",
+                "check_id": "domain_allowlist",
+                "config": {"allowed_hosts": ["a.com", "b.com"]},
+                "coworker_id": cw,
+            },
+        )
+    assert resp.status_code == 200, resp.text
+    dup = [
+        w for w in resp.json()["warnings"] if w["type"] == "duplicate_scope"
+    ]
+    assert dup == []

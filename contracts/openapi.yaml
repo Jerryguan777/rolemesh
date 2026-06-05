@@ -1278,12 +1278,27 @@ paths:
         (create/update/delete) stay on the admin surface because
         rule mutation is an admin-only operation; see the design
         doc for the locked decision.
+
+        All filters combine with AND; omitting every filter returns
+        the full set. `check_id` + `coworker_id` + `stage` together
+        are the surface a client uses to detect a same-scope rule
+        before creating a new one.
       security: [ { bearerAuth: [] } ]
       parameters:
         - name: coworker_id
           in: query
           required: false
-          schema: { type: string, format: uuid }
+          description: |
+            Exact-match coworker scope. The literal `__null__` filters
+            to tenant-wide rules (`coworker_id IS NULL`). Any
+            `coworker_id` filter (a uuid OR `__null__`) excludes
+            platform-tier rules from the result.
+          schema: { type: string }
+        - name: check_id
+          in: query
+          required: false
+          description: Exact-match check id, e.g. `domain_allowlist`.
+          schema: { type: string }
         - name: stage
           in: query
           required: false
@@ -1300,6 +1315,54 @@ paths:
               schema:
                 type: array
                 items: { $ref: '#/components/schemas/SafetyRule' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/safety/rules:validate:
+    post:
+      tags: [Safety]
+      operationId: validateSafetyRule
+      summary: Dry-run a safety rule create/update (validate + warn)
+      description: |
+        Side-effect-free preview of a rule write. The body is the same
+        `SafetyRuleCreate` the admin write path takes, and validation
+        runs the identical validator the write path uses — so a body
+        that validates here is guaranteed to be accepted on save, and
+        vice-versa. No DB write, no webhook, no audit.
+
+        Returns `200` + `{valid: true, warnings, info}` when acceptable,
+        or `422` + `{valid: false, errors}` when not. `errors`/`warnings`
+        cover what the per-rule JSON Schema can't: cross-rule conflicts
+        (a same-scope duplicate, a platform-tier overlap) and derived
+        metadata. Pass `?rule_id=` on a PATCH dry-run so the
+        duplicate-scope warning excludes the rule being edited.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: rule_id
+          in: query
+          required: false
+          description: |
+            When previewing an UPDATE, the id of the rule being edited so
+            the duplicate-scope check excludes it from the conflict set.
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SafetyRuleCreate' }
+      responses:
+        '200':
+          description: Rule body is valid (may carry warnings / info).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SafetyRuleValidationResult'
+        '422':
+          description: Rule body is invalid; `errors` is non-empty.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SafetyRuleValidationResult'
         '401':
           $ref: '#/components/responses/Unauthorized'
 
@@ -2676,6 +2739,101 @@ components:
             Convenience flag the SPA uses to show/hide edit / duplicate /
             delete affordances without re-deriving from `source`. False for
             platform rules (audit-only).
+
+    SafetyRuleCreate:
+      type: object
+      required: [stage, check_id]
+      description: |
+        Body for creating a safety rule (admin write path) and for the
+        `rules:validate` dry-run. The effective action is encoded via the
+        check's natural action plus an optional `config.action_override`
+        — there is no top-level `action` field.
+      properties:
+        stage: { $ref: '#/components/schemas/SafetyStage' }
+        check_id: { type: string, minLength: 1, maxLength: 128 }
+        config:
+          type: object
+          additionalProperties: true
+        coworker_id:
+          type: string
+          nullable: true
+          description: |
+            `null` (or omitted) makes the rule tenant-wide; non-null binds
+            it to a single coworker.
+        priority: { type: integer, minimum: -1000, maximum: 1000, default: 100 }
+        enabled: { type: boolean, default: true }
+        description: { type: string, maxLength: 500, default: '' }
+
+    SafetyRuleValidationError:
+      type: object
+      required: [type, msg]
+      description: |
+        One blocking error. Shape mirrors a FastAPI/Pydantic error so the
+        SPA's existing parser consumes it unchanged; `loc` is rooted at
+        `body`, e.g. `["body", "config", "allowed_hosts"]`.
+      properties:
+        type: { type: string }
+        loc:
+          type: array
+          items: { type: string }
+        msg: { type: string }
+        friendly_hint:
+          type: string
+          nullable: true
+          description: |
+            Forward-compat slot for a one-line human hint. Always null in
+            v1 — the SPA maps `loc` → field on its own for now.
+
+    SafetyRuleValidationWarning:
+      type: object
+      required: [type, message, severity]
+      description: |
+        One non-blocking advisory — a cross-rule signal the per-rule
+        schema can't express (same-scope duplicate, platform overlap).
+      properties:
+        type: { type: string }
+        message: { type: string }
+        related_rule_ids:
+          type: array
+          items: { type: string }
+        severity:
+          type: string
+          enum: [low, medium, high]
+
+    SafetyRuleValidationInfo:
+      type: object
+      description: Derived, display-only metadata the SPA can't compute itself.
+      properties:
+        action_resolution:
+          type: string
+          nullable: true
+          description: |
+            Effective action — a valid `config.action_override` wins, else
+            the check's natural action for the stage.
+        stage_supported_actions:
+          type: array
+          items: { type: string }
+
+    SafetyRuleValidationResult:
+      type: object
+      required: [valid]
+      description: |
+        Response of `POST /api/v1/safety/rules:validate`. `valid` is true
+        iff `errors` is empty iff the identical body would be accepted by
+        the admin write path. `warnings`/`info` are populated only on the
+        valid path.
+      properties:
+        valid: { type: boolean }
+        errors:
+          type: array
+          items: { $ref: '#/components/schemas/SafetyRuleValidationError' }
+        warnings:
+          type: array
+          items: { $ref: '#/components/schemas/SafetyRuleValidationWarning' }
+        info:
+          oneOf:
+            - $ref: '#/components/schemas/SafetyRuleValidationInfo'
+          nullable: true
 
     SafetyCheck:
       type: object
