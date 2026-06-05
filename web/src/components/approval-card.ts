@@ -18,7 +18,9 @@
 import { LitElement, html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import type { ApprovalStatus } from './approval-store.js';
+import type { ApprovalStatus, ApprovalTriggeredBy } from './approval-store.js';
+import { checkLabel } from './safety-catalog.js';
+import { iconShield } from './icons.js';
 
 /** Fired when the user confirms a decision. Bubbles + composed so chat-panel
  *  (the light-DOM host) catches it. `note` is present only on a Reject that
@@ -87,6 +89,10 @@ export class ApprovalCard extends LitElement {
    *  rejected card (§3.6). May arrive via prop (store) or be remembered from
    *  the form the user just submitted. */
   @property() note: string | null = null;
+  /** Safety-rule provenance (§3.10). When kind is "safety_rule" the card shows
+   *  an amber "paused by a safety rule" banner above the tool chip; null (a
+   *  business-policy approval) or an unknown kind shows nothing. */
+  @property({ attribute: false }) triggeredBy: ApprovalTriggeredBy = null;
 
   /** Inline reject-note form open? */
   @state() private rejecting = false;
@@ -289,6 +295,47 @@ export class ApprovalCard extends LitElement {
     `;
   }
 
+  // §3.10 — amber provenance banner for a safety-triggered approval. Returns
+  // nothing for a business-policy approval (triggeredBy null) OR an unknown
+  // kind (forward-compatible: a future "scheduled_task" degrades to no banner).
+  // Stage is intentionally omitted — the decision-maker cares WHICH check
+  // caught it, not WHEN in the pipeline.
+  private renderSafetyBanner(): TemplateResult | typeof nothing {
+    const tb = this.triggeredBy;
+    if (!tb || tb.kind !== 'safety_rule') return nothing;
+    return html`
+      <div
+        class="flex items-start gap-2 mb-2.5 px-2.5 py-2 rounded-md text-[12.5px]
+               bg-amber-50 dark:bg-amber-900/20 text-amber-800 dark:text-amber-200
+               border-l-2 border-amber-400 dark:border-amber-600"
+        data-testid="approval-safety-banner"
+      >
+        <span class="shrink-0 mt-px text-amber-600 dark:text-amber-400"
+          >${iconShield(14)}</span
+        >
+        <span class="flex-1 min-w-0"
+          >Paused by a safety rule — <b>${checkLabel(tb.check_id)}</b></span
+        >
+        <button
+          type="button"
+          class="shrink-0 underline whitespace-nowrap hover:text-amber-900 dark:hover:text-amber-100"
+          data-testid="approval-safety-link"
+          @click=${() => this.jumpToSafetyDecision(tb.rule_id)}
+        >
+          view in safety log →
+        </button>
+      </div>
+    `;
+  }
+
+  // Navigate to Settings → Safety log (spec §3.10). The log can't yet deep-
+  // filter by rule_id (the v1 endpoint exposes no rule_id filter), so this
+  // opens the log rather than a pre-filtered, auto-opened decision. The
+  // rule_id is accepted now so the call site is stable when that lands.
+  private jumpToSafetyDecision(_ruleId: string): void {
+    location.hash = '#/manage/safety-log';
+  }
+
   private renderToolChip(): TemplateResult | typeof nothing {
     if (!this.mcpServerName && !this.toolName) return nothing;
     const label = [this.mcpServerName, this.toolName]
@@ -478,7 +525,7 @@ export class ApprovalCard extends LitElement {
       >
         ${this.renderHeader()}
         <div class="px-3.5 py-3">
-          ${this.renderMeta()}${this.renderToolChip()}
+          ${this.renderMeta()}${this.renderSafetyBanner()}${this.renderToolChip()}
           <div class=${resolved ? 'opacity-75' : ''}>
             ${this.renderParams()}
           </div>

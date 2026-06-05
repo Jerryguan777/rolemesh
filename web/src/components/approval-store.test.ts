@@ -66,6 +66,7 @@ function seed(id: string, status: ApprovalCard['status']): ApprovalCard {
     status,
     resolvedAt: null,
     note: null,
+    triggeredBy: null,
     orderTs: 0,
   };
 }
@@ -123,6 +124,21 @@ describe('upsertRequested', () => {
     const once = upsertRequested([], requested('a'));
     const twice = upsertRequested(once, requested('a'));
     expect(twice).toHaveLength(1);
+  });
+
+  it('carries triggered_by through (safety provenance §3.10)', () => {
+    const tb = {
+      kind: 'safety_rule' as const,
+      rule_id: 'sr-1',
+      check_id: 'presidio.pii',
+      stage: 'post_tool_result' as const,
+    };
+    const out = upsertRequested([], requested('a', { triggered_by: tb }));
+    expect(out[0].triggeredBy).toEqual(tb);
+  });
+
+  it('defaults triggeredBy to null for a business-policy approval', () => {
+    expect(upsertRequested([], requested('a'))[0].triggeredBy).toBeNull();
   });
 
   it('does NOT revert a resolved card back to pending on redelivery', () => {
