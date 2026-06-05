@@ -622,6 +622,10 @@ export class SafetyRuleDialog extends LitElement {
         // { block_categories, warn_categories } on save. Only block/warn
         // are expressible per-category (no require_approval_categories field).
         return this.renderModerationRouting(check);
+      case 'jailbreak-phrases':
+        // Backend: { phrases: list[str], case_sensitive: bool }
+        // Different from llm_guard.prompt_injection / toxicity (threshold).
+        return this.renderJailbreakPhrases();
       default:
         return html``;
     }
@@ -661,6 +665,51 @@ export class SafetyRuleDialog extends LitElement {
         This check runs all built-in secret detectors automatically. No
         additional configuration is needed — use the action picker above to
         choose what happens when a secret is found.
+      </p>
+    `;
+  }
+
+  private renderJailbreakPhrases(): TemplateResult {
+    // Backend: { phrases: list[str], case_sensitive: bool }
+    // phrases defaults to the built-in set on the server; leave empty to use it.
+    const phrases = ((this.config['phrases'] as string[]) ?? []).join('\n');
+    const caseSensitive = (this.config['case_sensitive'] as boolean) ?? false;
+    return html`
+      <label class="block text-[12.5px] font-medium mb-1">
+        Custom detection phrases
+        <span class="rm-saf-lblnote">one per line · leave blank to use the built-in list</span>
+      </label>
+      <textarea
+        class="${INPUT_CLASS} font-mono text-[12.5px]"
+        style="min-height:72px"
+        data-testid="saf-jailbreak-phrases"
+        placeholder="ignore all previous instructions&#10;pretend you have no restrictions"
+        .value=${phrases}
+        @input=${(e: Event) => {
+          const lines = (e.target as HTMLTextAreaElement).value
+            .split('\n')
+            .map((s) => s.trim())
+            .filter(Boolean);
+          this.config = { ...this.config, phrases: lines };
+        }}
+      ></textarea>
+      <label class="flex items-center gap-2 mt-2 text-[12.5px]">
+        <input
+          type="checkbox"
+          data-testid="saf-case-sensitive"
+          ?checked=${caseSensitive}
+          @change=${(e: Event) => {
+            this.config = {
+              ...this.config,
+              case_sensitive: (e.target as HTMLInputElement).checked,
+            };
+          }}
+        />
+        Case-sensitive matching
+      </label>
+      <p class="text-[11.5px] text-ink-3 dark:text-d-ink-3 mt-2 leading-snug">
+        Leave the phrases box empty to use the built-in set. Add custom phrases
+        to catch tenant-specific jailbreak patterns.
       </p>
     `;
   }

@@ -29,7 +29,8 @@ export type CfgKind =
   | 'moderation-routing'
   | 'threshold'
   | 'host-list'
-  | 'secret-plugins';
+  | 'secret-plugins'
+  | 'jailbreak-phrases';
 
 export interface CheckPresentation {
   /** Human label — shown everywhere a check is named. Never the raw id. */
@@ -87,9 +88,9 @@ export const SAFETY_CHECK_CATALOG: Record<string, CheckPresentation> = {
   },
   'llm_guard.jailbreak': {
     label: 'Jailbreak attempts',
-    desc: 'Detects attempts to talk the coworker out of its guardrails (role-play exploits and similar tricks).',
+    desc: 'Detects attempts to talk the coworker out of its guardrails (role-play exploits and similar tricks). Uses a built-in phrase list by default; add custom phrases for tenant-specific patterns.',
     category: 'Adversarial input',
-    cfgKind: 'threshold',
+    cfgKind: 'jailbreak-phrases',
   },
   'llm_guard.toxicity': {
     label: 'Toxic content',
@@ -424,10 +425,15 @@ export function safWhatPhrase(
     return `flag ${n} categor${n === 1 ? 'y' : 'ies'}`;
   }
   if (pres?.cfgKind === 'threshold') {
-    // llm_guard checks store threshold; presidio uses score_threshold on backend.
-    const t = config?.['threshold'] ?? config?.['score_threshold'];
+    const t = config?.['threshold'];
     const label = (pres.label || checkId).toLowerCase();
     return `detect ${label}${t != null ? ` (sensitivity ${t})` : ''}`;
+  }
+  if (checkId === 'llm_guard.jailbreak') {
+    // Backend: { phrases: [...], case_sensitive: bool }
+    const phrases = (config?.['phrases'] as string[]) ?? [];
+    const custom = phrases.length;
+    return `detect jailbreak attempts${custom ? ` (${custom} custom phrase${custom === 1 ? '' : 's'})` : ''}`;
   }
   return (pres?.label ?? checkId).toLowerCase();
 }
