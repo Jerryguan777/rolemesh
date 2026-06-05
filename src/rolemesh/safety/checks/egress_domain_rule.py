@@ -2,9 +2,19 @@
 
 This check is the EC stage's answer to ``pii.regex`` — a cheap,
 pure-Python detector with a small, closed config schema. Each rule row
-carries one ``domain_pattern`` and an optional ``ports`` list; the
-check reports whether the request host/port matches, and the gateway's
-aggregator decides allow vs block based on whether any rule matched.
+carries a list of ``domain_patterns`` and an optional ``ports`` list;
+the check reports whether the request host/port matches ANY pattern,
+and the gateway's aggregator decides allow vs block based on whether
+any rule matched.
+
+One rule carries many patterns deliberately. A typical operator
+allowlist is 5-10 hosts (Stripe + Amazon Ads + Slack; a handful of
+SaaS); modelling that as one rule — rather than N near-identical
+rows — keeps the Safety rules page legible, makes the audit story
+"patterns: [...] → [...]" a single record, and matches the shape of
+``domain_allowlist`` (``allowed_hosts: list[str]``). ``ports`` is
+shared across every pattern in the rule; patterns that need different
+port scoping belong in separate rules.
 
 Matching semantics:
 
@@ -22,9 +32,9 @@ service for an attacker with a matching SNI.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..types import Finding, Stage, Verdict
 
@@ -46,17 +56,39 @@ class EgressDomainRuleConfig(BaseModel):
 
     ``extra='forbid'`` so an admin typo like ``{"domains": ["x"]}`` (plural
     + wrong key) fails loud at rule create time rather than accepted-and-
-    silently-ignored at run time.
+    silently-ignored at run time. This is the property that makes the
+    closed schema worth keeping closed — there is intentionally no
+    back-compat ``domain_pattern`` (singular) alias, because accepting
+    two legal shapes is exactly the silent-typo hazard ``extra='forbid'``
+    exists to prevent.
 
-    ``domain_pattern``'s upper bound of 253 matches the DNS name length
-    limit. A longer "pattern" is either a bug or an attempt to sneak
-    one through.
+    ``domain_patterns`` is required and non-empty: an empty list overlaps
+    semantically with "delete the rule", so it is rejected rather than
+    silently meaning "match nothing". The ``max_length=100`` cap keeps a
+    single rule from ballooning past audit-readability — typical
+    allowlists are 5-10, extreme ones well under 50. Each element is
+    bounded to the DNS name length limit (253); a longer "pattern" is
+    either a bug or an attempt to sneak one through.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    domain_pattern: str = Field(..., min_length=1, max_length=253)
+    domain_patterns: Annotated[
+        list[Annotated[str, Field(min_length=1, max_length=253)]],
+        Field(min_length=1, max_length=100),
+    ]
     ports: list[int] | None = None
+
+    @field_validator("domain_patterns")
+    @classmethod
+    def _strip_patterns(cls, patterns: list[str]) -> list[str]:
+        # Reject whitespace-only entries so they can't sneak through as a
+        # silent "match nothing" slot. Element length bounds above run
+        # first; this normalisation only trims and re-checks emptiness.
+        clean = [p.strip() for p in patterns]
+        if any(not p for p in clean):
+            raise ValueError("domain_patterns entries must be non-empty")
+        return clean
 
 
 def _matches(host: str, pattern: str) -> bool:
@@ -127,9 +159,12 @@ class EgressDomainRuleCheck:
         port = int(ctx.payload.get("port", 0))
         if not host:
             return Verdict(action="allow")
-        if not _matches(host, cfg.domain_pattern):
-            return Verdict(action="allow")
         if cfg.ports is not None and port not in cfg.ports:
+            return Verdict(action="allow")
+        matched = next(
+            (p for p in cfg.domain_patterns if _matches(host, p)), None
+        )
+        if matched is None:
             return Verdict(action="allow")
         return Verdict(
             action="allow",
@@ -137,7 +172,7 @@ class EgressDomainRuleCheck:
                 Finding(
                     code=EgressDomainCode.DOMAIN_ALLOWED.value,
                     severity="info",
-                    message=f"matched {cfg.domain_pattern}",
+                    message=f"matched {matched}",
                 )
             ],
         )
@@ -163,15 +198,20 @@ def make_egress_domain_check() -> Any:
             return False, []
         host = getattr(request, "host", "")
         port = int(getattr(request, "port", 0))
-        if not host or not _matches(host, cfg.domain_pattern):
+        if not host:
             return False, []
         if cfg.ports is not None and port not in cfg.ports:
+            return False, []
+        matched = next(
+            (p for p in cfg.domain_patterns if _matches(host, p)), None
+        )
+        if matched is None:
             return False, []
         return True, [
             {
                 "code": EgressDomainCode.DOMAIN_ALLOWED.value,
                 "severity": "info",
-                "message": f"matched {cfg.domain_pattern}",
+                "message": f"matched {matched}",
                 "metadata": {"host": host, "port": port},
             }
         ]

@@ -17,7 +17,7 @@ def _make_rule(**overrides: object) -> dict[str, object]:
         "coworker_id": "coworker-x",
         "stage": "egress_request",
         "check_id": "egress.domain_rule",
-        "config": {"domain_pattern": "api.anthropic.com"},
+        "config": {"domain_patterns": ["api.anthropic.com"]},
         "priority": 100,
         "enabled": True,
     }
@@ -102,8 +102,15 @@ async def test_malformed_event_does_not_crash_cache() -> None:
 async def test_cached_rule_carries_config() -> None:
     cache = PolicyCache()
     await cache.seed(
-        [_make_rule(config={"domain_pattern": "*.github.com", "ports": [443]})]
+        [
+            _make_rule(
+                config={"domain_patterns": ["*.github.com"], "ports": [443]}
+            )
+        ]
     )
     rule = cache.get_rules_for("tenant-a", "coworker-x")[0]
     assert isinstance(rule, CachedRule)
-    assert rule.config == {"domain_pattern": "*.github.com", "ports": [443]}
+    assert rule.config == {
+        "domain_patterns": ["*.github.com"],
+        "ports": [443],
+    }

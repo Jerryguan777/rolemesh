@@ -44,7 +44,7 @@ async def _seed_allowlist(topology: Topology, allow_host: str) -> None:
         "coworker_id": None,
         "stage": "egress_request",
         "check_id": "egress.domain_rule",
-        "config": {"domain_pattern": allow_host},
+        "config": {"domain_patterns": [allow_host]},
         "priority": 100,
         "enabled": True,
     }
