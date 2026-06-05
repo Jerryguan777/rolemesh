@@ -24,19 +24,11 @@
 import { LitElement, html, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import './safety-decisions-page.js';
 import {
   iconActivity,
   iconChevronRight,
   iconClose,
 } from './icons.js';
-
-type ActivityTab = 'index' | 'safety-decisions';
-
-function tabFromHash(hash: string): ActivityTab {
-  if (hash.startsWith('#/activity/safety-decisions')) return 'safety-decisions';
-  return 'index';
-}
 
 @customElement('rm-activity-shell')
 export class RmActivityShell extends LitElement {
@@ -71,49 +63,23 @@ export class RmActivityShell extends LitElement {
     location.hash = '#/';
   };
 
-  private goTab(tab: ActivityTab): void {
-    const next =
-      tab === 'safety-decisions'
-        ? '#/activity/safety-decisions'
-        : '#/activity';
-    if (location.hash === next) return;
-    location.hash = next;
-  }
-
-  private renderTabs(active: ActivityTab): TemplateResult {
-    const items: { id: ActivityTab; label: string }[] = [
-      { id: 'index', label: 'Overview' },
-      { id: 'safety-decisions', label: 'Safety decisions' },
-    ];
-    return html`
-      <div class="as-tabs" role="tablist" aria-label="Activity sections">
-        ${items.map(
-          (t) => html`
-            <button
-              class=${`as-tab ${active === t.id ? 'active' : ''}`}
-              role="tab"
-              aria-selected=${active === t.id}
-              data-testid=${`activity-tab-${t.id}`}
-              data-tab=${t.id}
-              @click=${() => this.goTab(t.id)}
-            >${t.label}</button>
-          `,
-        )}
-      </div>
-    `;
-  }
+  // The safety log moved to Settings → Governance (spec §7); this card is now
+  // a launcher into that home rather than an in-shell tab.
+  private goSafetyLog = () => {
+    location.hash = '#/manage/safety-log';
+  };
 
   private renderIndex(): TemplateResult {
     return html`
       <div class="as-index">
         <button
           class="as-card"
-          data-testid="activity-card-safety-decisions"
-          @click=${() => this.goTab('safety-decisions')}
+          data-testid="activity-card-safety-log"
+          @click=${this.goSafetyLog}
         >
           <span class="as-card-icon">${iconActivity(22)}</span>
           <span class="as-card-body">
-            <span class="as-card-title">Safety decisions</span>
+            <span class="as-card-title">Safety log</span>
             <span class="as-card-sub">
               Live audit of allow / block / redact / warn verdicts across
               all conversations on this tenant.
@@ -126,11 +92,6 @@ export class RmActivityShell extends LitElement {
   }
 
   override render(): TemplateResult {
-    const active = tabFromHash(this.hash);
-    const body =
-      active === 'safety-decisions'
-        ? html`<rm-safety-decisions-page></rm-safety-decisions-page>`
-        : this.renderIndex();
     return html`
       <style>
         rm-activity-shell {
@@ -272,9 +233,8 @@ export class RmActivityShell extends LitElement {
           @click=${this.backToChat}
         >${iconClose(16)}</button>
       </div>
-      ${this.renderTabs(active)}
-      <div class="as-body" data-testid="activity-body" data-tab=${active}>
-        ${body}
+      <div class="as-body" data-testid="activity-body">
+        ${this.renderIndex()}
       </div>
     `;
   }

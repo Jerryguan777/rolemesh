@@ -282,6 +282,30 @@ export function iconShield(size = 16): SVGTemplateResult {
   `;
 }
 
+/** Check-in-a-box — Settings → Governance → Approval policies (matches the
+ *  prototype nav icon; distinct from the plain shield used by Safety rules). */
+export function iconClipboardCheck(size = 16): SVGTemplateResult {
+  return svg`
+    <svg width=${size} height=${size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+      <path d="M9 11l3 3L22 4"/>
+      <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+    </svg>
+  `;
+}
+
+/** Document with lines — Settings → Governance → Safety log (matches the
+ *  prototype nav icon). */
+export function iconFileText(size = 16): SVGTemplateResult {
+  return svg`
+    <svg width=${size} height=${size} viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+      <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/>
+    </svg>
+  `;
+}
+
 /** General — home / house. */
 export function iconHome(size = 16): SVGTemplateResult {
   return svg`

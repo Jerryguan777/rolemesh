@@ -1,13 +1,9 @@
 // @vitest-environment happy-dom
-// <rm-activity-shell> — pins the two-route layout:
-//   * `#/activity`                  → index (one card)
-//   * `#/activity/safety-decisions` → <rm-safety-decisions-page>
-//
-// We pin observable behaviour: which custom element gets slotted, which
-// hash a tab click writes, and whether the X button returns to `#/`.
-// We do NOT mock the slotted pages — their internal fetches fail
-// silently in the unit-test env, and that's fine because we're not
-// asserting on the inner page's render output, just on shell routing.
+// <rm-activity-shell> — now a thin launcher. The safety log moved to
+// Settings → Governance (spec §7), so the Activity overview's card links into
+// `#/manage/safety-log` rather than hosting the page in-shell. We pin: the
+// card exists, it navigates to the settings home, the shell never slots the
+// decisions page, and the X button returns to chat.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -91,70 +87,35 @@ describe('<rm-activity-shell>', () => {
     vi.clearAllMocks();
   });
 
-  it('renders the index (card, no inner page) at #/activity', async () => {
+  it('renders the index launcher card and never slots the decisions page', async () => {
     loc = stubHash('#/activity');
     const el = await mount();
-    const body = el.querySelector('[data-testid="activity-body"]');
-    expect(body?.getAttribute('data-tab')).toBe('index');
     expect(
-      el.querySelector('[data-testid="activity-card-safety-decisions"]'),
+      el.querySelector('[data-testid="activity-card-safety-log"]'),
     ).not.toBeNull();
-    // Index renders no child page.
     expect(el.querySelector('rm-safety-decisions-page')).toBeNull();
   });
 
-  it('renders <rm-safety-decisions-page> at #/activity/safety-decisions', async () => {
-    loc = stubHash('#/activity/safety-decisions');
-    const el = await mount();
-    expect(el.querySelector('rm-safety-decisions-page')).not.toBeNull();
-  });
-
-  it('clicking the Safety decisions index card navigates to #/activity/safety-decisions', async () => {
+  it('clicking the Safety log card navigates to Settings → Safety log', async () => {
     loc = stubHash('#/activity');
     const el = await mount();
     const card = el.querySelector<HTMLButtonElement>(
-      '[data-testid="activity-card-safety-decisions"]',
+      '[data-testid="activity-card-safety-log"]',
     );
     card!.click();
     await settle(el);
-    expect(loc.hashAssignments).toContain('#/activity/safety-decisions');
-    expect(el.querySelector('rm-safety-decisions-page')).not.toBeNull();
-  });
-
-  it('tab bar switches via hash (URL is source of truth)', async () => {
-    loc = stubHash('#/activity');
-    const el = await mount();
-    const safetyTab = el.querySelector<HTMLButtonElement>(
-      '[data-testid="activity-tab-safety-decisions"]',
-    );
-    safetyTab!.click();
-    await settle(el);
-    expect(loc.hashAssignments).toContain('#/activity/safety-decisions');
-    expect(
-      el.querySelector('[data-testid="activity-body"]')?.getAttribute('data-tab'),
-    ).toBe('safety-decisions');
+    expect(loc.hashAssignments).toContain('#/manage/safety-log');
+    // The shell still never hosts the page itself.
+    expect(el.querySelector('rm-safety-decisions-page')).toBeNull();
   });
 
   it('X button navigates back to chat (#/)', async () => {
-    loc = stubHash('#/activity/safety-decisions');
+    loc = stubHash('#/activity');
     const el = await mount();
     const back = el.querySelector<HTMLButtonElement>(
       '[data-testid="activity-back"]',
     );
     back!.click();
     expect(loc.hashAssignments).toContain('#/');
-  });
-
-  it('reacts to external hashchange (route survives deep link / refresh)', async () => {
-    loc = stubHash('#/activity');
-    const el = await mount();
-    expect(
-      el.querySelector('[data-testid="activity-body"]')?.getAttribute('data-tab'),
-    ).toBe('index');
-    // Simulate the user pasting a URL or hitting Back. The shell
-    // must follow the URL, not its previous state.
-    location.hash = '#/activity/safety-decisions';
-    await settle(el);
-    expect(el.querySelector('rm-safety-decisions-page')).not.toBeNull();
   });
 });
