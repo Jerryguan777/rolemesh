@@ -1,19 +1,17 @@
 // @vitest-environment happy-dom
-// Safety rules page — pins the v1/admin read-vs-write split.
+// Safety rules page (spec §6) — pins the v1/admin read-vs-write split AND the
+// revamped two-tier list behaviour.
 //
 // What this test catches:
-//   * Reads on mount go through the typed v1 ApiClient
-//     (listSafetyRules / listSafetyChecks / listSafetyRuleAudit).
-//   * Writes (create/update/delete + toggle) keep using
-//     safety-admin-client (admin POST/PATCH/DELETE).
-//   * A refactor that "helpfully" repointed a write to v1 would
-//     blow up at runtime (no v1 write endpoint exists), so we
-//     pin the routing here.
+//   * Reads on mount go through the typed v1 ApiClient.
+//   * Writes (toggle / delete) keep using safety-admin-client (admin).
+//   * Platform-tier rows are audit-only — no edit / duplicate / delete and the
+//     toggle is inert (a regression that exposed those would let an org mutate
+//     a cross-tenant default it doesn't own).
+//   * The card renders the human label, sentence, action pill, and chips.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-// Hoisted spies so the factories below (which run before
-// top-level `const`s) can reference them.
 const {
   listSafetyRulesSpy,
   listSafetyChecksSpy,
@@ -59,7 +57,8 @@ vi.mock('../services/safety-admin-client.js', async () => {
   };
 });
 
-import { SafetyRulesPage } from './safety-rules-page.js';
+import { SafetyRulesPage, auditSummary } from './safety-rules-page.js';
+import type { SafetyCheck, SafetyRule, SafetyRuleAuditEntry } from '../api/client.js';
 
 async function waitUntilLoaded(page: SafetyRulesPage): Promise<void> {
   for (let i = 0; i < 30; i++) {
@@ -71,257 +70,264 @@ async function waitUntilLoaded(page: SafetyRulesPage): Promise<void> {
   throw new Error('SafetyRulesPage did not finish loading');
 }
 
-function makeRule(overrides: Record<string, unknown> = {}) {
+function piiCheck(): SafetyCheck {
+  return {
+    id: 'pii.regex',
+    version: '1',
+    stages: ['input_prompt', 'pre_tool_call'],
+    cost_class: 'cheap',
+    action_model: 'fixed',
+    natural_actions: { input_prompt: 'block', pre_tool_call: 'block' },
+    supported_actions: {
+      input_prompt: ['allow', 'block', 'require_approval', 'warn'],
+      pre_tool_call: ['allow', 'block', 'require_approval', 'warn'],
+    },
+    supported_codes: [],
+    config_schema: null,
+  } as SafetyCheck;
+}
+
+function makeRule(overrides: Partial<SafetyRule> = {}): SafetyRule {
   return {
     id: 'r1',
     tenant_id: 't1',
     coworker_id: null,
-    stage: 'input_prompt' as const,
-    check_id: 'prompt-pii',
-    config: {},
+    stage: 'pre_tool_call',
+    check_id: 'pii.regex',
+    config: { entities: ['ssn'] },
     priority: 100,
     enabled: true,
     description: '',
     created_at: '2026-05-21T00:00:00Z',
     updated_at: '2026-05-21T00:00:00Z',
+    source: 'tenant',
+    tier: null,
+    editable: true,
     ...overrides,
-  };
+  } as SafetyRule;
 }
 
-describe('SafetyRulesPage routing', () => {
+async function mount(rules: SafetyRule[]): Promise<SafetyRulesPage> {
+  listSafetyRulesSpy.mockResolvedValue(rules);
+  const page = new SafetyRulesPage();
+  document.body.appendChild(page);
+  await waitUntilLoaded(page);
+  await page.updateComplete;
+  return page;
+}
+
+describe('SafetyRulesPage', () => {
   beforeEach(() => {
     listSafetyRulesSpy.mockResolvedValue([]);
-    listSafetyChecksSpy.mockResolvedValue([]);
+    listSafetyChecksSpy.mockResolvedValue([piiCheck()]);
     listSafetyRuleAuditSpy.mockResolvedValue([]);
     createRuleSpy.mockResolvedValue(makeRule());
     updateRuleSpy.mockResolvedValue(makeRule({ enabled: false }));
     deleteRuleSpy.mockResolvedValue(undefined);
-    listCoworkersSpy.mockResolvedValue([]);
+    listCoworkersSpy.mockResolvedValue([{ id: 'ops', name: 'Ops coworker' }]);
   });
 
   afterEach(() => {
     vi.clearAllMocks();
+    document.body.innerHTML = '';
   });
 
-  it('reads via the typed v1 ApiClient on mount', async () => {
-    const page = new SafetyRulesPage();
-    document.body.appendChild(page);
-    await waitUntilLoaded(page);
-
+  it('reads via the typed v1 ApiClient + admin coworker list on mount', async () => {
+    const page = await mount([]);
     expect(listSafetyRulesSpy).toHaveBeenCalledTimes(1);
     expect(listSafetyChecksSpy).toHaveBeenCalledTimes(1);
-    // Coworker list is admin-side (CSV export + sidebar share it);
-    // the v1 read split deliberately doesn't reach for it.
     expect(listCoworkersSpy).toHaveBeenCalledTimes(1);
-    document.body.removeChild(page);
+    page.remove();
   });
 
-  it('audit timeline call routes to the v1 client', async () => {
-    const rule = makeRule();
-    listSafetyRulesSpy.mockResolvedValue([rule]);
-    const page = new SafetyRulesPage();
-    document.body.appendChild(page);
-    await waitUntilLoaded(page);
-
-    // @ts-expect-error — invoking private method directly to pin
-    //                    the routing without spinning up a click.
-    await page.openDetail(rule);
-
-    expect(listSafetyRuleAuditSpy).toHaveBeenCalledTimes(1);
-    expect(listSafetyRuleAuditSpy).toHaveBeenCalledWith('r1');
-    document.body.removeChild(page);
+  it('shows the rich empty state when there are no rules', async () => {
+    const page = await mount([]);
+    expect(page.querySelector('[data-testid="saf-empty"]')).not.toBeNull();
+    page.remove();
   });
 
-  it('toggleEnabled write goes through admin updateRule, NOT v1', async () => {
-    const rule = makeRule({ enabled: true });
-    listSafetyRulesSpy.mockResolvedValue([rule]);
-    const page = new SafetyRulesPage();
-    document.body.appendChild(page);
-    await waitUntilLoaded(page);
-
-    // @ts-expect-error — exercise the write handler directly.
-    await page.toggleEnabled(rule);
-
-    expect(updateRuleSpy).toHaveBeenCalledTimes(1);
-    expect(updateRuleSpy).toHaveBeenCalledWith('r1', { enabled: false });
-    // Critically: no v1-write call exists. If a refactor wires a
-    // write to the v1 client, this assertion would still pass —
-    // but the runtime would 404. The negative side is structural
-    // (no v1 write method on ApiClient).
-    document.body.removeChild(page);
+  it('renders the human label, sentence, and action pill on a card', async () => {
+    const page = await mount([makeRule()]);
+    const row = page.querySelector('[data-testid="saf-row"]')!;
+    expect(row.querySelector('.rm-mn b')?.textContent).toContain('Personal data (regex)');
+    expect(row.querySelector('[data-testid="saf-sentence"]')?.textContent).toContain(
+      'Before tool calls',
+    );
+    // pii.regex natural action is block — the pill reflects the effective action.
+    expect(row.querySelector('[data-testid="saf-action-pill"]')?.textContent?.trim()).toBe(
+      'block',
+    );
+    page.remove();
   });
 
-  it('delete uses admin deleteRule', async () => {
-    const rule = makeRule();
-    listSafetyRulesSpy.mockResolvedValue([rule]);
-    const page = new SafetyRulesPage();
-    document.body.appendChild(page);
-    await waitUntilLoaded(page);
+  it('shows the scope chip only for a coworker-scoped rule', async () => {
+    const page = await mount([
+      makeRule({ id: 'org-wide', coworker_id: null }),
+      makeRule({ id: 'scoped', coworker_id: 'ops' }),
+    ]);
+    const rows = page.querySelectorAll('[data-testid="saf-row"]');
+    const byId = (id: string) =>
+      [...rows].find((r) => r.getAttribute('data-rule-id') === id)!;
+    expect(byId('org-wide').querySelector('.rm-saf-scope')).toBeNull();
+    expect(byId('scoped').querySelector('.rm-saf-scope')?.textContent).toContain(
+      'Ops coworker',
+    );
+    page.remove();
+  });
 
-    // happy-dom does not implement window.confirm — assign a stub.
-    window.confirm = () => true;
+  describe('two-tier platform / organization split (§6.2)', () => {
+    it('renders the platform banner only when a platform rule exists', async () => {
+      const orgOnly = await mount([makeRule()]);
+      expect(orgOnly.querySelector('[data-testid="saf-platform-banner"]')).toBeNull();
+      orgOnly.remove();
 
-    // @ts-expect-error — exercise the write handler directly.
-    await page.removeRule(rule);
+      const withPlatform = await mount([
+        makeRule({ id: 'plt', source: 'platform', tier: 'floor', editable: false }),
+      ]);
+      expect(
+        withPlatform.querySelector('[data-testid="saf-platform-banner"]'),
+      ).not.toBeNull();
+      withPlatform.remove();
+    });
 
-    expect(deleteRuleSpy).toHaveBeenCalledTimes(1);
-    expect(deleteRuleSpy).toHaveBeenCalledWith('r1');
-    document.body.removeChild(page);
+    it('platform rows expose audit only — no edit / duplicate / delete', async () => {
+      const page = await mount([
+        makeRule({ id: 'plt', source: 'platform', tier: 'floor', editable: false }),
+      ]);
+      const card = page.querySelector('[data-rule-id="plt"]')!;
+      expect(card.querySelector('[data-testid="saf-audit"]')).not.toBeNull();
+      expect(card.querySelector('[data-testid="saf-edit"]')).toBeNull();
+      expect(card.querySelector('[data-testid="saf-duplicate"]')).toBeNull();
+      expect(card.querySelector('[data-testid="saf-delete"]')).toBeNull();
+      page.remove();
+    });
+
+    it('platform toggle is inert (a span, not a clickable button)', async () => {
+      const page = await mount([
+        makeRule({ id: 'plt', source: 'platform', tier: 'floor', editable: false }),
+      ]);
+      const toggle = page
+        .querySelector('[data-rule-id="plt"]')!
+        .querySelector('[data-testid="saf-toggle"]')!;
+      expect(toggle.tagName).toBe('SPAN');
+      // org rows render a <button> toggle instead:
+      page.remove();
+      const orgPage = await mount([makeRule({ id: 'org' })]);
+      const orgToggle = orgPage
+        .querySelector('[data-rule-id="org"]')!
+        .querySelector('[data-testid="saf-toggle"]')!;
+      expect(orgToggle.tagName).toBe('BUTTON');
+      orgPage.remove();
+    });
+
+    it('does not toggle a platform rule even if toggleEnabled is called', async () => {
+      const page = await mount([
+        makeRule({ id: 'plt', source: 'platform', tier: 'floor', editable: false }),
+      ]);
+      // @ts-expect-error — exercise the guard directly
+      await page.toggleEnabled(page.rules[0]);
+      expect(updateRuleSpy).not.toHaveBeenCalled();
+      page.remove();
+    });
+  });
+
+  it('toggle on an org rule PATCHes via the admin client (optimistic)', async () => {
+    const page = await mount([makeRule({ id: 'org', enabled: true })]);
+    const toggle = page
+      .querySelector('[data-rule-id="org"]')!
+      .querySelector('[data-testid="saf-toggle"]') as HTMLButtonElement;
+    toggle.click();
+    await page.updateComplete;
+    expect(updateRuleSpy).toHaveBeenCalledWith('org', { enabled: false });
+    page.remove();
+  });
+
+  it('delete confirm DELETEs via the admin client', async () => {
+    const page = await mount([makeRule({ id: 'org' })]);
+    (
+      page
+        .querySelector('[data-rule-id="org"]')!
+        .querySelector('[data-testid="saf-delete"]') as HTMLButtonElement
+    ).click();
+    await page.updateComplete;
+    const confirm = page.querySelector('rm-confirm-dialog')!;
+    confirm.dispatchEvent(new CustomEvent('confirm'));
+    await page.updateComplete;
+    await Promise.resolve();
+    expect(deleteRuleSpy).toHaveBeenCalledWith('org');
+    page.remove();
+  });
+
+  it('audit drawer reads the timeline from the v1 client', async () => {
+    listSafetyRuleAuditSpy.mockResolvedValue([
+      {
+        id: 'a1',
+        rule_id: 'org',
+        tenant_id: 't1',
+        actor_user_id: 'u1',
+        action: 'created',
+        before_state: null,
+        after_state: { check_id: 'pii.regex', stage: 'pre_tool_call' },
+        note: null,
+        created_at: '2026-05-21T00:00:00Z',
+      } as SafetyRuleAuditEntry,
+    ]);
+    const page = await mount([makeRule({ id: 'org' })]);
+    (
+      page
+        .querySelector('[data-rule-id="org"]')!
+        .querySelector('[data-testid="saf-audit"]') as HTMLButtonElement
+    ).click();
+    await page.updateComplete;
+    await Promise.resolve();
+    await page.updateComplete;
+    expect(listSafetyRuleAuditSpy).toHaveBeenCalledWith('org');
+    page.remove();
   });
 });
 
-// ---------------------------------------------------------------------------
-// Action matrix panel — server-driven default badge + override picker.
-// ---------------------------------------------------------------------------
+describe('auditSummary', () => {
+  const base = (a: Partial<SafetyRuleAuditEntry>): SafetyRuleAuditEntry =>
+    ({
+      id: 'x',
+      rule_id: 'r',
+      tenant_id: 't',
+      actor_user_id: null,
+      before_state: null,
+      after_state: null,
+      note: null,
+      created_at: '2026-05-21T00:00:00Z',
+      action: 'updated',
+      ...a,
+    }) as SafetyRuleAuditEntry;
 
-function makeCheck(overrides: Record<string, unknown> = {}) {
-  return {
-    id: 'pii.regex',
-    version: '1',
-    stages: ['input_prompt', 'model_output'],
-    cost_class: 'cheap' as const,
-    supported_codes: [],
-    config_schema: null,
-    action_model: 'fixed' as const,
-    natural_actions: { input_prompt: 'block', model_output: 'block' },
-    supported_actions: {
-      // pii.regex @ input_prompt cannot redact (no modified_payload) and
-      // require_approval is valid; @ model_output drops warn.
-      input_prompt: ['allow', 'block', 'require_approval', 'warn'],
-      model_output: ['allow', 'block', 'require_approval'],
-    },
-    ...overrides,
-  };
-}
-
-async function openDraftFor(
-  page: SafetyRulesPage,
-  check_id: string,
-  stage: string,
-): Promise<void> {
-  // Drive the private draft state directly — the panel renders from
-  // (check_id, stage); we don't need to click through the selects.
-  /* eslint-disable @typescript-eslint/no-explicit-any */
-  (page as any).draftMode = 'create';
-  (page as any).draft = {
-    stage,
-    check_id,
-    coworker_id: null,
-    config: '{}',
-    priority: 100,
-    enabled: true,
-    description: '',
-  };
-  /* eslint-enable @typescript-eslint/no-explicit-any */
-  page.requestUpdate();
-  await page.updateComplete;
-}
-
-describe('SafetyRulesPage action panel', () => {
-  beforeEach(() => {
-    listSafetyRulesSpy.mockResolvedValue([]);
-    listSafetyRuleAuditSpy.mockResolvedValue([]);
-    createRuleSpy.mockResolvedValue(makeRule());
-    updateRuleSpy.mockResolvedValue(makeRule());
-    deleteRuleSpy.mockResolvedValue(undefined);
-    listCoworkersSpy.mockResolvedValue([]);
+  it('summarizes a create with the check label', () => {
+    const s = auditSummary(base({ action: 'created', after_state: { check_id: 'pii.regex', stage: 'pre_tool_call' } }));
+    expect(s).toContain('Created');
+    expect(s).toContain('Personal data (regex)');
   });
 
-  afterEach(() => {
-    vi.clearAllMocks();
+  it('diffs a priority change with friendly arrows', () => {
+    const s = auditSummary(
+      base({ before_state: { priority: 50 }, after_state: { priority: 100 } }),
+    );
+    expect(s).toBe('priority: 50 → 100');
   });
 
-  it('shows the fixed-default badge and greys out unsupported actions', async () => {
-    listSafetyChecksSpy.mockResolvedValue([makeCheck()]);
-    const page = new SafetyRulesPage();
-    document.body.appendChild(page);
-    await waitUntilLoaded(page);
-    await openDraftFor(page, 'pii.regex', 'input_prompt');
-
-    const badge = page.querySelector('[data-testid="action-badge"]');
-    expect(badge?.textContent).toContain('This check defaults to');
-    expect(badge?.textContent?.toLowerCase()).toContain('block');
-
-    const select = page.querySelector(
-      '[data-testid="action-override-select"]',
-    ) as HTMLSelectElement | null;
-    expect(select).not.toBeNull();
-    const opt = (v: string) =>
-      Array.from(select!.options).find((o) => o.value === v)!;
-    // redact is NOT in supported_actions -> disabled with a reason.
-    expect(opt('redact').disabled).toBe(true);
-    expect(opt('redact').title).toContain('rewrite the payload');
-    // block / require_approval ARE supported -> selectable.
-    expect(opt('block').disabled).toBe(false);
-    expect(opt('require_approval').disabled).toBe(false);
-    document.body.removeChild(page);
+  it('renders enabled changes as on/off, not true/false', () => {
+    const s = auditSummary(
+      base({ before_state: { enabled: false }, after_state: { enabled: true } }),
+    );
+    expect(s).toBe('enabled: off → on');
   });
 
-  it('config_routed checks show "no fixed default" wording', async () => {
-    listSafetyChecksSpy.mockResolvedValue([
-      makeCheck({
-        id: 'presidio.pii',
-        action_model: 'config_routed',
-        stages: ['input_prompt'],
-        natural_actions: { input_prompt: 'allow' },
-        supported_actions: {
-          input_prompt: ['allow', 'block', 'redact', 'warn', 'require_approval'],
-        },
+  it('surfaces an action_override change buried in config', () => {
+    const s = auditSummary(
+      base({
+        before_state: { config: {} },
+        after_state: { config: { action_override: 'warn' } },
       }),
-    ]);
-    const page = new SafetyRulesPage();
-    document.body.appendChild(page);
-    await waitUntilLoaded(page);
-    await openDraftFor(page, 'presidio.pii', 'input_prompt');
-
-    const badge = page.querySelector('[data-testid="action-badge"]');
-    expect(badge?.textContent).toContain('No fixed default');
-    // redact IS supported for presidio -> selectable.
-    const select = page.querySelector(
-      '[data-testid="action-override-select"]',
-    ) as HTMLSelectElement;
-    const redact = Array.from(select.options).find((o) => o.value === 'redact')!;
-    expect(redact.disabled).toBe(false);
-    document.body.removeChild(page);
-  });
-
-  it('aggregated checks explain the voting/aggregation semantics', async () => {
-    listSafetyChecksSpy.mockResolvedValue([
-      makeCheck({
-        id: 'egress.domain_rule',
-        action_model: 'aggregated',
-        stages: ['egress_request'],
-        natural_actions: { egress_request: 'allow' },
-        supported_actions: { egress_request: ['allow', 'block'] },
-      }),
-    ]);
-    const page = new SafetyRulesPage();
-    document.body.appendChild(page);
-    await waitUntilLoaded(page);
-    await openDraftFor(page, 'egress.domain_rule', 'egress_request');
-
-    const badge = page.querySelector('[data-testid="action-badge"]');
-    expect(badge?.textContent?.toLowerCase()).toContain('aggregation');
-    document.body.removeChild(page);
-  });
-
-  it('picking an override writes action_override into the config JSON', async () => {
-    listSafetyChecksSpy.mockResolvedValue([makeCheck()]);
-    const page = new SafetyRulesPage();
-    document.body.appendChild(page);
-    await waitUntilLoaded(page);
-    await openDraftFor(page, 'pii.regex', 'input_prompt');
-
-    const select = page.querySelector(
-      '[data-testid="action-override-select"]',
-    ) as HTMLSelectElement;
-    select.value = 'warn';
-    select.dispatchEvent(new Event('change'));
-    await page.updateComplete;
-
-    // @ts-expect-error — read private draft state for the assertion.
-    const cfg = JSON.parse(page.draft.config);
-    expect(cfg.action_override).toBe('warn');
-    document.body.removeChild(page);
+    );
+    expect(s).toContain('action: default → warn');
   });
 });

@@ -208,6 +208,8 @@
 .rm-pill.rm-pill-warn  { background: var(--rm-warn-subtle);   color: var(--rm-warn); }
 .rm-pill.rm-pill-off   { background: var(--rm-surface-3);     color: var(--rm-ink-3); }
 .rm-pill.rm-pill-bad   { background: var(--rm-bad-subtle);    color: var(--rm-bad); }
+/* require_approval pill — terracotta accent (the 5th safety action colour). */
+.rm-pill.rm-pill-appr  { background: var(--rm-accent-subtle); color: var(--rm-accent); }
 
 /* "X coworkers" muted meta count. Monospace to match the prototype's
  * data-density treatment. */
@@ -557,3 +559,450 @@
  * sees the SVG plus the native ▶ glyph stacked together. */
 summary.list-none::-webkit-details-marker { display: none; }
 summary.list-none::marker { content: ''; }
+
+/* ── Safety rules + safety log (spec §6 / §7) ─────────────────────
+ * Ported from the prototype's saf-* / routing-row / finding styles,
+ * re-prefixed rm-saf-* and re-pointed at the --rm-* token palette.
+ * Rule rows reuse .rm-card / .rm-pol-pri / .rm-mn / .rm-pol-toggle /
+ * .rm-row-acts; the classes below add the safety-specific chips,
+ * the action segmented control, the per-finding routing table, the
+ * decision log grid, the finding cards, and the audit timeline. */
+
+/* "slow" latency chip on a rule card. */
+.rm-saf-slowchip {
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  padding: 2px 7px;
+  border-radius: 99px;
+  background: var(--rm-surface-3);
+  color: var(--rm-ink-3);
+  flex-shrink: 0;
+}
+
+/* Per-coworker scope chip — accent when scoped, hidden when org-wide. */
+.rm-saf-scope {
+  font-size: 11px;
+  color: var(--rm-accent);
+  background: var(--rm-accent-subtle);
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 5px;
+  flex-shrink: 0;
+}
+
+/* Muted scope clause inside a rule sentence ("All coworkers." etc.). */
+.rm-saf-scope-mute { color: var(--rm-ink-3); }
+
+/* Platform-defaults informational banner (spec §6.2). */
+.rm-saf-platform-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--rm-ink-3);
+  padding: 9px 12px;
+  background: var(--rm-surface-2);
+  border: 1px solid var(--rm-border-2);
+  border-radius: 8px;
+  margin: 0 0 10px;
+  line-height: 1.5;
+}
+.rm-saf-platform-banner svg { flex-shrink: 0; margin-top: 1px; color: var(--rm-ink-3); }
+.rm-saf-platform-banner b { color: var(--rm-ink-2); font-weight: 600; }
+
+/* "Your organization's rules" small-caps section divider. */
+.rm-saf-section-label {
+  font-size: 10.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--rm-ink-3);
+  font-weight: 600;
+  margin: 16px 0 8px;
+  padding-left: 2px;
+}
+
+/* Platform-tier card: accent priority badge (the toggle/edit/dup/delete
+ * are simply not rendered for these rows — handled in the template). */
+.rm-card.rm-card--platform .rm-pol-pri {
+  background: var(--rm-accent-subtle);
+  color: var(--rm-accent);
+}
+
+/* ---- rule dialog: action segmented control (spec §6.11.1 Experience 1) ---- */
+
+/* Plain-language panel above the control — NO "action model" header (§8.5). */
+.rm-saf-action-panel {
+  border: 1px solid var(--rm-border-2);
+  border-radius: 8px;
+  padding: 10px 13px;
+  margin-bottom: 11px;
+  background: var(--rm-surface-2);
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--rm-ink-2);
+}
+.rm-saf-action-panel .rm-saf-natural {
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 5px;
+  font-size: 11.5px;
+  text-transform: capitalize;
+}
+.rm-saf-action-panel .rm-saf-natural.rm-saf-act-block { background: var(--rm-bad-subtle); color: var(--rm-bad); }
+.rm-saf-action-panel .rm-saf-natural.rm-saf-act-allow { background: var(--rm-good-subtle); color: var(--rm-good); }
+
+.rm-saf-seg {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  background: var(--rm-surface-2);
+  padding: 3px;
+  border-radius: 8px;
+}
+.rm-saf-seg button {
+  padding: 5px 11px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--rm-ink-2);
+  background: none;
+  cursor: pointer;
+  position: relative;
+  font-family: inherit;
+  border: none;
+  transition: var(--rm-transition);
+  text-align: center;
+}
+.rm-saf-seg button.rm-saf-on { background: var(--rm-surface); color: var(--rm-ink); font-weight: 500; }
+.rm-saf-seg button.rm-saf-on.rm-saf-act-allow   { background: var(--rm-good-subtle); color: var(--rm-good); box-shadow: inset 0 0 0 1px var(--rm-good); }
+.rm-saf-seg button.rm-saf-on.rm-saf-act-warn    { background: var(--rm-surface-3); color: var(--rm-ink-2); box-shadow: inset 0 0 0 1px var(--rm-ink-3); }
+.rm-saf-seg button.rm-saf-on.rm-saf-act-redact  { background: var(--rm-warn-subtle); color: var(--rm-warn); box-shadow: inset 0 0 0 1px var(--rm-warn); }
+.rm-saf-seg button.rm-saf-on.rm-saf-act-require_approval { background: var(--rm-accent-subtle); color: var(--rm-accent); box-shadow: inset 0 0 0 1px var(--rm-accent); }
+.rm-saf-seg button.rm-saf-on.rm-saf-act-block   { background: var(--rm-bad-subtle); color: var(--rm-bad); box-shadow: inset 0 0 0 1px var(--rm-bad); }
+.rm-saf-seg button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  text-decoration: line-through;
+}
+.rm-saf-seg button .rm-saf-sub {
+  font-size: 10px;
+  color: var(--rm-ink-3);
+  font-weight: 400;
+  margin-top: 1px;
+}
+.rm-saf-nat-dot {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--rm-accent);
+  box-shadow: 0 0 0 2px var(--rm-surface);
+}
+.rm-saf-seg-legend {
+  font-size: 11px;
+  color: var(--rm-ink-3);
+  margin: 6px 0 0;
+  line-height: 1.6;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.rm-saf-seg-legend .rm-saf-nat-dot {
+  position: static;
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  box-shadow: none;
+  margin-right: 2px;
+}
+/* Disabled-action tooltip (the WHY, server-supplied reason in plain text). */
+.rm-saf-seg button[data-reason]:hover::after {
+  content: attr(data-reason);
+  position: absolute;
+  bottom: calc(100% + 7px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--rm-ink);
+  color: var(--rm-bg);
+  font-size: 11px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-weight: 400;
+  font-style: normal;
+  text-decoration: none;
+  z-index: 100;
+  pointer-events: none;
+  width: max-content;
+  max-width: 240px;
+  white-space: normal;
+  text-align: center;
+  line-height: 1.4;
+}
+
+/* ---- per-finding routing table (spec §6.11.1 Experience 2 / §6.12) ---- */
+.rm-saf-routing-table {
+  display: flex;
+  flex-direction: column;
+  margin-top: 6px;
+  border: 1px solid var(--rm-border-2);
+  border-radius: 7px;
+  background: var(--rm-surface);
+  overflow: hidden;
+}
+.rm-saf-routing-row {
+  display: grid;
+  grid-template-columns: 1fr 200px;
+  gap: 12px;
+  align-items: center;
+  padding: 9px 13px;
+  border-bottom: 1px solid var(--rm-border-2);
+  font-size: 12.5px;
+}
+.rm-saf-routing-row:last-child { border-bottom: none; }
+.rm-saf-routing-row .rm-saf-rcode { color: var(--rm-ink); }
+.rm-saf-routing-row .rm-saf-rdesc {
+  font-family: var(--rm-font-mono);
+  font-size: 11px;
+  color: var(--rm-ink-3);
+  margin-top: 2px;
+}
+.rm-saf-routing-row select {
+  padding: 4px 8px;
+  font-size: 12px;
+  border: 1px solid var(--rm-border-2);
+  border-radius: 5px;
+  background: var(--rm-surface);
+  color: var(--rm-ink);
+  font-family: inherit;
+}
+.rm-saf-routing-inert {
+  font-size: 11.5px;
+  color: var(--rm-ink-3);
+  font-style: italic;
+  padding: 8px 13px;
+  background: var(--rm-warn-subtle);
+  border-radius: 6px;
+  margin-top: 8px;
+  border-left: 3px solid var(--rm-warn);
+}
+.rm-saf-routing-inert b { font-style: normal; color: var(--rm-warn); font-weight: 600; }
+
+/* Config form checkbox grid (pii-entities / secret-plugins). */
+.rm-saf-cfg-checks {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px 14px;
+  margin-top: 6px;
+}
+.rm-saf-cfg-checks label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  font-weight: 400;
+}
+
+/* Threshold slider. */
+.rm-saf-threshold { display: flex; align-items: center; gap: 12px; margin-top: 8px; }
+.rm-saf-threshold input[type='range'] { flex: 1; }
+.rm-saf-threshold .rm-saf-tval {
+  font-variant-numeric: tabular-nums;
+  font-size: 12.5px;
+  color: var(--rm-ink-2);
+  min-width: 40px;
+  text-align: right;
+  font-weight: 500;
+}
+.rm-saf-thint {
+  font-size: 11px;
+  color: var(--rm-ink-3);
+  display: flex;
+  justify-content: space-between;
+  margin-top: 3px;
+}
+
+/* "leave any blank to let it through" inline note on a field label. */
+.rm-saf-lblnote { font-weight: 400; color: var(--rm-ink-3); font-size: 11px; margin-left: 5px; }
+
+/* Scope-locked hint in edit mode (spec §6.11.3). */
+.rm-saf-scope-locked {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--rm-ink-3);
+  margin-top: 6px;
+  line-height: 1.5;
+}
+.rm-saf-scope-locked a { color: var(--rm-accent); cursor: pointer; }
+.rm-saf-scope-locked a:hover { text-decoration: underline; }
+
+/* ---- safety log (spec §7) ---- */
+.rm-saf-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.rm-saf-filters select {
+  padding: 5px 9px;
+  font-size: 12px;
+  border: 1px solid var(--rm-border-2);
+  border-radius: 6px;
+  background: var(--rm-surface);
+  color: var(--rm-ink);
+  font-family: inherit;
+}
+.rm-saf-filters .rm-saf-clear {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--rm-accent);
+  cursor: pointer;
+  background: none;
+  border: none;
+  font-family: inherit;
+}
+.rm-saf-filters .rm-saf-clear:hover { text-decoration: underline; }
+
+.rm-saf-decisions {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--rm-border);
+  border-radius: var(--rm-r);
+  overflow: hidden;
+}
+.rm-saf-row {
+  display: grid;
+  grid-template-columns: 80px 78px 110px 150px 1fr 120px 18px;
+  gap: 11px;
+  align-items: center;
+  padding: 10px 13px;
+  font-size: 12.5px;
+  border-bottom: 1px solid var(--rm-border);
+  cursor: pointer;
+  transition: var(--rm-transition);
+  background: var(--rm-surface);
+  text-align: left;
+  width: 100%;
+  font-family: inherit;
+  border-left: none;
+  border-right: none;
+  border-top: none;
+}
+.rm-saf-row:hover { background: var(--rm-surface-2); }
+.rm-saf-row:last-child { border-bottom: none; }
+.rm-saf-row .rm-saf-ts { font-variant-numeric: tabular-nums; font-size: 11.5px; color: var(--rm-ink-3); }
+.rm-saf-row .rm-saf-verdict {
+  font-size: 10.5px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 99px;
+  font-weight: 600;
+  text-align: center;
+  width: fit-content;
+}
+.rm-saf-row .rm-saf-verdict.rm-saf-v-allow  { background: var(--rm-good-subtle); color: var(--rm-good); }
+.rm-saf-row .rm-saf-verdict.rm-saf-v-block  { background: var(--rm-bad-subtle); color: var(--rm-bad); }
+.rm-saf-row .rm-saf-verdict.rm-saf-v-redact { background: var(--rm-warn-subtle); color: var(--rm-warn); }
+.rm-saf-row .rm-saf-verdict.rm-saf-v-warn   { background: var(--rm-surface-3); color: var(--rm-ink-2); }
+.rm-saf-row .rm-saf-verdict.rm-saf-v-require_approval { background: var(--rm-accent-subtle); color: var(--rm-accent); }
+.rm-saf-row .rm-saf-stage { font-family: var(--rm-font-mono); font-size: 11px; color: var(--rm-ink-3); }
+.rm-saf-row .rm-saf-check { font-size: 12px; color: var(--rm-ink-2); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rm-saf-row .rm-saf-summary { color: var(--rm-ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rm-saf-row .rm-saf-cw { font-size: 11.5px; color: var(--rm-ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rm-saf-row .rm-saf-arr { color: var(--rm-ink-3); text-align: right; }
+
+.rm-saf-pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 14px;
+  font-size: 12px;
+  color: var(--rm-ink-3);
+}
+.rm-saf-pager .rm-saf-pager-btns { display: flex; gap: 6px; }
+
+/* ---- decision detail: metadata grid + findings + privacy note ---- */
+.rm-saf-meta {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  gap: 8px 14px;
+  font-size: 12.5px;
+  margin-bottom: 14px;
+}
+.rm-saf-meta .rm-saf-mlabel { color: var(--rm-ink-3); }
+.rm-saf-mono { font-family: var(--rm-font-mono); font-size: 11px; color: var(--rm-ink-3); }
+.rm-saf-section-cap {
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--rm-ink-3);
+  font-weight: 600;
+  margin: 14px 0 6px;
+}
+.rm-saf-findings { display: flex; flex-direction: column; gap: 8px; }
+.rm-saf-finding {
+  padding: 8px 12px;
+  border: 1px solid var(--rm-border-2);
+  border-radius: 7px;
+  background: var(--rm-surface-2);
+}
+.rm-saf-finding .rm-saf-fhead { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
+.rm-saf-finding .rm-saf-fcode { font-family: var(--rm-font-mono); font-size: 11.5px; color: var(--rm-ink); font-weight: 500; }
+.rm-saf-finding .rm-saf-fsev {
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 1px 7px;
+  border-radius: 99px;
+  font-weight: 600;
+}
+.rm-saf-finding .rm-saf-fsev.rm-saf-sev-critical,
+.rm-saf-finding .rm-saf-fsev.rm-saf-sev-high { background: var(--rm-bad-subtle); color: var(--rm-bad); }
+.rm-saf-finding .rm-saf-fsev.rm-saf-sev-medium { background: var(--rm-warn-subtle); color: var(--rm-warn); }
+.rm-saf-finding .rm-saf-fsev.rm-saf-sev-low,
+.rm-saf-finding .rm-saf-fsev.rm-saf-sev-info { background: var(--rm-surface-3); color: var(--rm-ink-3); }
+.rm-saf-finding .rm-saf-fmsg { font-size: 12.5px; color: var(--rm-ink-2); line-height: 1.45; }
+.rm-saf-finding .rm-saf-fmeta { font-size: 11px; color: var(--rm-ink-3); font-family: var(--rm-font-mono); margin-top: 5px; }
+
+.rm-saf-privacy {
+  font-size: 11.5px;
+  color: var(--rm-ink-3);
+  line-height: 1.55;
+  padding: 9px 12px;
+  background: var(--rm-surface-2);
+  border-left: 3px solid var(--rm-accent);
+  border-radius: 0 6px 6px 0;
+  margin-top: 14px;
+}
+.rm-saf-privacy b {
+  color: var(--rm-ink-2);
+  font-weight: 600;
+  display: block;
+  margin-bottom: 3px;
+  font-size: 10.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+/* ---- audit drawer timeline (spec §6.9) ---- */
+.rm-saf-audit { display: flex; flex-direction: column; gap: 8px; }
+.rm-saf-audit-row {
+  padding: 9px 12px;
+  border: 1px solid var(--rm-border-2);
+  border-radius: 7px;
+  background: var(--rm-surface);
+}
+.rm-saf-audit-row .rm-saf-ahead { display: flex; align-items: center; gap: 8px; font-size: 12.5px; margin-bottom: 3px; }
+.rm-saf-audit-row .rm-saf-averb { font-weight: 600; letter-spacing: 0.03em; }
+.rm-saf-audit-row .rm-saf-averb.rm-saf-verb-created { color: var(--rm-good); }
+.rm-saf-audit-row .rm-saf-averb.rm-saf-verb-updated { color: var(--rm-ink-2); }
+.rm-saf-audit-row .rm-saf-averb.rm-saf-verb-deleted { color: var(--rm-bad); }
+.rm-saf-audit-row .rm-saf-actor { font-size: 11.5px; color: var(--rm-ink-3); }
+.rm-saf-audit-row .rm-saf-ats { font-size: 11px; color: var(--rm-ink-3); margin-left: auto; font-variant-numeric: tabular-nums; }
+.rm-saf-audit-row .rm-saf-achange { font-size: 11.5px; color: var(--rm-ink-2); margin-top: 5px; padding-left: 8px; border-left: 2px solid var(--rm-border-2); }

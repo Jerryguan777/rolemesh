@@ -1,61 +1,93 @@
-import { LitElement, html, nothing } from 'lit';
+// Safety rules page (#/manage/safety) — spec §6.
+//
+// Lists the organization's safety rules in two tiers (spec §6.2): platform
+// defaults (PR #49 — cross-tenant, read-only, audit-only) on top, then the
+// organization's own rules. Each row reuses the approval-policy card chrome
+// (priority badge / sentence / always-visible toggle / hover actions) plus
+// safety-specific chips (slow / scope / action pill). Create/edit/duplicate
+// go through <rm-safety-rule-dialog>; delete through <rm-confirm-dialog>; a
+// per-rule change history opens in an audit drawer.
+//
+// Reads go through the typed v1 ApiClient. Writes (toggle / delete) stay on
+// safety-admin-client because safety-rule mutation is admin-privileged
+// (design §3 Phase 4); this file is on the lint:no-admin-chat allowlist.
+
+import { LitElement, html, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
-import {
-  getApiClient,
-  type SafetyCheck,
-  type SafetyRule,
-  type SafetyRuleAuditEntry,
-  type SafetyStage,
+import { unsafeHTML } from 'lit/directives/unsafe-html.js';
+
+import { getApiClient } from '../api/client.js';
+import type {
+  SafetyCheck,
+  SafetyRule,
+  SafetyRuleAuditEntry,
 } from '../api/client.js';
 import {
-  createRule,
   deleteRule,
   listCoworkers,
   updateRule,
   type CoworkerSummary,
 } from '../services/safety-admin-client.js';
+import './dialog.js';
+import './confirm-dialog.js';
+import './safety-rule-dialog.js';
+import { iconCopy, iconPencil, iconTrash } from './icons.js';
+import {
+  checkLabel,
+  effectiveAction,
+  safActionPillClass,
+  safSentence,
+} from './safety-catalog.js';
 
-type DraftRule = {
-  stage: SafetyStage | '';
-  check_id: string;
-  coworker_id: string | null;
-  config: string; // JSON string being edited
-  priority: number;
-  enabled: boolean;
-  description: string;
-};
+/** Priority badge tint — mirrors approval policies (≥10 amber, 0 muted). */
+export function priorityBadgeClass(priority: number): string {
+  if (priority >= 10) return 'rm-pol-pri--hi';
+  if (priority === 0) return 'rm-pol-pri--zero';
+  return '';
+}
 
-const EMPTY_DRAFT: DraftRule = {
-  stage: '',
-  check_id: '',
-  coworker_id: null,
-  config: '{}',
-  priority: 100,
-  enabled: true,
-  description: '',
-};
+/** Sort within a tier: priority desc, then newest first on ties (§6.6). */
+export function sortRules(rows: SafetyRule[]): SafetyRule[] {
+  return [...rows].sort(
+    (a, b) =>
+      b.priority - a.priority ||
+      Date.parse(b.created_at) - Date.parse(a.created_at),
+  );
+}
 
-// Full action set, in the order the picker lists them. Whether each is
-// offered for a given (check, stage) comes from the check's
-// server-driven ``supported_actions`` — we never hardcode that here.
-const ALL_ACTIONS = [
-  'block',
-  'redact',
-  'warn',
-  'allow',
-  'require_approval',
-] as const;
+/** Human one-line summary of an audit entry (§6.9). The wire ships
+ *  before_state / after_state snapshots (no server summary), so we diff the
+ *  fields an operator cares about. Kept deliberately small + deterministic. */
+export function auditSummary(entry: SafetyRuleAuditEntry): string {
+  if (entry.action === 'created') {
+    const a = entry.after_state ?? {};
+    const check = checkLabel(String(a['check_id'] ?? ''));
+    return `Created — ${check}${a['stage'] ? `, ${String(a['stage'])}` : ''}`;
+  }
+  if (entry.action === 'deleted') return 'Deleted';
+  const before = entry.before_state ?? {};
+  const after = entry.after_state ?? {};
+  const fields = ['priority', 'enabled', 'stage'];
+  const parts: string[] = [];
+  for (const f of fields) {
+    if (JSON.stringify(before[f]) !== JSON.stringify(after[f])) {
+      parts.push(`${f}: ${fmtVal(before[f])} → ${fmtVal(after[f])}`);
+    }
+  }
+  // action_override lives inside config; surface it specifically.
+  const bOv = (before['config'] as Record<string, unknown> | undefined)?.['action_override'];
+  const aOv = (after['config'] as Record<string, unknown> | undefined)?.['action_override'];
+  if (JSON.stringify(bOv) !== JSON.stringify(aOv)) {
+    parts.push(`action: ${fmtVal(bOv ?? 'default')} → ${fmtVal(aOv ?? 'default')}`);
+  }
+  return parts.length ? parts.join('; ') : 'Configuration updated';
+}
 
-// Why an action is unavailable for a (check, stage), shown as a tooltip
-// on the greyed-out picker option. The server is the source of truth for
-// WHICH are unavailable; these strings only explain the common reasons.
-const UNSUPPORTED_REASON: Record<string, string> = {
-  redact: 'this check cannot rewrite the payload',
-  warn: 'nothing consumes warning context at this stage',
-  require_approval: 'no approval step exists at this stage',
-  block: 'not meaningful for this check at this stage',
-  allow: 'not meaningful for this check at this stage',
-};
+function fmtVal(v: unknown): string {
+  if (v === true) return 'on';
+  if (v === false) return 'off';
+  return String(v);
+}
 
 @customElement('rm-safety-rules-page')
 export class SafetyRulesPage extends LitElement {
@@ -63,13 +95,26 @@ export class SafetyRulesPage extends LitElement {
   @state() private checks: SafetyCheck[] = [];
   @state() private coworkers: CoworkerSummary[] = [];
   @state() private loading = true;
-  @state() private error: string | null = null;
-  @state() private editingId: string | null = null;
-  @state() private draft: DraftRule = { ...EMPTY_DRAFT };
-  @state() private draftMode: 'closed' | 'create' | 'edit' = 'closed';
-  @state() private busy = false;
-  @state() private detailRuleId: string | null = null;
-  @state() private detailAudit: SafetyRuleAuditEntry[] = [];
+  @state() private listError: string | null = null;
+
+  @state() private dialogOpen = false;
+  @state() private editTarget: SafetyRule | null = null;
+  @state() private duplicateSource: SafetyRule | null = null;
+
+  @state() private deleteTarget: SafetyRule | null = null;
+  @state() private deleteInFlight = false;
+
+  @state() private auditTarget: SafetyRule | null = null;
+  @state() private auditEntries: SafetyRuleAuditEntry[] = [];
+  @state() private auditLoading = false;
+
+  @state() private togglingIds: Set<string> = new Set();
+  @state() private toast: string | null = null;
+  @state() private highlightId: string | null = null;
+
+  private readonly api = getApiClient();
+  private toastTimer: number | null = null;
+  private highlightTimer: number | null = null;
 
   protected override createRenderRoot() {
     return this;
@@ -80,32 +125,37 @@ export class SafetyRulesPage extends LitElement {
     void this.refresh();
   }
 
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    if (this.toastTimer) clearTimeout(this.toastTimer);
+    if (this.highlightTimer) clearTimeout(this.highlightTimer);
+  }
+
   private async refresh(): Promise<void> {
     this.loading = true;
-    this.error = null;
+    this.listError = null;
     try {
-      // Reads go through the typed v1 ApiClient; writes (create /
-      // update / delete) keep using safety-admin-client because
-      // safety rule mutation is an admin-only operation per design
-      // §3 Phase 4.
-      const api = getApiClient();
       const [rules, checks, coworkers] = await Promise.all([
-        api.listSafetyRules(),
-        api.listSafetyChecks(),
+        this.api.listSafetyRules(),
+        this.api.listSafetyChecks(),
         listCoworkers(),
       ]);
       this.rules = rules;
       this.checks = checks;
       this.coworkers = coworkers;
     } catch (err) {
-      this.error = err instanceof Error ? err.message : String(err);
+      this.listError = this.errMessage(err);
     } finally {
       this.loading = false;
     }
   }
 
-  private coworkerName(id: string | null): string {
-    if (!id) return '(tenant-wide)';
+  private errMessage(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
+  }
+
+  private coworkerName(id: string | null | undefined): string | null {
+    if (!id) return null;
     const cw = this.coworkers.find((c) => c.id === id);
     return cw ? cw.name : id.slice(0, 8);
   }
@@ -114,551 +164,491 @@ export class SafetyRulesPage extends LitElement {
     return this.checks.find((c) => c.id === id) ?? null;
   }
 
-  // -- Action matrix helpers (server-driven; see SafetyCheck Protocol) --
+  private isPlatform(r: SafetyRule): boolean {
+    return r.source === 'platform';
+  }
 
-  // True only when the config textarea holds a JSON object — the
-  // override picker writes into it, so we refuse to touch un-parseable
-  // JSON rather than clobber the operator's in-progress edit.
-  private configIsObject(): boolean {
+  // ---- dialog flows ----
+
+  private openCreate = (): void => {
+    this.editTarget = null;
+    this.duplicateSource = null;
+    this.dialogOpen = true;
+  };
+
+  private openEdit(r: SafetyRule): void {
+    if (this.isPlatform(r)) return;
+    this.editTarget = r;
+    this.duplicateSource = null;
+    this.dialogOpen = true;
+  }
+
+  private openDuplicate(r: SafetyRule): void {
+    this.editTarget = null;
+    this.duplicateSource = r;
+    this.dialogOpen = true;
+  }
+
+  private closeDialog = (): void => {
+    this.dialogOpen = false;
+    this.editTarget = null;
+    this.duplicateSource = null;
+  };
+
+  // Edit-dialog "duplicate this rule" link (§6.11.3 — the path to move scope).
+  private onDuplicateFromEdit = (e: CustomEvent<{ id: string }>): void => {
+    const src = this.rules.find((r) => r.id === e.detail.id) ?? null;
+    this.dialogOpen = false;
+    this.editTarget = null;
+    // Reopen as duplicate on the next frame so the dialog re-seeds cleanly.
+    void this.updateComplete.then(() => {
+      this.duplicateSource = src;
+      this.dialogOpen = true;
+    });
+  };
+
+  private async onSaved(id: string): Promise<void> {
+    await this.refresh();
+    this.pulse(id);
+  }
+
+  private pulse(id: string): void {
+    this.highlightId = id;
+    if (this.highlightTimer) clearTimeout(this.highlightTimer);
+    void this.updateComplete.then(() => {
+      this.querySelector(`[data-rule-id="${id}"]`)?.scrollIntoView({
+        block: 'center',
+        behavior: 'smooth',
+      });
+    });
+    this.highlightTimer = window.setTimeout(() => {
+      this.highlightId = null;
+    }, 1800);
+  }
+
+  // ---- toggle (optimistic) ----
+
+  private async toggleEnabled(r: SafetyRule): Promise<void> {
+    if (this.isPlatform(r) || this.togglingIds.has(r.id)) return;
+    const next = !r.enabled;
+    this.rules = this.rules.map((x) =>
+      x.id === r.id ? { ...x, enabled: next } : x,
+    );
+    this.togglingIds = new Set(this.togglingIds).add(r.id);
     try {
-      const o = JSON.parse(this.draft.config || '{}');
-      return typeof o === 'object' && o !== null && !Array.isArray(o);
+      await updateRule(r.id, { enabled: next });
     } catch {
-      return false;
-    }
-  }
-
-  private currentActionOverride(): string {
-    try {
-      const o = JSON.parse(this.draft.config || '{}');
-      const v = (o as Record<string, unknown>)?.action_override;
-      return typeof v === 'string' ? v : '';
-    } catch {
-      return '';
-    }
-  }
-
-  // Patch (or clear, when action === '') the ``action_override`` key in
-  // the draft config JSON, keeping the textarea authoritative.
-  private setActionOverride(action: string): void {
-    let obj: Record<string, unknown> = {};
-    try {
-      const parsed = JSON.parse(this.draft.config || '{}');
-      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-        obj = parsed as Record<string, unknown>;
-      }
-    } catch {
-      obj = {};
-    }
-    if (action === '') delete obj['action_override'];
-    else obj['action_override'] = action;
-    this.draft = { ...this.draft, config: JSON.stringify(obj, null, 2) };
-  }
-
-  // The action a hit defaults to for the selected stage, or null when
-  // the stage is not declared by the check.
-  private naturalAction(meta: SafetyCheck, stage: SafetyStage): string | null {
-    const na = meta.natural_actions as
-      | Record<string, string | undefined>
-      | undefined;
-    return na?.[stage] ?? null;
-  }
-
-  private supportedActions(meta: SafetyCheck, stage: SafetyStage): string[] {
-    const sa = meta.supported_actions as
-      | Record<string, string[] | undefined>
-      | undefined;
-    return sa?.[stage] ?? [];
-  }
-
-  private openCreate(): void {
-    this.draft = { ...EMPTY_DRAFT };
-    this.draftMode = 'create';
-    this.editingId = null;
-  }
-
-  private openEdit(rule: SafetyRule): void {
-    this.draft = {
-      stage: rule.stage,
-      check_id: rule.check_id,
-      // v1 SafetyRule.coworker_id is `string | null | undefined`
-      // (codegen surfaces "optional + nullable" as both). Collapse
-      // to a strict `string | null` for the draft state so the
-      // <select> never receives `undefined` (DOM coerces to "").
-      coworker_id: rule.coworker_id ?? null,
-      config: JSON.stringify(rule.config ?? {}, null, 2),
-      priority: rule.priority,
-      enabled: rule.enabled,
-      description: rule.description,
-    };
-    this.draftMode = 'edit';
-    this.editingId = rule.id;
-  }
-
-  private closeDraft(): void {
-    this.draftMode = 'closed';
-    this.editingId = null;
-    this.error = null;
-  }
-
-  private async submitDraft(): Promise<void> {
-    this.busy = true;
-    this.error = null;
-    try {
-      let config: Record<string, unknown>;
-      try {
-        config = JSON.parse(this.draft.config || '{}');
-      } catch (err) {
-        throw new Error(
-          `config must be valid JSON: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-      if (!this.draft.stage) throw new Error('stage is required');
-      if (!this.draft.check_id) throw new Error('check_id is required');
-
-      if (this.draftMode === 'create') {
-        await createRule({
-          stage: this.draft.stage,
-          check_id: this.draft.check_id,
-          coworker_id: this.draft.coworker_id,
-          config,
-          priority: this.draft.priority,
-          enabled: this.draft.enabled,
-          description: this.draft.description,
-        });
-      } else if (this.draftMode === 'edit' && this.editingId) {
-        await updateRule(this.editingId, {
-          stage: this.draft.stage,
-          check_id: this.draft.check_id,
-          config,
-          priority: this.draft.priority,
-          enabled: this.draft.enabled,
-          description: this.draft.description,
-        });
-      }
-      this.closeDraft();
-      await this.refresh();
-    } catch (err) {
-      this.error = err instanceof Error ? err.message : String(err);
+      this.rules = this.rules.map((x) =>
+        x.id === r.id ? { ...x, enabled: r.enabled } : x,
+      );
+      this.showToast('Couldn’t update — try again');
     } finally {
-      this.busy = false;
+      const ids = new Set(this.togglingIds);
+      ids.delete(r.id);
+      this.togglingIds = ids;
     }
   }
 
-  private async toggleEnabled(rule: SafetyRule): Promise<void> {
-    this.busy = true;
-    this.error = null;
+  // ---- delete ----
+
+  private askDelete(r: SafetyRule): void {
+    if (this.isPlatform(r)) return;
+    this.deleteTarget = r;
+  }
+
+  private cancelDelete = (): void => {
+    if (this.deleteInFlight) return;
+    this.deleteTarget = null;
+  };
+
+  private async performDelete(): Promise<void> {
+    const r = this.deleteTarget;
+    if (!r || this.deleteInFlight) return;
+    this.deleteInFlight = true;
     try {
-      await updateRule(rule.id, { enabled: !rule.enabled });
-      await this.refresh();
+      await deleteRule(r.id);
+      this.rules = this.rules.filter((x) => x.id !== r.id);
+      this.deleteTarget = null;
     } catch (err) {
-      this.error = err instanceof Error ? err.message : String(err);
+      this.deleteTarget = null;
+      this.showToast(this.errMessage(err));
     } finally {
-      this.busy = false;
+      this.deleteInFlight = false;
     }
   }
 
-  private async removeRule(rule: SafetyRule): Promise<void> {
-    if (!confirm(`Delete rule for ${rule.check_id} at ${rule.stage}?`)) return;
-    this.busy = true;
-    this.error = null;
+  // ---- audit drawer ----
+
+  private async openAudit(r: SafetyRule): Promise<void> {
+    this.auditTarget = r;
+    this.auditEntries = [];
+    this.auditLoading = true;
     try {
-      await deleteRule(rule.id);
-      await this.refresh();
+      const entries = await this.api.listSafetyRuleAudit(r.id);
+      // Reverse-chronological (§6.9).
+      this.auditEntries = [...entries].sort(
+        (a, b) => Date.parse(b.created_at) - Date.parse(a.created_at),
+      );
     } catch (err) {
-      this.error = err instanceof Error ? err.message : String(err);
+      this.showToast(this.errMessage(err));
     } finally {
-      this.busy = false;
+      this.auditLoading = false;
     }
   }
 
-  private async openDetail(rule: SafetyRule): Promise<void> {
-    this.detailRuleId = rule.id;
-    this.detailAudit = [];
-    try {
-      // tenant_id flows from the bearer token server-side (v1
-      // surface) — no admin /tenant round-trip needed.
-      this.detailAudit = await getApiClient().listSafetyRuleAudit(rule.id);
-    } catch (err) {
-      this.error = err instanceof Error ? err.message : String(err);
-    }
+  private closeAudit = (): void => {
+    this.auditTarget = null;
+    this.auditEntries = [];
+  };
+
+  // ---- toast ----
+
+  private showToast(msg: string): void {
+    this.toast = msg;
+    if (this.toastTimer) clearTimeout(this.toastTimer);
+    this.toastTimer = window.setTimeout(() => {
+      this.toast = null;
+    }, 3200);
   }
 
-  private closeDetail(): void {
-    this.detailRuleId = null;
-    this.detailAudit = [];
-  }
+  // ---- render ----
 
-  // Server-driven action panel: a "defaults to" badge whose wording
-  // depends on action_model, plus an override picker that greys out
-  // actions the check cannot carry out for the selected stage.
-  private renderActionPanel(meta: SafetyCheck | null) {
-    const stage = this.draft.stage;
-    if (!meta || !stage || !meta.stages.includes(stage as SafetyStage)) {
-      return nothing;
-    }
-    const st = stage as SafetyStage;
-    const natural = this.naturalAction(meta, st);
-    const supported = this.supportedActions(meta, st);
-    const model = meta.action_model;
-
-    const badge =
-      model === 'fixed'
-        ? html`This check defaults to:
-            <span class="font-mono font-semibold uppercase"
-              >${natural ?? 'allow'}</span
-            >`
-        : model === 'config_routed'
-          ? html`No fixed default — the action is chosen per-category in
-              the config below; the check is inert until configured.`
-          : html`This check votes
-              <span class="font-mono">allow</span> on a match; the gateway
-              blocks when no rule allows (effective action decided by
-              aggregation).`;
-
-    const override = this.currentActionOverride();
-    const canEdit = this.configIsObject();
-
+  override render(): TemplateResult {
+    const sorted = sortRules(this.rules);
+    const platform = sorted.filter((r) => this.isPlatform(r));
+    const org = sorted.filter((r) => !this.isPlatform(r));
     return html`
-      <div
-        class="col-span-2 text-xs border rounded p-2 bg-surface-2 dark:bg-d-surface-2"
-        data-testid="action-panel"
-      >
-        <div class="mb-2" data-testid="action-badge">${badge}</div>
-        <label class="flex flex-col gap-1">
-          <span class="text-gray-500"
-            >Action override${canEdit
-              ? nothing
-              : html` <span class="text-amber-600"
-                  >(fix config JSON to edit)</span
-                >`}</span
-          >
-          <select
-            class="border rounded px-2 py-1 bg-transparent"
-            data-testid="action-override-select"
-            ?disabled=${!canEdit}
-            .value=${override}
-            @change=${(e: Event) =>
-              this.setActionOverride((e.target as HTMLSelectElement).value)}
-          >
-            <option value="">
-              (use default${natural ? `: ${natural}` : ''})
-            </option>
-            ${ALL_ACTIONS.map((a) => {
-              const ok = supported.includes(a);
-              return html`<option
-                value=${a}
-                ?disabled=${!ok}
-                title=${ok ? '' : (UNSUPPORTED_REASON[a] ?? '')}
-              >
-                ${a}${ok ? '' : ' — unavailable'}
-              </option>`;
-            })}
-          </select>
-        </label>
-      </div>
-    `;
-  }
-
-  private renderDraftForm() {
-    if (this.draftMode === 'closed') return nothing;
-    const meta = this.checkMeta(this.draft.check_id);
-    const supportedStages = meta?.stages ?? [];
-    return html`
-      <div class="border rounded-md p-4 mb-4 bg-surface-1 dark:bg-d-surface-1">
-        <h3 class="font-semibold mb-3">
-          ${this.draftMode === 'create' ? 'New rule' : 'Edit rule'}
-        </h3>
-        <div class="grid grid-cols-2 gap-3">
-          <label class="flex flex-col text-sm">
-            Check
-            <select
-              class="mt-1 border rounded px-2 py-1 bg-transparent"
-              .value=${this.draft.check_id}
-              @change=${(e: Event) => {
-                this.draft = {
-                  ...this.draft,
-                  check_id: (e.target as HTMLSelectElement).value,
-                };
-              }}
-            >
-              <option value="">(select)</option>
-              ${this.checks.map(
-                (c) => html`<option value=${c.id}>${c.id} (${c.cost_class})</option>`,
-              )}
-            </select>
-          </label>
-          <label class="flex flex-col text-sm">
-            Stage
-            <select
-              class="mt-1 border rounded px-2 py-1 bg-transparent"
-              .value=${this.draft.stage}
-              @change=${(e: Event) => {
-                this.draft = {
-                  ...this.draft,
-                  stage: (e.target as HTMLSelectElement).value as SafetyStage,
-                };
-              }}
-            >
-              <option value="">(select)</option>
-              ${supportedStages.map((s) => html`<option value=${s}>${s}</option>`)}
-              ${supportedStages.length === 0
-                ? ['input_prompt', 'pre_tool_call', 'post_tool_result', 'model_output'].map(
-                    (s) => html`<option value=${s}>${s}</option>`,
-                  )
-                : nothing}
-            </select>
-          </label>
-          ${this.renderActionPanel(meta)}
-          <label class="flex flex-col text-sm">
-            Coworker
-            <select
-              class="mt-1 border rounded px-2 py-1 bg-transparent"
-              .value=${this.draft.coworker_id ?? ''}
-              @change=${(e: Event) => {
-                const v = (e.target as HTMLSelectElement).value;
-                this.draft = {
-                  ...this.draft,
-                  coworker_id: v === '' ? null : v,
-                };
-              }}
-              ?disabled=${this.draftMode === 'edit'}
-            >
-              <option value="">(tenant-wide)</option>
-              ${this.coworkers.map(
-                (c) => html`<option value=${c.id}>${c.name}</option>`,
-              )}
-            </select>
-          </label>
-          <label class="flex flex-col text-sm">
-            Priority
-            <input
-              type="number"
-              class="mt-1 border rounded px-2 py-1 bg-transparent"
-              .value=${String(this.draft.priority)}
-              @change=${(e: Event) => {
-                const v = Number((e.target as HTMLInputElement).value);
-                this.draft = { ...this.draft, priority: Number.isFinite(v) ? v : 100 };
-              }}
-            />
-          </label>
-          <label class="flex items-center gap-2 text-sm col-span-2">
-            <input
-              type="checkbox"
-              ?checked=${this.draft.enabled}
-              @change=${(e: Event) => {
-                this.draft = {
-                  ...this.draft,
-                  enabled: (e.target as HTMLInputElement).checked,
-                };
-              }}
-            />
-            enabled
-          </label>
-          <label class="flex flex-col text-sm col-span-2">
-            Description
-            <input
-              type="text"
-              class="mt-1 border rounded px-2 py-1 bg-transparent"
-              .value=${this.draft.description}
-              @input=${(e: Event) => {
-                this.draft = {
-                  ...this.draft,
-                  description: (e.target as HTMLInputElement).value,
-                };
-              }}
-            />
-          </label>
-          <label class="flex flex-col text-sm col-span-2">
-            Config (JSON)
-            <textarea
-              class="mt-1 border rounded px-2 py-1 bg-transparent font-mono text-xs"
-              rows="6"
-              .value=${this.draft.config}
-              @input=${(e: Event) => {
-                this.draft = {
-                  ...this.draft,
-                  config: (e.target as HTMLTextAreaElement).value,
-                };
-              }}
-            ></textarea>
-            ${meta?.config_schema
-              ? html`<details class="text-xs text-gray-500 mt-1">
-                  <summary>schema</summary>
-                  <pre class="overflow-x-auto">${JSON.stringify(meta.config_schema, null, 2)}</pre>
-                </details>`
-              : nothing}
-          </label>
-        </div>
-        ${this.error
-          ? html`<div class="text-red-500 text-sm mt-2">${this.error}</div>`
-          : nothing}
-        <div class="flex justify-end gap-2 mt-3">
-          <button
-            class="px-3 py-1 border rounded text-sm"
-            ?disabled=${this.busy}
-            @click=${this.closeDraft}
-          >
-            Cancel
-          </button>
-          <button
-            class="px-3 py-1 bg-blue-600 text-white rounded text-sm"
-            ?disabled=${this.busy}
-            @click=${this.submitDraft}
-          >
-            ${this.busy ? 'Saving…' : 'Save'}
+      <div class="rm-spane">
+        <div class="rm-ch">
+          <h2>Safety rules</h2>
+          <button type="button" class="rm-add" @click=${this.openCreate}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+            New rule
           </button>
         </div>
-      </div>
-    `;
-  }
-
-  private renderDetailModal() {
-    if (!this.detailRuleId) return nothing;
-    return html`
-      <div
-        class="fixed inset-0 bg-black/40 flex items-center justify-center z-50"
-        @click=${this.closeDetail}
-      >
-        <div
-          class="bg-surface-0 dark:bg-d-surface-0 border rounded-md w-[720px] max-w-[95vw] max-h-[80vh] overflow-auto p-4"
-          @click=${(e: Event) => e.stopPropagation()}
-        >
-          <div class="flex justify-between items-center mb-3">
-            <h3 class="font-semibold">Rule audit — ${this.detailRuleId.slice(0, 8)}</h3>
-            <button class="text-sm px-2" @click=${this.closeDetail}>×</button>
-          </div>
-          ${this.detailAudit.length === 0
-            ? html`<div class="text-sm text-gray-500">No audit events.</div>`
-            : html`
-                <table class="w-full text-sm">
-                  <thead>
-                    <tr class="text-left border-b">
-                      <th class="py-1">When</th>
-                      <th>Action</th>
-                      <th>Actor</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    ${this.detailAudit.map(
-                      (e) => html`
-                        <tr class="border-b">
-                          <td class="py-1">
-                            ${new Date(e.created_at).toLocaleString()}
-                          </td>
-                          <td>${e.action}</td>
-                          <td>${e.actor_user_id ?? '(system)'}</td>
-                        </tr>
-                      `,
-                    )}
-                  </tbody>
-                </table>
-              `}
-        </div>
-      </div>
-    `;
-  }
-
-  override render() {
-    return html`
-      <div class="p-6 max-w-5xl mx-auto">
-        <a href="#" class="inline-flex items-center gap-1 text-sm text-gray-500 hover:text-gray-900 dark:hover:text-gray-100 mb-3">
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>
-          Back to chat
-        </a>
-        <div class="flex items-center justify-between mb-4">
-          <h2 class="text-xl font-semibold">Safety rules</h2>
-          <div class="flex gap-2">
-            <button
-              class="px-3 py-1 border rounded text-sm"
-              @click=${() => void this.refresh()}
-              ?disabled=${this.loading}
-            >
-              Refresh
-            </button>
-            <button
-              class="px-3 py-1 bg-blue-600 text-white rounded text-sm"
-              @click=${this.openCreate}
-            >
-              + New rule
-            </button>
-          </div>
-        </div>
-
-        ${this.renderDraftForm()}
+        <p class="rm-sub">
+          Automatic guardrails that scan for personal data, prompt injection,
+          secrets, or untrusted domains. Unlike approval policies these run with
+          no human in the loop — except when a rule's action is set to Approve,
+          which routes to the same approval inbox. See past triggers in the
+          <a href="#/manage/safety-log" class="rm-saf-link"
+            style="color: var(--rm-accent)">Safety log →</a>.
+        </p>
 
         ${this.loading
-          ? html`<div class="text-gray-500">Loading…</div>`
-          : this.error && this.draftMode === 'closed'
-            ? html`<div class="text-red-500">${this.error}</div>`
+          ? html`<div class="rm-banner-loading">Loading…</div>`
+          : this.listError
+            ? html`<div class="rm-banner-err">${this.listError}</div>`
             : this.rules.length === 0
-              ? html`<div class="text-gray-500">
-                  No safety rules configured. Click <strong>+ New rule</strong> to
-                  add one.
-                </div>`
+              ? this.renderEmpty()
               : html`
-                  <table class="w-full text-sm border">
-                    <thead class="bg-surface-1 dark:bg-d-surface-1">
-                      <tr class="text-left">
-                        <th class="p-2">Check</th>
-                        <th>Stage</th>
-                        <th>Scope</th>
-                        <th>Priority</th>
-                        <th>Enabled</th>
-                        <th></th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      ${this.rules.map(
-                        (r) => html`
-                          <tr class="border-t hover:bg-surface-1 dark:hover:bg-d-surface-1">
-                            <td class="p-2 font-mono text-xs">
-                              <div>${r.check_id}</div>
-                              ${r.description
-                                ? html`<div class="text-gray-500 font-sans">
-                                    ${r.description}
-                                  </div>`
-                                : nothing}
-                            </td>
-                            <td>${r.stage}</td>
-                            <td>${this.coworkerName(r.coworker_id ?? null)}</td>
-                            <td>${r.priority}</td>
-                            <td>
-                              <input
-                                type="checkbox"
-                                ?checked=${r.enabled}
-                                ?disabled=${this.busy}
-                                @change=${() => void this.toggleEnabled(r)}
-                              />
-                            </td>
-                            <td class="text-right whitespace-nowrap p-2">
-                              <button
-                                class="text-xs underline mr-2"
-                                @click=${() => void this.openDetail(r)}
-                              >
-                                audit
-                              </button>
-                              <button
-                                class="text-xs underline mr-2"
-                                @click=${() => this.openEdit(r)}
-                              >
-                                edit
-                              </button>
-                              <button
-                                class="text-xs underline text-red-500"
-                                @click=${() => void this.removeRule(r)}
-                              >
-                                delete
-                              </button>
-                            </td>
-                          </tr>
-                        `,
-                      )}
-                    </tbody>
-                  </table>
+                  ${platform.length ? this.renderPlatformBanner() : nothing}
+                  ${platform.map((r) => this.renderCard(r))}
+                  ${platform.length && org.length
+                    ? html`<div class="rm-saf-section-label">
+                        Your organization's rules
+                      </div>`
+                    : nothing}
+                  ${org.map((r) => this.renderCard(r))}
+                  ${this.renderHint()}
                 `}
-        ${this.renderDetailModal()}
+
+        <rm-safety-rule-dialog
+          ?open=${this.dialogOpen}
+          .editing=${this.editTarget}
+          .duplicating=${this.duplicateSource}
+          .checks=${this.checks}
+          .coworkers=${this.coworkers}
+          @close=${this.closeDialog}
+          @safety-rule-saved=${(e: CustomEvent<{ id: string }>) =>
+            void this.onSaved(e.detail.id)}
+          @safety-rule-duplicate-from-edit=${this.onDuplicateFromEdit}
+        ></rm-safety-rule-dialog>
+
+        ${this.renderDeleteDialog()}
+        ${this.renderAuditDrawer()}
+
+        ${this.toast
+          ? html`<div class="rm-toast" role="status" data-testid="saf-toast">
+              ${this.toast}
+            </div>`
+          : nothing}
       </div>
     `;
   }
+
+  private renderPlatformBanner(): TemplateResult {
+    return html`
+      <div class="rm-saf-platform-banner" data-testid="saf-platform-banner">
+        ${iconShieldCheck()}
+        <span>
+          <b>Platform defaults</b> — these rules apply to every organization and
+          can't be edited or disabled here. Contact the platform admin to
+          change.
+        </span>
+      </div>
+    `;
+  }
+
+  private renderHint(): TemplateResult {
+    return html`
+      <p class="rm-pol-hint" data-testid="saf-hint">
+        Higher-priority rules run first; ties go to the newest. Changes apply to
+        new agent tasks — already-running tasks finish with the current rules.
+      </p>
+    `;
+  }
+
+  private renderEmpty(): TemplateResult {
+    return html`
+      <div class="rm-pol-empty" data-testid="saf-empty">
+        <div class="rm-pol-empty-icon" style="color: var(--rm-accent)">
+          ${iconShieldCheck(22)}
+        </div>
+        <p>No safety rules yet.</p>
+        <p class="rm-pol-empty-sub">
+          Coworkers run with no automatic guardrails. Create your first rule to
+          scan for personal data, prompt injection, or untrusted domains.
+        </p>
+        <button type="button" @click=${this.openCreate}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2.2" aria-hidden="true">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+          Create your first rule
+        </button>
+      </div>
+    `;
+  }
+
+  private renderCard(r: SafetyRule): TemplateResult {
+    const platform = this.isPlatform(r);
+    const meta = this.checkMeta(r.check_id);
+    const cwName = this.coworkerName(r.coworker_id);
+    const dim = r.enabled ? '' : ' rm-card--dim';
+    const hi = this.highlightId === r.id ? ' rm-card--highlight' : '';
+    const tier = platform ? ' rm-card--platform' : '';
+    const action = effectiveAction(
+      { check_id: r.check_id, stage: r.stage, config: (r.config ?? {}) as Record<string, unknown> },
+      meta,
+    );
+    const slow = meta?.cost_class === 'slow';
+    const toggling = this.togglingIds.has(r.id);
+    return html`
+      <div
+        class="rm-card${dim}${hi}${tier}"
+        data-rule-id=${r.id}
+        data-testid="saf-row"
+      >
+        <span
+          class="rm-pol-pri ${priorityBadgeClass(r.priority)}"
+          data-testid="saf-priority"
+        >priority ${r.priority}</span>
+        <span class="rm-mn">
+          <b>${checkLabel(r.check_id)}</b>
+          <span class="rm-pol-sent" data-testid="saf-sentence">
+            ${unsafeHTML(
+              safSentence(
+                { check_id: r.check_id, stage: r.stage, config: (r.config ?? {}) as Record<string, unknown> },
+                meta,
+                cwName,
+              ),
+            )}
+          </span>
+        </span>
+        ${slow ? html`<span class="rm-saf-slowchip">slow</span>` : nothing}
+        ${cwName ? html`<span class="rm-saf-scope">${cwName}</span>` : nothing}
+        ${action
+          ? html`<span class="rm-pill ${safActionPillClass(action)}"
+              data-testid="saf-action-pill">${action}</span>`
+          : nothing}
+        ${this.renderToggle(r, platform, toggling)}
+        ${this.renderRowActs(r, platform)}
+      </div>
+    `;
+  }
+
+  private renderToggle(
+    r: SafetyRule,
+    platform: boolean,
+    toggling: boolean,
+  ): TemplateResult {
+    if (platform) {
+      // Fixed-on, click is a no-op (§6.2.1).
+      return html`<span
+        class="rm-pol-toggle rm-pol-toggle--on"
+        style="cursor: default; opacity: 0.7"
+        title="Platform-tier rules are always enabled"
+        data-testid="saf-toggle"
+      ><span>Enabled</span><span class="rm-switch"></span></span>`;
+    }
+    return html`<button
+      type="button"
+      class="rm-pol-toggle ${r.enabled ? 'rm-pol-toggle--on' : ''}"
+      title=${r.enabled ? 'Click to disable' : 'Click to enable'}
+      data-testid="saf-toggle"
+      ?disabled=${toggling}
+      @click=${(e: Event) => {
+        e.stopPropagation();
+        void this.toggleEnabled(r);
+      }}
+    ><span>${r.enabled ? 'Enabled' : 'Disabled'}</span><span class="rm-switch"></span></button>`;
+  }
+
+  private renderRowActs(r: SafetyRule, platform: boolean): TemplateResult {
+    const auditBtn = html`<button
+      type="button"
+      class="rm-iconbtn"
+      title="Change history"
+      data-testid="saf-audit"
+      @click=${(e: Event) => {
+        e.stopPropagation();
+        void this.openAudit(r);
+      }}
+    >${iconClock(15)}</button>`;
+    if (platform) {
+      // Platform rules: audit only (no edit / duplicate / delete) — §6.2.2.
+      return html`<span class="rm-row-acts" style="opacity: 1">${auditBtn}</span>`;
+    }
+    return html`
+      <span class="rm-row-acts">
+        <button type="button" class="rm-iconbtn" title="Edit rule"
+          data-testid="saf-edit"
+          @click=${(e: Event) => {
+            e.stopPropagation();
+            this.openEdit(r);
+          }}
+        >${iconPencil(15)}</button>
+        <button type="button" class="rm-iconbtn"
+          title="Duplicate — useful for moving scope or branching config"
+          data-testid="saf-duplicate"
+          @click=${(e: Event) => {
+            e.stopPropagation();
+            this.openDuplicate(r);
+          }}
+        >${iconCopy(15)}</button>
+        ${auditBtn}
+        <button type="button" class="rm-iconbtn rm-iconbtn--danger" title="Delete rule"
+          data-testid="saf-delete"
+          @click=${(e: Event) => {
+            e.stopPropagation();
+            this.askDelete(r);
+          }}
+        >${iconTrash(15)}</button>
+      </span>
+    `;
+  }
+
+  private renderDeleteDialog(): TemplateResult {
+    const r = this.deleteTarget;
+    const meta = r ? this.checkMeta(r.check_id) : null;
+    const sentence = r
+      ? safSentence(
+          { check_id: r.check_id, stage: r.stage, config: (r.config ?? {}) as Record<string, unknown> },
+          meta,
+          this.coworkerName(r.coworker_id),
+        )
+      : '';
+    return html`
+      <rm-confirm-dialog
+        ?open=${r !== null}
+        title="Delete safety rule?"
+        tone="danger"
+        confirm-label="Delete rule"
+        busy-label="Deleting…"
+        ?busy=${this.deleteInFlight}
+        @confirm=${() => void this.performDelete()}
+        @cancel=${this.cancelDelete}
+        @close=${this.cancelDelete}
+      >
+        ${r
+          ? html`<p>
+                You're about to delete the rule
+                <b>${checkLabel(r.check_id)}</b> —
+                ${unsafeHTML(sentence)}
+              </p>
+              <p>
+                After deletion, this check stops running on new agent tasks.
+                Tasks already in progress keep using this rule until they
+                finish, then move on.
+              </p>
+              <p>
+                Past safety log entries are kept. The change history for this
+                rule is also kept — you can review it later if there's ever an
+                audit.
+              </p>`
+          : nothing}
+      </rm-confirm-dialog>
+    `;
+  }
+
+  private renderAuditDrawer(): TemplateResult {
+    const r = this.auditTarget;
+    return html`
+      <rm-dialog
+        ?open=${r !== null}
+        title="Rule history"
+        width="520px"
+        @close=${this.closeAudit}
+      >
+        ${r
+          ? html`<p class="text-[12.5px] text-ink-3 dark:text-d-ink-3 mb-3">
+              ${checkLabel(r.check_id)}
+            </p>`
+          : nothing}
+        ${this.auditLoading
+          ? html`<div class="rm-banner-loading">Loading…</div>`
+          : this.auditEntries.length === 0
+            ? html`<div class="rm-banner-loading" data-testid="saf-audit-empty">
+                No change history yet.
+              </div>`
+            : html`<div class="rm-saf-audit" data-testid="saf-audit-list">
+                ${this.auditEntries.map((e) => this.renderAuditRow(e))}
+              </div>`}
+        <div slot="footer" style="display: flex; justify-content: flex-end">
+          <button type="button" class="rm-btn rm-btn--secondary" @click=${this.closeAudit}>
+            Close
+          </button>
+        </div>
+      </rm-dialog>
+    `;
+  }
+
+  private renderAuditRow(e: SafetyRuleAuditEntry): TemplateResult {
+    const verb = e.action.toUpperCase();
+    return html`
+      <div class="rm-saf-audit-row">
+        <div class="rm-saf-ahead">
+          <span class="rm-saf-averb rm-saf-verb-${e.action}">${verb}</span>
+          <span class="rm-saf-actor"
+            >by ${e.actor_user_id ?? 'the system'}</span
+          >
+          <span class="rm-saf-ats">${new Date(e.created_at).toLocaleString()}</span>
+        </div>
+        <div class="rm-saf-achange">${auditSummary(e)}</div>
+      </div>
+    `;
+  }
+}
+
+// History/clock icon — no iconClock in icons.ts, so inline (matches the
+// stroke style of the shared icon set).
+function iconClock(size = 15): TemplateResult {
+  return html`<svg width=${size} height=${size} viewBox="0 0 24 24" fill="none"
+    stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+    <circle cx="12" cy="12" r="10" />
+    <path d="M12 6v6l4 2" />
+  </svg>`;
+}
+
+// Shield-with-check — platform banner + empty-state glyph.
+function iconShieldCheck(size = 14): TemplateResult {
+  return html`<svg width=${size} height=${size} viewBox="0 0 24 24" fill="none"
+    stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+    <path d="M9 12l2 2 4-4" />
+  </svg>`;
 }
