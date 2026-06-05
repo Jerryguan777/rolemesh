@@ -791,10 +791,88 @@ export class SafetyRuleDialog extends LitElement {
     `;
   }
 
+  // Postel's-Law normalizer: strip scheme + trailing path, lowercase.
+  // Truly-invalid lines (illegal chars) are left as-is so schema validation
+  // can surface a precise error rather than silently mangling them.
+  private _normalizeDomainLine(raw: string): string {
+    let s = raw.trim().toLowerCase();
+    s = s.replace(/^https?:\/\//, '');
+    const slash = s.indexOf('/');
+    if (slash !== -1) s = s.slice(0, slash);
+    return s;
+  }
+
+  // onBlur: normalize every non-empty line in the textarea and rewrite it.
+  private _onHostTextareaBlur(e: Event, configKey: string): void {
+    const ta = e.target as HTMLTextAreaElement;
+    const lines = ta.value
+      .split('\n')
+      .map((l) => this._normalizeDomainLine(l))
+      .filter(Boolean);
+    ta.value = lines.join('\n');
+    this.config = { ...this.config, [configKey]: lines };
+  }
+
   private renderHostList(): TemplateResult {
-    // domain_allowlist backend config key is `allowed_hosts` (DomainAllowlistConfig),
-    // not `hosts`. This was the 400 "extra_forbidden / missing allowed_hosts" bug.
-    const hosts = ((this.config['allowed_hosts'] as string[]) ?? []).join('\n');
+    const isEgress = this.checkId === 'egress.domain_rule';
+    // egress.domain_rule → domain_patterns + optional ports (EgressDomainRuleConfig).
+    // domain_allowlist  → allowed_hosts (DomainAllowlistConfig).
+    const configKey = isEgress ? 'domain_patterns' : 'allowed_hosts';
+    const hosts = ((this.config[configKey] as string[]) ?? []).join('\n');
+
+    if (isEgress) {
+      const portsRaw = ((this.config['ports'] as number[]) ?? []).join(', ');
+      return html`
+        <label class="block text-[12.5px] font-medium mb-1">
+          Allowed domains
+          <span class="rm-saf-lblnote">one per line · wildcards like *.stripe.com · we'll clean URLs on save</span>
+        </label>
+        <textarea
+          class="${INPUT_CLASS} font-mono text-[12.5px]"
+          style="min-height:80px"
+          data-testid="saf-hosts"
+          placeholder="api.stripe.com&#10;*.internal.acme.com"
+          .value=${hosts}
+          @input=${(e: Event) => {
+            const lines = (e.target as HTMLTextAreaElement).value
+              .split('\n')
+              .map((s) => s.trim())
+              .filter(Boolean);
+            this.config = { ...this.config, domain_patterns: lines };
+          }}
+          @blur=${(e: Event) => this._onHostTextareaBlur(e, 'domain_patterns')}
+        ></textarea>
+        <label class="block text-[12.5px] font-medium mt-2 mb-1">
+          Ports
+          <span class="rm-saf-lblnote">optional · comma-separated · leave blank for any port</span>
+        </label>
+        <input
+          type="text"
+          class="${INPUT_CLASS}"
+          data-testid="saf-egress-ports"
+          placeholder="443, 8443"
+          .value=${portsRaw}
+          @input=${(e: Event) => {
+            const raw = (e.target as HTMLInputElement).value;
+            const parsed = raw
+              .split(',')
+              .map((s) => parseInt(s.trim(), 10))
+              .filter((n) => !Number.isNaN(n) && n > 0 && n <= 65535);
+            const next = { ...this.config };
+            if (parsed.length) next['ports'] = parsed;
+            else delete next['ports'];
+            this.config = next;
+          }}
+        />
+        <p class="text-[11.5px] text-ink-3 dark:text-d-ink-3 mt-2 leading-snug">
+          The coworker can only reach these domains. Any other outbound request
+          is blocked. <code>*.acme.com</code> matches subdomains but not
+          <code>acme.com</code> itself.
+        </p>
+      `;
+    }
+
+    // domain_allowlist
     return html`
       <label class="block text-[12.5px] font-medium mb-1">
         Allowed hosts
@@ -808,11 +886,12 @@ export class SafetyRuleDialog extends LitElement {
         .value=${hosts}
         @input=${(e: Event) => {
           const lines = (e.target as HTMLTextAreaElement).value
-            .split(/\s+/)
+            .split('\n')
             .map((s) => s.trim())
             .filter(Boolean);
           this.config = { ...this.config, allowed_hosts: lines };
         }}
+        @blur=${(e: Event) => this._onHostTextareaBlur(e, 'allowed_hosts')}
       ></textarea>
       <p class="text-[11.5px] text-ink-3 dark:text-d-ink-3 mt-2 leading-snug">
         The coworker can only reach these hosts. Any other outbound request is

@@ -219,6 +219,28 @@ describe('safWhatPhrase', () => {
     );
     expect(safWhatPhrase('domain_allowlist', { allowed_hosts: ['a.com'] })).toBe('allow only 1 host');
   });
+
+  // G1/G2 fix: egress.domain_rule now uses domain_patterns (list), not the
+  // pre-PR-#55 singular domain_pattern (string).
+  it('counts domain_patterns for egress.domain_rule (post-PR-#55 shape)', () => {
+    expect(
+      safWhatPhrase('egress.domain_rule', { domain_patterns: ['api.stripe.com', '*.acme.com'] }),
+    ).toBe('allow 2 domains');
+    expect(
+      safWhatPhrase('egress.domain_rule', { domain_patterns: ['api.stripe.com'] }),
+    ).toBe('allow 1 domain');
+  });
+
+  it('falls back gracefully for egress.domain_rule with empty or missing domain_patterns', () => {
+    expect(safWhatPhrase('egress.domain_rule', {})).toBe('allow listed domains');
+    expect(safWhatPhrase('egress.domain_rule', { domain_patterns: [] })).toBe('allow listed domains');
+  });
+
+  it('ignores the old singular domain_pattern key for egress.domain_rule', () => {
+    // Pre-PR-#55 shape — must NOT be read anymore.
+    const phrase = safWhatPhrase('egress.domain_rule', { domain_pattern: 'api.stripe.com' });
+    expect(phrase).toBe('allow listed domains'); // treated as empty/unknown
+  });
 });
 
 describe('safSentence', () => {

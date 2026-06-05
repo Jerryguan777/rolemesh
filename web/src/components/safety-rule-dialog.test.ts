@@ -63,7 +63,19 @@ const domainAllowlist: SafetyCheck = {
   config_schema: null,
 } as SafetyCheck;
 
-const ALL_CHECKS = [piiRegex, presidio, domainAllowlist];
+const egressDomainRule: SafetyCheck = {
+  id: 'egress.domain_rule',
+  version: '1',
+  stages: ['egress_request'],
+  cost_class: 'cheap',
+  action_model: 'aggregated',
+  natural_actions: { egress_request: 'allow' },
+  supported_actions: { egress_request: ['allow', 'block'] },
+  supported_codes: [],
+  config_schema: null,
+} as SafetyCheck;
+
+const ALL_CHECKS = [piiRegex, presidio, domainAllowlist, egressDomainRule];
 
 function makeRule(over: Partial<SafetyRule> = {}): SafetyRule {
   return {
@@ -260,6 +272,39 @@ describe('SafetyRuleDialog — presidio routing form ⇄ backend format round-tr
     el.remove();
   });
 
+  it('host-list check reads existing allowed_hosts into the textarea on load', async () => {
+    const el = await mount({
+      editing: makeRule({
+        check_id: 'domain_allowlist',
+        stage: 'pre_tool_call',
+        config: { allowed_hosts: ['api.stripe.com', '*.internal.acme.com'] },
+      }),
+    });
+    const ta = $<HTMLTextAreaElement>(el, '[data-testid="saf-hosts"]')!;
+    expect(ta.value).toContain('api.stripe.com');
+    expect(ta.value).toContain('*.internal.acme.com');
+    el.remove();
+  });
+
+  it('host-list check writes allowed_hosts to backend on save', async () => {
+    updateRuleSpy.mockResolvedValue(makeRule());
+    const el = await mount({
+      editing: makeRule({
+        id: 'r7',
+        check_id: 'domain_allowlist',
+        stage: 'pre_tool_call',
+        config: { allowed_hosts: ['api.stripe.com'] },
+      }),
+    });
+    ($(el, '[data-testid="saf-submit"]') as HTMLButtonElement).click();
+    await el.updateComplete;
+    await Promise.resolve();
+    const [, body] = updateRuleSpy.mock.calls[0];
+    expect((body.config as Record<string, unknown>).allowed_hosts).toEqual(['api.stripe.com']);
+    expect((body.config as Record<string, unknown>).domain_patterns).toBeUndefined();
+    el.remove();
+  });
+
   it('clearing a routing dropdown removes entity from the output lists', async () => {
     updateRuleSpy.mockResolvedValue(makeRule());
     const el = await mount({
@@ -284,6 +329,153 @@ describe('SafetyRuleDialog — presidio routing form ⇄ backend format round-tr
     const [, body] = updateRuleSpy.mock.calls[0];
     expect((body.config as Record<string, unknown>).block_codes).toEqual(['US_SSN']);
     expect((body.config as Record<string, unknown>).redact_codes).toEqual([]);
+    el.remove();
+  });
+});
+
+// G1/G2 — egress.domain_rule shared host-list form (spec §6.12.1)
+describe('SafetyRuleDialog — egress.domain_rule host-list form (G1/G2)', () => {
+  it('shows the domain_patterns textarea (not allowed_hosts) for egress', async () => {
+    const el = await mount({
+      duplicating: makeRule({ check_id: 'egress.domain_rule', stage: 'egress_request', config: {} }),
+    });
+    expect($(el, '[data-testid="saf-hosts"]')).not.toBeNull();
+    // ports input is egress-only
+    expect($(el, '[data-testid="saf-egress-ports"]')).not.toBeNull();
+    el.remove();
+  });
+
+  it('does NOT show the ports input for domain_allowlist', async () => {
+    const el = await mount({
+      duplicating: makeRule({ check_id: 'domain_allowlist', stage: 'pre_tool_call', config: {} }),
+    });
+    expect($(el, '[data-testid="saf-egress-ports"]')).toBeNull();
+    el.remove();
+  });
+
+  it('loads existing domain_patterns into the textarea', async () => {
+    const el = await mount({
+      editing: makeRule({
+        check_id: 'egress.domain_rule',
+        stage: 'egress_request',
+        config: { domain_patterns: ['api.stripe.com', '*.slack.com'], ports: [443] },
+      }),
+    });
+    const ta = $<HTMLTextAreaElement>(el, '[data-testid="saf-hosts"]')!;
+    expect(ta.value).toContain('api.stripe.com');
+    expect(ta.value).toContain('*.slack.com');
+    const portsInput = $<HTMLInputElement>(el, '[data-testid="saf-egress-ports"]')!;
+    expect(portsInput.value).toContain('443');
+    el.remove();
+  });
+
+  it('writes domain_patterns (not allowed_hosts) to backend on save', async () => {
+    updateRuleSpy.mockResolvedValue(makeRule());
+    const el = await mount({
+      editing: makeRule({
+        id: 'r8',
+        check_id: 'egress.domain_rule',
+        stage: 'egress_request',
+        config: { domain_patterns: ['api.stripe.com'] },
+      }),
+    });
+    ($(el, '[data-testid="saf-submit"]') as HTMLButtonElement).click();
+    await el.updateComplete;
+    await Promise.resolve();
+    const [, body] = updateRuleSpy.mock.calls[0];
+    expect((body.config as Record<string, unknown>).domain_patterns).toEqual(['api.stripe.com']);
+    expect((body.config as Record<string, unknown>).allowed_hosts).toBeUndefined();
+    expect((body.config as Record<string, unknown>).domain_pattern).toBeUndefined(); // old singular key gone
+    el.remove();
+  });
+
+  it('includes ports in backend config when set', async () => {
+    createRuleSpy.mockResolvedValue(makeRule());
+    const el = await mount({
+      duplicating: makeRule({ check_id: 'egress.domain_rule', stage: 'egress_request', config: {} }),
+    });
+    // Simulate typing domain_patterns
+    const ta = $<HTMLTextAreaElement>(el, '[data-testid="saf-hosts"]')!;
+    ta.value = 'api.stripe.com';
+    ta.dispatchEvent(new Event('input'));
+    // Simulate ports input
+    const portsInput = $<HTMLInputElement>(el, '[data-testid="saf-egress-ports"]')!;
+    portsInput.value = '443, 8443';
+    portsInput.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+    ($(el, '[data-testid="saf-submit"]') as HTMLButtonElement).click();
+    await el.updateComplete;
+    await Promise.resolve();
+    const [body] = createRuleSpy.mock.calls[0];
+    expect((body.config as Record<string, unknown>).ports).toEqual([443, 8443]);
+    el.remove();
+  });
+
+  it('omits ports from backend config when the ports input is empty', async () => {
+    createRuleSpy.mockResolvedValue(makeRule());
+    const el = await mount({
+      duplicating: makeRule({ check_id: 'egress.domain_rule', stage: 'egress_request', config: {} }),
+    });
+    const ta = $<HTMLTextAreaElement>(el, '[data-testid="saf-hosts"]')!;
+    ta.value = 'api.stripe.com';
+    ta.dispatchEvent(new Event('input'));
+    await el.updateComplete;
+    ($(el, '[data-testid="saf-submit"]') as HTMLButtonElement).click();
+    await el.updateComplete;
+    await Promise.resolve();
+    const [body] = createRuleSpy.mock.calls[0];
+    expect((body.config as Record<string, unknown>).ports).toBeUndefined();
+    el.remove();
+  });
+});
+
+// G1/G2 — onBlur domain normalization (spec §6.12.1)
+describe('SafetyRuleDialog — host-list onBlur normalization (G1/G2)', () => {
+  it('strips https:// scheme on blur for egress', async () => {
+    const el = await mount({
+      duplicating: makeRule({ check_id: 'egress.domain_rule', stage: 'egress_request', config: {} }),
+    });
+    const ta = $<HTMLTextAreaElement>(el, '[data-testid="saf-hosts"]')!;
+    ta.value = 'https://www.reddit.com/\nhttps://api.stripe.com/v1/charges';
+    ta.dispatchEvent(new Event('blur'));
+    await el.updateComplete;
+    expect(ta.value).toBe('www.reddit.com\napi.stripe.com');
+    el.remove();
+  });
+
+  it('lowercases domain entries on blur', async () => {
+    const el = await mount({
+      duplicating: makeRule({ check_id: 'domain_allowlist', stage: 'pre_tool_call', config: {} }),
+    });
+    const ta = $<HTMLTextAreaElement>(el, '[data-testid="saf-hosts"]')!;
+    ta.value = 'Www.Stripe.Com\nAPI.Example.COM';
+    ta.dispatchEvent(new Event('blur'));
+    await el.updateComplete;
+    expect(ta.value).toBe('www.stripe.com\napi.example.com');
+    el.remove();
+  });
+
+  it('drops blank lines on blur', async () => {
+    const el = await mount({
+      duplicating: makeRule({ check_id: 'egress.domain_rule', stage: 'egress_request', config: {} }),
+    });
+    const ta = $<HTMLTextAreaElement>(el, '[data-testid="saf-hosts"]')!;
+    ta.value = 'api.stripe.com\n\n\n*.slack.com\n';
+    ta.dispatchEvent(new Event('blur'));
+    await el.updateComplete;
+    expect(ta.value).toBe('api.stripe.com\n*.slack.com');
+    el.remove();
+  });
+
+  it('preserves wildcard prefixes on blur', async () => {
+    const el = await mount({
+      duplicating: makeRule({ check_id: 'domain_allowlist', stage: 'pre_tool_call', config: {} }),
+    });
+    const ta = $<HTMLTextAreaElement>(el, '[data-testid="saf-hosts"]')!;
+    ta.value = '*.stripe.com';
+    ta.dispatchEvent(new Event('blur'));
+    await el.updateComplete;
+    expect(ta.value).toBe('*.stripe.com');
     el.remove();
   });
 });
