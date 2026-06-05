@@ -38,7 +38,7 @@ keeps the architecture clean and free of the old model's assumptions.
 | Decision | Value | Rationale |
 |---|---|---|
 | `APPROVAL_TIMEOUT` default | **300_000 ms (5 min)** | Approver is the creator (self-approval); resolves in seconds–minutes. Short timeout cuts container-hold cost ~4× and keeps a wide margin below the container watchdog floor. |
-| Safety `require_approval` boundary | **Stays a hard block; does NOT enter HITL** | safety verdict `require_approval` is already a block alias on main. HITL serves **only MCP policy** matches. State this explicitly in code/docs so users aren't confused by two gate types. |
+| Safety `require_approval` boundary | **PRE_TOOL_CALL enters HITL; other stages stay a hard block** | The safety->approval bridge (§11.4) turns a PRE_TOOL_CALL `require_approval` verdict into a HITL ticket carrying `triggered_by` provenance, reusing the same block-and-await path as an MCP-policy approval. Every other stage (INPUT_PROMPT / MODEL_OUTPUT / POST_TOOL_RESULT) keeps the hard-block alias — only PRE_TOOL_CALL has both an awaiting agent and an approval surface. |
 
 ## 2. Scope redlines (locked for the whole implementation — do not expand)
 
@@ -280,8 +280,9 @@ row-level `status` transition is idempotent. Both sides converge.
 - **R2 (S3):** restart recovery must rebuild `_GroupState` + replay suspend for
   live containers, not just reload DB rows (see §8).
 - **R3 (resolved):** timeout default = 5 min (§1).
-- **R4 (resolved, document in S4):** safety `require_approval` stays a hard block;
-  HITL only for MCP policy (§1).
+- **R4 (revised — safety->approval bridge):** a PRE_TOOL_CALL safety
+  `require_approval` verdict now enters HITL via the bridge (§11.4), carrying
+  `triggered_by` provenance; other stages stay a hard block (§1).
 - **Operational:** each pending approval holds one container ≤ APPROVAL_TIMEOUT.
   Confirm `MAX_CONCURRENT_CONTAINERS` / `GLOBAL_MAX_CONTAINERS` headroom; accepted
   trade-off, but `log()` it if a cap is hit.
@@ -370,7 +371,8 @@ MVP = S1–S4.
   approval event; persist scheduled-task web notifications (survive disconnect).
 - Dual-channel result: soft (block `reason` → agent context) + hard (orchestrator
   deterministically edits the card to "❌ rejected" / "⏰ expired", no LLM).
-- **R4:** one-line in code/docs — safety `require_approval` stays hard block, not HITL.
+- **R4 (revised):** PRE_TOOL_CALL safety `require_approval` is bridged into HITL
+  (§11.4); other stages stay a hard block.
 - Verify: end-to-end `amount > 100` self-approval on **both** Telegram and Web
   (approve → agent gets result and continues; reject → agent gets block reason +
   user gets hard-channel card); resume ("continue" → retry tool → re-hit hook →
@@ -459,12 +461,35 @@ conversation is not wedged. The re-adoption path is correct for runtimes/configs
 that keep the container alive across a restart. (Tracked as an ops item, not an
 MVP blocker.)
 
-### 11.4 R4 (resolved, S4): two gate types, kept distinct
+### 11.4 R4 (revised): safety->approval bridge at PRE_TOOL_CALL
 
-Safety `require_approval` **stays a hard block and does not enter HITL**. HITL
-gates **only** tenant MCP-tool policy matches (the block-and-await hook). Pinned
-in code at the orchestrator MODEL_OUTPUT verdict branch
-(`verdict.action in ("block", "require_approval")`) and here. Do not merge them.
+The safety pipeline and the HITL approval system are connected at the one stage
+where it is meaningful: **PRE_TOOL_CALL**. There an agent is blocked waiting on a
+tool call (an approval surface) inside its own container, exactly like a business
+MCP-policy match — so a `require_approval` verdict is turned into a real HITL
+ticket instead of a terminal block.
+
+How it works (the container path, `agent_runner.safety.hook_handler`):
+
+- `pipeline_core` stamps the firing rule's provenance (`firing_rule_id` /
+  `firing_check_id`) onto a short-circuit verdict.
+- On a PRE_TOOL_CALL `require_approval` verdict, the handler builds a
+  `triggered_by = {kind: "safety_rule", rule_id, check_id, stage}` object and
+  publishes `approval_request` through the **shared `ApprovalAwaiter`** — the
+  same block-and-await primitive the business hook uses (`policy_id` is null;
+  the provenance rides `triggered_by`). It then blocks on the same
+  `APPROVAL_TIMEOUT` bound as a business approval.
+- The orchestrator persists `triggered_by` on the `approval_requests` row and
+  forwards it on the `event.approval.requested` WS push and the REST projection,
+  so the SPA renders the amber "paused by a safety rule" banner.
+- approve → the handler returns `None` and the tool runs in-band, same turn;
+  reject / timeout / cancel → a block verdict reaches the model.
+
+The other stages stay a hard-block alias for `require_approval`: INPUT_PROMPT and
+POST_TOOL_RESULT have no clean "approve then continue" semantics, and MODEL_OUTPUT
+runs orchestrator-side with no awaiting container. Two gate types still coexist
+(business MCP policy vs safety rule); the SPA tells them apart by the presence of
+`triggered_by`.
 
 ## 12. S5 deliverables (this session)
 

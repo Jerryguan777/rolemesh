@@ -802,3 +802,164 @@ class TestPreCompact:
             )
         )
         assert tool_ctx.events == []
+
+
+class _StubBroker:
+    """Records approval publishes so the bridge tests can assert wire traffic."""
+
+    def __init__(self) -> None:
+        self.published: list[tuple[str, dict[str, Any]]] = []
+
+    async def publish(self, subject: str, payload: dict[str, Any]) -> None:
+        self.published.append((subject, payload))
+
+    def by_leaf(self, leaf: str) -> list[dict[str, Any]]:
+        return [p for s, p in self.published if s.endswith(f".{leaf}")]
+
+    @property
+    def requests(self) -> list[dict[str, Any]]:
+        return self.by_leaf("approval_request")
+
+
+async def _wait_for_requests(broker: _StubBroker, n: int) -> None:
+    for _ in range(10_000):
+        if len(broker.requests) >= n:
+            return
+        await asyncio.sleep(0)
+    raise AssertionError(f"expected {n} approval_request(s), got {len(broker.requests)}")
+
+
+def _approval_stub_registry(check_id: str) -> CheckRegistry:
+    from rolemesh.safety.registry import CheckRegistry
+    from rolemesh.safety.types import Verdict
+
+    class _Stub:
+        id = check_id
+        version = "1"
+        stages = frozenset({Stage.PRE_TOOL_CALL})
+        cost_class = "cheap"
+        supported_codes: frozenset[str] = frozenset({"STUB"})
+        config_model = None
+
+        async def check(self, ctx, config):  # type: ignore[no-untyped-def]
+            return Verdict(action="require_approval", reason="needs a human")
+
+    reg = CheckRegistry()
+    reg.register(_Stub())
+    return reg
+
+
+class TestSafetyApprovalBridge:
+    """PRE_TOOL_CALL require_approval -> HITL ticket (docs/21 §11.4).
+
+    With an ApprovalAwaiter wired, a require_approval verdict publishes an
+    approval_request carrying the safety ``triggered_by`` provenance and blocks
+    until a decision: approve runs the tool in-band (None), reject/timeout
+    blocks. Without an awaiter the verdict stays a terminal block (covered by
+    TestVerdictTranslation).
+    """
+
+    def _handler(self, broker: _StubBroker, *, timeout_ms: int = 300_000):  # type: ignore[no-untyped-def]
+        from agent_runner.approval.awaiter import ApprovalAwaiter
+
+        tool_ctx = _FakeToolCtx()
+        awaiter = ApprovalAwaiter(
+            publish=broker.publish, job_id="job-1", timeout_ms=timeout_ms
+        )
+        rule = make_rule(
+            rule_id="rule-x",
+            check_id="stub.appr.bridge",
+            stage=Stage.PRE_TOOL_CALL,
+            config={},
+        )
+        handler = SafetyHookHandler(
+            rules=[rule],
+            registry=_approval_stub_registry("stub.appr.bridge"),
+            tool_ctx=tool_ctx,  # type: ignore[arg-type]
+            approval_awaiter=awaiter,
+        )
+        return handler, awaiter
+
+    @pytest.mark.asyncio
+    async def test_require_approval_publishes_request_with_triggered_by(self) -> None:
+        broker = _StubBroker()
+        handler, awaiter = self._handler(broker)
+
+        task = asyncio.create_task(
+            handler.on_pre_tool_use(
+                ToolCallEvent(tool_name="Bash", tool_input={"command": "rm -rf x"})
+            )
+        )
+        await _wait_for_requests(broker, 1)
+        req = broker.requests[0]
+        # Provenance is the whole point of the bridge.
+        assert req["triggered_by"] == {
+            "kind": "safety_rule",
+            "rule_id": "rule-x",
+            "check_id": "stub.appr.bridge",
+            "stage": "pre_tool_call",
+        }
+        # Not a business policy; the rationale surfaces the rule's reason.
+        assert req["policy_id"] is None
+        assert req["rationale"] == "needs a human"
+        # A builtin tool has no MCP server; the bare name rides tool_name.
+        assert req["mcp_server_name"] == ""
+        assert req["tool_name"] == "Bash"
+        assert req["params"] == {"command": "rm -rf x"}
+
+        awaiter.resolve_decision(
+            {"request_id": req["request_id"], "decision": "approve"}
+        )
+        assert await task is None  # approved -> tool runs in-band
+
+    @pytest.mark.asyncio
+    async def test_mcp_tool_splits_server_and_tool(self) -> None:
+        broker = _StubBroker()
+        handler, awaiter = self._handler(broker)
+        task = asyncio.create_task(
+            handler.on_pre_tool_use(
+                ToolCallEvent(tool_name="mcp__email__send", tool_input={"to": "x"})
+            )
+        )
+        await _wait_for_requests(broker, 1)
+        req = broker.requests[0]
+        assert req["mcp_server_name"] == "email"
+        assert req["tool_name"] == "send"
+        awaiter.resolve_decision(
+            {"request_id": req["request_id"], "decision": "approve"}
+        )
+        await task
+
+    @pytest.mark.asyncio
+    async def test_reject_blocks_with_reason(self) -> None:
+        broker = _StubBroker()
+        handler, awaiter = self._handler(broker)
+        task = asyncio.create_task(
+            handler.on_pre_tool_use(
+                ToolCallEvent(tool_name="Bash", tool_input={})
+            )
+        )
+        await _wait_for_requests(broker, 1)
+        awaiter.resolve_decision(
+            {
+                "request_id": broker.requests[0]["request_id"],
+                "decision": "reject",
+                "note": "no way",
+            }
+        )
+        verdict = await task
+        assert verdict is not None
+        assert verdict.block is True
+        assert "needs a human" in (verdict.reason or "")
+        assert "no way" in (verdict.reason or "")
+
+    @pytest.mark.asyncio
+    async def test_timeout_blocks(self) -> None:
+        broker = _StubBroker()
+        handler, _awaiter = self._handler(broker, timeout_ms=20)
+        verdict = await handler.on_pre_tool_use(
+            ToolCallEvent(tool_name="Bash", tool_input={})
+        )
+        assert verdict is not None
+        assert verdict.block is True
+        assert "timed out" in (verdict.reason or "")

@@ -42,12 +42,11 @@ never runs, which also makes the ``cancel`` publish best-effort by design.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from agent_runner.approval.awaiter import ApprovalAwaiter
 from agent_runner.approval.policy import (
     ApprovalPolicy,
     evaluate_condition_explained,
@@ -67,14 +66,6 @@ _log = logging.getLogger(__name__)
 
 # Prefix every MCP tool name carries: ``mcp__<server>__<tool>``.
 _MCP_PREFIX = "mcp__"
-
-
-def _utcnow() -> datetime:
-    return datetime.now(tz=UTC)
-
-
-def _new_request_id() -> str:
-    return str(uuid.uuid4())
 
 
 def parse_mcp_tool_name(tool_name: str) -> tuple[str, str] | None:
@@ -117,21 +108,35 @@ class ApprovalHookHandler:
         conversation_id: str | None = None,
         user_id: str | None = None,
         timeout_ms: int,
-        now: Callable[[], datetime] = _utcnow,
-        id_factory: Callable[[], str] = _new_request_id,
+        now: Callable[[], datetime] | None = None,
+        id_factory: Callable[[], str] | None = None,
     ) -> None:
-        self._publish = publish
         self._policies = list(policies)
-        self._job_id = job_id
         self._tenant_id = tenant_id
         self._coworker_id = coworker_id
         self._conversation_id = conversation_id
         self._user_id = user_id
         self._timeout_ms = timeout_ms
-        self._now = now
-        self._id_factory = id_factory
-        # request_id -> the Future a decision (or a timeout cancel) resolves.
-        self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        # The block-and-await machinery (publish request, await decision, emit
+        # cancel) lives in the shared ApprovalAwaiter so the safety bridge can
+        # reuse it; this handler only owns policy matching + the business
+        # request body + the business-flavoured verdict reasons.
+        awaiter_kwargs: dict[str, Any] = {}
+        if now is not None:
+            awaiter_kwargs["now"] = now
+        if id_factory is not None:
+            awaiter_kwargs["id_factory"] = id_factory
+        self._awaiter = ApprovalAwaiter(
+            publish=publish,
+            job_id=job_id,
+            timeout_ms=timeout_ms,
+            **awaiter_kwargs,
+        )
+
+    @property
+    def _pending(self) -> dict[str, Any]:
+        """Expose the awaiter's in-flight map (tests drive it directly)."""
+        return self._awaiter._pending
 
     # -- hook entrypoint ------------------------------------------------
 
@@ -186,14 +191,7 @@ class ApprovalHookHandler:
         (already timed out, already resolved, or never ours) is a no-op and
         returns ``False``. A successfully-routed decision returns ``True``.
         """
-        request_id = payload.get("request_id")
-        if not isinstance(request_id, str):
-            return False
-        fut = self._pending.get(request_id)
-        if fut is None or fut.done():
-            return False
-        fut.set_result(payload)
-        return True
+        return self._awaiter.resolve_decision(payload)
 
     # -- internals ------------------------------------------------------
 
@@ -205,106 +203,41 @@ class ApprovalHookHandler:
         policy: ApprovalPolicy,
         rationale: str | None = None,
     ) -> ToolCallVerdict | None:
-        request_id = self._id_factory()
-        loop = asyncio.get_running_loop()
-        fut: asyncio.Future[dict[str, Any]] = loop.create_future()
-        self._pending[request_id] = fut
-
-        requested_at = self._now()
-        expires_at = requested_at + timedelta(milliseconds=self._timeout_ms)
-
-        approved = False
-        try:
-            await self._publish(
-                self._subject("approval_request"),
-                {
-                    "request_id": request_id,
-                    "tenant_id": self._tenant_id,
-                    "coworker_id": self._coworker_id,
-                    "conversation_id": self._conversation_id,
-                    # Approver = creator; a null user_id is forwarded as-is so
-                    # the orchestrator fails closed on it (§3.1).
-                    "user_id": self._user_id,
-                    "job_id": self._job_id,
-                    "policy_id": policy.id,
-                    "mcp_server_name": server,
-                    "tool_name": tool,
-                    "params": params,
-                    "action_summary": _action_summary(server, tool, params),
-                    # The approval's "why". The agent-supplied rationale is not
-                    # wired yet (always None for a genuine match), but a
-                    # fail-closed match (un-evaluable condition) passes its
-                    # reason here so the user can see why the call was gated.
-                    "rationale": rationale,
-                    "requested_at": requested_at.isoformat(),
-                    "expires_at": expires_at.isoformat(),
-                },
+        decision = await self._awaiter.await_decision(
+            {
+                "tenant_id": self._tenant_id,
+                "coworker_id": self._coworker_id,
+                "conversation_id": self._conversation_id,
+                # Approver = creator; a null user_id is forwarded as-is so the
+                # orchestrator fails closed on it (§3.1).
+                "user_id": self._user_id,
+                "policy_id": policy.id,
+                "mcp_server_name": server,
+                "tool_name": tool,
+                "params": params,
+                "action_summary": _action_summary(server, tool, params),
+                # The approval's "why". The agent-supplied rationale is not
+                # wired yet (always None for a genuine match), but a fail-closed
+                # match (un-evaluable condition) passes its reason here so the
+                # user can see why the call was gated.
+                "rationale": rationale,
+            }
+        )
+        if decision.approved:
+            return None
+        if decision.timed_out:
+            return ToolCallVerdict(
+                block=True,
+                reason=(
+                    f"Approval request for {server}.{tool} timed out after "
+                    f"{self._timeout_ms // 1000}s without a decision; the "
+                    "tool call was not executed."
+                ),
             )
-
-            try:
-                decision = await asyncio.wait_for(
-                    fut, timeout=self._timeout_ms / 1000
-                )
-            except TimeoutError:
-                _log.info(
-                    "approval timed out for %s.%s (request %s)",
-                    server, tool, request_id,
-                )
-                return ToolCallVerdict(
-                    block=True,
-                    reason=(
-                        f"Approval request for {server}.{tool} timed out after "
-                        f"{self._timeout_ms // 1000}s without a decision; the "
-                        "tool call was not executed."
-                    ),
-                )
-
-            if str(decision.get("decision") or "") == "approve":
-                approved = True
-                return None
-
-            # Any non-approve decision is a deny (fail-closed): a reject, or a
-            # malformed decision we cannot read as an explicit approve.
-            note = decision.get("note")
-            reason = f"Tool call {server}.{tool} was rejected by the approver."
-            if isinstance(note, str) and note:
-                reason = f"{reason} Note: {note}"
-            return ToolCallVerdict(block=True, reason=reason)
-        finally:
-            self._pending.pop(request_id, None)
-            # §3.3: cancel covers reject / timeout / Stop / exception — every
-            # terminal path except a clean approve, where the round continues
-            # and the orchestrator already cleared suspend via the decision.
-            if not approved:
-                await self._safe_publish_cancel(request_id)
-
-    async def _safe_publish_cancel(self, request_id: str) -> None:
-        """Publish ``approval_cancel`` best-effort; never mask the caller.
-
-        Deliberately a plain ``await`` (not shielded): the publish must
-        record even when this runs while the task is being cancelled (Stop).
-        A coroutine that completes without suspending runs to completion even
-        under a pending ``CancelledError``; the real NATS publish may instead
-        be interrupted, in which case the orchestrator's expiry watcher (§8
-        layer 3) is the backstop — hence "best-effort". Broker errors are
-        swallowed for the same reason; ``CancelledError`` is allowed to
-        propagate so Stop still unwinds the turn.
-        """
-        try:
-            await self._publish(
-                self._subject("approval_cancel"),
-                {"request_id": request_id},
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 — cancel is best-effort (§8)
-            _log.warning(
-                "approval_cancel publish failed for request %s: %s",
-                request_id, exc,
-            )
-
-    def _subject(self, leaf: str) -> str:
-        return f"agent.{self._job_id}.{leaf}"
+        reason = f"Tool call {server}.{tool} was rejected by the approver."
+        if decision.note:
+            reason = f"{reason} Note: {decision.note}"
+        return ToolCallVerdict(block=True, reason=reason)
 
 
 def _action_summary(server: str, tool: str, params: dict[str, Any]) -> str:

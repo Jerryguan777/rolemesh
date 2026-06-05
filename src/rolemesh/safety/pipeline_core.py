@@ -277,9 +277,17 @@ async def pipeline_run(
         if verdict.action in _SHORT_CIRCUIT_ACTIONS:
             # block + require_approval both exit the loop and both
             # refuse the turn. They are kept as distinct verdict
-            # actions for audit/reporting, but the runtime effect is
-            # identical: the turn is blocked.
-            return replace(verdict, findings=list(all_findings))
+            # actions for audit/reporting; the runtime effect differs
+            # only where a require_approval verdict reaches an approval
+            # surface (see the hook bridge). Stamp the firing rule's
+            # provenance so that bridge can attribute the approval
+            # ticket back to the rule/check that raised it.
+            return replace(
+                verdict,
+                findings=list(all_findings),
+                firing_rule_id=str(rule.get("id") or "") or None,
+                firing_check_id=check_id or None,
+            )
 
         if verdict.action == "redact":
             # Shape already validated above. Swap the ctx payload so

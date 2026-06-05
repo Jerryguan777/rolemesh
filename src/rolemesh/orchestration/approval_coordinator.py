@@ -176,6 +176,10 @@ class ApprovalCoordinator:
         action_summary = payload.get("action_summary")
         raw_rationale = payload.get("rationale")
         rationale = raw_rationale if isinstance(raw_rationale, str) else None
+        # Safety-rule provenance (§3.10): present only when the container's
+        # safety hook raised the request; a business-policy approval omits it.
+        raw_triggered_by = payload.get("triggered_by")
+        triggered_by = raw_triggered_by if isinstance(raw_triggered_by, dict) else None
         key = approval_queue_key(conversation_id, coworker_id)
 
         # Server-side truth for the tenant; the payload value is only a fallback
@@ -228,6 +232,7 @@ class ApprovalCoordinator:
                 user_id=user_id,
                 action_summary=action_summary,
                 rationale=rationale,
+                triggered_by=triggered_by,
                 request_id=request_id,
             )
         except Exception:

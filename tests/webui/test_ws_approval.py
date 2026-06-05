@@ -137,6 +137,53 @@ def test_build_requested_frame_carries_decision_fields() -> None:
     WsServerEventApprovalRequested.model_validate(frame)
 
 
+def test_build_requested_frame_projects_safety_triggered_by() -> None:
+    # §3.10: a well-formed safety provenance projects so the SPA can render the
+    # amber "paused by a safety rule" banner; the frame still validates.
+    frame = _build_approval_frame_or_none(
+        {
+            "type": "approval.requested",
+            "request_id": "r1",
+            "action_summary": "Bash held for approval by a safety rule",
+            "expires_at": "2026-05-31T00:00:00Z",
+            "triggered_by": {
+                "kind": "safety_rule",
+                "rule_id": "rule-9",
+                "check_id": "pii.regex",
+                "stage": "pre_tool_call",
+            },
+        }
+    )
+    assert frame is not None
+    assert frame["triggered_by"] == {
+        "kind": "safety_rule",
+        "rule_id": "rule-9",
+        "check_id": "pii.regex",
+        "stage": "pre_tool_call",
+    }
+    WsServerEventApprovalRequested.model_validate(frame)
+
+
+def test_build_requested_frame_drops_malformed_triggered_by() -> None:
+    # A provenance missing a required key (or carrying a non-string) must never
+    # reach the browser half-formed — it degrades to no banner.
+    for bad in (
+        {"kind": "safety_rule", "rule_id": "r", "check_id": "c"},  # no stage
+        {"kind": "safety_rule", "rule_id": "", "check_id": "c", "stage": "s"},  # empty
+        {"kind": "safety_rule", "rule_id": 9, "check_id": "c", "stage": "s"},  # non-str
+        "not-a-dict",
+    ):
+        frame = _build_approval_frame_or_none(
+            {
+                "type": "approval.requested",
+                "request_id": "r1",
+                "triggered_by": bad,
+            }
+        )
+        assert frame is not None
+        assert "triggered_by" not in frame
+
+
 def test_build_requested_frame_drops_non_dict_params() -> None:
     # A malformed params (not an object) must never reach the browser as one —
     # the schema types it as object|null, and the SPA reads keys off it.

@@ -73,7 +73,14 @@ machine, the policy snapshot, or container lifecycle.
   `tests/test_openapi_contract.py` (they were already red — missing
   `request.stop` / `event.run.progress` / `event.message.appended`).
 
-## R4 (resolved + documented)
+## R4 (resolved + documented) — SUPERSEDED by the safety->approval bridge
+
+> **Update:** R4's original "safety `require_approval` never enters HITL" stance
+> was later revised. A PRE_TOOL_CALL `require_approval` verdict is now bridged
+> into a HITL ticket (carrying `triggered_by` provenance) — see §11.4 of
+> `docs/21-hitl-approval-plan.md`. The text below is the original S4 decision,
+> kept for history. The hard-block alias still holds for every stage *except*
+> PRE_TOOL_CALL (notably MODEL_OUTPUT, the branch named below).
 
 Safety `require_approval` **stays a hard block and does NOT enter HITL**. HITL
 gates only tenant MCP-tool *policy* matches (the block-and-await hook in

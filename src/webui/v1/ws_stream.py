@@ -250,6 +250,27 @@ def _build_approval_frame_or_none(
         expires_at = payload.get("expires_at")
         if isinstance(expires_at, str):
             frame["expires_at"] = expires_at
+        # Safety-rule provenance (§3.10). Whitelist exactly the four
+        # ApprovalTriggeredBy keys and forward only a fully-formed object so an
+        # unexpected internal key never reaches the browser; a malformed or
+        # absent provenance degrades to no banner (the SPA treats a missing
+        # triggered_by as a normal business-policy approval).
+        triggered_by = payload.get("triggered_by")
+        if isinstance(triggered_by, dict):
+            kind_v = triggered_by.get("kind")
+            rule_id = triggered_by.get("rule_id")
+            check_id = triggered_by.get("check_id")
+            stage = triggered_by.get("stage")
+            if all(
+                isinstance(v, str) and v
+                for v in (kind_v, rule_id, check_id, stage)
+            ):
+                frame["triggered_by"] = {
+                    "kind": kind_v,
+                    "rule_id": rule_id,
+                    "check_id": check_id,
+                    "stage": stage,
+                }
         return frame
     if kind == "approval.resolved":
         outcome = payload.get("outcome")

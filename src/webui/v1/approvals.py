@@ -36,6 +36,7 @@ from webui.schemas_v1 import (
     ApprovalPolicyCreate,
     ApprovalPolicyUpdate,
     ApprovalRequest,
+    ApprovalTriggeredBy,
 )
 from webui.v1.errors import raise_error_response
 
@@ -61,6 +62,32 @@ def _policy_to_response(p: ApprovalPolicyValue) -> ApprovalPolicy:
     )
 
 
+def _triggered_by_to_response(
+    raw: dict[str, object] | None,
+) -> ApprovalTriggeredBy | None:
+    """Project the row's ``triggered_by`` jsonb into the wire model.
+
+    Only a fully-formed ``safety_rule`` provenance projects; anything else
+    (None, malformed, or an unknown kind) collapses to ``None`` so a bad row
+    degrades to a plain business-policy card rather than failing the response.
+    """
+    if not isinstance(raw, dict):
+        return None
+    if raw.get("kind") != "safety_rule":
+        return None
+    rule_id = raw.get("rule_id")
+    check_id = raw.get("check_id")
+    stage = raw.get("stage")
+    if not all(isinstance(v, str) and v for v in (rule_id, check_id, stage)):
+        return None
+    return ApprovalTriggeredBy(
+        kind="safety_rule",
+        rule_id=str(rule_id),
+        check_id=str(check_id),
+        stage=str(stage),
+    )
+
+
 def _request_to_response(r: ApprovalRequestRow) -> ApprovalRequest:
     # ``action`` is the {tool_name, params} snapshot. The decision UX (§1.2)
     # needs the raw params to be informative — the user cannot meaningfully
@@ -81,6 +108,7 @@ def _request_to_response(r: ApprovalRequestRow) -> ApprovalRequest:
         params=params,
         coworker_id=r.coworker_id,
         rationale=r.rationale,
+        triggered_by=_triggered_by_to_response(r.triggered_by),
         status=r.status,
         decided_at=r.decided_at.isoformat() if r.decided_at else None,
         note=r.note,

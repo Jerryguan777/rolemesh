@@ -198,6 +198,7 @@ def maybe_register_safety_handler(
     *,
     slow_check_specs: list[dict[str, Any]] | None = None,
     nats_client: Any = None,
+    approval_awaiter: Any = None,
 ) -> bool:
     """Register a SafetyHookHandler iff rules are present.
 
@@ -219,6 +220,12 @@ def maybe_register_safety_handler(
     still use this function to wire the cheap-only registry — adding
     two required arguments would force callers to pass ``None`` / a
     live NATS client just to say "no slow checks please".
+
+    ``approval_awaiter`` (optional) wires the safety->approval bridge: when
+    provided, a PRE_TOOL_CALL ``require_approval`` verdict is turned into a HITL
+    approval ticket instead of a terminal block (docs/21 §11.4). Left ``None``
+    (the default) the handler keeps the legacy require_approval==block
+    behaviour, so callers without HITL wired pay nothing.
     """
     if not safety_rules:
         return False
@@ -255,6 +262,7 @@ def maybe_register_safety_handler(
             rules=safety_rules,
             registry=registry,
             tool_ctx=tool_ctx,
+            approval_awaiter=approval_awaiter,
         )
     )
     return True
