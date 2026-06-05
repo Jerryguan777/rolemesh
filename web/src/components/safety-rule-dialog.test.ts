@@ -479,3 +479,152 @@ describe('SafetyRuleDialog — host-list onBlur normalization (G1/G2)', () => {
     el.remove();
   });
 });
+
+// G3 — duplicate-rule detection (spec §6.10a)
+describe('SafetyRuleDialog — duplicate detection (G3)', () => {
+  // Default seedForm picks stages[0] = 'input_prompt' for pii.regex.
+  // existingRule must share the same (check, scope, stage) triple.
+  const existingRule = makeRule({
+    id: 'existing-r1',
+    check_id: 'pii.regex',
+    stage: 'input_prompt',
+    coworker_id: null,
+    config: { patterns: { SSN: true } },
+    priority: 50,
+    enabled: false,
+    source: 'tenant',
+  });
+
+  it('detects a triple match and shows the info banner', async () => {
+    const el = await mount({ rules: [existingRule] });
+    // Default create mode opens with pii.regex / pre_tool_call / all coworkers
+    // which matches existingRule's triple.
+    expect($(el, '[data-testid="saf-dup-banner-info"]')).not.toBeNull();
+    el.remove();
+  });
+
+  it('flips the dialog title to "Edit existing rule" on match', async () => {
+    const el = await mount({ rules: [existingRule] });
+    // The title is passed as an attribute to <rm-dialog>; check the attribute.
+    const dlg = $<HTMLElement>(el, 'rm-dialog')!;
+    expect(dlg.getAttribute('title')).toBe('Edit existing rule');
+    el.remove();
+  });
+
+  it('pre-loads the existing rule config, priority, and enabled state', async () => {
+    const el = await mount({ rules: [existingRule] });
+    expect($<HTMLInputElement>(el, '[data-testid="saf-priority"]')!.value).toBe('50');
+    // enabled toggle should reflect existingRule.enabled = false
+    const toggle = $<HTMLButtonElement>(el, '[data-testid="saf-enabled"]')!;
+    expect(toggle.getAttribute('aria-pressed')).toBe('false');
+    el.remove();
+  });
+
+  it('locks the scope select when in dup-target mode', async () => {
+    const el = await mount({ rules: [existingRule] });
+    const scope = $<HTMLSelectElement>(el, '[data-testid="saf-scope"]')!;
+    expect(scope.disabled).toBe(true);
+    el.remove();
+  });
+
+  it('"Create a separate rule anyway" clears dupTarget and shows warn banner', async () => {
+    const el = await mount({ rules: [existingRule] });
+    expect($(el, '[data-testid="saf-dup-banner-info"]')).not.toBeNull();
+    ($<HTMLButtonElement>(el, '[data-testid="saf-dup-force-create"]'))!.click();
+    await el.updateComplete;
+    expect($(el, '[data-testid="saf-dup-banner-info"]')).toBeNull();
+    expect($(el, '[data-testid="saf-dup-banner-warn"]')).not.toBeNull();
+    el.remove();
+  });
+
+  it('save btn label changes: info→"Save changes", force-create→"Create separate rule"', async () => {
+    const el = await mount({ rules: [existingRule] });
+    const btn = $<HTMLButtonElement>(el, '[data-testid="saf-submit"]')!;
+    expect(btn.textContent?.trim()).toBe('Save changes');
+    ($<HTMLButtonElement>(el, '[data-testid="saf-dup-force-create"]'))!.click();
+    await el.updateComplete;
+    expect(btn.textContent?.trim()).toBe('Create separate rule');
+    el.remove();
+  });
+
+  it('"Switch back" clears forceCreate and re-detects (restores info banner)', async () => {
+    const el = await mount({ rules: [existingRule] });
+    ($<HTMLButtonElement>(el, '[data-testid="saf-dup-force-create"]'))!.click();
+    await el.updateComplete;
+    expect($(el, '[data-testid="saf-dup-banner-warn"]')).not.toBeNull();
+    ($<HTMLButtonElement>(el, '[data-testid="saf-dup-switch-back"]'))!.click();
+    await el.updateComplete;
+    expect($(el, '[data-testid="saf-dup-banner-info"]')).not.toBeNull();
+    el.remove();
+  });
+
+  it('skip: real edit mode — no detection fires', async () => {
+    const el = await mount({ editing: existingRule, rules: [existingRule] });
+    expect($(el, '[data-testid="saf-dup-banner-info"]')).toBeNull();
+    el.remove();
+  });
+
+  it('skip: force-create already on — triple change does not re-flip', async () => {
+    const el = await mount({ rules: [existingRule] });
+    ($<HTMLButtonElement>(el, '[data-testid="saf-dup-force-create"]'))!.click();
+    await el.updateComplete;
+    // Stage change should NOT re-flip to info banner while forceCreate is true.
+    const stageSelect = $<HTMLSelectElement>(el, '[data-testid="saf-stage"]');
+    if (stageSelect) {
+      stageSelect.value = 'input_prompt';
+      stageSelect.dispatchEvent(new Event('change'));
+      await el.updateComplete;
+    }
+    // Still in force-create mode (no re-trigger).
+    expect($(el, '[data-testid="saf-dup-banner-warn"]')).not.toBeNull();
+    expect($(el, '[data-testid="saf-dup-banner-info"]')).toBeNull();
+    el.remove();
+  });
+
+  it('platform-tier overlap shows FYI banner, not info banner', async () => {
+    const platformRule = makeRule({
+      id: 'plat-r1',
+      check_id: 'pii.regex',
+      stage: 'input_prompt', // matches default seedForm triple
+      coworker_id: null,
+      source: 'platform',
+    });
+    const el = await mount({ rules: [platformRule] });
+    expect($(el, '[data-testid="saf-dup-banner-info"]')).toBeNull();
+    expect($(el, '[data-testid="saf-dup-banner-fyi"]')).not.toBeNull();
+    el.remove();
+  });
+
+  it('routes to updateRule(existingRule.id) when submitting in dup-target mode', async () => {
+    updateRuleSpy.mockResolvedValue(makeRule({ id: 'existing-r1' }));
+    const el = await mount({ rules: [existingRule] });
+    expect($(el, '[data-testid="saf-dup-banner-info"]')).not.toBeNull();
+    ($<HTMLButtonElement>(el, '[data-testid="saf-submit"]'))!.click();
+    await el.updateComplete;
+    await Promise.resolve();
+    expect(updateRuleSpy).toHaveBeenCalledTimes(1);
+    expect(updateRuleSpy.mock.calls[0][0]).toBe('existing-r1');
+    expect(createRuleSpy).not.toHaveBeenCalled();
+    el.remove();
+  });
+
+  it('routes to createRule when submitting in force-create mode', async () => {
+    createRuleSpy.mockResolvedValue(makeRule());
+    const el = await mount({ rules: [existingRule] });
+    ($<HTMLButtonElement>(el, '[data-testid="saf-dup-force-create"]'))!.click();
+    await el.updateComplete;
+    ($<HTMLButtonElement>(el, '[data-testid="saf-submit"]'))!.click();
+    await el.updateComplete;
+    await Promise.resolve();
+    expect(createRuleSpy).toHaveBeenCalledTimes(1);
+    expect(updateRuleSpy).not.toHaveBeenCalled();
+    el.remove();
+  });
+
+  it('does not detect duplicating rule against itself', async () => {
+    // Duplicating a rule: the source (existingRule) should not match against itself.
+    const el = await mount({ duplicating: existingRule, rules: [existingRule] });
+    expect($(el, '[data-testid="saf-dup-banner-info"]')).toBeNull();
+    el.remove();
+  });
+});

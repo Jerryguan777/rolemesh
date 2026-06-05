@@ -103,6 +103,8 @@ export class SafetyRuleDialog extends LitElement {
   /** Check catalog + coworker list — fetched once by the page, passed down. */
   @property({ attribute: false }) checks: SafetyCheck[] = [];
   @property({ attribute: false }) coworkers: CoworkerSummary[] = [];
+  /** All existing rules — used for duplicate-detection (G3, spec §6.10a). */
+  @property({ attribute: false }) rules: SafetyRule[] = [];
 
   @state() private checkId = '';
   @state() private stage: SafetyStage | '' = '';
@@ -117,6 +119,16 @@ export class SafetyRuleDialog extends LitElement {
   @state() private advancedJson: string | null = null;
   @state() private busy = false;
   @state() private err: string | null = null;
+  // --- G3: duplicate-detection state (spec §6.10a) ---
+  /** Org-tier rule matching the current (check, scope, stage) triple when in
+   *  create/duplicate mode. When set, the form auto-flips to edit that rule. */
+  @state() private _dupTarget: SafetyRule | null = null;
+  /** True after the user clicked "Create a separate rule anyway" — bypasses
+   *  auto-flip and forces a POST. Resets when dialog closes. */
+  @state() private _forceCreate = false;
+  /** Platform-tier rule covering the same triple; shows the gray FYI banner
+   *  but does NOT flip to edit (user can't edit platform rules). */
+  @state() private _platformOverlap: SafetyRule | null = null;
 
   protected override createRenderRoot() {
     return this;
@@ -124,6 +136,9 @@ export class SafetyRuleDialog extends LitElement {
 
   override willUpdate(changed: Map<string, unknown>) {
     if (changed.has('open') && this.open) {
+      this._dupTarget = null;
+      this._forceCreate = false;
+      this._platformOverlap = null;
       this.seedForm();
       this.err = null;
     }
@@ -169,6 +184,8 @@ export class SafetyRuleDialog extends LitElement {
       this.config = {};
       this.advancedJson = null;
     }
+    // G3: run detection after all form fields are set (skips in edit mode).
+    this._checkDuplicateRule();
   }
 
   private close = () => {
@@ -186,6 +203,9 @@ export class SafetyRuleDialog extends LitElement {
     this.pickedAction = null;
     this.config = {};
     this.advancedJson = null;
+    this._dupTarget = null; // triple changed — reset before re-detecting
+    this._platformOverlap = null;
+    this._checkDuplicateRule();
   }
 
   private onStageChange(stage: SafetyStage): void {
@@ -198,6 +218,141 @@ export class SafetyRuleDialog extends LitElement {
       const st = actionButtonState(check, stage, this.pickedAction, nat);
       if (!st.enabled) this.pickedAction = null;
     }
+    this._dupTarget = null;
+    this._platformOverlap = null;
+    this._checkDuplicateRule();
+  }
+
+  private onScopeChange(v: string): void {
+    this.coworkerId = v === '' ? null : v;
+    this._dupTarget = null;
+    this._platformOverlap = null;
+    this._checkDuplicateRule();
+  }
+
+  // ---- G3: duplicate-rule detection (spec §6.10a) ----
+
+  // Detect whether the current (check_id, coworker_id, stage) triple matches an
+  // existing rule. Skipped in edit mode, when _forceCreate is already true, or
+  // when check/stage are not yet set. On a match the form auto-flips to edit
+  // the existing rule (or shows a gray FYI for platform-tier overlaps).
+  private _checkDuplicateRule(): void {
+    if (this.isEdit) return;         // real edit — user picked this rule explicitly
+    if (this._forceCreate) return;   // user opted out of auto-flip
+    if (!this.checkId || !this.stage) return;
+
+    const matchesTriple = (r: SafetyRule) =>
+      r.check_id === this.checkId &&
+      r.stage === this.stage &&
+      (r.coworker_id ?? null) === this.coworkerId;
+
+    // Org-tier collision: an editable rule with the same triple (excluding the
+    // duplicating source so we don't detect a rule against itself).
+    const orgMatch = this.rules.find(
+      (r) =>
+        r.source === 'tenant' &&
+        matchesTriple(r) &&
+        r.id !== this.duplicating?.id,
+    );
+
+    if (orgMatch) {
+      this._dupTarget = orgMatch;
+      this._platformOverlap = null;
+      // Pre-load existing rule's config/priority/enabled — user is editing it.
+      const cfg = { ...(orgMatch.config ?? {}) } as Record<string, unknown>;
+      const override = cfg['action_override'];
+      this.pickedAction =
+        typeof override === 'string' ? (override as SafetyVerdictAction) : null;
+      delete cfg['action_override'];
+      this._normalizeConfigFromBackend(orgMatch.check_id, cfg);
+      this.config = cfg;
+      this.priority = orgMatch.priority;
+      this.enabled = orgMatch.enabled;
+      this.coworkerId = orgMatch.coworker_id ?? null;
+      return;
+    }
+
+    this._dupTarget = null;
+
+    // Platform-tier overlap: show FYI banner, do NOT flip to edit.
+    const platformMatch = this.rules.find(
+      (r) => r.source === 'platform' && matchesTriple(r),
+    );
+    this._platformOverlap = platformMatch ?? null;
+  }
+
+  // "Create a separate rule anyway" — lock in forced-create mode.
+  private _onForceCreate(): void {
+    this._forceCreate = true;
+    this._dupTarget = null;
+    this._platformOverlap = null;
+    // Reset to defaults; keep check/stage the user selected.
+    this.config = {};
+    this.pickedAction = null;
+    this.priority = 100;
+    this.enabled = true;
+    this.coworkerId = null; // unlock scope
+  }
+
+  // "Switch back to editing the existing one" — re-run detection.
+  private _onSwitchBackToEdit(): void {
+    this._forceCreate = false;
+    this._checkDuplicateRule();
+  }
+
+  // Banner rendered above the check field when dup detection fires (§6.10a).
+  private _renderDupBanner(): TemplateResult | typeof nothing {
+    if (this._dupTarget && !this._forceCreate) {
+      const label = this._dupTarget.check_id;
+      const stageLbl = SAF_STAGE_LABEL[this._dupTarget.stage as SafetyStage] ?? this._dupTarget.stage;
+      const scope = this._dupTarget.coworker_id
+        ? (this.coworkers.find((c) => c.id === this._dupTarget!.coworker_id)?.name ?? this._dupTarget.coworker_id)
+        : 'all coworkers';
+      return html`
+        <div class="rm-dup-banner rm-dup-banner--info" data-testid="saf-dup-banner-info">
+          <span>ℹ</span>
+          <span>
+            You already have a <b>${label}</b> rule for <b>${stageLbl}</b> on
+            <b>${scope}</b>. You're editing that rule now (not creating a new one).
+            <button
+              type="button"
+              class="rm-dup-link"
+              data-testid="saf-dup-force-create"
+              @click=${() => this._onForceCreate()}
+            >Create a separate rule anyway</button>
+          </span>
+        </div>
+      `;
+    }
+    if (this._forceCreate) {
+      return html`
+        <div class="rm-dup-banner rm-dup-banner--warn" data-testid="saf-dup-banner-warn">
+          <span>⚠</span>
+          <span>
+            Creating a second rule for the same surface — they may conflict.
+            <button
+              type="button"
+              class="rm-dup-link"
+              data-testid="saf-dup-switch-back"
+              @click=${() => this._onSwitchBackToEdit()}
+            >Switch back to editing the existing one</button>
+          </span>
+        </div>
+      `;
+    }
+    if (this._platformOverlap) {
+      const label = this._platformOverlap.check_id;
+      return html`
+        <div class="rm-dup-banner rm-dup-banner--fyi" data-testid="saf-dup-banner-fyi">
+          <span>🛡</span>
+          <span>
+            A platform default <b>${label}</b> already covers this surface — your
+            org rule will run alongside it.
+          </span>
+        </div>
+      `;
+    }
+    return nothing;
   }
 
   // ---- config format converters (backend ↔ internal display) ----
@@ -333,6 +488,17 @@ export class SafetyRuleDialog extends LitElement {
           enabled: this.enabled,
         });
         savedId = saved.id;
+      } else if (this._dupTarget && !this._forceCreate) {
+        // G3: auto-flipped to edit existing rule — PATCH that rule, not POST.
+        // Scope omitted (immutable on edit, same as real edit mode).
+        const saved = await updateRule(this._dupTarget.id, {
+          check_id: this.checkId,
+          stage: this.stage,
+          config,
+          priority: this.priority,
+          enabled: this.enabled,
+        });
+        savedId = saved.id;
       } else {
         const saved = await createRule({
           check_id: this.checkId,
@@ -377,8 +543,16 @@ export class SafetyRuleDialog extends LitElement {
 
   private dialogTitle(): string {
     if (this.isEdit) return 'Edit safety rule';
+    if (this._dupTarget && !this._forceCreate) return 'Edit existing rule';
+    if (this._forceCreate) return 'Create separate rule';
     if (this.duplicating) return 'Duplicate safety rule';
     return 'New safety rule';
+  }
+
+  private saveBtnLabel(): string {
+    if (this.isEdit || (this._dupTarget && !this._forceCreate)) return 'Save changes';
+    if (this._forceCreate) return 'Create separate rule';
+    return 'Create rule';
   }
 
   override render(): TemplateResult {
@@ -400,6 +574,7 @@ export class SafetyRuleDialog extends LitElement {
           already-running tasks finish with the current rules.
         </p>
 
+        ${this._renderDupBanner()}
         ${this.renderCheckField(pres)}
         ${this.renderStageField(check)}
         ${this.showActionPanel() ? this.renderActionPanel(check) : nothing}
@@ -422,7 +597,7 @@ export class SafetyRuleDialog extends LitElement {
           <button type="button" class="rm-btn rm-btn--primary"
             data-testid="saf-submit" ?disabled=${this.busy}
             @click=${() => void this.submit()}
-          >${this.busy ? 'Saving…' : this.isEdit ? 'Save changes' : 'Create rule'}</button>
+          >${this.busy ? 'Saving…' : this.saveBtnLabel()}</button>
         </div>
       </rm-dialog>
     `;
@@ -957,7 +1132,9 @@ export class SafetyRuleDialog extends LitElement {
   }
 
   private renderScopeField(): TemplateResult {
-    const locked = this.isEdit;
+    // Scope is locked in real edit mode AND when auto-flipped to edit an
+    // existing rule via dup-detection (same audit-consistency reason).
+    const locked = this.isEdit || (this._dupTarget !== null && !this._forceCreate);
     return html`
       <div class="mb-2">
         <label class="block text-[12.5px] font-medium mb-1">Applies to</label>
@@ -966,10 +1143,7 @@ export class SafetyRuleDialog extends LitElement {
           data-testid="saf-scope"
           ?disabled=${locked || this.busy}
           style=${locked ? 'opacity:0.55;cursor:not-allowed' : ''}
-          @change=${(e: Event) => {
-            const v = (e.target as HTMLSelectElement).value;
-            this.coworkerId = v === '' ? null : v;
-          }}
+          @change=${(e: Event) => this.onScopeChange((e.target as HTMLSelectElement).value)}
         >
           <option value="" ?selected=${!this.coworkerId}>All coworkers</option>
           ${this.coworkers.map(

@@ -362,6 +362,7 @@ export class SafetyRulesPage extends LitElement {
           .duplicating=${this.duplicateSource}
           .checks=${this.checks}
           .coworkers=${this.coworkers}
+          .rules=${this.rules}
           @close=${this.closeDialog}
           @safety-rule-saved=${(e: CustomEvent<{ id: string }>) =>
             void this.onSaved(e.detail.id)}
