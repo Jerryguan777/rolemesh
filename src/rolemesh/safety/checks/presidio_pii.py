@@ -109,8 +109,11 @@ class PresidioPIIConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    block_codes: list[str] = Field(default_factory=list)
-    redact_codes: list[str] = Field(default_factory=list)
+    # Typed as the closed PresidioPIICode enum (not bare str) so the JSON
+    # Schema dumps ``items.enum`` — the frontend reads the legal PII.*
+    # code set straight off the schema instead of hardcoding it.
+    block_codes: list[PresidioPIICode] = Field(default_factory=list)
+    redact_codes: list[PresidioPIICode] = Field(default_factory=list)
     language: str = "en"
     score_threshold: float = 0.4
     action_override: str | None = None
