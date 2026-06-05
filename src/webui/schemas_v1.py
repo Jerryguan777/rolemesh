@@ -460,6 +460,34 @@ class ApprovalPolicyUpdate(BaseModel):
     )
 
 
+class ApprovalTriggeredBy(BaseModel):
+    """Provenance of an approval that did not come from a business policy.
+
+    Set by the safety pipeline when a check returns
+    ``Verdict(action="require_approval")`` (spec §1.1, §3.10). Null on a
+    normal business-policy approval. The SPA renders an amber "paused by a
+    safety rule" banner on the chat card and a small shield on the inbox
+    row when ``kind == "safety_rule"``; unknown kinds degrade to no banner.
+
+    ``kind`` is an open tag so future provenances (e.g. ``scheduled_task``)
+    extend the union without a breaking change; V1 only emits
+    ``safety_rule``. ``stage`` is a ``SafetyStage`` value (typed ``str``
+    here because this model is defined before the ``SafetyStage`` literal;
+    the OpenAPI schema ``$ref``\\s the enum so the typed client narrows it).
+
+    NOTE: no producer populates this yet — the safety→approval bridge that
+    would set it is a separate, unbuilt backend effort. The field exists so
+    the contract and SPA are ready; today it is always null end-to-end.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["safety_rule"]
+    rule_id: str
+    check_id: str
+    stage: str
+
+
 class ApprovalRequest(BaseModel):
     """Wire projection of an ``approval_requests`` row (§4.2).
 
@@ -490,6 +518,10 @@ class ApprovalRequest(BaseModel):
     status: str
     decided_at: str | None = None
     note: str | None = None
+    # §1.1/§3.10 provenance: present (kind="safety_rule") when the approval was
+    # raised by a safety check's require_approval verdict; null for business
+    # policy approvals. No producer sets it yet (see ApprovalTriggeredBy).
+    triggered_by: ApprovalTriggeredBy | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -984,6 +1016,10 @@ class WsServerEventApprovalRequested(BaseModel):
     rationale: str | None = None
     action_summary: str | None = None
     expires_at: str | None = None
+    # §1.1/§3.10 provenance for a safety-triggered approval; null for a
+    # business-policy approval. No producer sets it yet (see
+    # ApprovalTriggeredBy) — the SPA renders nothing when absent.
+    triggered_by: ApprovalTriggeredBy | None = None
 
 
 class WsServerEventApprovalResolved(BaseModel):

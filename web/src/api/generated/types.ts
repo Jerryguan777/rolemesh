@@ -1411,6 +1411,24 @@ export interface components {
             enabled?: boolean;
             priority?: number;
         };
+        /**
+         * @description Provenance of a safety-triggered approval (§1.1, §3.10). Present on an
+         *     approval raised by a safety check's `require_approval` verdict; absent
+         *     / null on a business-policy approval. `kind` is an open tag so future
+         *     provenances (e.g. `scheduled_task`) extend without a break — V1 only
+         *     emits `safety_rule`, and the SPA degrades to no banner on unknown
+         *     kinds. No producer sets it yet (the safety→approval bridge is a
+         *     separate unbuilt effort); the field exists so the contract + typed
+         *     client are ready.
+         */
+        ApprovalTriggeredBy: {
+            /** @enum {string} */
+            kind: "safety_rule";
+            /** Format: uuid */
+            rule_id: string;
+            check_id: string;
+            stage: components["schemas"]["SafetyStage"];
+        };
         ApprovalRequest: {
             /**
              * Format: uuid
@@ -1455,6 +1473,11 @@ export interface components {
             decided_at?: string | null;
             /** @description The approver's note on a reject; null otherwise. */
             note?: string | null;
+            /**
+             * @description Safety-rule provenance (§3.10); null for a business-policy
+             *     approval. Always null today — see ApprovalTriggeredBy.
+             */
+            triggered_by?: components["schemas"]["ApprovalTriggeredBy"] | null;
         };
         SkillFile: {
             path: string;
@@ -1645,6 +1668,28 @@ export interface components {
             created_at: string;
             /** Format: date-time */
             updated_at: string;
+            /**
+             * @description Platform Safety Rules (PR #49). `tenant` rules are owned by the
+             *     organization and editable on the admin surface; `platform` rules
+             *     are cross-tenant defaults set by the platform admin — read-only
+             *     here. The SPA renders the two tiers in separate sections (§6.2).
+             * @default tenant
+             * @enum {string}
+             */
+            source: "tenant" | "platform";
+            /**
+             * @description Platform-rule tier; null for tenant-owned rules. Set only when
+             *     `source == platform`.
+             * @enum {string|null}
+             */
+            tier?: "floor" | "transparent_floor" | "default" | null;
+            /**
+             * @description Convenience flag the SPA uses to show/hide edit / duplicate /
+             *     delete affordances without re-deriving from `source`. False for
+             *     platform rules (audit-only).
+             * @default true
+             */
+            editable: boolean;
         };
         SafetyCheck: {
             id: string;
@@ -1686,6 +1731,13 @@ export interface components {
             findings?: components["schemas"]["SafetyFinding"][];
             context_digest: string;
             context_summary: string;
+            /**
+             * @description `platform` when any triggered rule is platform-owned, else
+             *     `tenant`. Lets the log filter platform-rule hits at a glance.
+             * @default tenant
+             * @enum {string}
+             */
+            source: "tenant" | "platform";
             /** Format: date-time */
             created_at: string;
         };
@@ -2018,6 +2070,11 @@ export interface components {
             action_summary?: string | null;
             /** @description When the pending approval auto-expires (ISO-8601). */
             expires_at?: string | null;
+            /**
+             * @description Safety-rule provenance (§3.10); null for a business-policy
+             *     approval. Always null today — see ApprovalTriggeredBy.
+             */
+            triggered_by?: components["schemas"]["ApprovalTriggeredBy"] | null;
         };
         WsServerEventApprovalResolved: {
             /**
