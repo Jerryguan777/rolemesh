@@ -551,6 +551,48 @@ async def test_list_decisions_pagination_limit_offset() -> None:
     assert a_ids.isdisjoint(b_ids)
 
 
+async def test_list_decisions_filters_by_rule_and_check() -> None:
+    """check_id / rule_id narrow the list to decisions a given rule (or
+    a given check's rules) triggered. The decision carries no check_id,
+    so the server resolves check -> rule ids and matches the array."""
+    user, _ = await _make_user("flt")
+    pii = await create_safety_rule(
+        tenant_id=user.tenant_id, stage="pre_tool_call",
+        check_id="pii.regex", config={},
+    )
+    host = await create_safety_rule(
+        tenant_id=user.tenant_id, stage="pre_tool_call",
+        check_id="domain_allowlist", config={},
+    )
+    pii_dec = await insert_safety_decision(
+        tenant_id=user.tenant_id, stage="pre_tool_call",
+        verdict_action="block", triggered_rule_ids=[pii.id], findings=[],
+        context_digest="d" * 16, context_summary="pii",
+    )
+    await insert_safety_decision(
+        tenant_id=user.tenant_id, stage="pre_tool_call",
+        verdict_action="block", triggered_rule_ids=[host.id], findings=[],
+        context_digest="d" * 16, context_summary="host",
+    )
+
+    async with _client(_build_app(user)) as ac:
+        by_check = (
+            await ac.get(
+                "/api/v1/safety/decisions?check_id=pii.regex", headers=_HDRS,
+            )
+        ).json()
+        by_rule = (
+            await ac.get(
+                f"/api/v1/safety/decisions?rule_id={pii.id}", headers=_HDRS,
+            )
+        ).json()
+
+    assert by_check["total"] == 1
+    assert [it["id"] for it in by_check["items"]] == [pii_dec]
+    assert by_rule["total"] == 1
+    assert [it["id"] for it in by_rule["items"]] == [pii_dec]
+
+
 async def test_list_decisions_limit_caps_at_200() -> None:
     """A misbehaving caller asking for limit=10_000 must not scan
     the whole table — Pydantic's ``Query(le=200)`` clamps it via a

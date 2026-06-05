@@ -1179,6 +1179,14 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         "CREATE INDEX IF NOT EXISTS idx_safety_decisions_verdict "
         "ON safety_decisions (tenant_id, verdict_action, created_at DESC)"
     )
+    # The check_id / rule_id filters on the decisions list match against
+    # the triggered_rule_ids array (``&&`` overlap / ``@>`` contains). A
+    # GIN index turns those array predicates from a tenant-wide seq scan
+    # into an index probe.
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_safety_decisions_triggered_rules "
+        "ON safety_decisions USING gin (triggered_rule_ids)"
+    )
 
     # Rule-change audit log. Every INSERT / UPDATE / DELETE on
     # safety_rules appends one append-only row here via the trigger

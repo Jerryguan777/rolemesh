@@ -19,6 +19,7 @@ import uuid
 import pytest
 
 from rolemesh.db import (
+    count_safety_decisions,
     create_coworker,
     create_safety_rule,
     create_tenant,
@@ -28,6 +29,7 @@ from rolemesh.db import (
     list_safety_decisions,
     list_safety_rules,
     list_safety_rules_for_coworker,
+    list_visible_platform_rules,
     update_safety_rule,
 )
 
@@ -238,3 +240,70 @@ class TestSafetyDecisions:
             findings=[], context_digest="z" * 64, context_summary="",
         )
         assert await list_safety_decisions(tid_b) == []
+
+    @pytest.mark.asyncio
+    async def test_rule_id_filter(self) -> None:
+        tid, _ = await _tenant_and_coworker()
+        r1 = await create_safety_rule(
+            tenant_id=tid, stage="pre_tool_call", check_id="pii.regex",
+            config={},
+        )
+        r2 = await create_safety_rule(
+            tenant_id=tid, stage="pre_tool_call", check_id="pii.regex",
+            config={},
+        )
+        await insert_safety_decision(
+            tenant_id=tid, stage="pre_tool_call", verdict_action="block",
+            triggered_rule_ids=[r1.id], findings=[],
+            context_digest="a" * 64, context_summary="hit-r1",
+        )
+        await insert_safety_decision(
+            tenant_id=tid, stage="pre_tool_call", verdict_action="block",
+            triggered_rule_ids=[r2.id], findings=[],
+            context_digest="b" * 64, context_summary="hit-r2",
+        )
+        rows = await list_safety_decisions(tid, rule_id=r1.id)
+        assert [d["context_summary"] for d in rows] == ["hit-r1"]
+        assert await count_safety_decisions(tid, rule_id=r1.id) == 1
+
+    @pytest.mark.asyncio
+    async def test_check_id_filter(self) -> None:
+        tid, _ = await _tenant_and_coworker()
+        pii = await create_safety_rule(
+            tenant_id=tid, stage="pre_tool_call", check_id="pii.regex",
+            config={},
+        )
+        host = await create_safety_rule(
+            tenant_id=tid, stage="pre_tool_call",
+            check_id="domain_allowlist", config={},
+        )
+        await insert_safety_decision(
+            tenant_id=tid, stage="pre_tool_call", verdict_action="block",
+            triggered_rule_ids=[pii.id], findings=[],
+            context_digest="a" * 64, context_summary="pii-hit",
+        )
+        await insert_safety_decision(
+            tenant_id=tid, stage="pre_tool_call", verdict_action="block",
+            triggered_rule_ids=[host.id], findings=[],
+            context_digest="b" * 64, context_summary="host-hit",
+        )
+        rows = await list_safety_decisions(tid, check_id="pii.regex")
+        assert [d["context_summary"] for d in rows] == ["pii-hit"]
+        assert await count_safety_decisions(tid, check_id="pii.regex") == 1
+
+    @pytest.mark.asyncio
+    async def test_check_id_covers_platform_rules(self) -> None:
+        """A decision triggered by a platform rule is found by check_id —
+        the resolver must look in platform_safety_rules, not just the
+        tenant's own safety_rules."""
+        tid, _ = await _tenant_and_coworker()
+        platform = await list_visible_platform_rules(tid)
+        prule = next(p for p in platform if p["check_id"] == "pii.regex")
+        await insert_safety_decision(
+            tenant_id=tid, stage="input_prompt", verdict_action="block",
+            triggered_rule_ids=[str(prule["id"])], findings=[],
+            context_digest="c" * 64, context_summary="platform-pii",
+        )
+        rows = await list_safety_decisions(tid, check_id="pii.regex")
+        assert [d["context_summary"] for d in rows] == ["platform-pii"]
+        assert rows[0]["source"] == "platform"

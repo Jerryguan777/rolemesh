@@ -539,8 +539,23 @@ def _safety_decision_where_clauses(
     stage: str | None,
     from_ts: str | None,
     to_ts: str | None,
+    check_id: str | None = None,
+    rule_id: str | None = None,
 ) -> tuple[str, list[Any]]:
-    """Shared WHERE-clause builder for list + count calls."""
+    """Shared WHERE-clause builder for list + count calls.
+
+    ``rule_id`` matches decisions whose ``triggered_rule_ids`` array
+    contains that rule (``@>`` array-contains).
+
+    ``check_id`` has no direct column on ``safety_decisions`` — a
+    decision records the *rules* it triggered, and ``check_id`` lives on
+    the rule. So we translate the check into its rule ids and test for
+    array overlap (``&&``). The ids may belong to either the tenant's own
+    ``safety_rules`` (RLS-scoped to the caller within this connection, so
+    a foreign tenant's rule can never resolve here) or the global,
+    read-only ``platform_safety_rules`` catalog — a triggered rule can be
+    platform-owned, so both must be considered.
+    """
     clauses = ["tenant_id = $1::uuid"]
     params: list[Any] = [tenant_id]
     if verdict_action is not None:
@@ -558,6 +573,18 @@ def _safety_decision_where_clauses(
     if to_ts is not None:
         params.append(to_ts)
         clauses.append(f"created_at <= ${len(params)}::timestamptz")
+    if rule_id is not None:
+        params.append(rule_id)
+        clauses.append(f"triggered_rule_ids @> ARRAY[${len(params)}::uuid]")
+    if check_id is not None:
+        params.append(check_id)
+        n = len(params)
+        clauses.append(
+            "triggered_rule_ids && ("
+            f"ARRAY(SELECT id FROM safety_rules WHERE check_id = ${n}) || "
+            f"ARRAY(SELECT id FROM platform_safety_rules WHERE check_id = ${n})"
+            ")"
+        )
     return " AND ".join(clauses), params
 
 
@@ -569,6 +596,8 @@ async def count_safety_decisions(
     stage: str | None = None,
     from_ts: str | None = None,
     to_ts: str | None = None,
+    check_id: str | None = None,
+    rule_id: str | None = None,
 ) -> int:
     """Total count for a matching filter set.
 
@@ -584,6 +613,8 @@ async def count_safety_decisions(
         stage=stage,
         from_ts=from_ts,
         to_ts=to_ts,
+        check_id=check_id,
+        rule_id=rule_id,
     )
     async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchval(
@@ -601,6 +632,8 @@ async def list_safety_decisions(
     stage: str | None = None,
     from_ts: str | None = None,
     to_ts: str | None = None,
+    check_id: str | None = None,
+    rule_id: str | None = None,
     limit: int = 200,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
@@ -618,6 +651,8 @@ async def list_safety_decisions(
         stage=stage,
         from_ts=from_ts,
         to_ts=to_ts,
+        check_id=check_id,
+        rule_id=rule_id,
     )
     params.append(limit)
     params.append(offset)

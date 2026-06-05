@@ -361,6 +361,8 @@ async def list_decisions(
     verdict_action: SafetyVerdictAction | None = None,
     coworker_id: str | None = None,
     stage: SafetyStage | None = None,
+    check_id: str | None = None,
+    rule_id: str | None = None,
     from_ts: str | None = None,
     to_ts: str | None = None,
     limit: int = Query(default=50, ge=1, le=200),
@@ -372,6 +374,12 @@ async def list_decisions(
     Two parallel DB calls (count + page) so a misbehaving client
     that asks for offset=100k pays for the count once rather than
     once per page. Filter args mirror the admin shape verbatim.
+
+    ``check_id`` and ``rule_id`` narrow to decisions a given check /
+    rule triggered. A decision carries no ``check_id`` directly, so the
+    helper translates the check into its rule ids (tenant + platform
+    catalogs) and tests for array overlap; ``rule_id`` tests array
+    containment against ``triggered_rule_ids``.
     """
     total = await count_safety_decisions(
         user.tenant_id,
@@ -380,6 +388,8 @@ async def list_decisions(
         stage=stage,
         from_ts=from_ts,
         to_ts=to_ts,
+        check_id=check_id,
+        rule_id=rule_id,
     )
     items = await list_safety_decisions(
         user.tenant_id,
@@ -388,6 +398,8 @@ async def list_decisions(
         stage=stage,
         from_ts=from_ts,
         to_ts=to_ts,
+        check_id=check_id,
+        rule_id=rule_id,
         limit=limit,
         offset=offset,
     )
