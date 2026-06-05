@@ -234,7 +234,7 @@ FIRE_SPECS: dict[str, FireSpec] = {
         build=lambda: EgressDomainRuleCheck(),
         inputs={
             Stage.EGRESS_REQUEST: (
-                {"domain_pattern": "api.example.com"},
+                {"domain_patterns": ["api.example.com"]},
                 {"host": "api.example.com", "port": 443},
             ),
         },

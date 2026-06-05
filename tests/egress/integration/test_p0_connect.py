@@ -107,7 +107,7 @@ async def _bootstrap_rules(topology: Topology, *, allow_host: str) -> list[dict[
         "coworker_id": None,
         "stage": "egress_request",
         "check_id": "egress.domain_rule",
-        "config": {"domain_pattern": allow_host},
+        "config": {"domain_patterns": [allow_host]},
         "priority": 100,
         "enabled": True,
     }

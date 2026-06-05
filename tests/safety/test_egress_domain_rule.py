@@ -71,25 +71,71 @@ class TestMatches:
 class TestConfigValidation:
     def test_valid_minimal_config(self) -> None:
         cfg = EgressDomainRuleConfig.model_validate(
-            {"domain_pattern": "api.anthropic.com"}
+            {"domain_patterns": ["api.anthropic.com"]}
         )
+        assert cfg.domain_patterns == ["api.anthropic.com"]
         assert cfg.ports is None
 
-    def test_empty_domain_pattern_rejected(self) -> None:
-        with pytest.raises(ValidationError):
-            EgressDomainRuleConfig.model_validate({"domain_pattern": ""})
+    def test_valid_multi_pattern_config(self) -> None:
+        cfg = EgressDomainRuleConfig.model_validate(
+            {
+                "domain_patterns": [
+                    "api.stripe.com",
+                    "*.slack.com",
+                    "ads.amazon.com",
+                ],
+                "ports": [443],
+            }
+        )
+        assert len(cfg.domain_patterns) == 3
+        assert cfg.ports == [443]
 
-    def test_overlong_domain_pattern_rejected(self) -> None:
+    def test_patterns_stripped(self) -> None:
+        cfg = EgressDomainRuleConfig.model_validate(
+            {"domain_patterns": ["  api.anthropic.com  "]}
+        )
+        assert cfg.domain_patterns == ["api.anthropic.com"]
+
+    def test_empty_list_rejected(self) -> None:
+        """An empty list overlaps with 'delete the rule' — reject it."""
+        with pytest.raises(ValidationError):
+            EgressDomainRuleConfig.model_validate({"domain_patterns": []})
+
+    def test_whitespace_only_entry_rejected(self) -> None:
         with pytest.raises(ValidationError):
             EgressDomainRuleConfig.model_validate(
-                {"domain_pattern": "x" * 254}
+                {"domain_patterns": ["api.anthropic.com", "   "]}
+            )
+
+    def test_overlong_list_rejected(self) -> None:
+        """The 100-entry cap keeps one rule from ballooning past
+        audit-readability."""
+        with pytest.raises(ValidationError):
+            EgressDomainRuleConfig.model_validate(
+                {"domain_patterns": [f"h{i}.example.com" for i in range(101)]}
+            )
+
+    def test_overlong_single_entry_rejected(self) -> None:
+        """One bad element (>253 chars) fails the whole config."""
+        with pytest.raises(ValidationError):
+            EgressDomainRuleConfig.model_validate(
+                {"domain_patterns": ["ok.example.com", "x" * 254]}
+            )
+
+    def test_old_singular_field_name_rejected(self) -> None:
+        """The retired ``domain_pattern`` (singular) shape must 400 at
+        REST time — there is intentionally no back-compat alias, so the
+        old wire shape fails loud instead of silently matching nothing."""
+        with pytest.raises(ValidationError):
+            EgressDomainRuleConfig.model_validate(
+                {"domain_pattern": "api.anthropic.com"}
             )
 
     def test_extra_keys_rejected(self) -> None:
         """Typo like ``domains`` (plural) must fail loud at REST time."""
         with pytest.raises(ValidationError):
             EgressDomainRuleConfig.model_validate(
-                {"domain_pattern": "x.com", "domains": ["y.com"]}
+                {"domain_patterns": ["x.com"], "domains": ["y.com"]}
             )
 
 
@@ -103,35 +149,68 @@ class TestGatewayAdapter:
         check = make_egress_domain_check()
         matched, findings = await check(
             _FakeRequest(host="api.anthropic.com", port=443),
-            {"domain_pattern": "api.anthropic.com"},
+            {"domain_patterns": ["api.anthropic.com"]},
         )
         assert matched is True
         assert len(findings) == 1
         assert findings[0]["code"] == EgressDomainCode.DOMAIN_ALLOWED.value
 
-    async def test_non_match_returns_false_no_findings(self) -> None:
+    async def test_any_pattern_match_votes_allow(self) -> None:
+        """A multi-pattern rule matches the request host against ANY of
+        its patterns; the finding reports the specific pattern hit."""
+        check = make_egress_domain_check()
+        matched, findings = await check(
+            _FakeRequest(host="raw.slack.com", port=443),
+            {
+                "domain_patterns": [
+                    "api.stripe.com",
+                    "*.slack.com",
+                    "ads.amazon.com",
+                ]
+            },
+        )
+        assert matched is True
+        assert len(findings) == 1
+        assert findings[0]["message"] == "matched *.slack.com"
+
+    async def test_no_pattern_match_misses(self) -> None:
         check = make_egress_domain_check()
         matched, findings = await check(
             _FakeRequest(host="api.openai.com", port=443),
-            {"domain_pattern": "api.anthropic.com"},
+            {"domain_patterns": ["api.stripe.com", "*.slack.com"]},
         )
         assert matched is False
         assert findings == []
 
-    async def test_port_restriction_enforced(self) -> None:
-        """domain_pattern matches but port doesn't — must miss."""
+    async def test_non_match_returns_false_no_findings(self) -> None:
         check = make_egress_domain_check()
-        matched, _ = await check(
-            _FakeRequest(host="api.anthropic.com", port=80),
-            {"domain_pattern": "api.anthropic.com", "ports": [443]},
+        matched, findings = await check(
+            _FakeRequest(host="api.openai.com", port=443),
+            {"domain_patterns": ["api.anthropic.com"]},
         )
         assert matched is False
+        assert findings == []
+
+    async def test_ports_shared_across_patterns(self) -> None:
+        """``ports`` is shared by every pattern in the rule. A host that
+        matches a pattern but hits a non-listed port still misses."""
+        check = make_egress_domain_check()
+        cfg = {
+            "domain_patterns": ["api.stripe.com", "*.slack.com"],
+            "ports": [443],
+        }
+        # pattern matches, port allowed → match
+        ok, _ = await check(_FakeRequest(host="api.slack.com", port=443), cfg)
+        assert ok is True
+        # pattern matches, port NOT allowed → miss (shared ports)
+        bad, _ = await check(_FakeRequest(host="api.stripe.com", port=80), cfg)
+        assert bad is False
 
     async def test_port_none_matches_any(self) -> None:
         check = make_egress_domain_check()
         matched, _ = await check(
             _FakeRequest(host="api.anthropic.com", port=8080),
-            {"domain_pattern": "api.anthropic.com"},
+            {"domain_patterns": ["api.anthropic.com"]},
         )
         assert matched is True
 
@@ -141,7 +220,18 @@ class TestGatewayAdapter:
         check = make_egress_domain_check()
         matched, _ = await check(
             _FakeRequest(host="api.anthropic.com"),
-            {},  # missing domain_pattern
+            {},  # missing domain_patterns
+        )
+        assert matched is False
+
+    async def test_old_singular_field_misses_safely(self) -> None:
+        """The retired ``domain_pattern`` shape is an invalid config now;
+        the gateway treats it as a miss (and the caller logs it) rather
+        than silently honouring the old key."""
+        check = make_egress_domain_check()
+        matched, _ = await check(
+            _FakeRequest(host="api.anthropic.com", port=443),
+            {"domain_pattern": "api.anthropic.com"},
         )
         assert matched is False
 
@@ -172,7 +262,7 @@ class TestSafetyCheckProtocol:
             payload={"host": "api.anthropic.com", "port": 443},
         )
         verdict = await check.check(
-            ctx, {"domain_pattern": "api.anthropic.com"}
+            ctx, {"domain_patterns": ["api.anthropic.com"]}
         )
         assert verdict.action == "allow"
         assert len(verdict.findings) == 1
@@ -191,7 +281,7 @@ class TestSafetyCheckProtocol:
             payload={"host": "api.openai.com", "port": 443},
         )
         verdict = await check.check(
-            ctx, {"domain_pattern": "api.anthropic.com"}
+            ctx, {"domain_patterns": ["api.anthropic.com"]}
         )
         assert verdict.action == "allow"
         assert verdict.findings == []

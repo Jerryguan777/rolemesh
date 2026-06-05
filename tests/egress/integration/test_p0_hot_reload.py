@@ -90,7 +90,7 @@ async def test_rule_disable_propagates_to_live_gateway(
         "coworker_id": None,
         "stage": "egress_request",
         "check_id": "egress.domain_rule",
-        "config": {"domain_pattern": topology.fake_upstream_name},
+        "config": {"domain_patterns": [topology.fake_upstream_name]},
         "priority": 100,
         "enabled": True,
     }
