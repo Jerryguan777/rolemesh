@@ -379,9 +379,15 @@ export function safWhatPhrase(
     const n = ((config?.['plugins'] as string[]) ?? []).length;
     return `scan for secrets${n ? ` (${n} type${n === 1 ? '' : 's'})` : ''}`;
   }
-  if (checkId === 'domain_allowlist' || checkId === 'egress.domain_rule') {
-    const n = ((config?.['hosts'] as string[]) ?? []).length;
+  if (checkId === 'domain_allowlist') {
+    // domain_allowlist backend key is `allowed_hosts` (DomainAllowlistConfig).
+    const n = ((config?.['allowed_hosts'] as string[]) ?? []).length;
     return `allow only ${n || 'listed'} host${n === 1 ? '' : 's'}`;
+  }
+  if (checkId === 'egress.domain_rule') {
+    // egress.domain_rule uses `domain_pattern` (single string per rule).
+    const p = config?.['domain_pattern'] as string | undefined;
+    return p ? `allow ${p}` : 'allow listed domains';
   }
   if (checkId === 'openai_moderation') {
     const routing = (config?.['routing'] as Record<string, string>) ?? {};

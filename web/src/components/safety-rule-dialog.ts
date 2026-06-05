@@ -595,7 +595,9 @@ export class SafetyRuleDialog extends LitElement {
   }
 
   private renderHostList(): TemplateResult {
-    const hosts = ((this.config['hosts'] as string[]) ?? []).join('\n');
+    // domain_allowlist backend config key is `allowed_hosts` (DomainAllowlistConfig),
+    // not `hosts`. This was the 400 "extra_forbidden / missing allowed_hosts" bug.
+    const hosts = ((this.config['allowed_hosts'] as string[]) ?? []).join('\n');
     return html`
       <label class="block text-[12.5px] font-medium mb-1">
         Allowed hosts
@@ -612,7 +614,7 @@ export class SafetyRuleDialog extends LitElement {
             .split(/\s+/)
             .map((s) => s.trim())
             .filter(Boolean);
-          this.config = { ...this.config, hosts: lines };
+          this.config = { ...this.config, allowed_hosts: lines };
         }}
       ></textarea>
       <p class="text-[11.5px] text-ink-3 dark:text-d-ink-3 mt-2 leading-snug">

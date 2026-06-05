@@ -154,7 +154,7 @@ describe('effectiveAction', () => {
 
   it('returns block for host-list checks regardless of action_model', () => {
     const a = effectiveAction(
-      { check_id: 'domain_allowlist', stage: 'pre_tool_call' as SafetyStage, config: { hosts: ['a.com'] } },
+      { check_id: 'domain_allowlist', stage: 'pre_tool_call' as SafetyStage, config: { allowed_hosts: ['a.com'] } },
       domainAllowlist,
     );
     expect(a).toBe('block');
@@ -209,10 +209,10 @@ describe('safWhatPhrase', () => {
   });
 
   it('counts hosts for an allowlist', () => {
-    expect(safWhatPhrase('domain_allowlist', { hosts: ['a.com', 'b.com'] })).toBe(
+    expect(safWhatPhrase('domain_allowlist', { allowed_hosts: ['a.com', 'b.com'] })).toBe(
       'allow only 2 hosts',
     );
-    expect(safWhatPhrase('domain_allowlist', { hosts: ['a.com'] })).toBe('allow only 1 host');
+    expect(safWhatPhrase('domain_allowlist', { allowed_hosts: ['a.com'] })).toBe('allow only 1 host');
   });
 });
 
@@ -250,7 +250,7 @@ describe('safSentence', () => {
 
   it('uses the allowlist phrasing for host-list checks', () => {
     const s = safSentence(
-      { check_id: 'domain_allowlist', stage: 'pre_tool_call' as SafetyStage, config: { hosts: ['a.com', 'b.com', 'c.com'] } },
+      { check_id: 'domain_allowlist', stage: 'pre_tool_call' as SafetyStage, config: { allowed_hosts: ['a.com', 'b.com', 'c.com'] } },
       domainAllowlist,
       'Ops coworker',
     );
