@@ -50,6 +50,22 @@ class PIICode(StrEnum):
     IP_ADDRESS = "PII.IP_ADDRESS"
 
 
+class PIIPatternKey(StrEnum):
+    """Closed set of ``patterns`` config keys (short, human-facing form).
+
+    Typing ``PIIRegexConfig.patterns`` as ``dict[PIIPatternKey, bool]``
+    is what makes ``model_json_schema()`` emit a ``propertyNames`` enum
+    constraint — the authoritative list of legal keys the frontend can
+    read straight off the schema instead of hardcoding it.
+    """
+
+    SSN = "SSN"
+    CREDIT_CARD = "CREDIT_CARD"
+    EMAIL = "EMAIL"
+    PHONE_US = "PHONE_US"
+    IP_ADDRESS = "IP_ADDRESS"
+
+
 # Explicit short-key → stable code mapping. Admin UI / REST API accept
 # the short form on the left; Finding.code uses the prefixed form on
 # the right. Any key not in this map is a typo and SHOULD be rejected
@@ -61,6 +77,14 @@ _CONFIG_KEY_TO_CODE: dict[str, PIICode] = {
     "PHONE_US": PIICode.PHONE_US,
     "IP_ADDRESS": PIICode.IP_ADDRESS,
 }
+
+# Single-source guard: the schema enum (PIIPatternKey) and the runtime
+# mapping must never drift apart. If someone adds a code to one but not
+# the other, import fails loudly instead of shipping a schema that lies
+# about which keys are legal.
+assert set(PIIPatternKey) == set(_CONFIG_KEY_TO_CODE), (
+    "PIIPatternKey and _CONFIG_KEY_TO_CODE are out of sync"
+)
 
 
 class PIIRegexConfig(BaseModel):
@@ -81,23 +105,16 @@ class PIIRegexConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    # Keys are constrained to the closed ``PIIPatternKey`` set — pydantic
+    # rejects an unknown key like ``{"patterns": {"SNN": true}}`` with a
+    # 422 at admin time, and the constraint surfaces in the JSON Schema
+    # as ``propertyNames`` so the frontend never hardcodes the key list.
     # StrictBool rejects truthy strings like "yes" / "on" / "1" that
-    # pydantic's default bool coercion silently converts to True. The
+    # pydantic's default bool coercion silently converts to True: the
     # admin intent of {"patterns": {"SSN": "yes"}} is ambiguous — we
     # want them to write `true` / `false` explicitly.
-    patterns: dict[str, StrictBool] = Field(default_factory=dict)
+    patterns: dict[PIIPatternKey, StrictBool] = Field(default_factory=dict)
     action_override: str | None = None
-
-    def model_post_init(self, _ctx: Any) -> None:
-        # Validate each key against the stable mapping at admin time
-        # so the operator's feedback loop is tight. Unknown keys ->
-        # 422 through pydantic's standard error surface.
-        for key in self.patterns:
-            if key not in _CONFIG_KEY_TO_CODE:
-                valid = sorted(_CONFIG_KEY_TO_CODE.keys())
-                raise ValueError(
-                    f"Unknown PII pattern {key!r}; valid keys: {valid}"
-                )
 
 
 # Conservative regex set. CREDIT_CARD uses a loose 13-19-digit window
@@ -258,4 +275,4 @@ class PIIRegexCheck:
         return Verdict(action="allow")
 
 
-__all__ = ["PIICode", "PIIRegexCheck", "PIIRegexConfig"]
+__all__ = ["PIICode", "PIIPatternKey", "PIIRegexCheck", "PIIRegexConfig"]

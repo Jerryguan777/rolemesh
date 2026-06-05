@@ -150,7 +150,9 @@ class TestCreateRule:
     async def test_unknown_pattern_key_400(self) -> None:
         # Previously, {"patterns": {"SNN": true}} was silently ignored
         # in the container — admins saw "rule created" then no actual
-        # detection. pydantic config_model now rejects at REST time.
+        # detection. The config_model now constrains pattern keys to the
+        # closed PIIPatternKey enum, so pydantic rejects the typo at REST
+        # time (and the same enum drives config_schema's propertyNames).
         tid, uid, _ = await _seed()
         app = _build_app(_authed_user(tid, uid))
         async with _client(app) as client:
@@ -163,7 +165,9 @@ class TestCreateRule:
                 },
             )
             assert r.status_code == 400
-            assert "Unknown PII pattern" in r.text
+            # The bad key is named and the legal set is surfaced.
+            assert "SNN" in r.text
+            assert "SSN" in r.text
 
     @pytest.mark.asyncio
     async def test_non_bool_pattern_value_400(self) -> None:
