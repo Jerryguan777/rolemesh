@@ -3687,6 +3687,18 @@ export interface operations {
                 verdict_action?: components["schemas"]["SafetyVerdictAction"];
                 coworker_id?: string;
                 stage?: components["schemas"]["SafetyStage"];
+                /**
+                 * @description Narrow to decisions triggered by a rule using this check.
+                 *     A decision stores no check_id directly; the server resolves
+                 *     the check to its rule ids (tenant + platform catalogs) and
+                 *     matches by array overlap on triggered_rule_ids.
+                 */
+                check_id?: string;
+                /**
+                 * @description Narrow to decisions whose triggered_rule_ids contains this
+                 *     rule id (array containment).
+                 */
+                rule_id?: string;
                 from_ts?: string;
                 to_ts?: string;
                 limit?: number;
