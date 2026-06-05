@@ -26,7 +26,9 @@ describe('applyLegacyRedirect', () => {
     ['#/credentials',            '#/manage/credentials'],
     ['#/skills',                 '#/manage/skills'],
     ['#/admin/safety/rules',     '#/manage/safety'],
-    ['#/admin/safety/decisions', '#/activity/safety-decisions'],
+    // Safety log moved to Settings → Governance (spec §7).
+    ['#/admin/safety/decisions', '#/manage/safety-log'],
+    ['#/activity/safety-decisions', '#/manage/safety-log'],
   ];
 
   it.each(TABLE)('rewrites %s → %s', (oldHash, newHash) => {
@@ -48,7 +50,7 @@ describe('applyLegacyRedirect', () => {
 
   it('returns null for hashes that are already on the v2 IA', () => {
     expect(applyLegacyRedirect('#/manage/coworkers')).toBeNull();
-    expect(applyLegacyRedirect('#/activity/safety-decisions')).toBeNull();
+    expect(applyLegacyRedirect('#/manage/safety-log')).toBeNull();
     expect(applyLegacyRedirect('#/')).toBeNull();
     expect(applyLegacyRedirect('')).toBeNull();
   });
@@ -154,6 +156,6 @@ describe('installLegacyRedirects', () => {
     });
     window.dispatchEvent(new HashChangeEvent('hashchange'));
     expect(calls.length).toBe(1);
-    expect(calls[0]).toMatch(/#\/activity\/safety-decisions$/);
+    expect(calls[0]).toMatch(/#\/manage\/safety-log$/);
   });
 });

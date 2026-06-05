@@ -33,7 +33,9 @@ import {
   iconBook,
   iconChevronDown,
   iconChip,
+  iconClipboardCheck,
   iconClose,
+  iconFileText,
   iconHome,
   iconKey,
   iconLink,
@@ -52,6 +54,7 @@ import './skills-page.js';
 import './models-page.js';
 import './credentials-page.js';
 import './safety-rules-page.js';
+import './safety-decisions-page.js';
 import './approval-policies-page.js';
 import './appearance-page.js';
 import './coming-soon.js';
@@ -135,7 +138,7 @@ const NAV_GROUPS: NavGroup[] = [
       {
         slug: 'approval-policies',
         label: 'Approval policies',
-        icon: () => iconShield(16),
+        icon: () => iconClipboardCheck(16),
         render: () =>
           html`<rm-approval-policies-page></rm-approval-policies-page>`,
       },
@@ -144,6 +147,12 @@ const NAV_GROUPS: NavGroup[] = [
         label: 'Safety rules',
         icon: () => iconShield(16),
         render: () => html`<rm-safety-rules-page></rm-safety-rules-page>`,
+      },
+      {
+        slug: 'safety-log',
+        label: 'Safety log',
+        icon: () => iconFileText(16),
+        render: () => html`<rm-safety-decisions-page></rm-safety-decisions-page>`,
       },
     ],
   },

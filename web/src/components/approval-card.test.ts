@@ -282,3 +282,60 @@ describe('<rm-approval-card>', () => {
     expect(onDecision).not.toHaveBeenCalled();
   });
 });
+
+describe('<rm-approval-card> safety-triggered banner (§3.10)', () => {
+  let el: ApprovalCard;
+  afterEach(() => {
+    el?.remove();
+  });
+
+  it('renders an amber banner with the check label when triggered by a safety rule', async () => {
+    el = await mount({
+      mcpServerName: 'stripe',
+      toolName: 'refund.create',
+      triggeredBy: {
+        kind: 'safety_rule',
+        rule_id: 'sr-1',
+        check_id: 'presidio.pii',
+        stage: 'post_tool_result',
+      },
+    });
+    const banner = $(el, '[data-testid="approval-safety-banner"]');
+    expect(banner).not.toBeNull();
+    // Human label, never the raw id; stage intentionally omitted.
+    expect(banner?.textContent).toContain('Personal data (Presidio)');
+    expect(banner?.textContent).not.toContain('post_tool_result');
+    expect($(el, '[data-testid="approval-safety-link"]')).not.toBeNull();
+  });
+
+  it('renders no banner for a business-policy approval (triggeredBy null)', async () => {
+    el = await mount({ mcpServerName: 'stripe', toolName: 'refund.create', triggeredBy: null });
+    expect($(el, '[data-testid="approval-safety-banner"]')).toBeNull();
+  });
+
+  it('degrades to no banner on an unknown triggered_by kind (forward-compat)', async () => {
+    el = await mount({
+      mcpServerName: 'stripe',
+      toolName: 'refund.create',
+      // A future kind the SPA doesn't know about must not crash or render.
+      triggeredBy: { kind: 'scheduled_task', rule_id: 'x', check_id: 'y', stage: 'input_prompt' } as never,
+    });
+    expect($(el, '[data-testid="approval-safety-banner"]')).toBeNull();
+  });
+
+  it('jumps to the settings safety log when "view in safety log" is clicked', async () => {
+    el = await mount({
+      mcpServerName: 'stripe',
+      toolName: 'refund.create',
+      triggeredBy: {
+        kind: 'safety_rule',
+        rule_id: 'sr-1',
+        check_id: 'presidio.pii',
+        stage: 'post_tool_result',
+      },
+    });
+    location.hash = '#/';
+    ($(el, '[data-testid="approval-safety-link"]') as HTMLButtonElement).click();
+    expect(location.hash).toBe('#/manage/safety-log');
+  });
+});

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from typing import get_args
+
 from pydantic import BaseModel, Field, field_validator
+
+from webui.schemas_v1 import SafetyStage
 
 # ---------------------------------------------------------------------------
 # Tenant
@@ -191,10 +195,13 @@ class AssignRequest(BaseModel):
 # V1 stages exposed through REST. Rule POST accepts any of these, but
 # the server additionally checks the stage is within the selected
 # check's ``stages`` set before writing to the DB.
-_SAFETY_STAGE_PATTERN = (
-    r"^(input_prompt|pre_tool_call|post_tool_result|"
-    r"model_output|pre_compaction)$"
-)
+# Derived from the canonical v1 ``SafetyStage`` literal (itself pinned to the
+# engine ``Stage`` enum by test_v1_safety_stage_enum_matches_safety_types_stage)
+# so this admin-write validator can never drift out of sync with the stage set.
+# PR #50 added EGRESS_REQUEST to the engine, the v1 read schema, and every
+# check's stages — but not this hardcoded regex, so editing an egress rule
+# (stage=egress_request) was rejected with a 422. Deriving it closes that gap.
+_SAFETY_STAGE_PATTERN = "^(" + "|".join(get_args(SafetyStage)) + ")$"
 
 
 class SafetyRuleResponse(BaseModel):

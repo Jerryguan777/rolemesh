@@ -25,7 +25,11 @@ const LEGACY_REDIRECTS: ReadonlyMap<string, string> = new Map([
   ['#/credentials',              '#/manage/credentials'],
   ['#/skills',                   '#/manage/skills'],
   ['#/admin/safety/rules',       '#/manage/safety'],
-  ['#/admin/safety/decisions',   '#/activity/safety-decisions'],
+  // Safety log moved from the Activity surface to Settings → Governance
+  // (spec §7). Both the v1.1 admin bookmark and the interim v2 Activity
+  // path now land on the canonical settings home.
+  ['#/admin/safety/decisions',   '#/manage/safety-log'],
+  ['#/activity/safety-decisions', '#/manage/safety-log'],
 ]);
 
 /**

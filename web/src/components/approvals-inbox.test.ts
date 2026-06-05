@@ -491,3 +491,54 @@ describe('<rm-approvals-inbox> is triage-only (never decides)', () => {
     expect(decision).not.toHaveBeenCalled();
   });
 });
+
+describe('<rm-approvals-inbox> safety-triggered shield (§4.10)', () => {
+  it('shows a shield with the check label for a safety-triggered row', async () => {
+    const el = await mount({
+      open: true,
+      rows: [
+        req({
+          request_id: 'r-saf',
+          triggered_by: {
+            kind: 'safety_rule',
+            rule_id: 'sr-1',
+            check_id: 'presidio.pii',
+            stage: 'post_tool_result',
+          },
+        }),
+      ],
+    });
+    const icon = el.querySelector('[data-testid="approvals-row-safety"]');
+    expect(icon).not.toBeNull();
+    expect(icon?.getAttribute('title')).toContain('Personal data (Presidio)');
+    el.remove();
+  });
+
+  it('shows no shield for a business-policy row (triggered_by null)', async () => {
+    const el = await mount({
+      open: true,
+      rows: [req({ request_id: 'r-plain', triggered_by: null })],
+    });
+    expect(el.querySelector('[data-testid="approvals-row-safety"]')).toBeNull();
+    el.remove();
+  });
+
+  it('degrades to no shield on an unknown triggered_by kind', async () => {
+    const el = await mount({
+      open: true,
+      rows: [
+        req({
+          request_id: 'r-future',
+          triggered_by: {
+            kind: 'scheduled_task',
+            rule_id: 'x',
+            check_id: 'y',
+            stage: 'input_prompt',
+          } as never,
+        }),
+      ],
+    });
+    expect(el.querySelector('[data-testid="approvals-row-safety"]')).toBeNull();
+    el.remove();
+  });
+});

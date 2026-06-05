@@ -2300,6 +2300,26 @@ components:
         enabled: { type: boolean }
         priority: { type: integer }
 
+    ApprovalTriggeredBy:
+      type: object
+      description: |
+        Provenance of a safety-triggered approval (§1.1, §3.10). Present on an
+        approval raised by a safety check's `require_approval` verdict; absent
+        / null on a business-policy approval. `kind` is an open tag so future
+        provenances (e.g. `scheduled_task`) extend without a break — V1 only
+        emits `safety_rule`, and the SPA degrades to no banner on unknown
+        kinds. No producer sets it yet (the safety→approval bridge is a
+        separate unbuilt effort); the field exists so the contract + typed
+        client are ready.
+      required: [kind, rule_id, check_id, stage]
+      properties:
+        kind:
+          type: string
+          enum: [safety_rule]
+        rule_id: { type: string, format: uuid }
+        check_id: { type: string }
+        stage: { $ref: '#/components/schemas/SafetyStage' }
+
     ApprovalRequest:
       type: object
       required:
@@ -2358,6 +2378,13 @@ components:
           type: string
           nullable: true
           description: The approver's note on a reject; null otherwise.
+        triggered_by:
+          allOf:
+            - $ref: '#/components/schemas/ApprovalTriggeredBy'
+          nullable: true
+          description: |
+            Safety-rule provenance (§3.10); null for a business-policy
+            approval. Always null today — see ApprovalTriggeredBy.
 
     # -----------------------------------------------------------------
     # Skills (design §3 Phase 3 / docs/19-skills-architecture.md)
@@ -2626,6 +2653,29 @@ components:
         description: { type: string }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+        source:
+          type: string
+          enum: [tenant, platform]
+          default: tenant
+          description: |
+            Platform Safety Rules (PR #49). `tenant` rules are owned by the
+            organization and editable on the admin surface; `platform` rules
+            are cross-tenant defaults set by the platform admin — read-only
+            here. The SPA renders the two tiers in separate sections (§6.2).
+        tier:
+          type: string
+          enum: [floor, transparent_floor, default]
+          nullable: true
+          description: |
+            Platform-rule tier; null for tenant-owned rules. Set only when
+            `source == platform`.
+        editable:
+          type: boolean
+          default: true
+          description: |
+            Convenience flag the SPA uses to show/hide edit / duplicate /
+            delete affordances without re-deriving from `source`. False for
+            platform rules (audit-only).
 
     SafetyCheck:
       type: object
@@ -2710,6 +2760,13 @@ components:
           items: { $ref: '#/components/schemas/SafetyFinding' }
         context_digest: { type: string }
         context_summary: { type: string }
+        source:
+          type: string
+          enum: [tenant, platform]
+          default: tenant
+          description: |
+            `platform` when any triggered rule is platform-owned, else
+            `tenant`. Lets the log filter platform-rule hits at a glance.
         created_at: { type: string, format: date-time }
 
     SafetyDecisionPage:
@@ -3150,6 +3207,13 @@ components:
           type: string
           nullable: true
           description: When the pending approval auto-expires (ISO-8601).
+        triggered_by:
+          allOf:
+            - $ref: '#/components/schemas/ApprovalTriggeredBy'
+          nullable: true
+          description: |
+            Safety-rule provenance (§3.10); null for a business-policy
+            approval. Always null today — see ApprovalTriggeredBy.
 
     WsServerEventApprovalResolved:
       type: object

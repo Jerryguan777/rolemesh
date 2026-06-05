@@ -28,6 +28,15 @@ export type ApprovalStatus =
   | 'expired'
   | 'cancelled';
 
+/** Provenance of a safety-triggered approval (§3.10). Present (kind
+ *  "safety_rule") when a safety check's require_approval verdict raised the
+ *  approval; null for a business-policy approval. Forward-compatible: the SPA
+ *  handles `safety_rule` explicitly and degrades to nothing on unknown kinds.
+ *  NOTE: no producer sets this yet (the safety→approval bridge is unbuilt), so
+ *  in practice it is always null today — the indicators below render nothing. */
+export type ApprovalTriggeredBy =
+  components['schemas']['ApprovalTriggeredBy'] | null;
+
 export interface ApprovalCard {
   requestId: string;
   /** The gated MCP server (`event.approval.requested.mcp_server_name`). */
@@ -57,6 +66,8 @@ export interface ApprovalCard {
    *  card can echo it back ("YOUR REASON"). Never comes off the wire — it is
    *  what the user typed — and is lost on reconnect, which is acceptable. */
   note: string | null;
+  /** Safety-rule provenance (§3.10); null for a business-policy approval. */
+  triggeredBy: ApprovalTriggeredBy;
   /** Ordering key (epoch ms) used to interleave the card with chat messages in
    *  chronological position instead of pinning it to the conversation tail. It
    *  is stamped client-side at the instant the card enters the timeline for a
@@ -106,6 +117,7 @@ export function upsertRequested(
       status: 'pending',
       resolvedAt: null,
       note: null,
+      triggeredBy: ev.triggered_by ?? null,
       // Live push: stamp arrival time so the card sorts after the user message
       // that triggered it and before the (later) confirmation, even if the
       // server's requested_at clock differs from the browser's.
@@ -160,6 +172,7 @@ export function mergePending(
     status: 'pending',
     resolvedAt: null,
     note: null,
+    triggeredBy: r.triggered_by ?? null,
     orderTs: r.requested_at ? Date.parse(r.requested_at) : Date.now(),
   }));
   // De-dup defensively: a row whose id already has a resolved card (decided in
@@ -199,6 +212,7 @@ export function cardsFromConversation(
       resolvedAt:
         status !== 'pending' && decidedAt ? Date.parse(decidedAt) : null,
       note: r.note ?? null,
+      triggeredBy: r.triggered_by ?? null,
       orderTs: r.requested_at ? Date.parse(r.requested_at) : 0,
     };
   });

@@ -34,7 +34,9 @@ import {
   type Coworker,
   type ApprovalRequest,
 } from '../api/client.js';
-import { iconInbox } from './icons.js';
+import { iconInbox, iconShield } from './icons.js';
+import { checkLabel } from './safety-catalog.js';
+import type { ApprovalTriggeredBy } from './approval-store.js';
 
 /** Countdown turns urgent (deep red) under this many ms remaining (§4.1
  *  / §4.3). Matches the chat card's 5-minute threshold. */
@@ -392,6 +394,14 @@ export class ApprovalsInbox extends LitElement {
           margin-left: 6px;
           font-weight: 400;
         }
+        /* §4.10 — third-tier safety-triggered hint, after the tool chip. */
+        rm-approvals-inbox .appr-item .inbox-saf-icon {
+          display: inline-flex;
+          align-items: center;
+          margin-left: 5px;
+          color: var(--rm-warn);
+          vertical-align: middle;
+        }
         rm-approvals-inbox .appr-item .m {
           font-size: 11.5px;
           color: var(--rm-ink-3);
@@ -516,6 +526,20 @@ export class ApprovalsInbox extends LitElement {
     `;
   }
 
+  // §4.10 — small amber shield after the tool chip when the approval was
+  // raised by a safety rule. Whole-row click still handles navigation (no
+  // separate behaviour). Renders nothing for a business-policy approval or an
+  // unknown triggered_by kind (forward-compatible).
+  private renderSafetyIcon(tb: ApprovalTriggeredBy): TemplateResult | typeof nothing {
+    if (!tb || tb.kind !== 'safety_rule') return nothing;
+    return html`<span
+      class="inbox-saf-icon"
+      data-testid="approvals-row-safety"
+      title="Triggered by safety rule: ${checkLabel(tb.check_id)}"
+      >${iconShield(11)}</span
+    >`;
+  }
+
   private renderRow(r: ApprovalRequest): TemplateResult {
     const name = this.coworkerName(r.coworker_id);
     const tool = [r.mcp_server_name, r.tool_name].filter(Boolean).join('.');
@@ -545,6 +569,7 @@ export class ApprovalsInbox extends LitElement {
                 >${tool}</span
               >`
             : nothing}
+          ${this.renderSafetyIcon(r.triggered_by ?? null)}
         </div>
         <div class="m">
           ${title ? html`"${title}" · ` : nothing}

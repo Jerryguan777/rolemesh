@@ -92,6 +92,7 @@ export class MessageList extends LitElement {
                 .coworkerName=${this.coworkerName}
                 .resolvedAt=${item.card.resolvedAt}
                 .note=${item.card.note}
+                .triggeredBy=${item.card.triggeredBy}
                 .busy=${this.approvalBusy.has(item.card.requestId)}
               ></rm-approval-card>
             </div>`,
