@@ -61,9 +61,11 @@ export const SAFETY_CHECK_CATALOG: Record<string, CheckPresentation> = {
   },
   secret_scanner: {
     label: 'Secrets & credentials',
-    desc: 'Scans for API keys, tokens, passwords, and cloud credentials. Run it on outputs to stop a coworker from leaking a secret.',
+    desc: 'Scans for API keys, tokens, passwords, and cloud credentials. Run it on outputs to stop a coworker from leaking a secret. Runs all built-in detectors automatically — no configuration needed.',
     category: 'Sensitive data',
-    cfgKind: 'secret-plugins',
+    // No cfgKind: backend SecretScannerConfig only has action_override.
+    // The dialog shows a plain info note instead of a config form.
+    cfgKind: 'secret-plugins' as const,
   },
   domain_allowlist: {
     label: 'Allowed domains only',
@@ -316,8 +318,23 @@ export function effectiveAction(
 ): SafetyVerdictAction | null {
   if (isHostList(rule.check_id)) return 'block';
   if (check?.action_model === 'config_routed') {
-    const routing = (rule.config?.['routing'] as Record<string, unknown>) ?? {};
-    return representativeRoutedAction(routing);
+    if (rule.check_id === 'presidio.pii') {
+      // Backend stores block_codes + redact_codes (not a routing dict).
+      const blockCodes = (rule.config?.['block_codes'] as string[]) ?? [];
+      const redactCodes = (rule.config?.['redact_codes'] as string[]) ?? [];
+      if (redactCodes.length > 0) return 'redact';
+      if (blockCodes.length > 0) return 'block';
+      return null; // inert
+    }
+    if (rule.check_id === 'openai_moderation') {
+      // Backend stores block_categories + warn_categories (not a routing dict).
+      const blockCats = (rule.config?.['block_categories'] as string[]) ?? [];
+      const warnCats = (rule.config?.['warn_categories'] as string[]) ?? [];
+      if (blockCats.length > 0) return 'block';
+      if (warnCats.length > 0) return 'warn';
+      return null; // inert
+    }
+    return null;
   }
   const override = rule.config?.['action_override'];
   if (typeof override === 'string') return override as SafetyVerdictAction;
@@ -333,12 +350,13 @@ function esc(s: string): string {
     .replace(/>/g, '&gt;');
 }
 
+// Keys match the backend pattern keys (uppercase, per _CONFIG_KEY_TO_CODE).
 const PII_REGEX_LABELS: Record<string, string> = {
-  ssn: 'SSNs',
-  credit_card: 'credit cards',
-  email: 'emails',
-  phone: 'phones',
-  ip: 'IPs',
+  SSN: 'SSNs',
+  CREDIT_CARD: 'credit cards',
+  EMAIL: 'emails',
+  PHONE_US: 'phones',
+  IP_ADDRESS: 'IPs',
 };
 const PRESIDIO_ENTITY_LABELS: Record<string, string> = {
   EMAIL_ADDRESS: 'emails',
@@ -359,15 +377,23 @@ export function safWhatPhrase(
 ): string {
   const pres = SAFETY_CHECK_CATALOG[checkId];
   if (checkId === 'pii.regex') {
-    const entities = (config?.['entities'] as string[]) ?? [];
-    const named = entities.map((e) => PII_REGEX_LABELS[e] ?? e);
+    // Backend: { patterns: { SSN: true, CREDIT_CARD: true, ... } }
+    const patterns = (config?.['patterns'] as Record<string, boolean> | undefined) ?? {};
+    const keys = Object.keys(patterns).filter((k) => patterns[k]);
+    const named = keys.map((k) => PII_REGEX_LABELS[k] ?? k);
     return `detect ${named.length ? named.join(', ') : 'configured personal data'}`;
   }
   if (checkId === 'presidio.pii') {
-    const routing = (config?.['routing'] as Record<string, string>) ?? {};
-    const entries = Object.entries(routing);
-    if (entries.length === 0)
+    // Backend: { block_codes: [...], redact_codes: [...] }
+    const blockCodes = (config?.['block_codes'] as string[]) ?? [];
+    const redactCodes = (config?.['redact_codes'] as string[]) ?? [];
+    const total = blockCodes.length + redactCodes.length;
+    if (total === 0)
       return 'scan for personal data (not configured yet — running but doing nothing)';
+    const entries: [string, string][] = [
+      ...blockCodes.map((c): [string, string] => [c, 'block']),
+      ...redactCodes.map((c): [string, string] => [c, 'redact']),
+    ];
     const summary = entries
       .slice(0, 3)
       .map(([k, a]) => `${PRESIDIO_ENTITY_LABELS[k] ?? k}→${a}`)
@@ -376,8 +402,8 @@ export function safWhatPhrase(
     return summary + more;
   }
   if (checkId === 'secret_scanner') {
-    const n = ((config?.['plugins'] as string[]) ?? []).length;
-    return `scan for secrets${n ? ` (${n} type${n === 1 ? '' : 's'})` : ''}`;
+    // SecretScannerConfig has no plugin selection — runs all detectors.
+    return 'scan for secrets';
   }
   if (checkId === 'domain_allowlist') {
     // domain_allowlist backend key is `allowed_hosts` (DomainAllowlistConfig).
@@ -390,13 +416,16 @@ export function safWhatPhrase(
     return p ? `allow ${p}` : 'allow listed domains';
   }
   if (checkId === 'openai_moderation') {
-    const routing = (config?.['routing'] as Record<string, string>) ?? {};
-    const n = Object.keys(routing).length;
+    // Backend: { block_categories: [...], warn_categories: [...] }
+    const blockCats = (config?.['block_categories'] as string[]) ?? [];
+    const warnCats = (config?.['warn_categories'] as string[]) ?? [];
+    const n = blockCats.length + warnCats.length;
     if (n === 0) return 'check content moderation (not configured yet)';
     return `flag ${n} categor${n === 1 ? 'y' : 'ies'}`;
   }
   if (pres?.cfgKind === 'threshold') {
-    const t = config?.['threshold'];
+    // llm_guard checks store threshold; presidio uses score_threshold on backend.
+    const t = config?.['threshold'] ?? config?.['score_threshold'];
     const label = (pres.label || checkId).toLowerCase();
     return `detect ${label}${t != null ? ` (sensitivity ${t})` : ''}`;
   }

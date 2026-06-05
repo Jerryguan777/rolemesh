@@ -160,51 +160,56 @@ describe('effectiveAction', () => {
     expect(a).toBe('block');
   });
 
-  it('returns null for a routed check with empty routing (inert)', () => {
+  it('returns null for presidio.pii with empty block/redact lists (inert)', () => {
+    // Backend stores block_codes + redact_codes (not a routing dict).
     const a = effectiveAction(
-      { check_id: 'presidio.pii', stage: 'post_tool_result' as SafetyStage, config: { routing: {} } },
+      { check_id: 'presidio.pii', stage: 'post_tool_result' as SafetyStage, config: { block_codes: [], redact_codes: [] } },
       presidio,
     );
     expect(a).toBeNull();
   });
 
-  it('picks the most-severe routed action for the pill', () => {
+  it('picks redact over block for the presidio pill (most-severe wins)', () => {
     const a = effectiveAction(
       {
         check_id: 'presidio.pii',
         stage: 'post_tool_result' as SafetyStage,
-        config: { routing: { EMAIL_ADDRESS: 'redact', US_SSN: 'block' } },
+        config: { block_codes: ['US_SSN'], redact_codes: ['EMAIL_ADDRESS'] },
       },
       presidio,
     );
-    // redact outranks block in the display priority
     expect(a).toBe('redact');
   });
 });
 
 describe('safWhatPhrase', () => {
-  it('names the entities for pii.regex', () => {
-    expect(safWhatPhrase('pii.regex', { entities: ['ssn', 'credit_card'] })).toBe(
+  it('names the entities for pii.regex (backend patterns dict, uppercase keys)', () => {
+    // Backend stores { patterns: { SSN: true, CREDIT_CARD: true } }
+    expect(safWhatPhrase('pii.regex', { patterns: { SSN: true, CREDIT_CARD: true } })).toBe(
       'detect SSNs, credit cards',
     );
   });
 
-  it('avoids the word "inert" for an unconfigured routed check', () => {
-    const phrase = safWhatPhrase('presidio.pii', { routing: {} });
+  it('shows nothing-configured for pii.regex with empty patterns', () => {
+    expect(safWhatPhrase('pii.regex', { patterns: {} })).toBe(
+      'detect configured personal data',
+    );
+  });
+
+  it('avoids the word "inert" for an unconfigured presidio check', () => {
+    // Backend stores { block_codes: [], redact_codes: [] }
+    const phrase = safWhatPhrase('presidio.pii', { block_codes: [], redact_codes: [] });
     expect(phrase).not.toMatch(/inert/i);
     expect(phrase).toMatch(/running but doing nothing/i);
   });
 
-  it('summarizes presidio routing with a +N overflow', () => {
+  it('summarizes presidio block/redact codes with a +N overflow', () => {
+    // Backend stores block_codes + redact_codes
     const phrase = safWhatPhrase('presidio.pii', {
-      routing: {
-        EMAIL_ADDRESS: 'redact',
-        PHONE_NUMBER: 'redact',
-        US_SSN: 'block',
-        PERSON: 'warn',
-      },
+      block_codes: ['US_SSN', 'PERSON'],
+      redact_codes: ['EMAIL_ADDRESS', 'PHONE_NUMBER'],
     });
-    expect(phrase).toContain('emails→redact');
+    expect(phrase).toContain('SSNs→block');
     expect(phrase).toContain('+1 more');
   });
 
@@ -219,7 +224,7 @@ describe('safWhatPhrase', () => {
 describe('safSentence', () => {
   it('renders a fixed-check sentence with the effective verb and scope', () => {
     const s = safSentence(
-      { check_id: 'pii.regex', stage: 'pre_tool_call' as SafetyStage, config: { entities: ['ssn'] } },
+      { check_id: 'pii.regex', stage: 'pre_tool_call' as SafetyStage, config: { patterns: { SSN: true } } },
       piiRegex,
       null,
     );
@@ -240,7 +245,7 @@ describe('safSentence', () => {
 
   it('omits the verb for an inert routed check (no contradiction)', () => {
     const s = safSentence(
-      { check_id: 'presidio.pii', stage: 'post_tool_result' as SafetyStage, config: { routing: {} } },
+      { check_id: 'presidio.pii', stage: 'post_tool_result' as SafetyStage, config: { block_codes: [], redact_codes: [] } },
       presidio,
       null,
     );

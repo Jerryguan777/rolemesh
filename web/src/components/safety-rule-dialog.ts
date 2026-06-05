@@ -58,12 +58,15 @@ const INPUT_CLASS =
 // Presentation lists for the per-check config forms. Human label first, the
 // technical code as a muted subtitle (§8.5: behaviour primary, code for
 // debugging). These are UI-only; the backend keys are the codes.
+
+// pii.regex: backend key is `patterns: { SSN: true, ... }` (uppercase, dict of bool).
+// Each entry: [backendKey, humanLabel]. Frontend stores as Set<backendKey>.
 const PII_REGEX_ENTITIES: [string, string][] = [
-  ['ssn', 'US Social Security numbers'],
-  ['credit_card', 'Credit card numbers'],
-  ['email', 'Email addresses'],
-  ['phone', 'Phone numbers'],
-  ['ip', 'IP addresses'],
+  ['SSN', 'US Social Security numbers'],
+  ['CREDIT_CARD', 'Credit card numbers'],
+  ['EMAIL', 'Email addresses'],
+  ['PHONE_US', 'Phone numbers'],
+  ['IP_ADDRESS', 'IP addresses'],
 ];
 const PRESIDIO_ENTITIES: [string, string][] = [
   ['EMAIL_ADDRESS', 'Email addresses'],
@@ -151,6 +154,8 @@ export class SafetyRuleDialog extends LitElement {
       this.pickedAction =
         typeof override === 'string' ? (override as SafetyVerdictAction) : null;
       delete cfg['action_override'];
+      // Convert stored backend format → internal display format per check.
+      this._normalizeConfigFromBackend(src.check_id, cfg);
       this.config = cfg;
       this.advancedJson = null;
     } else {
@@ -195,6 +200,74 @@ export class SafetyRuleDialog extends LitElement {
     }
   }
 
+  // ---- config format converters (backend ↔ internal display) ----
+
+  // Convert backend-stored config → internal UI format on load.
+  // Each check uses different field names from what the UI stores internally.
+  private _normalizeConfigFromBackend(checkId: string, cfg: Record<string, unknown>): void {
+    if (checkId === 'pii.regex') {
+      // Backend: { patterns: { SSN: true, CREDIT_CARD: true, ... } }
+      // Internal: Set<backendKey> stored as cfg['_piiKeys'] (a string[])
+      const patterns = (cfg['patterns'] as Record<string, boolean> | undefined) ?? {};
+      cfg['_piiKeys'] = Object.keys(patterns).filter((k) => patterns[k]);
+      delete cfg['patterns'];
+    } else if (checkId === 'presidio.pii') {
+      // Backend: { block_codes: [...], redact_codes: [...], score_threshold: 0.4 }
+      // Internal: { routing: { CODE: 'block'|'redact' }, threshold: 0.4 }
+      const blockCodes = (cfg['block_codes'] as string[]) ?? [];
+      const redactCodes = (cfg['redact_codes'] as string[]) ?? [];
+      const routing: Record<string, string> = {};
+      for (const c of blockCodes) routing[c] = 'block';
+      for (const c of redactCodes) routing[c] = 'redact';
+      cfg['routing'] = routing;
+      cfg['threshold'] = cfg['score_threshold'] ?? 0.4;
+      delete cfg['block_codes'];
+      delete cfg['redact_codes'];
+      delete cfg['score_threshold'];
+      delete cfg['language'];
+    } else if (checkId === 'openai_moderation') {
+      // Backend: { block_categories: [...], warn_categories: [...] }
+      // Internal: { routing: { category: 'block'|'warn' } }
+      const blockCats = (cfg['block_categories'] as string[]) ?? [];
+      const warnCats = (cfg['warn_categories'] as string[]) ?? [];
+      const routing: Record<string, string> = {};
+      for (const c of blockCats) routing[c] = 'block';
+      for (const c of warnCats) routing[c] = 'warn';
+      cfg['routing'] = routing;
+      delete cfg['block_categories'];
+      delete cfg['warn_categories'];
+    }
+    // secret_scanner: backend only has action_override (already stripped above).
+    // No additional conversion needed.
+  }
+
+  // Convert internal UI format → backend config on save.
+  private _buildBackendConfig(cfg: Record<string, unknown>): Record<string, unknown> {
+    const out = { ...cfg };
+    if (this.checkId === 'pii.regex') {
+      const keys = (out['_piiKeys'] as string[]) ?? [];
+      delete out['_piiKeys'];
+      const patterns: Record<string, boolean> = {};
+      for (const k of keys) patterns[k] = true;
+      out['patterns'] = patterns;
+    } else if (this.checkId === 'presidio.pii') {
+      const routing = (out['routing'] as Record<string, string>) ?? {};
+      delete out['routing'];
+      const threshold = out['threshold'];
+      delete out['threshold'];
+      out['block_codes'] = Object.entries(routing).filter(([, a]) => a === 'block').map(([c]) => c);
+      out['redact_codes'] = Object.entries(routing).filter(([, a]) => a === 'redact').map(([c]) => c);
+      out['score_threshold'] = threshold ?? 0.4;
+    } else if (this.checkId === 'openai_moderation') {
+      const routing = (out['routing'] as Record<string, string>) ?? {};
+      delete out['routing'];
+      out['block_categories'] = Object.entries(routing).filter(([, a]) => a === 'block').map(([c]) => c);
+      out['warn_categories'] = Object.entries(routing).filter(([, a]) => a === 'warn').map(([c]) => c);
+    }
+    // secret_scanner: action_override only — no extra fields.
+    return out;
+  }
+
   // ---- editor-experience selection (spec §6.11.1) ----
 
   private showActionPanel(): boolean {
@@ -223,7 +296,7 @@ export class SafetyRuleDialog extends LitElement {
         }
       }
     }
-    const cfg: Record<string, unknown> = { ...this.config };
+    let cfg: Record<string, unknown> = { ...this.config };
     // action_override is only written for the fixed picker experience, only
     // when the user picked a non-natural, override-writable action.
     if (this.showActionPanel() && this.pickedAction) {
@@ -231,6 +304,8 @@ export class SafetyRuleDialog extends LitElement {
       const nat = naturalAction(check, this.stage as SafetyStage);
       if (this.pickedAction !== nat) cfg['action_override'] = this.pickedAction;
     }
+    // Convert internal UI format → backend field names before submitting.
+    cfg = this._buildBackendConfig(cfg);
     return cfg;
   }
 
@@ -527,41 +602,47 @@ export class SafetyRuleDialog extends LitElement {
   private renderCfgForm(check: SafetyCheck, cfgKind: string): TemplateResult {
     switch (cfgKind) {
       case 'pii-entities':
-        return this.renderCheckboxGrid('What to look for', 'entities', PII_REGEX_ENTITIES);
+        // Internally stored as _piiKeys (Set<backendKey>); converted to
+        // { patterns: { SSN: true, ... } } on save (see _buildBackendConfig).
+        return this.renderPiiEntityGrid();
       case 'secret-plugins':
-        return this.renderCheckboxGrid('Types of secrets to look for', 'plugins', SECRET_PLUGINS);
+        // Backend SecretScannerConfig has action_override only — no plugin
+        // selection. Show an info note instead of a broken checkbox grid.
+        return this.renderSecretScannerNote();
       case 'threshold':
         return this.renderThreshold('How sensitive should the check be?', 0.7);
       case 'host-list':
         return this.renderHostList();
       case 'presidio-routing':
+        // Stored internally as { routing: {CODE→action}, threshold } and
+        // converted to { block_codes, redact_codes, score_threshold } on save.
         return this.renderRouting(check, 'type', PRESIDIO_ENTITIES, true);
       case 'moderation-routing':
-        return this.renderRouting(check, 'category', MODERATION_CATEGORIES, false);
+        // Stored internally as { routing: {cat→action} } and converted to
+        // { block_categories, warn_categories } on save. Only block/warn
+        // are expressible per-category (no require_approval_categories field).
+        return this.renderModerationRouting(check);
       default:
         return html``;
     }
   }
 
-  private renderCheckboxGrid(
-    label: string,
-    key: 'entities' | 'plugins',
-    options: [string, string][],
-  ): TemplateResult {
-    const selected = new Set((this.config[key] as string[]) ?? []);
+  private renderPiiEntityGrid(): TemplateResult {
+    // _piiKeys holds the Set of selected backend keys (SSN, CREDIT_CARD, …).
+    const selected = new Set((this.config['_piiKeys'] as string[]) ?? []);
     return html`
-      <label class="block text-[12.5px] font-medium mb-1">${label}</label>
+      <label class="block text-[12.5px] font-medium mb-1">What to look for</label>
       <div class="rm-saf-cfg-checks">
-        ${options.map(
-          ([value, lbl]) => html`<label>
+        ${PII_REGEX_ENTITIES.map(
+          ([backendKey, lbl]) => html`<label>
             <input
               type="checkbox"
-              ?checked=${selected.has(value)}
+              ?checked=${selected.has(backendKey)}
               @change=${(e: Event) => {
                 const next = new Set(selected);
-                if ((e.target as HTMLInputElement).checked) next.add(value);
-                else next.delete(value);
-                this.config = { ...this.config, [key]: [...next] };
+                if ((e.target as HTMLInputElement).checked) next.add(backendKey);
+                else next.delete(backendKey);
+                this.config = { ...this.config, _piiKeys: [...next] };
               }}
             />
             ${lbl}
@@ -571,7 +652,74 @@ export class SafetyRuleDialog extends LitElement {
     `;
   }
 
+  private renderSecretScannerNote(): TemplateResult {
+    // SecretScannerConfig only accepts action_override — there is no plugin
+    // selection in the current backend schema. The check runs all built-in
+    // detectors automatically.
+    return html`
+      <p class="text-[12.5px] text-ink-3 dark:text-d-ink-3 leading-snug">
+        This check runs all built-in secret detectors automatically. No
+        additional configuration is needed — use the action picker above to
+        choose what happens when a secret is found.
+      </p>
+    `;
+  }
+
+  // Moderation routing: only block/warn per category — the schema has no
+  // require_approval_categories field, so we filter it from the options.
+  private renderModerationRouting(check: SafetyCheck): TemplateResult {
+    const stage = this.stage as SafetyStage;
+    const routing = (this.config['routing'] as Record<string, string>) ?? {};
+    // Only block and warn are expressible per-category.
+    const options = supportedActions(check, stage).filter(
+      (a) => a !== 'allow' && a !== 'require_approval' && a !== 'redact',
+    );
+    const anyRouted = Object.values(routing).some(Boolean);
+    return html`
+      <label class="block text-[12.5px] font-medium mb-1">
+        Choose an action for each category
+        <span class="rm-saf-lblnote">leave any blank to let it through</span>
+      </label>
+      <div class="rm-saf-routing-table" data-testid="saf-routing">
+        ${MODERATION_CATEGORIES.map(
+          ([code, lbl]) => html`<div class="rm-saf-routing-row">
+            <div>
+              <div class="rm-saf-rcode">${lbl}</div>
+              <div class="rm-saf-rdesc">${code}</div>
+            </div>
+            <select
+              data-routing-code=${code}
+              @change=${(e: Event) => {
+                const v = (e.target as HTMLSelectElement).value;
+                const next = { ...routing };
+                if (v) next[code] = v;
+                else delete next[code];
+                this.config = { ...this.config, routing: next };
+              }}
+            >
+              <option value="" ?selected=${!routing[code]}>— allow these —</option>
+              ${options.map(
+                (a) => html`<option value=${a} ?selected=${routing[code] === a}>
+                  ${SAF_ACTION_LABEL[a]}
+                </option>`,
+              )}
+            </select>
+          </div>`,
+        )}
+      </div>
+      ${!anyRouted
+        ? html`<div class="rm-saf-routing-inert" data-testid="saf-routing-inert">
+            <b>Nothing set yet.</b> The check runs on every input but won't do
+            anything. Pick an action for at least one category above to make it
+            active.
+          </div>`
+        : nothing}
+    `;
+  }
+
   private renderThreshold(label: string, fallback: number): TemplateResult {
+    // Internally stored as `threshold`; presidio uses `score_threshold` on
+    // the backend — converted in _buildBackendConfig.
     const value = (this.config['threshold'] as number) ?? fallback;
     return html`
       <label class="block text-[12.5px] font-medium mb-1">${label}</label>

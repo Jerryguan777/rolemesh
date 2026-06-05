@@ -217,62 +217,64 @@ describe('SafetyRuleDialog — action_override write rule', () => {
     el.remove();
   });
 
-  it('never writes action_override for a config_routed check', async () => {
-    const el = await mount({ duplicating: makeRule({ check_id: 'presidio.pii', stage: 'post_tool_result', config: { routing: { US_SSN: 'block' } } }) });
+  it('never writes action_override for a config_routed check; converts to backend format', async () => {
+    // Backend format for presidio is block_codes/redact_codes, not routing.
+    const el = await mount({ duplicating: makeRule({ check_id: 'presidio.pii', stage: 'post_tool_result', config: { block_codes: ['US_SSN'], redact_codes: [] } }) });
     ($(el, '[data-testid="saf-submit"]') as HTMLButtonElement).click();
     await el.updateComplete;
     await Promise.resolve();
     const [body] = createRuleSpy.mock.calls[0];
     expect((body.config as Record<string, unknown>).action_override).toBeUndefined();
-    expect((body.config as Record<string, unknown>).routing).toEqual({ US_SSN: 'block' });
+    expect((body.config as Record<string, unknown>).block_codes).toEqual(['US_SSN']);
+    expect((body.config as Record<string, unknown>).redact_codes).toEqual([]);
     el.remove();
   });
 });
 
-describe('SafetyRuleDialog — routing form ⇄ config round-trip', () => {
-  it('loads an existing routing map into the dropdowns and back out unchanged', async () => {
+describe('SafetyRuleDialog — presidio routing form ⇄ backend format round-trip', () => {
+  it('loads backend block_codes/redact_codes and saves back in the same format', async () => {
     updateRuleSpy.mockResolvedValue(makeRule());
+    // Server stores block_codes + redact_codes; dialog converts internally for display.
     const el = await mount({
       editing: makeRule({
         id: 'r5',
         check_id: 'presidio.pii',
         stage: 'post_tool_result',
-        config: { routing: { EMAIL_ADDRESS: 'redact', US_SSN: 'block' }, threshold: 0.6 },
+        config: { block_codes: ['US_SSN'], redact_codes: ['EMAIL_ADDRESS'], score_threshold: 0.6 },
       }),
     });
-    // The loaded routing select for EMAIL_ADDRESS exists and offers redact.
+    // The routing select for EMAIL_ADDRESS should exist (loaded from redact_codes).
     const emailSel = $<HTMLSelectElement>(
       el,
       '[data-testid="saf-routing"] select[data-routing-code="EMAIL_ADDRESS"]',
     )!;
     expect(emailSel).not.toBeNull();
-    // Save without touching anything → routing round-trips (proves the loaded
-    // config survived into buildConfig untouched).
+    // Save without touching → round-trips back to block_codes/redact_codes.
     ($(el, '[data-testid="saf-submit"]') as HTMLButtonElement).click();
     await el.updateComplete;
     await Promise.resolve();
     const [, body] = updateRuleSpy.mock.calls[0];
-    expect((body.config as Record<string, unknown>).routing).toEqual({
-      EMAIL_ADDRESS: 'redact',
-      US_SSN: 'block',
-    });
+    expect((body.config as Record<string, unknown>).block_codes).toEqual(['US_SSN']);
+    expect((body.config as Record<string, unknown>).redact_codes).toEqual(['EMAIL_ADDRESS']);
+    expect((body.config as Record<string, unknown>).score_threshold).toBeDefined();
     el.remove();
   });
 
-  it('clearing a routing dropdown drops that entity from the config', async () => {
+  it('clearing a routing dropdown removes entity from the output lists', async () => {
     updateRuleSpy.mockResolvedValue(makeRule());
     const el = await mount({
       editing: makeRule({
         id: 'r6',
         check_id: 'presidio.pii',
         stage: 'post_tool_result',
-        config: { routing: { EMAIL_ADDRESS: 'redact', US_SSN: 'block' } },
+        config: { block_codes: ['US_SSN'], redact_codes: ['EMAIL_ADDRESS'] },
       }),
     });
     const emailSel = $<HTMLSelectElement>(
       el,
       '[data-testid="saf-routing"] select[data-routing-code="EMAIL_ADDRESS"]',
     )!;
+    // Clear EMAIL_ADDRESS routing → it should vanish from redact_codes.
     emailSel.value = '';
     emailSel.dispatchEvent(new Event('change'));
     await el.updateComplete;
@@ -280,7 +282,8 @@ describe('SafetyRuleDialog — routing form ⇄ config round-trip', () => {
     await el.updateComplete;
     await Promise.resolve();
     const [, body] = updateRuleSpy.mock.calls[0];
-    expect((body.config as Record<string, unknown>).routing).toEqual({ US_SSN: 'block' });
+    expect((body.config as Record<string, unknown>).block_codes).toEqual(['US_SSN']);
+    expect((body.config as Record<string, unknown>).redact_codes).toEqual([]);
     el.remove();
   });
 });
