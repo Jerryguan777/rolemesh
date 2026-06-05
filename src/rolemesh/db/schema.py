@@ -1422,6 +1422,16 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     await conn.execute(
         "ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS rationale TEXT"
     )
+    # Safety->approval provenance (docs/21-hitl-approval-plan.md §3.10 / §11.4):
+    # a JSON {kind, rule_id, check_id, stage} object set when the safety pipeline
+    # raises a require_approval verdict at PRE_TOOL_CALL and the hook bridge turns
+    # it into a HITL ticket; null for a business-policy approval. Like
+    # ``policy_id`` it is deliberately not an FK — the rule/check it names may be
+    # edited or deleted while a historical request remains. Added after the table
+    # shipped, so use the idempotent ADD COLUMN IF NOT EXISTS form.
+    await conn.execute(
+        "ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS triggered_by JSONB"
+    )
 
     # Reference/seed data — see _seed_reference_data.
     await _seed_reference_data(conn)

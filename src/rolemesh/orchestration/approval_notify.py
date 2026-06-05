@@ -267,6 +267,10 @@ class ApprovalNotifier:
                     "requested_at": req.requested_at.isoformat(),
                     "rationale": req.rationale,
                     "action_summary": req.action_summary,
+                    # Safety-rule provenance (§3.10); None for a business-policy
+                    # approval. The SPA renders the amber "paused by a safety
+                    # rule" banner from this.
+                    "triggered_by": req.triggered_by,
                     "expires_at": req.expires_at.isoformat(),
                 },
             )

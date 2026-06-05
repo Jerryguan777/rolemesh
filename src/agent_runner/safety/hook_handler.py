@@ -23,10 +23,13 @@ Verdict translation (V2 P0.2):
                          expose a replace-result channel, the handler
                          emits ``appended_context`` with a withhold
                          notice instead.
-  - require_approval   → treated identically to ``block``: the turn is
-                         refused. The orchestrator's audit ingestion
-                         records ``verdict_action=require_approval`` for
-                         reporting, but the runtime effect is a block.
+  - require_approval   → at PRE_TOOL_CALL, when an ``ApprovalAwaiter`` is
+                         wired, bridged into a HITL approval ticket
+                         (docs/21 §11.4): the call blocks until a human
+                         decides — approve runs the tool in-band, reject /
+                         timeout blocks. Everywhere else (no approval
+                         surface) it stays a ``block`` alias. The audit
+                         still records ``verdict_action=require_approval``.
   - redact             → PRE_TOOL_CALL replaces ``tool_input``.
                          POST_TOOL_RESULT falls back to appended_context
                          because the hook protocol cannot replace the
@@ -51,6 +54,7 @@ from rolemesh.safety.types import SafetyContext, Stage, ToolInfo
 from .pipeline import pipeline_run
 
 if TYPE_CHECKING:
+    from agent_runner.approval.awaiter import ApprovalAwaiter
     from agent_runner.hooks.events import (
         CompactionEvent,
         ToolCallEvent,
@@ -61,6 +65,7 @@ if TYPE_CHECKING:
         UserPromptVerdict,
     )
     from agent_runner.tools.context import ToolContext
+    from rolemesh.safety.types import Verdict
 
     from .registry import CheckRegistry
 
@@ -79,6 +84,7 @@ class SafetyHookHandler:
         rules: list[dict[str, Any]],
         registry: CheckRegistry,
         tool_ctx: ToolContext,
+        approval_awaiter: ApprovalAwaiter | None = None,
     ) -> None:
         # Rules are a snapshot taken at container start. Hot-update
         # semantics (§5.1) applies at the container restart boundary;
@@ -86,6 +92,12 @@ class SafetyHookHandler:
         self._rules = rules
         self._registry = registry
         self._tool_ctx = tool_ctx
+        # When wired (HITL is active for the run), a PRE_TOOL_CALL
+        # require_approval verdict is bridged into a real HITL approval ticket
+        # instead of a terminal block. None preserves the legacy behaviour
+        # (require_approval == block) for any stage/run without an approval
+        # surface. Only PRE_TOOL_CALL uses it — see docs/21 §11.4.
+        self._approval_awaiter = approval_awaiter
 
     # -- Context construction helper -----------------------------------
 
@@ -137,8 +149,19 @@ class SafetyHookHandler:
             publisher=self._tool_ctx.publish,
         )
 
+        if (
+            verdict.action == "require_approval"
+            and self._approval_awaiter is not None
+        ):
+            # Safety->approval bridge (docs/21 §11.4): PRE_TOOL_CALL is the one
+            # stage with both an awaiting agent and an approval surface, so a
+            # require_approval verdict becomes a HITL ticket. approve -> the
+            # tool runs in-band (return None); reject/timeout -> block.
+            return await self._request_approval(event, verdict)
+
         if verdict.action in ("block", "require_approval"):
-            # require_approval blocks the turn identically to block.
+            # block — or require_approval with no approval surface wired —
+            # refuses the turn identically.
             reason = verdict.reason or "Blocked by safety policy"
             return ToolCallVerdict(block=True, reason=reason)
 
@@ -163,6 +186,72 @@ class SafetyHookHandler:
         # has no appended_context). The audit event has already been
         # published; nothing more for the agent here.
         return None
+
+    async def _request_approval(
+        self, event: ToolCallEvent, verdict: Verdict
+    ) -> ToolCallVerdict | None:
+        """Bridge a PRE_TOOL_CALL require_approval verdict into a HITL ticket.
+
+        Builds the approval request body (with the safety ``triggered_by``
+        provenance) and blocks on the shared awaiter, exactly like a
+        business-policy approval. ``approve`` lets the tool run in-band;
+        ``reject`` / timeout returns a block verdict with a safety-flavoured
+        reason. Only reachable when ``self._approval_awaiter`` is wired.
+        """
+        from agent_runner.hooks.events import ToolCallVerdict
+        from agent_runner.hooks.handlers.approval import parse_mcp_tool_name
+
+        assert self._approval_awaiter is not None
+        tool_name = event.tool_name or ""
+        parsed = parse_mcp_tool_name(tool_name)
+        # MCP tools split into (server, tool); a builtin tool (Bash/Edit/...)
+        # has no server, so carry the bare name as tool_name and leave
+        # mcp_server_name empty. The SPA keys the safety banner off
+        # triggered_by, not the server name, so an empty server is fine.
+        if parsed is not None:
+            server, tool = parsed
+        else:
+            server, tool = "", tool_name
+        params = dict(event.tool_input) if isinstance(event.tool_input, dict) else {}
+
+        triggered_by = {
+            "kind": "safety_rule",
+            "rule_id": verdict.firing_rule_id or "",
+            "check_id": verdict.firing_check_id or "",
+            "stage": Stage.PRE_TOOL_CALL.value,
+        }
+        decision = await self._approval_awaiter.await_decision(
+            {
+                "tenant_id": self._tool_ctx.tenant_id,
+                "coworker_id": self._tool_ctx.coworker_id,
+                "conversation_id": self._tool_ctx.conversation_id or None,
+                # Approver = the user whose turn this is; a null id is forwarded
+                # as-is so the orchestrator fails closed on it (§3.1).
+                "user_id": self._tool_ctx.user_id or None,
+                # Not a business policy — provenance travels in triggered_by.
+                "policy_id": None,
+                "mcp_server_name": server,
+                "tool_name": tool,
+                "params": params,
+                "action_summary": f"{tool} held for approval by a safety rule",
+                "rationale": verdict.reason,
+                "triggered_by": triggered_by,
+            }
+        )
+        if decision.approved:
+            return None
+        if decision.timed_out:
+            return ToolCallVerdict(
+                block=True,
+                reason=(
+                    f"Safety approval for {tool} timed out without a decision; "
+                    "the tool call was not executed."
+                ),
+            )
+        reason = verdict.reason or "Tool call blocked by a safety rule."
+        if decision.note:
+            reason = f"{reason} Note: {decision.note}"
+        return ToolCallVerdict(block=True, reason=reason)
 
     # -- INPUT_PROMPT ---------------------------------------------------
 

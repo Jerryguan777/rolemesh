@@ -61,6 +61,9 @@ class ApprovalRequest:
     action: dict[str, Any]          # { tool_name, params }
     action_summary: str | None
     rationale: str | None           # agent's "why" (nullable; no fill yet)
+    # Safety->approval provenance {kind, rule_id, check_id, stage}; None for a
+    # business-policy approval. Set by the safety hook bridge (§3.10).
+    triggered_by: dict[str, Any] | None
     status: str
     decided_by: str | None
     note: str | None
@@ -74,6 +77,19 @@ def _json_to_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, str):
         value = json.loads(value) if value else {}
     return value if isinstance(value, dict) else {}
+
+
+def _json_to_optional_dict(value: Any) -> dict[str, Any] | None:
+    """Like :func:`_json_to_dict` but preserves NULL as ``None``.
+
+    Used for nullable jsonb columns (``triggered_by``) where the absence of a
+    value is semantically distinct from an empty object.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = json.loads(value) if value else None
+    return value if isinstance(value, dict) else None
 
 
 def _record_to_policy(row: asyncpg.Record) -> ApprovalPolicy:
@@ -103,6 +119,7 @@ def _record_to_request(row: asyncpg.Record) -> ApprovalRequest:
         action=_json_to_dict(row["action"]),
         action_summary=row["action_summary"],
         rationale=row["rationale"],
+        triggered_by=_json_to_optional_dict(row["triggered_by"]),
         status=row["status"],
         decided_by=str(row["decided_by"]) if row["decided_by"] else None,
         note=row["note"],
@@ -265,6 +282,7 @@ async def create_approval_request(
     user_id: str | None = None,
     action_summary: str | None = None,
     rationale: str | None = None,
+    triggered_by: dict[str, Any] | None = None,
     request_id: str | None = None,
 ) -> ApprovalRequest:
     """Insert a ``pending`` approval request and return it.
@@ -274,6 +292,10 @@ async def create_approval_request(
     call. ``user_id`` is the approver (the task creator). A ``None``
     approver is persisted as-is so the caller can fail closed on it.
 
+    ``triggered_by`` is the safety-rule provenance {kind, rule_id, check_id,
+    stage} when the request was raised by the safety pipeline's
+    require_approval bridge; ``None`` for a business-policy approval.
+
     ``request_id`` lets the caller pin the row's primary key. The container
     mints the ``request_id`` it blocks on (§3.1) *before* the orchestrator
     persists, and the decision relay routes back by that same id (§3.2), so the
@@ -281,6 +303,7 @@ async def create_approval_request(
     relay could never find the awaiting call. Left ``None`` (e.g. S1 CRUD
     tests) the DB default mints a fresh id.
     """
+    triggered_by_json = json.dumps(triggered_by) if triggered_by is not None else None
     async with tenant_conn(tenant_id) as conn:
         if request_id is not None:
             row = await conn.fetchrow(
@@ -288,11 +311,11 @@ async def create_approval_request(
                 INSERT INTO approval_requests (
                     id, tenant_id, coworker_id, conversation_id, policy_id,
                     user_id, job_id, mcp_server_name, action, action_summary,
-                    rationale, expires_at
+                    rationale, triggered_by, expires_at
                 )
                 VALUES (
                     $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid,
-                    $6::uuid, $7, $8, $9::jsonb, $10, $11, $12
+                    $6::uuid, $7, $8, $9::jsonb, $10, $11, $12::jsonb, $13
                 )
                 RETURNING *
                 """,
@@ -307,6 +330,7 @@ async def create_approval_request(
                 json.dumps(action),
                 action_summary,
                 rationale,
+                triggered_by_json,
                 expires_at,
             )
         else:
@@ -315,11 +339,11 @@ async def create_approval_request(
                 INSERT INTO approval_requests (
                     tenant_id, coworker_id, conversation_id, policy_id, user_id,
                     job_id, mcp_server_name, action, action_summary, rationale,
-                    expires_at
+                    triggered_by, expires_at
                 )
                 VALUES (
                     $1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::uuid,
-                    $6, $7, $8::jsonb, $9, $10, $11
+                    $6, $7, $8::jsonb, $9, $10, $11::jsonb, $12
                 )
                 RETURNING *
                 """,
@@ -333,6 +357,7 @@ async def create_approval_request(
                 json.dumps(action),
                 action_summary,
                 rationale,
+                triggered_by_json,
                 expires_at,
             )
     assert row is not None

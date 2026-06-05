@@ -65,6 +65,7 @@ class _FakeStore:
         user_id: str | None = None,
         action_summary: str | None = None,
         rationale: str | None = None,
+        triggered_by: dict[str, Any] | None = None,
         request_id: str | None = None,
     ) -> ApprovalRequest:
         rid = request_id or str(uuid.uuid4())
@@ -80,6 +81,7 @@ class _FakeStore:
             action=action,
             action_summary=action_summary,
             rationale=rationale,
+            triggered_by=triggered_by,
             status="pending",
             decided_by=None,
             note=None,
@@ -187,6 +189,34 @@ async def test_request_suspends_and_persists() -> None:
     assert "req1" in store.rows
     assert q._get_group("conv1").idle_handle is None  # suspended, not armed
     assert decisions == []
+
+
+async def test_request_persists_safety_triggered_by() -> None:
+    # A safety-bridge request carries triggered_by; the coordinator must thread
+    # it into the persisted row so the REST/WS surfaces can render the banner.
+    coord, _q, store, _ = _make()
+    payload = _payload()
+    payload["policy_id"] = None
+    payload["triggered_by"] = {
+        "kind": "safety_rule",
+        "rule_id": "rule-9",
+        "check_id": "pii.regex",
+        "stage": "pre_tool_call",
+    }
+    await coord.on_approval_request(payload)
+    assert store.rows["req1"].triggered_by == {
+        "kind": "safety_rule",
+        "rule_id": "rule-9",
+        "check_id": "pii.regex",
+        "stage": "pre_tool_call",
+    }
+
+
+async def test_request_without_triggered_by_persists_none() -> None:
+    # A business-policy request omits triggered_by -> the row stores None.
+    coord, _q, store, _ = _make()
+    await coord.on_approval_request(_payload())
+    assert store.rows["req1"].triggered_by is None
 
 
 async def test_request_keyed_on_coworker_when_no_conversation() -> None:

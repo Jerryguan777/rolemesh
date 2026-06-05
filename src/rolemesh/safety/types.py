@@ -190,9 +190,19 @@ class Verdict:
     appropriate payload shape with the offending content rewritten.
     ``action="warn"`` uses ``appended_context`` to inject a string into
     the agent's follow-up context (hook bridge wires this up at V2).
-    ``action="require_approval"`` is a verdict that blocks the turn —
-    the pipeline short-circuits on it exactly like ``block``. It is
-    kept as a distinct action for audit/reporting purposes.
+    ``action="require_approval"`` is a verdict that short-circuits the
+    pipeline exactly like ``block``. Where an approval surface exists
+    (PRE_TOOL_CALL), the hook bridge turns it into a HITL approval
+    ticket rather than a terminal block; everywhere else it remains a
+    block alias. It is kept as a distinct action for audit/reporting.
+
+    ``firing_rule_id`` / ``firing_check_id`` carry the provenance of the
+    rule that produced a short-circuit verdict (``block`` /
+    ``require_approval``). They are populated by the pipeline at the
+    short-circuit return — not by individual checks — and stay ``None``
+    on a synthesized tail verdict (redact/warn/allow), where no single
+    rule "fired" the outcome. The safety->approval bridge reads them to
+    fill the approval ticket's ``triggered_by`` provenance.
     """
 
     action: Action = "allow"
@@ -200,6 +210,8 @@ class Verdict:
     modified_payload: Any | None = None
     findings: list[Finding] = field(default_factory=list)
     appended_context: str | None = None
+    firing_rule_id: str | None = None
+    firing_check_id: str | None = None
 
 
 @dataclass(frozen=True)

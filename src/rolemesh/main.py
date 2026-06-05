@@ -519,11 +519,11 @@ async def _apply_model_output_safety(
             block=("[Response blocked by safety policy]", None)
         )
     if verdict.action in ("block", "require_approval"):
-        # R4 (docs/21-hitl-approval-plan.md §1): a safety ``require_approval``
-        # verdict is a HARD block and deliberately does NOT enter HITL tool
-        # approval. HITL gates only tenant MCP-tool *policy* matches (the
-        # block-and-await hook in agent_runner); the safety pipeline's
-        # require_approval stays a terminal block alias as it is on main.
+        # R4 (docs/21-hitl-approval-plan.md §11.4): the safety->approval bridge
+        # is scoped to PRE_TOOL_CALL — the one stage with an awaiting container
+        # and an approval surface. MODEL_OUTPUT runs orchestrator-side with no
+        # container to block, so a ``require_approval`` verdict stays a HARD
+        # block alias here (PRE_TOOL_CALL gets the HITL ticket instead).
         reason = verdict.reason or "[Response blocked by safety policy]"
         # Verdict at pipeline level doesn't carry rule_ids — the audit
         # path persists per-rule records to safety_decisions separately.

@@ -29,6 +29,7 @@ def _req(
     rationale: str | None = None,
     action: dict[str, Any] | None = None,
     mcp_server_name: str = "stripe",
+    triggered_by: dict[str, Any] | None = None,
 ) -> ApprovalRequest:
     now = datetime.now(tz=UTC)
     return ApprovalRequest(
@@ -43,6 +44,7 @@ def _req(
         action=action if action is not None else {"tool_name": "charge", "params": {"amount": 500}},
         action_summary=action_summary,
         rationale=rationale,
+        triggered_by=triggered_by,
         status="pending",
         decided_by=None,
         note=None,
@@ -240,6 +242,26 @@ async def test_web_requested_payload_carries_decision_fields() -> None:
     assert payload["conversation_id"] == "conv1"
     assert payload["rationale"] == "refunding duplicate order"
     assert payload["requested_at"]  # ISO timestamp present
+    # A business-policy approval has no safety provenance.
+    assert payload["triggered_by"] is None
+
+
+async def test_web_requested_payload_carries_safety_triggered_by() -> None:
+    # A safety-bridge approval forwards triggered_by so the SPA renders the
+    # amber "paused by a safety rule" banner from the push alone (§3.10).
+    provenance = {
+        "kind": "safety_rule",
+        "rule_id": "rule-9",
+        "check_id": "pii.regex",
+        "stage": "pre_tool_call",
+    }
+    h = _Harness(
+        conversations={"conv1": _conv()}, bindings={"bind1": _binding("web")}
+    )
+    n = h.notifier()
+    await n.notify_status(_req(triggered_by=provenance))
+    payload = h.web_events[0][2]
+    assert payload["triggered_by"] == provenance
 
 
 async def test_web_card_emits_cancelled_resolution() -> None:

@@ -764,6 +764,10 @@ class TestRequireApproval:
         # Distinct action so P1.1 can dispatch.
         assert verdict.action == "require_approval"
         assert verdict.reason == "needs human"
+        # Provenance of the firing rule rides the short-circuit verdict so the
+        # safety->approval bridge can attribute the ticket (docs/21 §11.4).
+        assert verdict.firing_rule_id == "r1"
+        assert verdict.firing_check_id == "stub.approve"
 
     @pytest.mark.asyncio
     async def test_audit_event_carries_require_approval_string(

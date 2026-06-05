@@ -307,6 +307,32 @@ async def run_query_loop(
     hook_registry = HookRegistry()
     hook_registry.register(TranscriptArchiveHandler(assistant_name=init.assistant_name))
 
+    # HITL approval plumbing (docs/21-hitl-approval-plan.md §6 / §11.4). Both the
+    # business-policy approval hook and the safety-pipeline require_approval
+    # bridge publish agent.{job_id}.approval_request and block on a decision
+    # relayed over agent.{job_id}.approval_decision (subscribed below).
+    # APPROVAL_TIMEOUT is the in-band fallback bound; the startup assertion in
+    # core/config keeps it strictly below the container watchdog floor.
+    from rolemesh.core.config import APPROVAL_TIMEOUT
+
+    from .approval.awaiter import ApprovalAwaiter
+    from .hooks.handlers import ApprovalHookHandler, policies_from_snapshot
+
+    async def _publish_approval(subject: str, payload: dict[str, Any]) -> None:
+        await js.publish(subject, json.dumps(payload).encode())
+
+    # Safety->approval bridge awaiter: wired only when this run carries safety
+    # rules, so a rule-free agent pays nothing. The awaiter owns the same
+    # block-and-await machinery the business hook uses; the safety hook calls it
+    # on a PRE_TOOL_CALL require_approval verdict.
+    safety_awaiter: ApprovalAwaiter | None = None
+    if init.safety_rules:
+        safety_awaiter = ApprovalAwaiter(
+            publish=_publish_approval,
+            job_id=job_id,
+            timeout_ms=APPROVAL_TIMEOUT,
+        )
+
     # Register SafetyHookHandler only when rules are provided. An empty
     # or missing safety_rules list means the Safety Framework is
     # inactive for this run, preserving zero runtime cost for agents
@@ -321,25 +347,16 @@ async def run_query_loop(
         tool_ctx=tool_ctx,
         slow_check_specs=init.slow_check_specs,
         nats_client=nc,
+        approval_awaiter=safety_awaiter,
     )
 
-    # HITL approval hook (docs/21-hitl-approval-plan.md §6). Registered only
-    # when this run carries a non-empty policy snapshot — mirrors the safety
-    # handler's zero-cost-when-inactive rule. The handler blocks a matched MCP
-    # tool call in place until the orchestrator relays a decision over
-    # agent.{job_id}.approval_decision (subscribed below). APPROVAL_TIMEOUT is
-    # the in-band fallback bound; the startup assertion in core/config keeps it
-    # strictly below the container watchdog floor.
-    from rolemesh.core.config import APPROVAL_TIMEOUT
-
-    from .hooks.handlers import ApprovalHookHandler, policies_from_snapshot
-
+    # Business-policy approval hook. Registered only when this run carries a
+    # non-empty policy snapshot — mirrors the safety handler's
+    # zero-cost-when-inactive rule. Blocks a matched MCP tool call in place
+    # until the orchestrator relays a decision.
     approval_handler: ApprovalHookHandler | None = None
     approval_policies = policies_from_snapshot(init.approval_policies)
     if approval_policies:
-        async def _publish_approval(subject: str, payload: dict[str, Any]) -> None:
-            await js.publish(subject, json.dumps(payload).encode())
-
         approval_handler = ApprovalHookHandler(
             publish=_publish_approval,
             policies=approval_policies,
@@ -404,13 +421,24 @@ async def run_query_loop(
     input_sub = await js.subscribe(f"agent.{job_id}.input")
 
     # Approval decisions are relayed by the orchestrator over JetStream. We ack
-    # on receipt and route the payload to the blocked hook's await point via
-    # ApprovalHookHandler.resolve_decision (first-wins: an unknown/stale
-    # request_id is a no-op). The container is awaiting a Future, not blocking
-    # the loop, so this push callback fires while an approval is pending.
+    # on receipt and route the payload to whichever awaiter owns the request_id:
+    # the business-policy hook and the safety bridge each own one, and request
+    # ids are disjoint, so a "try business, then safety" route is first-wins (an
+    # unknown/stale id is a no-op on both). The container is awaiting a Future,
+    # not blocking the loop, so this push callback fires while an approval is
+    # pending.
+    _approval_handler = approval_handler
+    _safety_awaiter = safety_awaiter
+
+    def _route_approval_decision(data: dict[str, Any]) -> bool:
+        if _approval_handler is not None and _approval_handler.resolve_decision(data):
+            return True
+        return bool(
+            _safety_awaiter is not None and _safety_awaiter.resolve_decision(data)
+        )
+
     approval_decision_sub = None
-    if approval_handler is not None:
-        _approval_handler = approval_handler
+    if approval_handler is not None or safety_awaiter is not None:
 
         async def handle_approval_decision(msg: Any) -> None:
             await msg.ack()
@@ -419,7 +447,7 @@ async def run_query_loop(
             except (ValueError, TypeError) as exc:
                 log(f"Malformed approval_decision dropped: {exc}")
                 return
-            if isinstance(data, dict) and not _approval_handler.resolve_decision(data):
+            if isinstance(data, dict) and not _route_approval_decision(data):
                 log(
                     "approval_decision for unknown/stale request dropped: "
                     f"{data.get('request_id')}"
