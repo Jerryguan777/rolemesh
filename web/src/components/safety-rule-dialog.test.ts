@@ -17,11 +17,9 @@ vi.mock('../services/safety-admin-client.js', async () => {
   return { ...actual, createRule: createRuleSpy, updateRule: updateRuleSpy };
 });
 
-// Side-effect import registers the custom element. The named import below is
-// type-only (used in `as SafetyRuleDialog`), so without this the module — and
-// its customElements.define — would be elided and the element never defined.
-import './safety-rule-dialog.js';
-import type { SafetyRuleDialog } from './safety-rule-dialog.js';
+// Value import registers the custom element (via @customElement decorator) AND
+// makes SafetyRuleDialog available for static method access in G4 tests.
+import { SafetyRuleDialog } from './safety-rule-dialog.js';
 import type { SafetyCheck, SafetyRule } from '../api/client.js';
 
 const piiRegex: SafetyCheck = {
@@ -477,6 +475,152 @@ describe('SafetyRuleDialog — host-list onBlur normalization (G1/G2)', () => {
     await el.updateComplete;
     expect(ta.value).toBe('*.stripe.com');
     el.remove();
+  });
+});
+
+// G4 — client-side schema validation (spec §6.12.3 / §6.18)
+describe('SafetyRuleDialog — schema validation (G4)', () => {
+  // A SafetyCheck with a realistic config_schema for pii.regex.
+  const piiWithSchema: SafetyCheck = {
+    ...piiRegex,
+    config_schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        patterns: {
+          type: 'object',
+          propertyNames: { enum: ['SSN', 'CREDIT_CARD', 'EMAIL', 'PHONE_US', 'IP_ADDRESS'] },
+          additionalProperties: { type: 'boolean' },
+        },
+      },
+    },
+  };
+
+  // A SafetyCheck with minItems on domain_patterns.
+  const egressWithSchema: SafetyCheck = {
+    ...egressDomainRule,
+    config_schema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        domain_patterns: { type: 'array', items: { type: 'string' }, minItems: 1 },
+        ports: { type: 'array', items: { type: 'integer' } },
+      },
+      required: ['domain_patterns'],
+    },
+  };
+
+  it('Ajv catches additionalProperties violation', async () => {
+    const el = await mount({
+      checks: [piiWithSchema, presidio, domainAllowlist, egressDomainRule],
+    });
+    // Inject bad config via advanced JSON textarea.
+    const adv = $<HTMLButtonElement>(el, '[data-testid="saf-adv-toggle"]');
+    adv?.click();
+    await el.updateComplete;
+    const ta = $<HTMLTextAreaElement>(el, '[data-testid="saf-config-json"]');
+    if (ta) {
+      ta.value = '{"patterns": {}, "unknown_extra_field": true}';
+      ta.dispatchEvent(new Event('input'));
+    }
+    await el.updateComplete;
+    ($<HTMLButtonElement>(el, '[data-testid="saf-submit"]'))!.click();
+    await el.updateComplete;
+    // Should NOT have called createRule.
+    expect(createRuleSpy).not.toHaveBeenCalled();
+    expect($<HTMLElement>(el, '[data-testid="saf-error-banner"]')).not.toBeNull();
+    el.remove();
+  });
+
+  it('sanity check fires when patterns is empty (config_schema present)', async () => {
+    const el = await mount({
+      checks: [piiWithSchema, presidio, domainAllowlist, egressDomainRule],
+    });
+    // Open config and submit without selecting any pattern (empty patterns).
+    ($<HTMLButtonElement>(el, '[data-testid="saf-submit"]'))!.click();
+    await el.updateComplete;
+    expect(createRuleSpy).not.toHaveBeenCalled();
+    expect($<HTMLElement>(el, '[data-testid="saf-error-banner"]')).not.toBeNull();
+    el.remove();
+  });
+
+  it('sanity check does NOT fire when config_schema is null', async () => {
+    // piiRegex has config_schema: null — submission should go through.
+    createRuleSpy.mockResolvedValue(makeRule());
+    const el = await mount();
+    ($<HTMLButtonElement>(el, '[data-testid="saf-submit"]'))!.click();
+    await el.updateComplete;
+    await Promise.resolve();
+    expect(createRuleSpy).toHaveBeenCalledTimes(1);
+    el.remove();
+  });
+
+  it('Ajv catches minItems violation (egress domain_patterns empty)', async () => {
+    const el = await mount({
+      checks: [piiRegex, presidio, domainAllowlist, egressWithSchema],
+      duplicating: makeRule({ check_id: 'egress.domain_rule', stage: 'egress_request', config: {} }),
+    });
+    ($<HTMLButtonElement>(el, '[data-testid="saf-submit"]'))!.click();
+    await el.updateComplete;
+    expect(createRuleSpy).not.toHaveBeenCalled();
+    expect($<HTMLElement>(el, '[data-testid="saf-error-banner"]')).not.toBeNull();
+    el.remove();
+  });
+
+  it('error banner lists all errors', async () => {
+    const el = await mount({
+      checks: [piiWithSchema, presidio, domainAllowlist, egressDomainRule],
+    });
+    ($<HTMLButtonElement>(el, '[data-testid="saf-submit"]'))!.click();
+    await el.updateComplete;
+    const banner = $<HTMLElement>(el, '[data-testid="saf-error-banner"]')!;
+    expect(banner).not.toBeNull();
+    expect(banner.querySelector('ul')).not.toBeNull();
+    el.remove();
+  });
+});
+
+// G4 — FastAPI 4xx translator (SafetyRuleDialog._parseBackend400)
+describe('SafetyRuleDialog — FastAPI 4xx translator (G4)', () => {
+  it('translates extra_forbidden to user-friendly message', () => {
+    const result = SafetyRuleDialog._parseBackend400({
+      detail: [{ type: 'extra_forbidden', loc: ['body', 'config', 'hosts'], msg: 'Extra inputs are not permitted' }],
+    });
+    expect(result).toHaveLength(1);
+    expect(result[0].message).toMatch(/unknown field/i);
+    expect(result[0].message).toMatch(/hosts/);
+  });
+
+  it('translates missing to user-friendly message', () => {
+    const result = SafetyRuleDialog._parseBackend400({
+      detail: [{ type: 'missing', loc: ['body', 'config', 'domain_patterns'], msg: 'Field required' }],
+    });
+    expect(result[0].message).toMatch(/required field/i);
+    expect(result[0].message).toMatch(/domain_patterns/);
+  });
+
+  it('translates enum to message', () => {
+    const result = SafetyRuleDialog._parseBackend400({
+      detail: [{ type: 'enum', loc: ['body', 'config', 'patterns', 'SNN'], msg: 'Input should be one of SSN, CREDIT_CARD' }],
+    });
+    expect(result[0].message).toMatch(/invalid value/i);
+  });
+
+  it('translates int_parsing to user-friendly message', () => {
+    const result = SafetyRuleDialog._parseBackend400({
+      detail: [{ type: 'int_parsing', loc: ['body', 'config', 'ports', '0'], msg: 'Input should be a valid integer' }],
+    });
+    expect(result[0].message).toMatch(/must be a number/i);
+  });
+
+  it('returns empty array when detail is missing', () => {
+    expect(SafetyRuleDialog._parseBackend400({})).toEqual([]);
+    expect(SafetyRuleDialog._parseBackend400(null)).toEqual([]);
+    expect(SafetyRuleDialog._parseBackend400({ other: 'key' })).toEqual([]);
+  });
+
+  it('returns empty array for non-array detail', () => {
+    expect(SafetyRuleDialog._parseBackend400({ detail: 'string error' })).toEqual([]);
   });
 });
 

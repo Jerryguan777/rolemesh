@@ -21,6 +21,7 @@
 // consistency (SafetyRuleUpdate has no such field; this is the belt-and-
 // suspenders backstop).
 
+import Ajv, { type ValidateFunction } from 'ajv';
 import { LitElement, html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
@@ -54,6 +55,53 @@ const INPUT_CLASS =
   'w-full text-[13.5px] px-3 py-2 rounded-md border border-surface-3 ' +
   'dark:border-d-surface-3 bg-surface-1 dark:bg-d-surface-1 ' +
   'text-ink-0 dark:text-d-ink-0 focus:outline-none focus:ring-2 focus:ring-brand';
+
+// G4: module-level Ajv instance + compiled-validator cache (§6.12.3).
+// Compiled once per config_schema, reused across dialog opens.
+const _ajv = new Ajv({ allErrors: true, strict: false });
+const _schemaValidators = new Map<string, ValidateFunction>();
+
+/** Compile (or return cached) an Ajv validator for a check's config_schema.
+ *  Returns null when config_schema is absent or null (defensive §6, hard
+ *  constraint #6). */
+function _getSchemaValidator(check: SafetyCheck): ValidateFunction | null {
+  const schema = check.config_schema as Record<string, unknown> | null | undefined;
+  if (!schema || typeof schema !== 'object') return null;
+  let v = _schemaValidators.get(check.id);
+  if (!v) {
+    v = _ajv.compile(schema);
+    _schemaValidators.set(check.id, v);
+  }
+  return v;
+}
+
+/** Translate a FastAPI 4xx detail array entry into a user-friendly message
+ *  (§6.18 Layer 2). The `loc` path is flattened to a dot-string for display. */
+function _translateFastApiError(err: {
+  type?: string;
+  loc?: unknown[];
+  msg?: string;
+}): string {
+  const loc = Array.isArray(err.loc)
+    ? err.loc.filter((s) => s !== 'body').join('.')
+    : '';
+  const field = loc ? `(field: ${loc})` : '';
+  switch (err.type) {
+    case 'extra_forbidden':
+      return `Unknown field${loc ? ` '${loc}'` : ''} — this check doesn't accept that setting.`;
+    case 'missing':
+      return `Required field${loc ? ` '${loc}'` : ''} is missing.`;
+    case 'int_parsing':
+    case 'float_parsing':
+      return `Field${loc ? ` '${loc}'` : ''} must be a number.`;
+    case 'enum':
+      return `Field${loc ? ` '${loc}'` : ''} has an invalid value. ${err.msg ?? ''} ${field}`.trim();
+    default:
+      return err.msg
+        ? `${err.msg} ${field}`.trim()
+        : `The server rejected this field ${field}.`.trim();
+  }
+}
 
 // Presentation lists for the per-check config forms. Human label first, the
 // technical code as a muted subtitle (§8.5: behaviour primary, code for
@@ -129,6 +177,8 @@ export class SafetyRuleDialog extends LitElement {
   /** Platform-tier rule covering the same triple; shows the gray FYI banner
    *  but does NOT flip to edit (user can't edit platform rules). */
   @state() private _platformOverlap: SafetyRule | null = null;
+  // --- G4: client-side validation errors (§6.12.3 / §6.18) ---
+  @state() private _saveErrors: { fieldId?: string; message: string }[] = [];
 
   protected override createRenderRoot() {
     return this;
@@ -139,6 +189,7 @@ export class SafetyRuleDialog extends LitElement {
       this._dupTarget = null;
       this._forceCreate = false;
       this._platformOverlap = null;
+      this._saveErrors = [];
       this.seedForm();
       this.err = null;
     }
@@ -355,6 +406,105 @@ export class SafetyRuleDialog extends LitElement {
     return nothing;
   }
 
+  // ---- G4: client-side schema validation (§6.12.3 / §6.18) ----
+
+  // Layer 1a — Ajv JSON Schema validation against config_schema.
+  // Returns array of {fieldId?, message} errors; empty = valid.
+  private _validateWithSchema(config: Record<string, unknown>): { fieldId?: string; message: string }[] {
+    const check = this.currentCheck();
+    if (!check) return [];
+    const validate = _getSchemaValidator(check);
+    if (!validate) return [];
+    if (validate(config)) return [];
+    return (validate.errors ?? []).map((e) => {
+      const path = e.instancePath?.replace(/^\//, '') ?? '';
+      return {
+        fieldId: path || undefined,
+        message: e.message ?? 'Invalid value',
+      };
+    });
+  }
+
+  // Layer 1b — hand-coded sanity checks for constraints JSON Schema can't express.
+  // Only runs when config_schema is present: without a schema the backend hasn't
+  // declared expected config shape, so we can't know whether {} is intentional.
+  private _sanityCheck(config: Record<string, unknown>): { fieldId?: string; message: string }[] {
+    const check = this.currentCheck();
+    if (!check?.config_schema) return []; // no schema → skip (Ajv already skipped too)
+    const errs: { fieldId?: string; message: string }[] = [];
+    if (this.checkId === 'pii.regex') {
+      const patterns = config['patterns'] as Record<string, boolean> | undefined;
+      if (!patterns || Object.keys(patterns).length === 0) {
+        errs.push({ fieldId: 'saf-config', message: 'Pick at least one type of personal data to look for.' });
+      }
+    } else if (this.checkId === 'presidio.pii') {
+      const bc = (config['block_codes'] as string[]) ?? [];
+      const rc = (config['redact_codes'] as string[]) ?? [];
+      if (bc.length === 0 && rc.length === 0) {
+        errs.push({ fieldId: 'saf-config', message: 'Set an action for at least one entity type.' });
+      }
+    } else if (this.checkId === 'openai_moderation') {
+      const bl = (config['block_categories'] as string[]) ?? [];
+      const wl = (config['warn_categories'] as string[]) ?? [];
+      if (bl.length === 0 && wl.length === 0) {
+        errs.push({ fieldId: 'saf-config', message: 'Set an action for at least one category.' });
+      }
+    } else if (this.checkId === 'domain_allowlist') {
+      const hosts = (config['allowed_hosts'] as string[]) ?? [];
+      if (hosts.length === 0) {
+        errs.push({ fieldId: 'saf-hosts', message: 'Add at least one host.' });
+      }
+    } else if (this.checkId === 'egress.domain_rule') {
+      const patterns = (config['domain_patterns'] as string[]) ?? [];
+      if (patterns.length === 0) {
+        errs.push({ fieldId: 'saf-hosts', message: 'Add at least one domain pattern.' });
+      }
+    }
+    return errs;
+  }
+
+  // Combined pre-save validation (Layer 1). Returns errors array.
+  private _validateBeforeSave(config: Record<string, unknown>): { fieldId?: string; message: string }[] {
+    return [...this._validateWithSchema(config), ...this._sanityCheck(config)];
+  }
+
+  // Parse a FastAPI 4xx { detail: [...] } body and return friendly messages
+  // (§6.18 Layer 2). Falls back gracefully if the shape is unexpected.
+  static _parseBackend400(body: unknown): { fieldId?: string; message: string }[] {
+    if (!body || typeof body !== 'object') return [];
+    const detail = (body as Record<string, unknown>)['detail'];
+    if (!Array.isArray(detail)) return [];
+    return detail
+      .filter((e): e is Record<string, unknown> => e && typeof e === 'object')
+      .map((e) => ({
+        fieldId: undefined,
+        message: _translateFastApiError({
+          type: e['type'] as string | undefined,
+          loc: e['loc'] as unknown[] | undefined,
+          msg: e['msg'] as string | undefined,
+        }),
+      }));
+  }
+
+  // Render inline error message next to an input (fieldId matches testid).
+  private _fieldError(fieldId: string): TemplateResult | typeof nothing {
+    const err = this._saveErrors.find((e) => e.fieldId === fieldId);
+    if (!err) return nothing;
+    return html`<p class="rm-field-error" data-testid="saf-err-${fieldId}">${err.message}</p>`;
+  }
+
+  // Render summary error banner at dialog bottom (§6.18).
+  private _renderErrorBanner(): TemplateResult | typeof nothing {
+    if (this._saveErrors.length === 0) return nothing;
+    const count = this._saveErrors.length;
+    return html`
+      <div class="rm-save-error-banner" data-testid="saf-error-banner">
+        <b>${count === 1 ? 'Fix this before saving' : 'Fix these before saving'}</b>
+        <ul>${this._saveErrors.map((e) => html`<li>${e.message}</li>`)}</ul>
+      </div>
+    `;
+  }
+
   // ---- config format converters (backend ↔ internal display) ----
 
   // Convert backend-stored config → internal UI format on load.
@@ -469,10 +619,17 @@ export class SafetyRuleDialog extends LitElement {
       this.err = 'Pick a check and a stage.';
       return;
     }
+    // G4: Layer 1 — client-side validation before any network call.
+    const config = this.buildConfig();
+    const errs = this._validateBeforeSave(config);
+    if (errs.length > 0) {
+      this._saveErrors = errs;
+      return;
+    }
+    this._saveErrors = [];
     this.busy = true;
     this.err = null;
     try {
-      const config = this.buildConfig();
       // createRule / updateRule return the admin-shaped row; the page holds
       // v1-client rows (with source/tier/editable), so we hand back only the
       // id and let the page re-fetch — the two-tier split must come from a
@@ -519,7 +676,18 @@ export class SafetyRuleDialog extends LitElement {
       );
       this.close();
     } catch (err) {
-      this.err = err instanceof Error ? err.message : String(err);
+      // G4: Layer 2 — try to parse FastAPI { detail: [...] } from the error.
+      const raw = err instanceof Error ? err.message : String(err);
+      let parsed: unknown;
+      try { parsed = JSON.parse(raw); } catch { /* not JSON */ }
+      if (parsed) {
+        const backend400 = SafetyRuleDialog._parseBackend400(parsed);
+        if (backend400.length > 0) {
+          this._saveErrors = backend400;
+          return;
+        }
+      }
+      this.err = raw;
     } finally {
       this.busy = false;
     }
@@ -590,6 +758,7 @@ export class SafetyRuleDialog extends LitElement {
               data-testid="saf-form-error"
             >${this.err}</div>`
           : nothing}
+        ${this._renderErrorBanner()}
 
         <div slot="footer" style="display: flex; gap: 8px; justify-content: flex-end;">
           <button type="button" class="rm-btn rm-btn--secondary"
