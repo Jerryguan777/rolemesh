@@ -16,6 +16,7 @@ __all__ = [
     "get_all_tenants",
     "get_tenant",
     "get_tenant_by_slug",
+    "set_tenant_status",
     "update_tenant",
     "update_tenant_message_cursor",
 ]
@@ -38,7 +39,8 @@ async def create_tenant(
             """
             INSERT INTO tenants (slug, name, plan, max_concurrent_containers)
             VALUES ($1, $2, $3, $4)
-            RETURNING id, slug, name, plan, max_concurrent_containers, last_message_cursor, created_at
+            RETURNING id, slug, name, plan, max_concurrent_containers,
+                      last_message_cursor, created_at, status
             """,
             slug,
             name,
@@ -59,6 +61,7 @@ def _record_to_tenant(row: asyncpg.Record) -> Tenant:
         max_concurrent_containers=row["max_concurrent_containers"],
         last_message_cursor=lmc.isoformat() if lmc else None,
         created_at=row["created_at"].isoformat() if row["created_at"] else "",
+        status=row["status"],
     )
 
 
@@ -109,6 +112,25 @@ async def get_tenant_by_slug(slug: str) -> Tenant | None:
     """Get a tenant by slug."""
     async with admin_conn() as conn:
         row = await conn.fetchrow("SELECT * FROM tenants WHERE slug = $1", slug)
+    if row is None:
+        return None
+    return _record_to_tenant(row)
+
+
+async def set_tenant_status(tenant_id: str, status: str) -> Tenant | None:
+    """Set a tenant's lifecycle status ('active' | 'suspended').
+
+    Platform-plane only (provision/suspend/resume). Returns the updated
+    tenant, or None if no such tenant. The DB CHECK constraint rejects any
+    value outside the allowed set, so a bad ``status`` fails loud rather
+    than silently writing garbage.
+    """
+    async with admin_conn() as conn:
+        row = await conn.fetchrow(
+            "UPDATE tenants SET status = $1 WHERE id = $2::uuid RETURNING *",
+            status,
+            tenant_id,
+        )
     if row is None:
         return None
     return _record_to_tenant(row)

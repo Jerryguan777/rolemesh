@@ -78,7 +78,18 @@ _TENANT_ROLE_ACTIONS: dict[str, set[str]] = {
 #     (``/api/v1/platform/models``). Every tenant READS the catalog at
 #     ``/api/v1/models``; only the platform operator may write it (a tenant
 #     owner must not edit a catalog every other tenant sees).
-_PLATFORM_ONLY_ACTIONS: set[str] = {"credential.pool.manage", "model.manage"}
+#   * platform.tenant.manage — run the tenant lifecycle
+#     (``/api/v1/platform/tenants``): provision / list / get / suspend /
+#     resume. A SINGLE action covers the whole surface, mirroring
+#     ``credential.pool.manage``. Deliberately distinct from the tenant-plane
+#     ``tenant.manage`` (an owner editing their OWN tenant's settings): this
+#     one operates a tenant AS a customer across the platform and must never
+#     be reachable by any tenant role.
+_PLATFORM_ONLY_ACTIONS: set[str] = {
+    "credential.pool.manage",
+    "model.manage",
+    "platform.tenant.manage",
+}
 
 
 def _all_known_actions() -> set[str]:

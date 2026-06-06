@@ -112,6 +112,7 @@ class Tenant:
     max_concurrent_containers: int = 5
     last_message_cursor: str | None = None  # TIMESTAMPTZ iso
     created_at: str = ""
+    status: str = "active"  # 'active' | 'suspended' (platform lifecycle)
 
 
 @dataclass
