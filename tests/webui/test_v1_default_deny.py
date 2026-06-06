@@ -92,9 +92,9 @@ AUTH_ONLY_V1_ROUTES: dict[tuple[str, str], str] = {
         "Read of one approval policy.",
     ("GET", "/api/v1/approvals/requests"):
         "Read of the tenant's pending approval requests (inbox re-render).",
-    ("GET", "/api/v1/schedules"):
+    ("GET", "/api/v1/tasks"):
         "Read-only schedules surface; writes are not exposed on v1.",
-    ("GET", "/api/v1/schedules/{task_id}"):
+    ("GET", "/api/v1/tasks/{task_id}"):
         "Read of one scheduled task.",
     ("GET", "/api/v1/runs/{run_id}"):
         "Read of one run snapshot (SPA reconnect path).",

@@ -34,7 +34,7 @@ tags:
   - name: Users
   - name: Tenant
   - name: Safety
-  - name: Schedules
+  - name: Tasks
   - name: Platform
 
 paths:
@@ -1809,10 +1809,10 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
 
-  /api/v1/schedules:
+  /api/v1/tasks:
     get:
-      tags: [Schedules]
-      operationId: schedulesList
+      tags: [Tasks]
+      operationId: tasksList
       summary: List scheduled tasks for the tenant
       description: |
         Read-only listing of the `scheduled_tasks` table for the
@@ -1839,10 +1839,10 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
-  /api/v1/schedules/{id}:
+  /api/v1/tasks/{id}:
     get:
-      tags: [Schedules]
-      operationId: schedulesGet
+      tags: [Tasks]
+      operationId: tasksGet
       summary: Fetch one scheduled task
       security: [ { bearerAuth: [] } ]
       parameters:
@@ -1858,8 +1858,8 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
     delete:
-      tags: [Schedules]
-      operationId: schedulesDelete
+      tags: [Tasks]
+      operationId: tasksDelete
       summary: Delete a scheduled task
       description: |
         Removes a scheduled task. Gated by `task.manage` (owner +

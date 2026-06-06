@@ -1140,7 +1140,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/schedules": {
+    "/api/v1/tasks": {
         parameters: {
             query?: never;
             header?: never;
@@ -1156,7 +1156,7 @@ export interface paths {
          *     scheduled" without round-tripping through the orchestrator
          *     IPC. A coworker filter is exposed for the per-coworker view.
          */
-        get: operations["schedulesList"];
+        get: operations["tasksList"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1165,7 +1165,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/schedules/{id}": {
+    "/api/v1/tasks/{id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -1173,7 +1173,7 @@ export interface paths {
             cookie?: never;
         };
         /** Fetch one scheduled task */
-        get: operations["schedulesGet"];
+        get: operations["tasksGet"];
         put?: never;
         post?: never;
         /**
@@ -1182,7 +1182,7 @@ export interface paths {
          *     admin); reads on this surface stay auth-only. A cross-tenant /
          *     unknown id returns 404.
          */
-        delete: operations["schedulesDelete"];
+        delete: operations["tasksDelete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -4593,7 +4593,7 @@ export interface operations {
             403: components["responses"]["Forbidden"];
         };
     };
-    schedulesList: {
+    tasksList: {
         parameters: {
             query?: {
                 /** @description Maximum number of items to return (default 50, max 200). */
@@ -4621,7 +4621,7 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
         };
     };
-    schedulesGet: {
+    tasksGet: {
         parameters: {
             query?: never;
             header?: never;
@@ -4645,7 +4645,7 @@ export interface operations {
             404: components["responses"]["NotFound"];
         };
     };
-    schedulesDelete: {
+    tasksDelete: {
         parameters: {
             query?: never;
             header?: never;

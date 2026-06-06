@@ -1,4 +1,4 @@
-"""Integration tests for ``/api/v1/schedules`` (PR24 read-only surface).
+"""Integration tests for ``/api/v1/tasks`` (PR24 read-only surface).
 
 Hits the FastAPI app via httpx ASGI transport against the testcontainer
 postgres. Catches contract drift between the read-only endpoint and
@@ -96,7 +96,7 @@ async def test_list_schedules_returns_tenant_tasks() -> None:
         tenant_id=user.tenant_id, coworker_id=cw_id, prompt="beta",
     )
     async with _client(_build_app(user)) as ac:
-        resp = await ac.get("/api/v1/schedules", headers=_HDRS)
+        resp = await ac.get("/api/v1/tasks", headers=_HDRS)
     assert resp.status_code == 200
     ids = {row["id"] for row in resp.json()["items"]}
     assert a in ids and b in ids
@@ -119,7 +119,7 @@ async def test_list_schedules_filters_by_coworker() -> None:
     )
     async with _client(_build_app(user)) as ac:
         resp = await ac.get(
-            f"/api/v1/schedules?coworker_id={cw_a}", headers=_HDRS,
+            f"/api/v1/tasks?coworker_id={cw_a}", headers=_HDRS,
         )
     assert resp.status_code == 200
     ids = {row["id"] for row in resp.json()["items"]}
@@ -138,7 +138,7 @@ async def test_list_schedules_excludes_other_tenants() -> None:
         tenant_id=user_b.tenant_id, coworker_id=cw_b, prompt="other",
     )
     async with _client(_build_app(user_a)) as ac:
-        resp = await ac.get("/api/v1/schedules", headers=_HDRS)
+        resp = await ac.get("/api/v1/tasks", headers=_HDRS)
     assert resp.status_code == 200
     ids = {row["id"] for row in resp.json()["items"]}
     assert other not in ids
@@ -150,7 +150,7 @@ async def test_get_schedule_returns_one() -> None:
         tenant_id=user.tenant_id, coworker_id=cw, prompt="probe",
     )
     async with _client(_build_app(user)) as ac:
-        resp = await ac.get(f"/api/v1/schedules/{tid}", headers=_HDRS)
+        resp = await ac.get(f"/api/v1/tasks/{tid}", headers=_HDRS)
     assert resp.status_code == 200
     body = resp.json()
     assert body["id"] == tid
@@ -161,7 +161,7 @@ async def test_get_schedule_404_on_missing() -> None:
     user, _ = await _make_user_and_coworker("g404")
     bogus = str(uuid.uuid4())
     async with _client(_build_app(user)) as ac:
-        resp = await ac.get(f"/api/v1/schedules/{bogus}", headers=_HDRS)
+        resp = await ac.get(f"/api/v1/tasks/{bogus}", headers=_HDRS)
     assert resp.status_code == 404
     assert resp.json()["code"] == "NOT_FOUND"
 
@@ -177,7 +177,7 @@ async def test_get_schedule_404_on_cross_tenant() -> None:
         tenant_id=user_b.tenant_id, coworker_id=cw_b, prompt="b-only",
     )
     async with _client(_build_app(user_a)) as ac:
-        resp = await ac.get(f"/api/v1/schedules/{tid_b}", headers=_HDRS)
+        resp = await ac.get(f"/api/v1/tasks/{tid_b}", headers=_HDRS)
     assert resp.status_code == 404
 
 
@@ -186,7 +186,7 @@ async def test_get_schedule_404_on_malformed_uuid() -> None:
     # 404, not 500. Pattern matches skills + coworkers handling.
     user, _ = await _make_user_and_coworker("mu")
     async with _client(_build_app(user)) as ac:
-        resp = await ac.get("/api/v1/schedules/not-a-uuid", headers=_HDRS)
+        resp = await ac.get("/api/v1/tasks/not-a-uuid", headers=_HDRS)
     assert resp.status_code == 404
 
 
@@ -214,10 +214,10 @@ async def test_delete_schedule_owner_ok() -> None:
         tenant_id=user.tenant_id, coworker_id=cw, prompt="doomed",
     )
     async with _client(_build_app(user)) as ac:
-        resp = await ac.delete(f"/api/v1/schedules/{tid}", headers=_HDRS)
+        resp = await ac.delete(f"/api/v1/tasks/{tid}", headers=_HDRS)
         assert resp.status_code == 204
         # Confirm it's gone.
-        after = await ac.get(f"/api/v1/schedules/{tid}", headers=_HDRS)
+        after = await ac.get(f"/api/v1/tasks/{tid}", headers=_HDRS)
     assert after.status_code == 404
 
 
@@ -228,7 +228,7 @@ async def test_delete_schedule_admin_ok() -> None:
         tenant_id=owner.tenant_id, coworker_id=cw, prompt="x",
     )
     async with _client(_build_app(admin)) as ac:
-        resp = await ac.delete(f"/api/v1/schedules/{tid}", headers=_HDRS)
+        resp = await ac.delete(f"/api/v1/tasks/{tid}", headers=_HDRS)
     assert resp.status_code == 204
 
 
@@ -239,7 +239,7 @@ async def test_delete_schedule_member_forbidden() -> None:
         tenant_id=owner.tenant_id, coworker_id=cw, prompt="x",
     )
     async with _client(_build_app(member)) as ac:
-        resp = await ac.delete(f"/api/v1/schedules/{tid}", headers=_HDRS)
+        resp = await ac.delete(f"/api/v1/tasks/{tid}", headers=_HDRS)
     assert resp.status_code == 403
 
 
@@ -247,7 +247,7 @@ async def test_delete_schedule_unknown_404() -> None:
     user, _ = await _make_user_and_coworker("d404")
     async with _client(_build_app(user)) as ac:
         resp = await ac.delete(
-            f"/api/v1/schedules/{uuid.uuid4()}", headers=_HDRS,
+            f"/api/v1/tasks/{uuid.uuid4()}", headers=_HDRS,
         )
     assert resp.status_code == 404
 
@@ -259,5 +259,5 @@ async def test_delete_schedule_cross_tenant_404() -> None:
         tenant_id=user_b.tenant_id, coworker_id=cw_b, prompt="b-only",
     )
     async with _client(_build_app(user_a)) as ac:
-        resp = await ac.delete(f"/api/v1/schedules/{tid_b}", headers=_HDRS)
+        resp = await ac.delete(f"/api/v1/tasks/{tid_b}", headers=_HDRS)
     assert resp.status_code == 404
