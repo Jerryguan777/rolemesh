@@ -78,10 +78,14 @@ _TENANT_ROLE_ACTIONS: dict[str, set[str]] = {
     },
 }
 
-# Platform-plane-only actions (not granted to any tenant role). Empty today;
-# kept as an explicit seam so future platform-wide capabilities are added in
-# one obvious place.
-_PLATFORM_ONLY_ACTIONS: set[str] = set()
+# Platform-plane-only actions (not granted to any tenant role). Added to the
+# platform_admin superset by ``_all_known_actions`` but never to a tenant role,
+# so any tenant role hits default-deny.
+#   * credential.pool.manage — mutate the platform credential pool
+#     (``platform_provider_credentials``). Tenants elect the pool via their
+#     own ``credential.byok.manage``-gated route; only the platform operator
+#     configures the underlying keys.
+_PLATFORM_ONLY_ACTIONS: set[str] = {"credential.pool.manage"}
 
 
 def _all_known_actions() -> set[str]:

@@ -204,30 +204,50 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         )
     """)
 
-    # Tenant-scoped LLM credentials. ``credential_data`` BYTEA holds the
-    # Fernet-encrypted JSON payload ({"api_key": "sk-..."}) — see
-    # ``rolemesh.auth.credential_vault`` and design §8.1. The CREATE
-    # below already lands the BYTEA column on a fresh DB; the guarded
-    # DO block below rewrites a pre-greenfield dev DB that still has
-    # the legacy ``credential_ref TEXT`` shape. Both branches are
-    # idempotent.
+    # Tenant-scoped LLM credentials. Each ``(tenant, provider)`` row is
+    # explicit opt-in state (design "credential pool" §1): no row means
+    # the provider is *unconfigured* and an agent on it fails closed.
+    # ``credential_mode`` records which key the resolver uses:
+    #   * ``'byok'`` — the tenant's own key, held Fernet-encrypted in
+    #     ``credential_data`` (the {"api_key": "sk-..."} payload — see
+    #     ``rolemesh.auth.credential_vault`` and design §8.1).
+    #   * ``'pool'`` — the tenant explicitly elected the platform pool
+    #     key (``platform_provider_credentials``). ``credential_data``
+    #     may be NULL (never had a BYOK key) or carry a *dormant* BYOK
+    #     ciphertext retained across a byok→pool switch so the tenant
+    #     can flip back without re-entering it; the resolver ignores it
+    #     while mode is ``'pool'``.
+    # The CHECK enforces the one illegal combination — a ``'byok'`` row
+    # must carry a key, so the resolver can route on mode alone and a
+    # byok row never silently falls through to the pool. The CREATE
+    # below lands the full shape on a fresh DB; the guarded DO block
+    # rewrites a pre-existing dev DB. Both branches are idempotent.
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS tenant_model_credentials (
             id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             tenant_id        UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
             provider         VARCHAR(50) NOT NULL,
-            credential_data  BYTEA NOT NULL,
+            credential_mode  VARCHAR(10) NOT NULL DEFAULT 'byok'
+                                 CHECK (credential_mode IN ('pool', 'byok')),
+            credential_data  BYTEA,
             created_at       TIMESTAMPTZ DEFAULT NOW(),
             updated_at       TIMESTAMPTZ DEFAULT NOW(),
-            UNIQUE (tenant_id, provider)
+            UNIQUE (tenant_id, provider),
+            CONSTRAINT tmc_byok_requires_key
+                CHECK (credential_mode <> 'byok' OR credential_data IS NOT NULL)
         )
     """)
-    # Greenfield migration: drop legacy ``credential_ref`` column and
-    # add ``credential_data`` if the pre-existing dev DB was created
-    # with the old shape. The design (§8.1) is explicit that the
-    # vault is not back-compat with the old plaintext-pointer column —
-    # any row stored under the old shape is unrecoverable, so we drop
-    # all rows along with the column. Tenants must re-PUT credentials.
+    # Migration for a pre-existing dev DB. Four idempotent steps:
+    #   1. Drop the legacy ``credential_ref TEXT`` indirection column.
+    #      The vault (§8.1) is not back-compat with the old plaintext
+    #      pointer — any row under that shape is unrecoverable, so the
+    #      rows go with the column and tenants must re-PUT.
+    #   2. Add ``credential_data`` if the DB predates the BYTEA column.
+    #   3. Add ``credential_mode`` defaulting to ``'byok'`` — every
+    #      pre-pool row carries a real key, so the default backfills the
+    #      correct mode and behaviour is unchanged.
+    #   4. Drop the legacy NOT NULL on ``credential_data`` (pool rows may
+    #      have no key) and add the byok-requires-key CHECK once.
     await conn.execute("""
         DO $$
         BEGIN
@@ -241,9 +261,45 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
                            WHERE table_name = 'tenant_model_credentials'
                              AND column_name = 'credential_data') THEN
                 ALTER TABLE tenant_model_credentials
-                    ADD COLUMN credential_data BYTEA NOT NULL;
+                    ADD COLUMN credential_data BYTEA;
+            END IF;
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                           WHERE table_name = 'tenant_model_credentials'
+                             AND column_name = 'credential_mode') THEN
+                ALTER TABLE tenant_model_credentials
+                    ADD COLUMN credential_mode VARCHAR(10) NOT NULL DEFAULT 'byok';
+                ALTER TABLE tenant_model_credentials
+                    ADD CONSTRAINT tmc_mode_values
+                        CHECK (credential_mode IN ('pool', 'byok'));
+            END IF;
+            ALTER TABLE tenant_model_credentials
+                ALTER COLUMN credential_data DROP NOT NULL;
+            IF NOT EXISTS (SELECT 1 FROM information_schema.table_constraints
+                           WHERE table_name = 'tenant_model_credentials'
+                             AND constraint_name = 'tmc_byok_requires_key') THEN
+                ALTER TABLE tenant_model_credentials
+                    ADD CONSTRAINT tmc_byok_requires_key
+                        CHECK (credential_mode <> 'byok'
+                               OR credential_data IS NOT NULL);
             END IF;
         END $$
+    """)
+
+    # Platform credential pool (design "credential pool" §2). Tenant-
+    # agnostic, no RLS, no ``tenant_id`` — the mirror of ``models`` but
+    # holding the Fernet-encrypted platform key per provider. A tenant
+    # row with ``credential_mode = 'pool'`` resolves its key from here.
+    # Only ``platform_admin`` mutates it (``credential.pool.manage``);
+    # tenants never read the ciphertext (metadata-only list endpoints).
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS platform_provider_credentials (
+            id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            provider         VARCHAR(50) NOT NULL,
+            credential_data  BYTEA NOT NULL,
+            created_at       TIMESTAMPTZ DEFAULT NOW(),
+            updated_at       TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE (provider)
+        )
     """)
 
     # MCP server registry. ``tool_reversibility`` is a {tool_name: bool}
@@ -1599,7 +1655,9 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     # pair tables) inherit RLS transitively via ``coworkers.tenant_id``.
     # ``models`` is deliberately NOT enabled — it's a platform-level
     # catalog and rolemesh_app needs unfiltered SELECT to render the
-    # model picker.
+    # model picker. ``platform_provider_credentials`` is likewise NOT
+    # enabled — it is platform-scoped (no ``tenant_id``) and only the
+    # platform_admin route + the resolver's ``admin_conn`` touch it.
     await _enable_rls_on(conn, "tenant_model_credentials")
     await _enable_rls_on(conn, "mcp_servers")
     await _enable_rls_on(conn, "runs")
