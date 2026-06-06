@@ -323,7 +323,7 @@ describe('<rm-approval-card> safety-triggered banner (§3.10)', () => {
     expect($(el, '[data-testid="approval-safety-banner"]')).toBeNull();
   });
 
-  it('jumps to the settings safety log when "view in safety log" is clicked', async () => {
+  it('jumps to safety log with ?rule_id=Y when "view in safety log" is clicked (G5+G6)', async () => {
     el = await mount({
       mcpServerName: 'stripe',
       toolName: 'refund.create',
@@ -336,6 +336,7 @@ describe('<rm-approval-card> safety-triggered banner (§3.10)', () => {
     });
     location.hash = '#/';
     ($(el, '[data-testid="approval-safety-link"]') as HTMLButtonElement).click();
-    expect(location.hash).toBe('#/manage/safety-log');
+    // G6: the deep link sets ?rule_id so the safety log mounts the chip filter.
+    expect(location.hash).toBe('#/manage/safety-log?rule_id=sr-1');
   });
 });

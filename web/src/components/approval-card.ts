@@ -328,12 +328,12 @@ export class ApprovalCard extends LitElement {
     `;
   }
 
-  // Navigate to Settings → Safety log (spec §3.10). The log can't yet deep-
-  // filter by rule_id (the v1 endpoint exposes no rule_id filter), so this
-  // opens the log rather than a pre-filtered, auto-opened decision. The
-  // rule_id is accepted now so the call site is stable when that lands.
-  private jumpToSafetyDecision(_ruleId: string): void {
-    location.hash = '#/manage/safety-log';
+  // Navigate to Settings → Safety log filtered by rule_id (spec §3.10).
+  // The log mounts the rule_id chip from the URL's ?rule_id= query param
+  // (G6 / PR #57); landing on a filtered list lets the user see the rule's
+  // broader behavior before deciding.
+  private jumpToSafetyDecision(ruleId: string): void {
+    location.hash = `#/manage/safety-log?rule_id=${encodeURIComponent(ruleId)}`;
   }
 
   private renderToolChip(): TemplateResult | typeof nothing {
