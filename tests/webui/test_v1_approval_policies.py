@@ -104,7 +104,7 @@ async def test_create_list_get_patch_delete_round_trip() -> None:
 
         listing = await ac.get("/api/v1/approval-policies", headers=_AUTH)
         assert listing.status_code == 200
-        assert [p["id"] for p in listing.json()] == [pid]
+        assert [p["id"] for p in listing.json()["items"]] == [pid]
 
         got = await ac.get(f"/api/v1/approval-policies/{pid}", headers=_AUTH)
         assert got.status_code == 200
@@ -312,13 +312,13 @@ async def test_pending_requests_returns_own_tenant_only() -> None:
     async with _client(_build_app(a)) as ac:
         resp = await ac.get("/api/v1/approval-requests", headers=_AUTH)
     assert resp.status_code == 200
-    ids = {r["request_id"] for r in resp.json()}
+    ids = {r["request_id"] for r in resp.json()["items"]}
     assert a_req in ids
     assert b_req not in ids
     # §1.2: the projection now carries the decision-relevant payload — the raw
     # params (the decision input), the requesting coworker, and the rationale —
     # flattened out of the internal ``action`` wrapper.
-    row = next(r for r in resp.json() if r["request_id"] == a_req)
+    row = next(r for r in resp.json()["items"] if r["request_id"] == a_req)
     assert row["tool_name"] == "charge"
     assert row["action_summary"] == "charge $500"
     assert row["params"] == {"amount": 500}

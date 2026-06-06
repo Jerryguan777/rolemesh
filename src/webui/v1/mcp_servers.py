@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, Response
 
 from rolemesh.db import (
     MCPServerRow,
+    count_mcp_servers,
     create_mcp_server,
     delete_mcp_server,
     get_mcp_server,
@@ -27,8 +28,14 @@ from rolemesh.db import (
     update_mcp_server,
 )
 from webui.dependencies import get_current_user, require_action
-from webui.schemas_v1 import MCPServer, MCPServerCreate, MCPServerUpdate
+from webui.schemas_v1 import (
+    MCPServer,
+    MCPServerCreate,
+    MCPServerPage,
+    MCPServerUpdate,
+)
 from webui.v1 import mcp_events
+from webui.v1._pagination import DEFAULT_PAGE_LIMIT, LimitParam, OffsetParam
 from webui.v1.errors import ErrorResponseException, raise_error_response
 
 if TYPE_CHECKING:
@@ -70,12 +77,20 @@ async def _get_or_404(mcp_id: str, *, tenant_id: str) -> MCPServerRow:
     return row
 
 
-@router.get("", response_model=list[MCPServer])
+@router.get("", response_model=MCPServerPage)
 async def list_endpoint(
+    limit: LimitParam = DEFAULT_PAGE_LIMIT,
+    offset: OffsetParam = 0,
     user: AuthenticatedUser = Depends(get_current_user),
-) -> list[MCPServer]:
-    rows = await list_mcp_servers(user.tenant_id)
-    return [_row_to_response(r) for r in rows]
+) -> MCPServerPage:
+    rows = await list_mcp_servers(user.tenant_id, limit=limit, offset=offset)
+    total = await count_mcp_servers(user.tenant_id)
+    return MCPServerPage(
+        items=[_row_to_response(r) for r in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.post("", response_model=MCPServer, status_code=201)

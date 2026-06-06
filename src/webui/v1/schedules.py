@@ -22,13 +22,15 @@ import asyncpg
 from fastapi import APIRouter, Depends, Query, Response
 
 from rolemesh.db import (
+    count_tasks,
     delete_task,
     get_all_tasks,
     get_task_by_id,
     get_tasks_for_coworker,
 )
 from webui.dependencies import get_current_user, require_action
-from webui.schemas_v1 import ScheduledTask
+from webui.schemas_v1 import ScheduledTask, ScheduledTaskPage
+from webui.v1._pagination import DEFAULT_PAGE_LIMIT, LimitParam, OffsetParam
 from webui.v1.errors import raise_error_response
 
 if TYPE_CHECKING:
@@ -56,16 +58,28 @@ def _to_response(t: ScheduledTaskDataclass) -> ScheduledTask:
     )
 
 
-@router.get("", response_model=list[ScheduledTask])
+@router.get("", response_model=ScheduledTaskPage)
 async def list_schedules_endpoint(
     coworker_id: str | None = Query(default=None),
+    limit: LimitParam = DEFAULT_PAGE_LIMIT,
+    offset: OffsetParam = 0,
     user: AuthenticatedUser = Depends(get_current_user),
-) -> list[ScheduledTask]:
+) -> ScheduledTaskPage:
     if coworker_id is not None:
-        rows = await get_tasks_for_coworker(coworker_id, tenant_id=user.tenant_id)
+        rows = await get_tasks_for_coworker(
+            coworker_id, tenant_id=user.tenant_id, limit=limit, offset=offset,
+        )
     else:
-        rows = await get_all_tasks(tenant_id=user.tenant_id)
-    return [_to_response(r) for r in rows]
+        rows = await get_all_tasks(
+            tenant_id=user.tenant_id, limit=limit, offset=offset,
+        )
+    total = await count_tasks(user.tenant_id, coworker_id=coworker_id)
+    return ScheduledTaskPage(
+        items=[_to_response(r) for r in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/{task_id}", response_model=ScheduledTask)

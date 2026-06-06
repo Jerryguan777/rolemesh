@@ -135,7 +135,7 @@ async def test_created_coworker_defaults_private_and_hidden_from_others() -> Non
     other_app = _build_app(_authed(tid, other, "member"))
     async with _client(other_app) as c:
         listed = await c.get("/api/v1/coworkers")
-        assert cw_id not in {r["id"] for r in listed.json()}
+        assert cw_id not in {r["id"] for r in listed.json()["items"]}
         fetched = await c.get(f"/api/v1/coworkers/{cw_id}")
         assert fetched.status_code == 404, fetched.text
 
@@ -179,7 +179,7 @@ async def test_member_list_coworkers_scopes_to_visible() -> None:
     app = _build_app(_authed(tid, me, "member"))
     async with _client(app) as c:
         resp = await c.get("/api/v1/coworkers")
-    ids = {r["id"] for r in resp.json()}
+    ids = {r["id"] for r in resp.json()["items"]}
     assert my_private in ids
     assert shared in ids
     assert others_private not in ids
@@ -198,8 +198,32 @@ async def test_admin_list_coworkers_sees_everything() -> None:
     app = _build_app(_authed(tid, admin, "admin"))
     async with _client(app) as c:
         resp = await c.get("/api/v1/coworkers")
-    ids = {r["id"] for r in resp.json()}
+    ids = {r["id"] for r in resp.json()["items"]}
     assert {a, b} <= ids
+
+
+@pytest.mark.asyncio
+async def test_list_coworkers_pagination_total_respects_visibility() -> None:
+    # The page envelope's total must reflect the VISIBLE set, not the
+    # whole tenant: a member who can see fewer rows gets a smaller total
+    # than an admin over the same data (the count mirrors the list's
+    # visibility predicate).
+    tid = await _tenant()
+    me = await _user(tid, "member")
+    other = await _user(tid, "member")
+    await _seed_coworker(tid, created_by=me, visibility="private")
+    await _seed_coworker(tid, created_by=other, visibility="shared")
+    await _seed_coworker(tid, created_by=other, visibility="private")
+
+    async with _client(_build_app(_authed(tid, me, "member"))) as c:
+        member_page = (await c.get("/api/v1/coworkers")).json()
+    async with _client(_build_app(_authed(tid, me, "admin"))) as c:
+        admin_page = (await c.get("/api/v1/coworkers")).json()
+
+    # Member sees own-private + shared (2); admin sees all 3.
+    assert member_page["total"] == 2
+    assert admin_page["total"] == 3
+    assert member_page["limit"] == 50 and member_page["offset"] == 0
 
 
 @pytest.mark.asyncio
@@ -214,7 +238,7 @@ async def test_member_list_skills_scopes_to_visible() -> None:
     app = _build_app(_authed(tid, me, "member"))
     async with _client(app) as c:
         resp = await c.get("/api/v1/skills")
-    ids = {r["id"] for r in resp.json()}
+    ids = {r["id"] for r in resp.json()["items"]}
     assert mine in ids
     assert shared in ids
     assert foreign not in ids

@@ -26,6 +26,7 @@ __all__ = [
     "CoworkerMCPBinding",
     "MCPServerRow",
     "bind_coworker_mcp_server",
+    "count_mcp_servers",
     "create_mcp_server",
     "delete_mcp_server",
     "get_mcp_server",
@@ -101,14 +102,30 @@ _SELECT_COLUMNS = (
 )
 
 
-async def list_mcp_servers(tenant_id: str) -> list[MCPServerRow]:
+async def list_mcp_servers(
+    tenant_id: str, *, limit: int | None = None, offset: int = 0,
+) -> list[MCPServerRow]:
+    sql = (
+        f"SELECT {_SELECT_COLUMNS} FROM mcp_servers "
+        "WHERE tenant_id = $1::uuid ORDER BY name"
+    )
+    params: list[object] = [tenant_id]
+    if limit is not None:
+        params.extend((limit, offset))
+        sql += f" LIMIT ${len(params) - 1} OFFSET ${len(params)}"
     async with tenant_conn(tenant_id) as conn:
-        rows = await conn.fetch(
-            f"SELECT {_SELECT_COLUMNS} FROM mcp_servers "
-            "WHERE tenant_id = $1::uuid ORDER BY name",
+        rows = await conn.fetch(sql, *params)
+    return [_row_to_dataclass(r) for r in rows]
+
+
+async def count_mcp_servers(tenant_id: str) -> int:
+    """Total MCP server count for a tenant (for the pagination envelope)."""
+    async with tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow(
+            "SELECT COUNT(*) AS n FROM mcp_servers WHERE tenant_id = $1::uuid",
             tenant_id,
         )
-    return [_row_to_dataclass(r) for r in rows]
+    return int(row["n"]) if row else 0
 
 
 async def get_mcp_server(

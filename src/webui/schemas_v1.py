@@ -918,16 +918,18 @@ class SafetyDecision(BaseModel):
 class SafetyDecisionPage(BaseModel):
     """``GET /api/v1/safety/decisions`` response envelope.
 
-    Mirrors the admin shape ``{total, items}`` so the SPA renders
-    pagination without a second count call. The two-field envelope
-    is intentional even when ``total == len(items)`` — keeps the
-    list and count concerns coupled in one round-trip.
+    The standard offset/limit page shape shared across the v1 list
+    surface: ``items`` plus ``total`` (so the SPA renders pagination
+    without a second count call) and an echo of the effective
+    ``limit``/``offset`` (so the caller doesn't have to track them).
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    items: list[SafetyDecision]
     total: int = Field(ge=0)
-    items: list[SafetyDecision] = Field(default_factory=list)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
 
 
 class SafetyRuleAuditEntry(BaseModel):
@@ -1266,3 +1268,128 @@ class ModelUpdate(BaseModel):
 
     display_name: str | None = Field(default=None, min_length=1, max_length=200)
     is_active: bool | None = None
+
+
+# ---------------------------------------------------------------------------
+# Pagination envelopes (offset/limit). One named class per resource keeps the
+# generated TS type names clean; all share the {items, total, limit, offset}
+# shape established by SafetyDecisionPage. See webui.v1._pagination.
+# ---------------------------------------------------------------------------
+
+
+class SafetyRulePage(BaseModel):
+    """Offset/limit page of safety rules."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[SafetyRule]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
+class ScheduledTaskPage(BaseModel):
+    """Offset/limit page of scheduled tasks."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ScheduledTask]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
+class ApprovalPolicyPage(BaseModel):
+    """Offset/limit page of approval policies."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ApprovalPolicy]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
+class ApprovalRequestPage(BaseModel):
+    """Offset/limit page of approval requests."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ApprovalRequest]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
+class CoworkerPage(BaseModel):
+    """Offset/limit page of coworkers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[Coworker]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
+class SkillSummaryPage(BaseModel):
+    """Offset/limit page of skill summaries."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[SkillSummary]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
+class MCPServerPage(BaseModel):
+    """Offset/limit page of MCP servers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[MCPServer]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
+class ConversationPage(BaseModel):
+    """Offset/limit page of conversations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[Conversation]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
+class SafetyRuleAuditPage(BaseModel):
+    """Offset/limit page of safety rule audit entries."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[SafetyRuleAuditEntry]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
+class MessagePage(BaseModel):
+    """Cursor page of conversation messages.
+
+    Messages use cursor pagination, NOT offset/limit like the other
+    collections: chat history is append-only and read newest-first
+    ("load older"), so offset paging would shift or duplicate rows as
+    new messages arrive mid-scroll. The server seeks on ``(timestamp,
+    id)``. ``items`` are returned oldest-first (natural display order);
+    when ``has_more`` is true, ``next_cursor`` is passed back as the
+    ``before`` query param to fetch the next older page.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[Message]
+    has_more: bool
+    next_cursor: str | None = None

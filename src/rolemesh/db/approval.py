@@ -27,6 +27,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ApprovalRequest",
+    "count_approval_policies",
+    "count_pending_requests_for_tenant",
     "create_approval_policy",
     "create_approval_request",
     "delete_approval_policy",
@@ -185,22 +187,43 @@ async def get_approval_policy(
 
 
 async def list_approval_policies(
-    tenant_id: str, *, enabled_only: bool = False
+    tenant_id: str,
+    *,
+    enabled_only: bool = False,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> list[ApprovalPolicy]:
-    """List a tenant's policies.
+    """List a tenant's policies, optionally paginated.
 
     ``enabled_only=True`` returns the snapshot the matcher consumes
-    (``find_matching_policy``). Order is the matcher's tiebreak order
-    (priority desc, then newest) so callers that take the first match get
-    the same answer as the matcher — but the matcher does not rely on it.
+    (``find_matching_policy``) — internal callers leave ``limit`` unset to
+    get the full set. Order is the matcher's tiebreak order (priority desc,
+    then newest) so callers that take the first match get the same answer
+    as the matcher — but the matcher does not rely on it.
     """
     sql = "SELECT * FROM approval_policies WHERE tenant_id = $1::uuid"
     if enabled_only:
         sql += " AND enabled = TRUE"
     sql += " ORDER BY priority DESC, updated_at DESC"
+    params: list[object] = [tenant_id]
+    if limit is not None:
+        params.extend((limit, offset))
+        sql += f" LIMIT ${len(params) - 1} OFFSET ${len(params)}"
     async with tenant_conn(tenant_id) as conn:
-        rows = await conn.fetch(sql, tenant_id)
+        rows = await conn.fetch(sql, *params)
     return [_record_to_policy(r) for r in rows]
+
+
+async def count_approval_policies(
+    tenant_id: str, *, enabled_only: bool = False
+) -> int:
+    """Total policy count for a tenant (matching ``enabled_only``)."""
+    sql = "SELECT COUNT(*) AS n FROM approval_policies WHERE tenant_id = $1::uuid"
+    if enabled_only:
+        sql += " AND enabled = TRUE"
+    async with tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow(sql, tenant_id)
+    return int(row["n"]) if row else 0
 
 
 async def update_approval_policy(
@@ -378,18 +401,63 @@ async def get_approval_request(
     return _record_to_request(row) if row else None
 
 
+def _pending_requests_filter_sql(
+    tenant_id: str, *, conversation_id: str | None,
+) -> tuple[str, list[object]]:
+    """Shared WHERE clause for pending-request list/count.
+
+    The optional ``conversation_id`` is pushed into SQL (not filtered in
+    process) so pagination counts and slices the same scoped set.
+    """
+    sql = "tenant_id = $1::uuid AND status = 'pending'"
+    params: list[object] = [tenant_id]
+    if conversation_id is not None:
+        params.append(conversation_id)
+        sql += f" AND conversation_id = ${len(params)}::uuid"
+    return sql, params
+
+
 async def list_pending_requests_for_tenant(
     tenant_id: str,
+    *,
+    conversation_id: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> list[ApprovalRequest]:
-    """Pending requests for one tenant (oldest first)."""
+    """Pending requests for one tenant (oldest first), optionally paginated.
+
+    ``conversation_id`` narrows to one conversation's in-flight cards (the
+    SPA reconnect path). Internal callers leave ``limit`` unset.
+    """
+    where, params = _pending_requests_filter_sql(
+        tenant_id, conversation_id=conversation_id,
+    )
+    sql = (
+        "SELECT * FROM approval_requests WHERE "
+        + where
+        + " ORDER BY requested_at ASC"
+    )
+    if limit is not None:
+        params.extend((limit, offset))
+        sql += f" LIMIT ${len(params) - 1} OFFSET ${len(params)}"
     async with tenant_conn(tenant_id) as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM approval_requests "
-            "WHERE tenant_id = $1::uuid AND status = 'pending' "
-            "ORDER BY requested_at ASC",
-            tenant_id,
-        )
+        rows = await conn.fetch(sql, *params)
     return [_record_to_request(r) for r in rows]
+
+
+async def count_pending_requests_for_tenant(
+    tenant_id: str, *, conversation_id: str | None = None,
+) -> int:
+    """Total pending-request count for a tenant (matching the filter)."""
+    where, params = _pending_requests_filter_sql(
+        tenant_id, conversation_id=conversation_id,
+    )
+    async with tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow(
+            "SELECT COUNT(*) AS n FROM approval_requests WHERE " + where,
+            *params,
+        )
+    return int(row["n"]) if row else 0
 
 
 async def list_requests_for_conversation(

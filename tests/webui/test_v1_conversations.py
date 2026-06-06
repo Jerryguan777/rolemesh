@@ -122,7 +122,7 @@ async def test_create_then_list_conversation() -> None:
         # List
         resp = await c.get(f"/api/v1/coworkers/{cw_id}/conversations")
         assert resp.status_code == 200
-        items = resp.json()
+        items = resp.json()["items"]
         assert len(items) == 1
         assert items[0]["id"] == conv_id
 
@@ -260,7 +260,7 @@ async def test_delete_conversation_cascades_messages() -> None:
     async with _client(app) as c:
         r = await c.get(f"/api/v1/conversations/{conv_id}/messages")
     assert r.status_code == 200
-    msgs = r.json()
+    msgs = r.json()["items"]
     assert len(msgs) == 2
     roles = {m["role"] for m in msgs}
     assert roles == {"user", "assistant"}, msgs
@@ -307,7 +307,7 @@ async def test_bot_message_with_only_is_bot_message_surfaces_as_assistant() -> N
     async with _client(app) as c:
         r = await c.get(f"/api/v1/conversations/{conv_id}/messages")
     assert r.status_code == 200
-    msgs = r.json()
+    msgs = r.json()["items"]
     assert len(msgs) == 1
     assert msgs[0]["role"] == "assistant"
 
@@ -471,3 +471,63 @@ async def test_conversation_approvals_cross_tenant_is_404() -> None:
         r = await c.get(f"/api/v1/conversations/{b_conv}/approval-requests")
     assert r.status_code == 404
     assert r.json()["code"] == "NOT_FOUND"
+
+
+@pytest.mark.asyncio
+async def test_messages_cursor_pagination_walks_older() -> None:
+    """Cursor paging returns the newest page first, then walks older via
+    next_cursor. Items come back oldest-first (display order); the cursor
+    is opaque and seeks on (timestamp, id)."""
+    tid, uid, cw_id = await _make_tenant_user_coworker("curs")
+    app = _build_app(_authed(tid, uid))
+    async with _client(app) as c:
+        conv_id = (
+            await c.post(f"/api/v1/coworkers/{cw_id}/conversations", json={})
+        ).json()["id"]
+
+    base = datetime.now(UTC)
+    for i in range(3):  # m0 < m1 < m2 in time
+        await store_message(
+            tenant_id=tid,
+            conversation_id=conv_id,
+            msg_id=f"m-{i}",
+            sender="user",
+            sender_name="U",
+            content=f"msg{i}",
+            timestamp=(base + timedelta(seconds=i)).isoformat(),
+            is_from_me=False,
+        )
+
+    async with _client(app) as c:
+        # Page 1: newest 2 (m1, m2), oldest-first; more remain.
+        p1 = (
+            await c.get(f"/api/v1/conversations/{conv_id}/messages?limit=2")
+        ).json()
+        assert [m["content"] for m in p1["items"]] == ["msg1", "msg2"]
+        assert p1["has_more"] is True
+        assert p1["next_cursor"]
+        # Page 2: the one older message (m0); no more.
+        p2 = (
+            await c.get(
+                f"/api/v1/conversations/{conv_id}/messages"
+                f"?limit=2&before={p1['next_cursor']}"
+            )
+        ).json()
+        assert [m["content"] for m in p2["items"]] == ["msg0"]
+        assert p2["has_more"] is False
+        assert p2["next_cursor"] is None
+
+
+@pytest.mark.asyncio
+async def test_messages_malformed_cursor_is_400() -> None:
+    tid, uid, cw_id = await _make_tenant_user_coworker("badc")
+    app = _build_app(_authed(tid, uid))
+    async with _client(app) as c:
+        conv_id = (
+            await c.post(f"/api/v1/coworkers/{cw_id}/conversations", json={})
+        ).json()["id"]
+        resp = await c.get(
+            f"/api/v1/conversations/{conv_id}/messages?before=not-a-cursor"
+        )
+    assert resp.status_code == 400
+    assert resp.json()["code"] == "INVALID_CURSOR"

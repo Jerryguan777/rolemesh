@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "count_safety_decisions",
+    "count_safety_rules",
+    "count_safety_rules_audit",
     "create_safety_rule",
     "delete_safety_rule",
     "get_safety_decision",
@@ -140,14 +142,14 @@ async def get_safety_rule(
     return _record_to_safety_rule(row)
 
 
-async def list_safety_rules(
+def _safety_rule_filter_sql(
     tenant_id: str,
     *,
-    coworker_id: str | None = None,
-    stage: str | None = None,
-    enabled: bool | None = None,
-) -> list[SafetyRule]:
-    """List rules for a tenant, optionally filtered."""
+    coworker_id: str | None,
+    stage: str | None,
+    enabled: bool | None,
+) -> tuple[str, list[Any]]:
+    """Build the shared WHERE clause for list/count of safety rules."""
     clauses = ["tenant_id = $1::uuid"]
     params: list[Any] = [tenant_id]
     if coworker_id is not None:
@@ -159,14 +161,51 @@ async def list_safety_rules(
     if enabled is not None:
         params.append(enabled)
         clauses.append(f"enabled = ${len(params)}")
+    return " AND ".join(clauses), params
+
+
+async def list_safety_rules(
+    tenant_id: str,
+    *,
+    coworker_id: str | None = None,
+    stage: str | None = None,
+    enabled: bool | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[SafetyRule]:
+    """List rules for a tenant, optionally filtered and paginated."""
+    where, params = _safety_rule_filter_sql(
+        tenant_id, coworker_id=coworker_id, stage=stage, enabled=enabled,
+    )
     sql = (
         "SELECT * FROM safety_rules WHERE "
-        + " AND ".join(clauses)
+        + where
         + " ORDER BY priority DESC, updated_at DESC"
     )
+    if limit is not None:
+        params.extend((limit, offset))
+        sql += f" LIMIT ${len(params) - 1} OFFSET ${len(params)}"
     async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(sql, *params)
     return [_record_to_safety_rule(r) for r in rows]
+
+
+async def count_safety_rules(
+    tenant_id: str,
+    *,
+    coworker_id: str | None = None,
+    stage: str | None = None,
+    enabled: bool | None = None,
+) -> int:
+    """Total tenant rule count matching the same filters as the list."""
+    where, params = _safety_rule_filter_sql(
+        tenant_id, coworker_id=coworker_id, stage=stage, enabled=enabled,
+    )
+    async with tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow(
+            "SELECT COUNT(*) AS n FROM safety_rules WHERE " + where, *params,
+        )
+    return int(row["n"]) if row else 0
 
 
 async def list_safety_rules_for_coworker(
@@ -283,29 +322,52 @@ async def delete_safety_rule(
     return result.endswith(" 1")
 
 
-async def list_safety_rules_audit(
-    *,
-    tenant_id: str,
-    rule_id: str | None = None,
-    limit: int = 200,
-) -> list[dict[str, Any]]:
-    """List rule-change audit rows, newest first.
-
-    Filtered by tenant_id (never cross-tenant). ``rule_id`` optional
-    to narrow to a specific rule's history. Returns plain dicts; the
-    V2 admin UI will surface this as a timeline. Test fixture uses it
-    to pin actor/action correctness.
-    """
+def _safety_audit_filter_sql(
+    tenant_id: str, *, rule_id: str | None,
+) -> tuple[str, list[Any]]:
+    """Shared WHERE clause for the audit list/count."""
     clauses = ["tenant_id = $1::uuid"]
     params: list[Any] = [tenant_id]
     if rule_id is not None:
         params.append(rule_id)
         clauses.append(f"rule_id = ${len(params)}::uuid")
+    return " AND ".join(clauses), params
+
+
+async def count_safety_rules_audit(
+    *, tenant_id: str, rule_id: str | None = None,
+) -> int:
+    """Total audit-row count matching the same filters as the list."""
+    where, params = _safety_audit_filter_sql(tenant_id, rule_id=rule_id)
+    async with tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow(
+            "SELECT COUNT(*) AS n FROM safety_rules_audit WHERE " + where,
+            *params,
+        )
+    return int(row["n"]) if row else 0
+
+
+async def list_safety_rules_audit(
+    *,
+    tenant_id: str,
+    rule_id: str | None = None,
+    limit: int = 200,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """List rule-change audit rows, newest first (paginated).
+
+    Filtered by tenant_id (never cross-tenant). ``rule_id`` optional
+    to narrow to a specific rule's history. Returns plain dicts; the
+    admin UI surfaces this as a timeline.
+    """
+    where, params = _safety_audit_filter_sql(tenant_id, rule_id=rule_id)
     params.append(limit)
+    limit_pos = len(params)
+    params.append(offset)
     sql = (
         "SELECT * FROM safety_rules_audit WHERE "
-        + " AND ".join(clauses)
-        + f" ORDER BY created_at DESC LIMIT ${len(params)}"
+        + where
+        + f" ORDER BY created_at DESC LIMIT ${limit_pos} OFFSET ${len(params)}"
     )
     async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(sql, *params)

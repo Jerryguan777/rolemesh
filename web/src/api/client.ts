@@ -224,12 +224,14 @@ export class ApiClient {
   }
 
   async listCoworkers(): Promise<Coworker[]> {
-    const resp = await fetch(`${this.baseUrl}/api/v1/coworkers`, {
+    // Paged endpoint; request the max window and return items so callers
+    // keep their array shape (full page-through UI is a follow-up).
+    const resp = await fetch(`${this.baseUrl}/api/v1/coworkers?limit=200`, {
       method: 'GET',
       headers: this.headers(),
     });
     if (!resp.ok) throw await this.parseError(resp);
-    return (await resp.json()) as Coworker[];
+    return ((await resp.json()) as components['schemas']['CoworkerPage']).items;
   }
 
   /** Patch selected fields on a coworker. Backend treats ABSENT keys
@@ -259,12 +261,15 @@ export class ApiClient {
   }
 
   async listCoworkerConversations(coworkerId: string): Promise<Conversation[]> {
+    // Paged endpoint; request the max window and return items (array shape
+    // preserved for callers; full page-through UI is a follow-up).
     const resp = await fetch(
-      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(coworkerId)}/conversations`,
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(coworkerId)}/conversations?limit=200`,
       { method: 'GET', headers: this.headers() },
     );
     if (!resp.ok) throw await this.parseError(resp);
-    return (await resp.json()) as Conversation[];
+    return ((await resp.json()) as components['schemas']['ConversationPage'])
+      .items;
   }
 
   /** Create a fresh web-channel conversation for a coworker. The
@@ -288,12 +293,16 @@ export class ApiClient {
   }
 
   async listMessages(conversationId: string): Promise<Message[]> {
+    // Cursor-paginated endpoint. Request the max window and return the
+    // (oldest-first) items so existing callers keep their array shape; this
+    // shows the newest 200 messages. "Load older" via next_cursor is a
+    // follow-up once the chat UI grows a scrollback control.
     const resp = await fetch(
-      `${this.baseUrl}/api/v1/conversations/${encodeURIComponent(conversationId)}/messages`,
+      `${this.baseUrl}/api/v1/conversations/${encodeURIComponent(conversationId)}/messages?limit=200`,
       { method: 'GET', headers: this.headers() },
     );
     if (!resp.ok) throw await this.parseError(resp);
-    return (await resp.json()) as Message[];
+    return ((await resp.json()) as components['schemas']['MessagePage']).items;
   }
 
   async getRun(runId: string): Promise<Run | null> {
@@ -368,12 +377,13 @@ export class ApiClient {
   // ------------------------------------------------------------------
 
   async listMCPServers(): Promise<MCPServer[]> {
-    const resp = await fetch(`${this.baseUrl}/api/v1/mcp-servers`, {
+    // Paged endpoint; request the max window and return items (see above).
+    const resp = await fetch(`${this.baseUrl}/api/v1/mcp-servers?limit=200`, {
       method: 'GET',
       headers: this.headers(),
     });
     if (!resp.ok) throw await this.parseError(resp);
-    return (await resp.json()) as MCPServer[];
+    return ((await resp.json()) as components['schemas']['MCPServerPage']).items;
   }
 
   async createMCPServer(body: MCPServerCreate): Promise<MCPServer> {
@@ -415,12 +425,15 @@ export class ApiClient {
   // ------------------------------------------------------------------
 
   async listApprovalPolicies(): Promise<ApprovalPolicy[]> {
-    const resp = await fetch(`${this.baseUrl}/api/v1/approval-policies`, {
-      method: 'GET',
-      headers: this.headers(),
-    });
+    // Paged endpoint; request the max window and return the items so
+    // callers keep their array shape (page-through UI is a follow-up).
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/approval-policies?limit=200`,
+      { method: 'GET', headers: this.headers() },
+    );
     if (!resp.ok) throw await this.parseError(resp);
-    return (await resp.json()) as ApprovalPolicy[];
+    return ((await resp.json()) as components['schemas']['ApprovalPolicyPage'])
+      .items;
   }
 
   async createApprovalPolicy(
@@ -465,15 +478,15 @@ export class ApiClient {
   async listPendingApprovals(
     conversationId?: string,
   ): Promise<ApprovalRequest[]> {
-    const qs = conversationId
-      ? `?conversation_id=${encodeURIComponent(conversationId)}`
-      : '';
+    const qs = new URLSearchParams({ limit: '200' });
+    if (conversationId) qs.set('conversation_id', conversationId);
     const resp = await fetch(
-      `${this.baseUrl}/api/v1/approval-requests${qs}`,
+      `${this.baseUrl}/api/v1/approval-requests?${qs}`,
       { method: 'GET', headers: this.headers() },
     );
     if (!resp.ok) throw await this.parseError(resp);
-    return (await resp.json()) as ApprovalRequest[];
+    return ((await resp.json()) as components['schemas']['ApprovalRequestPage'])
+      .items;
   }
 
   /** A conversation's full HITL approval record — pending AND resolved,
@@ -500,12 +513,14 @@ export class ApiClient {
   // ------------------------------------------------------------------
 
   async listSkills(): Promise<SkillSummary[]> {
-    const resp = await fetch(`${this.baseUrl}/api/v1/skills`, {
+    // Paged endpoint; request the max window and return items (see above).
+    const resp = await fetch(`${this.baseUrl}/api/v1/skills?limit=200`, {
       method: 'GET',
       headers: this.headers(),
     });
     if (!resp.ok) throw await this.parseError(resp);
-    return (await resp.json()) as SkillSummary[];
+    return ((await resp.json()) as components['schemas']['SkillSummaryPage'])
+      .items;
   }
 
   async getSkill(id: string): Promise<Skill> {
@@ -629,10 +644,15 @@ export class ApiClient {
     if (filters?.enabled !== undefined && filters.enabled !== null) {
       qs.set('enabled', String(filters.enabled));
     }
-    const url = `${this.baseUrl}/api/v1/safety/rules${qs.size ? `?${qs}` : ''}`;
+    // List endpoints are paged; request the max window and return the
+    // items so existing callers keep their array shape. Real page-through
+    // UI is a follow-up (see the pagination rollout).
+    qs.set('limit', '200');
+    const url = `${this.baseUrl}/api/v1/safety/rules?${qs}`;
     const resp = await fetch(url, { method: 'GET', headers: this.headers() });
     if (!resp.ok) throw await this.parseError(resp);
-    return (await resp.json()) as SafetyRule[];
+    return ((await resp.json()) as components['schemas']['SafetyRulePage'])
+      .items;
   }
 
   async getSafetyRule(id: string): Promise<SafetyRule> {
@@ -648,12 +668,14 @@ export class ApiClient {
     ruleId: string,
     limit = 200,
   ): Promise<SafetyRuleAuditEntry[]> {
+    // Paged endpoint; return items so callers keep their array shape.
     const resp = await fetch(
       `${this.baseUrl}/api/v1/safety/rules/${encodeURIComponent(ruleId)}/audit?limit=${limit}`,
       { method: 'GET', headers: this.headers() },
     );
     if (!resp.ok) throw await this.parseError(resp);
-    return (await resp.json()) as SafetyRuleAuditEntry[];
+    return ((await resp.json()) as components['schemas']['SafetyRuleAuditPage'])
+      .items;
   }
 
   async listSafetyChecks(): Promise<SafetyCheck[]> {

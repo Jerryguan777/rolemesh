@@ -2081,8 +2081,76 @@ export interface components {
             created_at: string;
         };
         SafetyDecisionPage: {
+            items: components["schemas"]["SafetyDecision"][];
             total: number;
-            items?: components["schemas"]["SafetyDecision"][];
+            limit: number;
+            offset: number;
+        };
+        UserPage: {
+            items: components["schemas"]["UserResponse"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
+        SafetyRulePage: {
+            items: components["schemas"]["SafetyRule"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
+        ScheduledTaskPage: {
+            items: components["schemas"]["ScheduledTask"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
+        ApprovalPolicyPage: {
+            items: components["schemas"]["ApprovalPolicy"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
+        ApprovalRequestPage: {
+            items: components["schemas"]["ApprovalRequest"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
+        CoworkerPage: {
+            items: components["schemas"]["Coworker"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
+        SkillSummaryPage: {
+            items: components["schemas"]["SkillSummary"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
+        MCPServerPage: {
+            items: components["schemas"]["MCPServer"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
+        ConversationPage: {
+            items: components["schemas"]["Conversation"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
+        SafetyRuleAuditPage: {
+            items: components["schemas"]["SafetyRuleAuditEntry"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
+        MessagePage: {
+            items: components["schemas"]["Message"][];
+            has_more: boolean;
+            /** @description Opaque cursor for the next OLDER page; pass back as the `before` query param. Null when there are no older messages. */
+            next_cursor?: string | null;
         };
         SafetyRuleAuditEntry: {
             /** Format: uuid */
@@ -2642,6 +2710,10 @@ export interface components {
     };
     parameters: {
         IdInPath: string;
+        /** @description Maximum number of items to return (default 50, max 200). */
+        LimitParam: number;
+        /** @description Number of items to skip from the start of the ordered set. */
+        OffsetParam: number;
     };
     requestBodies: never;
     headers: never;
@@ -2814,7 +2886,12 @@ export interface operations {
     };
     listCoworkers: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Maximum number of items to return (default 50, max 200). */
+                limit?: components["parameters"]["LimitParam"];
+                /** @description Number of items to skip from the start of the ordered set. */
+                offset?: components["parameters"]["OffsetParam"];
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -2827,7 +2904,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Coworker"][];
+                    "application/json": components["schemas"]["CoworkerPage"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -2992,7 +3069,12 @@ export interface operations {
     };
     listCoworkerConversations: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Maximum number of items to return (default 50, max 200). */
+                limit?: components["parameters"]["LimitParam"];
+                /** @description Number of items to skip from the start of the ordered set. */
+                offset?: components["parameters"]["OffsetParam"];
+            };
             header?: never;
             path: {
                 id: components["parameters"]["IdInPath"];
@@ -3007,7 +3089,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Conversation"][];
+                    "application/json": components["schemas"]["ConversationPage"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -3092,7 +3174,12 @@ export interface operations {
     };
     listConversationMessages: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Opaque cursor from a previous page's next_cursor; returns the page of messages immediately older than it. */
+                before?: string;
+                /** @description Maximum number of items to return (default 50, max 200). */
+                limit?: components["parameters"]["LimitParam"];
+            };
             header?: never;
             path: {
                 id: components["parameters"]["IdInPath"];
@@ -3107,7 +3194,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Message"][];
+                    "application/json": components["schemas"]["MessagePage"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -3478,7 +3565,12 @@ export interface operations {
     };
     listSkills: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Maximum number of items to return (default 50, max 200). */
+                limit?: components["parameters"]["LimitParam"];
+                /** @description Number of items to skip from the start of the ordered set. */
+                offset?: components["parameters"]["OffsetParam"];
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -3491,7 +3583,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SkillSummary"][];
+                    "application/json": components["schemas"]["SkillSummaryPage"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -3867,7 +3959,12 @@ export interface operations {
     };
     listMCPServers: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Maximum number of items to return (default 50, max 200). */
+                limit?: components["parameters"]["LimitParam"];
+                /** @description Number of items to skip from the start of the ordered set. */
+                offset?: components["parameters"]["OffsetParam"];
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -3880,7 +3977,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["MCPServer"][];
+                    "application/json": components["schemas"]["MCPServerPage"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -4004,7 +4101,12 @@ export interface operations {
     };
     listApprovalPolicies: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Maximum number of items to return (default 50, max 200). */
+                limit?: components["parameters"]["LimitParam"];
+                /** @description Number of items to skip from the start of the ordered set. */
+                offset?: components["parameters"]["OffsetParam"];
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -4017,7 +4119,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ApprovalPolicy"][];
+                    "application/json": components["schemas"]["ApprovalPolicyPage"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -4127,6 +4229,10 @@ export interface operations {
     listPendingApprovalRequests: {
         parameters: {
             query?: {
+                /** @description Maximum number of items to return (default 50, max 200). */
+                limit?: components["parameters"]["LimitParam"];
+                /** @description Number of items to skip from the start of the ordered set. */
+                offset?: components["parameters"]["OffsetParam"];
                 /** @description Only return pending requests for this conversation. */
                 conversation_id?: string;
             };
@@ -4142,7 +4248,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ApprovalRequest"][];
+                    "application/json": components["schemas"]["ApprovalRequestPage"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -4211,6 +4317,10 @@ export interface operations {
     listSafetyRules: {
         parameters: {
             query?: {
+                /** @description Maximum number of items to return (default 50, max 200). */
+                limit?: components["parameters"]["LimitParam"];
+                /** @description Number of items to skip from the start of the ordered set. */
+                offset?: components["parameters"]["OffsetParam"];
                 coworker_id?: string;
                 stage?: components["schemas"]["SafetyStage"];
                 enabled?: boolean;
@@ -4227,7 +4337,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SafetyRule"][];
+                    "application/json": components["schemas"]["SafetyRulePage"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -4344,6 +4454,8 @@ export interface operations {
         parameters: {
             query?: {
                 limit?: number;
+                /** @description Number of items to skip from the start of the ordered set. */
+                offset?: components["parameters"]["OffsetParam"];
             };
             header?: never;
             path: {
@@ -4359,7 +4471,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SafetyRuleAuditEntry"][];
+                    "application/json": components["schemas"]["SafetyRuleAuditPage"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -4483,6 +4595,10 @@ export interface operations {
     schedulesList: {
         parameters: {
             query?: {
+                /** @description Maximum number of items to return (default 50, max 200). */
+                limit?: components["parameters"]["LimitParam"];
+                /** @description Number of items to skip from the start of the ordered set. */
+                offset?: components["parameters"]["OffsetParam"];
                 /** @description When set, only tasks bound to this coworker. */
                 coworker_id?: string;
             };
@@ -4498,7 +4614,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ScheduledTask"][];
+                    "application/json": components["schemas"]["ScheduledTaskPage"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -4767,7 +4883,12 @@ export interface operations {
     };
     listUsers: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Maximum number of items to return (default 50, max 200). */
+                limit?: components["parameters"]["LimitParam"];
+                /** @description Number of items to skip from the start of the ordered set. */
+                offset?: components["parameters"]["OffsetParam"];
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -4780,7 +4901,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["UserResponse"][];
+                    "application/json": components["schemas"]["UserPage"];
                 };
             };
             401: components["responses"]["Unauthorized"];

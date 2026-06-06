@@ -22,9 +22,11 @@ from webui.dependencies import require_action
 from webui.schemas import (
     UserCreate,
     UserDetailResponse,
+    UserPage,
     UserResponse,
     UserUpdate,
 )
+from webui.v1._pagination import DEFAULT_PAGE_LIMIT, LimitParam, OffsetParam
 from webui.v1.errors import raise_error_response
 
 if TYPE_CHECKING:
@@ -46,12 +48,22 @@ def _user_to_response(u: User) -> UserResponse:
     )
 
 
-@router.get("", response_model=list[UserResponse])
+@router.get("", response_model=UserPage)
 async def list_users(
+    limit: LimitParam = DEFAULT_PAGE_LIMIT,
+    offset: OffsetParam = 0,
     user: AuthenticatedUser = Depends(require_action("user.manage")),
-) -> list[UserResponse]:
-    users = await db.get_users_for_tenant(user.tenant_id)
-    return [_user_to_response(u) for u in users]
+) -> UserPage:
+    users = await db.get_users_for_tenant(
+        user.tenant_id, limit=limit, offset=offset,
+    )
+    total = await db.count_users_for_tenant(user.tenant_id)
+    return UserPage(
+        items=[_user_to_response(u) for u in users],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.post("", response_model=UserResponse, status_code=201)

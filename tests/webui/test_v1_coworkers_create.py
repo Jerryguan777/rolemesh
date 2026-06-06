@@ -369,11 +369,11 @@ async def test_list_coworkers_does_not_leak_across_tenants() -> None:
 
         list_a = await c_a.get("/api/v1/coworkers")
         assert list_a.status_code == 200
-        names_a = {c["name"] for c in list_a.json()}
+        names_a = {c["name"] for c in list_a.json()["items"]}
         assert "secret-helper" in names_a
 
     async with _client(app_b) as c_b:
         list_b = await c_b.get("/api/v1/coworkers")
         assert list_b.status_code == 200
-        names_b = {c["name"] for c in list_b.json()}
+        names_b = {c["name"] for c in list_b.json()["items"]}
         assert "secret-helper" not in names_b

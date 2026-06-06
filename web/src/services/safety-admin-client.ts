@@ -201,6 +201,13 @@ export async function listChecks(): Promise<SafetyCheckMeta[]> {
   return jsonOrThrow<SafetyCheckMeta[]>(res);
 }
 
+interface SafetyRulePage {
+  items: SafetyRule[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 export async function listRules(filters: {
   coworker_id?: string;
   stage?: SafetyStage;
@@ -210,9 +217,12 @@ export async function listRules(filters: {
     coworker_id: filters.coworker_id,
     stage: filters.stage,
     enabled: filters.enabled === undefined ? undefined : String(filters.enabled),
+    // Paged endpoint; request the max window and return items so callers
+    // keep the array shape (full page-through UI is a follow-up).
+    limit: 200,
   });
   const res = await apiFetch(`/api/v1/safety/rules${qs}`);
-  return jsonOrThrow<SafetyRule[]>(res);
+  return (await jsonOrThrow<SafetyRulePage>(res)).items;
 }
 
 export async function createRule(body: SafetyRuleCreateBody): Promise<SafetyRule> {
@@ -243,15 +253,23 @@ export async function deleteRule(ruleId: string): Promise<void> {
   }
 }
 
+interface SafetyRuleAuditPage {
+  items: SafetyRuleAuditEntry[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 export async function listRuleAudit(
   ruleId: string,
   limit = 200,
 ): Promise<SafetyRuleAuditEntry[]> {
   // Tenant is derived from the session server-side (no tenant id in path).
+  // Paged endpoint; return items so callers keep the array shape.
   const res = await apiFetch(
     `/api/v1/safety/rules/${encodeURIComponent(ruleId)}/audit?limit=${limit}`,
   );
-  return jsonOrThrow<SafetyRuleAuditEntry[]>(res);
+  return (await jsonOrThrow<SafetyRuleAuditPage>(res)).items;
 }
 
 export async function listDecisions(
@@ -331,8 +349,12 @@ export interface CoworkerSummary {
 }
 
 export async function listCoworkers(): Promise<CoworkerSummary[]> {
-  const res = await apiFetch('/api/v1/coworkers');
+  // Paged endpoint; request the max window and read items (the decisions
+  // filter only needs id/name for the dropdown).
+  const res = await apiFetch('/api/v1/coworkers?limit=200');
   if (!res.ok) return [];
-  const body = (await res.json()) as Array<{ id: string; name: string }>;
-  return body.map((c) => ({ id: c.id, name: c.name }));
+  const body = (await res.json()) as {
+    items: Array<{ id: string; name: string }>;
+  };
+  return body.items.map((c) => ({ id: c.id, name: c.name }));
 }

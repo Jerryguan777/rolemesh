@@ -23,6 +23,8 @@ from rolemesh.db.approval import (
     ApprovalRequest as ApprovalRequestRow,
 )
 from rolemesh.db.approval import (
+    count_approval_policies,
+    count_pending_requests_for_tenant,
     create_approval_policy,
     delete_approval_policy,
     get_approval_policy,
@@ -34,10 +36,13 @@ from webui.dependencies import get_current_user, require_action
 from webui.schemas_v1 import (
     ApprovalPolicy,
     ApprovalPolicyCreate,
+    ApprovalPolicyPage,
     ApprovalPolicyUpdate,
     ApprovalRequest,
+    ApprovalRequestPage,
     ApprovalTriggeredBy,
 )
+from webui.v1._pagination import DEFAULT_PAGE_LIMIT, LimitParam, OffsetParam
 from webui.v1.errors import raise_error_response
 
 if TYPE_CHECKING:
@@ -137,13 +142,23 @@ async def _get_policy_or_404(policy_id: str, *, tenant_id: str) -> ApprovalPolic
 # ---------------------------------------------------------------------------
 
 
-@policies_router.get("", response_model=list[ApprovalPolicy])
+@policies_router.get("", response_model=ApprovalPolicyPage)
 async def list_policies_endpoint(
+    limit: LimitParam = DEFAULT_PAGE_LIMIT,
+    offset: OffsetParam = 0,
     user: AuthenticatedUser = Depends(get_current_user),
-) -> list[ApprovalPolicy]:
+) -> ApprovalPolicyPage:
     """List the tenant's approval policies (priority desc, then newest)."""
-    policies = await list_approval_policies(user.tenant_id)
-    return [_policy_to_response(p) for p in policies]
+    policies = await list_approval_policies(
+        user.tenant_id, limit=limit, offset=offset,
+    )
+    total = await count_approval_policies(user.tenant_id)
+    return ApprovalPolicyPage(
+        items=[_policy_to_response(p) for p in policies],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @policies_router.post("", response_model=ApprovalPolicy, status_code=201)
@@ -232,7 +247,7 @@ async def delete_policy_endpoint(
 # ---------------------------------------------------------------------------
 
 
-@requests_router.get("", response_model=list[ApprovalRequest])
+@requests_router.get("", response_model=ApprovalRequestPage)
 async def list_pending_requests_endpoint(
     conversation_id: str | None = Query(
         default=None,
@@ -242,17 +257,30 @@ async def list_pending_requests_endpoint(
             "re-renders just that conversation's in-flight cards."
         ),
     ),
+    limit: LimitParam = DEFAULT_PAGE_LIMIT,
+    offset: OffsetParam = 0,
     user: AuthenticatedUser = Depends(get_current_user),
-) -> list[ApprovalRequest]:
+) -> ApprovalRequestPage:
     """Pending approval requests for the caller's tenant (oldest first).
 
-    Authoritative source for re-rendering ✅/❌ cards after a socket drop. The
-    optional ``conversation_id`` filter is applied in-process after the
-    tenant-scoped read — both the read and the filter stay inside the tenant
-    boundary, so it can never surface another tenant's request even if a
-    foreign ``conversation_id`` is supplied.
+    Authoritative source for re-rendering approval cards after a socket
+    drop. The optional ``conversation_id`` filter is pushed into the DB
+    query (not applied in-process) so the page count and slice cover the
+    same scoped set; either way the read stays inside the tenant boundary,
+    so a foreign ``conversation_id`` can never surface another tenant's row.
     """
-    pending = await list_pending_requests_for_tenant(user.tenant_id)
-    if conversation_id is not None:
-        pending = [r for r in pending if r.conversation_id == conversation_id]
-    return [_request_to_response(r) for r in pending]
+    pending = await list_pending_requests_for_tenant(
+        user.tenant_id,
+        conversation_id=conversation_id,
+        limit=limit,
+        offset=offset,
+    )
+    total = await count_pending_requests_for_tenant(
+        user.tenant_id, conversation_id=conversation_id,
+    )
+    return ApprovalRequestPage(
+        items=[_request_to_response(r) for r in pending],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )

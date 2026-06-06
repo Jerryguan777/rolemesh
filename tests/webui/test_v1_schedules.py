@@ -98,7 +98,7 @@ async def test_list_schedules_returns_tenant_tasks() -> None:
     async with _client(_build_app(user)) as ac:
         resp = await ac.get("/api/v1/schedules", headers=_HDRS)
     assert resp.status_code == 200
-    ids = {row["id"] for row in resp.json()}
+    ids = {row["id"] for row in resp.json()["items"]}
     assert a in ids and b in ids
 
 
@@ -122,7 +122,7 @@ async def test_list_schedules_filters_by_coworker() -> None:
             f"/api/v1/schedules?coworker_id={cw_a}", headers=_HDRS,
         )
     assert resp.status_code == 200
-    ids = {row["id"] for row in resp.json()}
+    ids = {row["id"] for row in resp.json()["items"]}
     assert task_a in ids
     assert task_b not in ids
 
@@ -140,7 +140,7 @@ async def test_list_schedules_excludes_other_tenants() -> None:
     async with _client(_build_app(user_a)) as ac:
         resp = await ac.get("/api/v1/schedules", headers=_HDRS)
     assert resp.status_code == 200
-    ids = {row["id"] for row in resp.json()}
+    ids = {row["id"] for row in resp.json()["items"]}
     assert other not in ids
 
 

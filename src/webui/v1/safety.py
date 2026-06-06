@@ -30,6 +30,8 @@ from rolemesh import db
 from rolemesh.auth.bootstrap_actor import resolve_actor_user_id
 from rolemesh.db import (
     count_safety_decisions,
+    count_safety_rules,
+    count_safety_rules_audit,
     create_safety_rule,
     delete_safety_rule,
     get_safety_decision,
@@ -54,9 +56,12 @@ from webui.schemas_v1 import (
     SafetyFinding,
     SafetyRule,
     SafetyRuleAuditEntry,
+    SafetyRuleAuditPage,
+    SafetyRulePage,
     SafetyStage,
     SafetyVerdictAction,
 )
+from webui.v1._pagination import DEFAULT_PAGE_LIMIT, LimitParam, OffsetParam
 from webui.v1.errors import raise_error_response
 
 if TYPE_CHECKING:
@@ -397,14 +402,16 @@ async def _publish_rule_changed(action: str, rule: SafetyRuleDataclass) -> None:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/rules", response_model=list[SafetyRule])
+@router.get("/rules", response_model=SafetyRulePage)
 async def list_rules(
     coworker_id: str | None = None,
     stage: SafetyStage | None = None,
     enabled: bool | None = None,
+    limit: LimitParam = DEFAULT_PAGE_LIMIT,
+    offset: OffsetParam = 0,
     user: AuthenticatedUser = Depends(require_action("safety.read")),
-) -> list[SafetyRule]:
-    """List safety rules for the caller's tenant.
+) -> SafetyRulePage:
+    """List safety rules for the caller's tenant (offset/limit paged).
 
     Returns the tenant's own rules PLUS the platform-owned rules that
     apply across all tenants. Platform rules are read-only
@@ -413,29 +420,43 @@ async def list_rules(
     enforce but are never shown. They honor the ``stage`` / ``enabled``
     filters. Like tenant-wide (``coworker_id IS NULL``) rules, platform
     rules are excluded when the caller filters by a specific
-    ``coworker_id`` — that filter is an exact-match narrowing, and
-    platform rules are not bound to any single coworker.
+    ``coworker_id``.
 
-    Tenant-rule filters mirror the admin endpoint exactly. Ordering
-    (``priority DESC, updated_at DESC``) lives in the helper; platform
-    rules are appended after, so the list groups tenant rules first.
+    Only the tenant rows are paginated at the DB. Platform rules are a
+    small read-only reference set, so they ride on the FIRST page only
+    (``offset == 0``), after the tenant slice; ``total`` counts them so
+    the SPA's pagination math stays correct.
     """
     rows = await list_safety_rules(
         user.tenant_id,
         coworker_id=coworker_id,
         stage=stage,
         enabled=enabled,
+        limit=limit,
+        offset=offset,
     )
-    out = [_rule_to_response(r) for r in rows]
+    items = [_rule_to_response(r) for r in rows]
+    total = await count_safety_rules(
+        user.tenant_id,
+        coworker_id=coworker_id,
+        stage=stage,
+        enabled=enabled,
+    )
 
     if coworker_id is None:
-        for prow in await list_visible_platform_rules(user.tenant_id):
-            if stage is not None and prow["stage"] != stage:
-                continue
-            if enabled is not None and bool(prow["enabled"]) != enabled:
-                continue
-            out.append(_platform_rule_to_response(prow))
-    return out
+        platform = [
+            _platform_rule_to_response(prow)
+            for prow in await list_visible_platform_rules(user.tenant_id)
+            if (stage is None or prow["stage"] == stage)
+            and (enabled is None or bool(prow["enabled"]) == enabled)
+        ]
+        total += len(platform)
+        if offset == 0:
+            items.extend(platform)
+
+    return SafetyRulePage(
+        items=items, total=total, limit=limit, offset=offset,
+    )
 
 
 @router.get("/rules/{rule_id}", response_model=SafetyRule)
@@ -472,27 +493,40 @@ async def get_rule(
 
 @router.get(
     "/rules/{rule_id}/audit",
-    response_model=list[SafetyRuleAuditEntry],
+    response_model=SafetyRuleAuditPage,
 )
 async def list_rule_audit(
     rule_id: str,
     limit: int = Query(default=200, ge=1, le=500),
+    offset: OffsetParam = 0,
     user: AuthenticatedUser = Depends(require_action("safety.read")),
-) -> list[SafetyRuleAuditEntry]:
-    """Change-history timeline for one rule, newest first.
+) -> SafetyRuleAuditPage:
+    """Change-history timeline for one rule, newest first (offset/limit paged).
 
     Probes the parent rule via :func:`_get_rule_or_404` before
     reading audit rows — without this guard, a cross-tenant rule_id
     would return an empty 200 (because the audit table is RLS-
     scoped) which is itself a weak signal of "wrong tenant".
+
+    Keeps its own ``limit`` cap (max 500, vs the shared 200) because a
+    compliance timeline is occasionally read in larger pulls.
     """
     await _get_rule_or_404(rule_id, tenant_id=user.tenant_id)
     rows = await list_safety_rules_audit(
         tenant_id=user.tenant_id,
         rule_id=rule_id,
         limit=limit,
+        offset=offset,
     )
-    return [_audit_row_to_response(r) for r in rows]
+    total = await count_safety_rules_audit(
+        tenant_id=user.tenant_id, rule_id=rule_id,
+    )
+    return SafetyRuleAuditPage(
+        items=[_audit_row_to_response(r) for r in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/checks", response_model=list[SafetyCheck])
@@ -546,8 +580,8 @@ async def list_decisions(
     rule_id: str | None = None,
     from_ts: str | None = None,
     to_ts: str | None = None,
-    limit: int = Query(default=50, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
+    limit: LimitParam = DEFAULT_PAGE_LIMIT,
+    offset: OffsetParam = 0,
     user: AuthenticatedUser = Depends(require_action("safety.read")),
 ) -> SafetyDecisionPage:
     """Paginated decisions list with a total-count envelope.
@@ -585,8 +619,10 @@ async def list_decisions(
         offset=offset,
     )
     return SafetyDecisionPage(
-        total=total,
         items=[_decision_row_to_response(r) for r in items],
+        total=total,
+        limit=limit,
+        offset=offset,
     )
 
 
