@@ -387,7 +387,13 @@ export class SafetyRuleDialog extends LitElement {
   }
 
   // Banner rendered above the check field when dup detection fires (§6.10a).
+  // Style mirrors the prototype's .dup-banner-edit / .dup-banner-warn / .dup-banner-info.
   private _renderDupBanner(): TemplateResult | typeof nothing {
+    const BASE =
+      'flex items-start gap-[9px] px-[13px] py-[10px] mb-[14px] rounded-[7px] text-[12.5px] leading-[1.5]';
+    const LINK =
+      'underline cursor-pointer font-[500] whitespace-nowrap ml-[6px] bg-transparent border-none p-0 text-inherit';
+
     if (this._dupTarget && !this._forceCreate) {
       const label = this._dupTarget.check_id;
       const stageLbl = SAF_STAGE_LABEL[this._dupTarget.stage as SafetyStage] ?? this._dupTarget.stage;
@@ -395,14 +401,17 @@ export class SafetyRuleDialog extends LitElement {
         ? (this.coworkers.find((c) => c.id === this._dupTarget!.coworker_id)?.name ?? this._dupTarget.coworker_id)
         : 'all coworkers';
       return html`
-        <div class="rm-dup-banner rm-dup-banner--info" data-testid="saf-dup-banner-info">
-          <span>ℹ</span>
+        <div
+          class="${BASE} bg-blue-50 dark:bg-blue-900/20 border-l-[3px] border-blue-600 dark:border-blue-500 text-blue-800 dark:text-blue-200"
+          data-testid="saf-dup-banner-info"
+        >
+          <span class="shrink-0 mt-px">ℹ</span>
           <span>
             You already have a <b>${label}</b> rule for <b>${stageLbl}</b> on
             <b>${scope}</b>. You're editing that rule now (not creating a new one).
             <button
               type="button"
-              class="rm-dup-link"
+              class="${LINK}"
               data-testid="saf-dup-force-create"
               @click=${() => this._onForceCreate()}
             >Create a separate rule anyway</button>
@@ -412,13 +421,16 @@ export class SafetyRuleDialog extends LitElement {
     }
     if (this._forceCreate) {
       return html`
-        <div class="rm-dup-banner rm-dup-banner--warn" data-testid="saf-dup-banner-warn">
-          <span>⚠</span>
+        <div
+          class="${BASE} bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-amber-500 dark:border-amber-600 text-amber-800 dark:text-amber-200"
+          data-testid="saf-dup-banner-warn"
+        >
+          <span class="shrink-0 mt-px">⚠</span>
           <span>
             Creating a second rule for the same surface — they may conflict.
             <button
               type="button"
-              class="rm-dup-link"
+              class="${LINK}"
               data-testid="saf-dup-switch-back"
               @click=${() => this._onSwitchBackToEdit()}
             >Switch back to editing the existing one</button>
@@ -429,8 +441,11 @@ export class SafetyRuleDialog extends LitElement {
     if (this._platformOverlap) {
       const label = this._platformOverlap.check_id;
       return html`
-        <div class="rm-dup-banner rm-dup-banner--fyi" data-testid="saf-dup-banner-fyi">
-          <span>🛡</span>
+        <div
+          class="${BASE} text-[11.5px] bg-surface-2 dark:bg-d-surface-2 border-l-[3px] border-ink-3 dark:border-d-ink-3 text-ink-2 dark:text-d-ink-2"
+          data-testid="saf-dup-banner-fyi"
+        >
+          <span class="shrink-0 mt-px">🛡</span>
           <span>
             A platform default <b>${label}</b> already covers this surface — your
             org rule will run alongside it.
