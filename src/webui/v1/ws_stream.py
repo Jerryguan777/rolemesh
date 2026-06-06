@@ -78,6 +78,7 @@ _CLOSE_TICKET_EXPIRED = 4001
 _CLOSE_TICKET_INVALID = 4002
 _CLOSE_TICKET_MISMATCH = 4003
 _CLOSE_NOT_FOUND = 4004
+_CLOSE_TENANT_SUSPENDED = 4005
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +127,20 @@ async def _verify_handshake(
         await ws.close(
             code=_CLOSE_TICKET_MISMATCH,
             reason="ticket conversation mismatch",
+        )
+        return None
+    # Suspended-tenant enforcement for the WS plane. The REST chokepoint
+    # (``webui.dependencies.get_current_user``) cannot cover WS — connections
+    # arrive with a pre-minted ticket, not a Bearer token — so a still-valid
+    # ticket issued before suspension is rejected here. (A suspended tenant
+    # also cannot mint a *new* ticket: ``POST /auth/ws-ticket`` runs through
+    # the REST chokepoint.)
+    from rolemesh.db import get_tenant_status
+
+    if await get_tenant_status(payload.tenant_id) == "suspended":
+        await ws.close(
+            code=_CLOSE_TENANT_SUSPENDED,
+            reason="TENANT_SUSPENDED",
         )
         return None
     return payload
