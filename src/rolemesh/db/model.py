@@ -1,15 +1,24 @@
-"""``models`` + ``tenant_model_credentials`` helpers.
+"""``models`` + credential (tenant + platform pool) helpers.
 
 The ``models`` table is tenant-agnostic (no RLS) — every tenant
 shares the platform catalog. ``tenant_model_credentials`` is
 tenant-scoped; reads / writes go through ``tenant_conn`` so the
 belt-and-braces RLS + ``WHERE tenant_id`` pattern (INV-1) applies.
+``platform_provider_credentials`` is platform-scoped (no RLS, no
+``tenant_id``) — its helpers go through ``admin_conn`` and only the
+platform_admin route + the credential resolver touch it.
 
-v1.1 §8.1: credentials now store Fernet-encrypted JSON in the BYTEA
+v1.1 §8.1: credentials store Fernet-encrypted JSON in the BYTEA
 ``credential_data`` column. These helpers move bytes opaquely — they
 do not parse, log, or otherwise observe the plaintext. Encryption /
 decryption is the route layer's responsibility via
 :mod:`rolemesh.auth.credential_vault`.
+
+Credential pool (§1): each ``(tenant, provider)`` row carries a
+``credential_mode`` of ``'byok'`` (tenant key in ``credential_data``)
+or ``'pool'`` (platform key from ``platform_provider_credentials``;
+``credential_data`` may hold a dormant BYOK key the resolver ignores).
+No row means the provider is unconfigured — opt-in, fail closed.
 """
 
 from __future__ import annotations
@@ -28,16 +37,23 @@ if TYPE_CHECKING:
 __all__ = [
     "CredentialRow",
     "ModelRow",
+    "PlatformCredentialRow",
     "count_coworkers_using_model",
     "create_model",
+    "delete_platform_credential",
     "delete_tenant_credential",
     "get_coworker_ids_for_tenant_provider",
+    "get_credential_mode_and_ciphertext",
     "get_model_by_id",
+    "get_platform_credential_ciphertext",
     "list_models",
+    "list_platform_credentials",
     "list_tenant_credentials",
+    "set_tenant_credential_pool",
     "soft_delete_model",
     "tenant_has_credential_for_provider",
     "update_model",
+    "upsert_platform_credential",
     "upsert_tenant_credential",
 ]
 
@@ -67,7 +83,23 @@ class CredentialRow:
     accidentally leak the ciphertext through a route that returns
     this dataclass — same defence-in-depth posture the wire schema
     uses (the Pydantic ``CredentialResponse`` does not declare a
-    ``credential_data`` field either).
+    ``credential_data`` field either). ``mode`` (``'byok'`` / ``'pool'``)
+    is metadata, not a secret — the SPA renders it so a tenant can see
+    which key a provider resolves to.
+    """
+
+    provider: str
+    mode: str
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class PlatformCredentialRow:
+    """Platform pool credential metadata WITHOUT the encrypted payload.
+
+    Same ciphertext-omitting posture as :class:`CredentialRow`. Listed
+    only to platform_admin; tenants never see these rows at all.
     """
 
     provider: str
@@ -274,22 +306,30 @@ async def tenant_has_credential_for_provider(
         )
 
 
-async def get_credential_ciphertext(
+async def get_credential_mode_and_ciphertext(
     tenant_id: str, provider: str
-) -> bytes | None:
-    """Return the Fernet-encrypted credential blob, or ``None`` if absent.
+) -> tuple[str, bytes | None] | None:
+    """Return ``(mode, ciphertext|None)`` for the row, or ``None`` if absent.
+
+    ``None`` means the provider is *unconfigured* for this tenant —
+    the resolver treats that as a hard miss (opt-in, fail closed). A
+    returned tuple carries the row's ``credential_mode`` and, for byok
+    rows, the Fernet ciphertext; pool rows return their dormant key (or
+    ``None``) which the resolver ignores in favour of the platform pool.
 
     Deliberately exposes ciphertext — the rest of this module's
     credential helpers strip ``credential_data`` from their projections
-    (see :class:`CredentialRow`). This single function is the carve-out:
+    (see :class:`CredentialRow`). This is one of two carve-outs (the
+    other is :func:`get_platform_credential_ciphertext`):
     :class:`rolemesh.egress.credentials.CredentialResolver` calls it,
     immediately Fernet-decrypts the blob into an in-process dict, and
     never reads the bytes again. Adding a second caller requires
     auditing that the bytes do not escape the process.
     """
     async with tenant_conn(tenant_id) as conn:
-        row = await conn.fetchval(
-            "SELECT credential_data FROM tenant_model_credentials "
+        row = await conn.fetchrow(
+            "SELECT credential_mode, credential_data "
+            "FROM tenant_model_credentials "
             "WHERE tenant_id = $1::uuid AND provider = $2 "
             "LIMIT 1",
             tenant_id,
@@ -297,14 +337,15 @@ async def get_credential_ciphertext(
         )
     if row is None:
         return None
-    return bytes(row)
+    blob = row["credential_data"]
+    return row["credential_mode"], (None if blob is None else bytes(blob))
 
 
 async def list_tenant_credentials(tenant_id: str) -> list[CredentialRow]:
-    """Return all credential rows for the tenant (no ciphertext)."""
+    """Return all credential rows for the tenant (mode metadata, no ciphertext)."""
     async with tenant_conn(tenant_id) as conn:
         rows = await conn.fetch(
-            "SELECT provider, created_at, updated_at "
+            "SELECT provider, credential_mode, created_at, updated_at "
             "FROM tenant_model_credentials "
             "WHERE tenant_id = $1::uuid "
             "ORDER BY provider",
@@ -313,6 +354,7 @@ async def list_tenant_credentials(tenant_id: str) -> list[CredentialRow]:
     return [
         CredentialRow(
             provider=r["provider"],
+            mode=r["credential_mode"],
             created_at=r["created_at"],
             updated_at=r["updated_at"],
         )
@@ -323,29 +365,66 @@ async def list_tenant_credentials(tenant_id: str) -> list[CredentialRow]:
 async def upsert_tenant_credential(
     *, tenant_id: str, provider: str, credential_data: bytes
 ) -> CredentialRow:
-    """Insert or update a tenant credential row; return metadata.
+    """Insert or update a tenant BYOK credential row; return metadata.
 
-    ``credential_data`` is the Fernet ciphertext (the caller already
-    ran ``CredentialVault.encrypt_json``). Uses
-    ``ON CONFLICT ... DO UPDATE`` keyed on
-    ``UNIQUE (tenant_id, provider)`` so the call is idempotent. The
-    RETURNING clause surfaces ``created_at`` and ``updated_at`` so
-    the response can show "first seen" vs "last touched".
+    Sets ``credential_mode = 'byok'`` — this is the bring-your-own-key
+    path. ``credential_data`` is the Fernet ciphertext (the caller
+    already ran ``CredentialVault.encrypt_json``). Uses
+    ``ON CONFLICT ... DO UPDATE`` keyed on ``UNIQUE (tenant_id,
+    provider)`` so the call is idempotent and a pool row flips back to
+    byok with the freshly supplied key. The RETURNING clause surfaces
+    ``created_at`` and ``updated_at`` so the response can show "first
+    seen" vs "last touched".
     """
     async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
             "INSERT INTO tenant_model_credentials "
-            "    (tenant_id, provider, credential_data) "
-            "VALUES ($1::uuid, $2, $3) "
+            "    (tenant_id, provider, credential_mode, credential_data) "
+            "VALUES ($1::uuid, $2, 'byok', $3) "
             "ON CONFLICT (tenant_id, provider) DO UPDATE SET "
+            "    credential_mode = 'byok', "
             "    credential_data = EXCLUDED.credential_data, "
             "    updated_at = NOW() "
-            "RETURNING provider, created_at, updated_at",
+            "RETURNING provider, credential_mode, created_at, updated_at",
             tenant_id, provider, credential_data,
         )
     assert row is not None
     return CredentialRow(
         provider=row["provider"],
+        mode=row["credential_mode"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+async def set_tenant_credential_pool(
+    *, tenant_id: str, provider: str
+) -> CredentialRow:
+    """Elect the platform pool key for ``(tenant, provider)``; return metadata.
+
+    Sets ``credential_mode = 'pool'`` without touching
+    ``credential_data`` on conflict — any existing BYOK ciphertext is
+    retained *dormant* so the tenant can flip back to byok without
+    re-entering the key (the resolver ignores it while mode is pool). A
+    first-time pool election inserts a row with NULL ciphertext, which
+    the byok-requires-key CHECK permits for pool rows. Idempotent via
+    ``ON CONFLICT (tenant_id, provider)``.
+    """
+    async with tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO tenant_model_credentials "
+            "    (tenant_id, provider, credential_mode, credential_data) "
+            "VALUES ($1::uuid, $2, 'pool', NULL) "
+            "ON CONFLICT (tenant_id, provider) DO UPDATE SET "
+            "    credential_mode = 'pool', "
+            "    updated_at = NOW() "
+            "RETURNING provider, credential_mode, created_at, updated_at",
+            tenant_id, provider,
+        )
+    assert row is not None
+    return CredentialRow(
+        provider=row["provider"],
+        mode=row["credential_mode"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -394,3 +473,93 @@ async def get_coworker_ids_for_tenant_provider(
             tenant_id, provider,
         )
     return [str(r["id"]) for r in rows]
+
+
+# ----- Platform credential pool (§2) --------------------------------------
+# Platform-scoped: no ``tenant_id``, no RLS, so every helper goes through
+# ``admin_conn``. ``get_platform_credential_ciphertext`` is the second
+# bytes carve-out (see :func:`get_credential_mode_and_ciphertext`); the
+# list/upsert/delete helpers are metadata-only and never return the blob.
+
+
+async def get_platform_credential_ciphertext(provider: str) -> bytes | None:
+    """Return the platform pool ciphertext for ``provider``, or ``None``.
+
+    The second ciphertext carve-out (mirrors
+    :func:`get_credential_mode_and_ciphertext`): only the credential
+    resolver calls it, for a ``credential_mode = 'pool'`` tenant row,
+    then immediately Fernet-decrypts and discards the bytes. ``None``
+    means the platform never configured this provider's pool key, which
+    the resolver surfaces as a hard credential miss.
+    """
+    async with admin_conn() as conn:
+        row = await conn.fetchval(
+            "SELECT credential_data FROM platform_provider_credentials "
+            "WHERE provider = $1 LIMIT 1",
+            provider,
+        )
+    if row is None:
+        return None
+    return bytes(row)
+
+
+async def list_platform_credentials() -> list[PlatformCredentialRow]:
+    """Return all platform pool rows (no ciphertext). Platform_admin only."""
+    async with admin_conn() as conn:
+        rows = await conn.fetch(
+            "SELECT provider, created_at, updated_at "
+            "FROM platform_provider_credentials "
+            "ORDER BY provider"
+        )
+    return [
+        PlatformCredentialRow(
+            provider=r["provider"],
+            created_at=r["created_at"],
+            updated_at=r["updated_at"],
+        )
+        for r in rows
+    ]
+
+
+async def upsert_platform_credential(
+    *, provider: str, credential_data: bytes
+) -> PlatformCredentialRow:
+    """Insert or update the platform pool key for ``provider``; return metadata.
+
+    ``credential_data`` is the Fernet ciphertext (the caller already ran
+    ``CredentialVault.encrypt_json`` against the same vault tenants use,
+    so the resolver decrypts both pool and byok blobs with one key).
+    Idempotent via ``ON CONFLICT (provider)``.
+    """
+    async with admin_conn() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO platform_provider_credentials "
+            "    (provider, credential_data) "
+            "VALUES ($1, $2) "
+            "ON CONFLICT (provider) DO UPDATE SET "
+            "    credential_data = EXCLUDED.credential_data, "
+            "    updated_at = NOW() "
+            "RETURNING provider, created_at, updated_at",
+            provider, credential_data,
+        )
+    assert row is not None
+    return PlatformCredentialRow(
+        provider=row["provider"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+async def delete_platform_credential(*, provider: str) -> bool:
+    """Delete the platform pool key for ``provider``. Returns ``True`` if removed.
+
+    Tenant rows that elected ``'pool'`` for this provider are left
+    intact; their next resolve fails closed (the resolver treats a
+    missing pool key as a hard miss) until the platform re-adds a key.
+    """
+    async with admin_conn() as conn:
+        status = await conn.execute(
+            "DELETE FROM platform_provider_credentials WHERE provider = $1",
+            provider,
+        )
+    return status.endswith(" 1")

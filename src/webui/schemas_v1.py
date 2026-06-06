@@ -281,6 +281,9 @@ class Model(BaseModel):
     created_at: str | None = None
 
 
+CredentialMode = Literal["byok", "pool"]
+
+
 class CredentialResponse(BaseModel):
     """Tenant credential metadata WITHOUT the secret.
 
@@ -290,6 +293,25 @@ class CredentialResponse(BaseModel):
     a future refactor to start serialising it. The defence here is
     structural: a curious developer cannot ask the wire type for the
     field because it does not exist.
+
+    ``mode`` tells the SPA which key the provider resolves to:
+    ``'byok'`` (the tenant's own key) or ``'pool'`` (the platform
+    credential pool). It is metadata, not a secret.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: ModelProvider
+    mode: CredentialMode
+    created_at: str
+    updated_at: str
+
+
+class PlatformCredentialResponse(BaseModel):
+    """Platform pool credential metadata WITHOUT the secret.
+
+    Same secret-omitting posture as :class:`CredentialResponse`;
+    surfaced only to platform_admin via ``/api/v1/platform/credentials``.
     """
 
     model_config = ConfigDict(extra="forbid")

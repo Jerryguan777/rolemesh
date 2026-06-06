@@ -55,6 +55,30 @@ async def _write_cred(
         )
 
 
+async def _write_pool_row(
+    tenant_id: str, provider: str, dormant_blob: bytes | None = None
+) -> None:
+    """Insert a tenant row in ``pool`` mode (optionally with a dormant key)."""
+    pool = _get_admin_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO tenant_model_credentials "
+            "(tenant_id, provider, credential_mode, credential_data) "
+            "VALUES ($1::uuid, $2, 'pool', $3)",
+            tenant_id, provider, dormant_blob,
+        )
+
+
+async def _write_platform_cred(provider: str, blob: bytes) -> None:
+    pool = _get_admin_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO platform_provider_credentials "
+            "(provider, credential_data) VALUES ($1, $2)",
+            provider, blob,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Test 1 — happy path: decrypt round-trip
 # ---------------------------------------------------------------------------
@@ -244,3 +268,80 @@ async def test_missing_credential_exception_carries_only_identifiers(
         assert forbidden not in rendered, (
             f"MissingCredentialError leaked '{forbidden}'-shaped substring"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 7 — pool mode resolves the platform key
+# ---------------------------------------------------------------------------
+
+
+async def test_resolve_pool_mode_uses_platform_key(vault: CredentialVault):
+    """Pin: a ``pool`` row decrypts the platform pool key, not a tenant key.
+
+    Mutation: routing every row through the tenant ciphertext (ignoring
+    ``credential_mode``) returns the wrong payload (or raises, since the
+    pool row has no key) and fails the equality assertion.
+    """
+    tenant_id = await _new_tenant("pool")
+    platform_payload = {"api_key": "sk-platform-pool-key"}
+    await _write_platform_cred("anthropic", vault.encrypt_json(platform_payload))
+    await _write_pool_row(tenant_id, "anthropic")  # no dormant key
+
+    resolver = CredentialResolver(vault)
+
+    result = await resolver.resolve(tenant_id, "anthropic")
+
+    assert result == platform_payload
+
+
+# ---------------------------------------------------------------------------
+# Test 8 — pool mode without a platform key fails closed
+# ---------------------------------------------------------------------------
+
+
+async def test_resolve_pool_mode_without_platform_key_raises(
+    vault: CredentialVault,
+):
+    """Pin: electing pool when the platform has no key is a hard miss.
+
+    Mutation: treating a missing pool key as "fall back to anything"
+    (or returning None) fails ``pytest.raises``.
+    """
+    tenant_id = await _new_tenant("pool-empty")
+    await _write_pool_row(tenant_id, "anthropic")  # no platform key configured
+
+    resolver = CredentialResolver(vault)
+
+    with pytest.raises(MissingCredentialError):
+        await resolver.resolve(tenant_id, "anthropic")
+
+
+# ---------------------------------------------------------------------------
+# Test 9 — dormant BYOK key is ignored while mode is pool
+# ---------------------------------------------------------------------------
+
+
+async def test_resolve_pool_mode_ignores_dormant_byok_key(
+    vault: CredentialVault,
+):
+    """Pin: a pool row's retained BYOK ciphertext never wins over the pool.
+
+    A byok→pool switch keeps the old key dormant so the tenant can flip
+    back. The resolver must still serve the *platform* key while mode is
+    pool.
+
+    Mutation: reading ``credential_data`` before checking the platform
+    pool returns the dormant tenant key and fails the assertion.
+    """
+    tenant_id = await _new_tenant("dormant")
+    dormant = vault.encrypt_json({"api_key": "sk-OLD-tenant-key"})
+    platform_payload = {"api_key": "sk-platform-pool-key"}
+    await _write_platform_cred("anthropic", vault.encrypt_json(platform_payload))
+    await _write_pool_row(tenant_id, "anthropic", dormant_blob=dormant)
+
+    resolver = CredentialResolver(vault)
+
+    result = await resolver.resolve(tenant_id, "anthropic")
+
+    assert result == platform_payload
+    assert result["api_key"] != "sk-OLD-tenant-key"

@@ -21,6 +21,7 @@ from rolemesh.db import (
     delete_tenant_credential,
     get_coworker_ids_for_tenant_provider,
     list_tenant_credentials,
+    set_tenant_credential_pool,
     upsert_tenant_credential,
 )
 from webui.dependencies import require_action
@@ -40,9 +41,39 @@ router = APIRouter(prefix="/tenant/credentials", tags=["Credentials"])
 def _credential_to_response(row: CredentialRow) -> CredentialResponse:
     return CredentialResponse(
         provider=row.provider,  # type: ignore[arg-type]
+        mode=row.mode,  # type: ignore[arg-type]
         created_at=row.created_at.isoformat(),
         updated_at=row.updated_at.isoformat(),
     )
+
+
+async def _restart_affected_coworkers(
+    *, tenant_id: str, provider: str, reason: str
+) -> None:
+    """Publish one ``web.coworker.restart`` per coworker on ``provider``.
+
+    Best-effort: a publish failure is logged but does not fail the
+    request — the DB row is the source of truth and the next process
+    boot picks it up. Shared by the byok-PUT and pool-election paths
+    since both change which key a running coworker resolves to.
+    """
+    coworker_ids = await get_coworker_ids_for_tenant_provider(
+        tenant_id=tenant_id, provider=provider,
+    )
+    for cid in coworker_ids:
+        try:
+            await coworker_events.publish_coworker_restart(
+                coworker_id=cid, tenant_id=tenant_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Failed to publish web.coworker.restart",
+                reason=reason,
+                coworker_id=cid,
+                tenant_id=tenant_id,
+                provider=provider,
+                exc_info=True,
+            )
 
 
 @router.get("", response_model=list[CredentialResponse])
@@ -91,23 +122,37 @@ async def put_credential_endpoint(
         credential_data=blob,
     )
 
-    coworker_ids = await get_coworker_ids_for_tenant_provider(
+    await _restart_affected_coworkers(
+        tenant_id=user.tenant_id, provider=provider, reason="credential PUT",
+    )
+
+    return _credential_to_response(row)
+
+
+@router.put("/{provider}/pool", response_model=CredentialResponse)
+async def elect_pool_endpoint(
+    provider: ModelProvider,
+    user: AuthenticatedUser = Depends(require_action("credential.byok.manage")),
+) -> CredentialResponse:
+    """Elect the platform credential pool for one provider.
+
+    Sets the row's mode to ``'pool'`` so the resolver uses the platform
+    key instead of the tenant's own. Any existing BYOK ciphertext is
+    retained *dormant* (the tenant can flip back via ``PUT /{provider}``
+    without re-entering it). This is the explicit opt-in: until a tenant
+    calls this (or sets a BYOK key) the provider stays unconfigured and
+    agents on it fail closed — the platform pool is never consumed
+    silently.
+
+    Like the BYOK path, we restart every affected coworker so a running
+    agent picks up the new key source.
+    """
+    row = await set_tenant_credential_pool(
         tenant_id=user.tenant_id, provider=provider,
     )
-    for cid in coworker_ids:
-        try:
-            await coworker_events.publish_coworker_restart(
-                coworker_id=cid, tenant_id=user.tenant_id,
-            )
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "Failed to publish web.coworker.restart after credential PUT",
-                coworker_id=cid,
-                tenant_id=user.tenant_id,
-                provider=provider,
-                exc_info=True,
-            )
-
+    await _restart_affected_coworkers(
+        tenant_id=user.tenant_id, provider=provider, reason="pool election",
+    )
     return _credential_to_response(row)
 
 
