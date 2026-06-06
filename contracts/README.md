@@ -7,7 +7,15 @@ Neither side owns it — both sides derive from it.
 ## Files
 
 - **`openapi.yaml`** — REST API contract (OpenAPI 3.1). Covers every
-  `/api/v1/*` endpoint and the JSON schemas they exchange.
+  `/api/v1/*` endpoint and the JSON schemas they exchange. Also holds the
+  WebSocket frame **payload** schemas (the `Ws*` block under
+  `components/schemas`), since every frame is plain JSON.
+- **`websocket-protocol.md`** — Realtime channel contract for the chat
+  WebSocket (`/api/v1/conversations/{id}/stream`). Documents the connection
+  lifecycle OpenAPI can't express — handshake, close codes, reconnect, and
+  frame ordering — and links each frame to its `Ws*` schema in `openapi.yaml`.
+  REST = `openapi.yaml`; realtime = this file. `src/webui/v1/ws_stream.py` is
+  the final authority for connection behaviour.
 
 ## Derived artifacts (do not edit by hand)
 
