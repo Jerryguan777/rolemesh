@@ -671,6 +671,8 @@ export class ApiClient {
     stage?: SafetyStage | null;
     fromTs?: string | null;
     toTs?: string | null;
+    checkId?: string | null;
+    ruleId?: string | null;
     limit?: number;
     offset?: number;
   }): Promise<SafetyDecisionPage> {
@@ -680,6 +682,8 @@ export class ApiClient {
     if (filters?.stage) qs.set('stage', filters.stage);
     if (filters?.fromTs) qs.set('from_ts', filters.fromTs);
     if (filters?.toTs) qs.set('to_ts', filters.toTs);
+    if (filters?.checkId) qs.set('check_id', filters.checkId);
+    if (filters?.ruleId) qs.set('rule_id', filters.ruleId);
     if (filters?.limit !== undefined) qs.set('limit', String(filters.limit));
     if (filters?.offset !== undefined) qs.set('offset', String(filters.offset));
     const url = `${this.baseUrl}/api/v1/safety/decisions${qs.size ? `?${qs}` : ''}`;

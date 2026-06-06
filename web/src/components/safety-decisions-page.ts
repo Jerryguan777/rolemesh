@@ -9,17 +9,16 @@
 // surface (v1 is GET-only, no CSV — design §3 Phase 4), so this file is on
 // the lint:no-admin-chat allowlist.
 //
-// Filter bar caveat: the v1 `/safety/decisions` endpoint filters by verdict /
-// stage / coworker / time, but NOT by check — there is no `check_id` query
-// param on the contract and we don't extend it here. So the spec's 4th "check"
-// dropdown is intentionally omitted (a note in the bar says so). Finding codes
-// in each row already convey what a decision caught.
+// G6: check_id filter dropdown + rule_id chip deep-link (PR #57 added both
+// params to GET /safety/decisions). URL params ?check_id=X and ?rule_id=Y
+// are read on mount and applied as initial filters.
 
 import { LitElement, html, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import {
   getApiClient,
+  type SafetyCheck,
   type SafetyDecision,
   type SafetyDecisionPage,
   type SafetyRule,
@@ -43,6 +42,7 @@ type Filters = {
   stage?: SafetyStage;
   from_ts?: string;
   to_ts?: string;
+  check_id?: string;
 };
 
 const VERDICTS: SafetyVerdictAction[] = [
@@ -68,12 +68,16 @@ export class SafetyDecisionsPage extends LitElement {
   @state() private tenantId: string | null = null;
   @state() private decisions: SafetyDecisionPage = { total: 0, items: [] };
   @state() private coworkers: CoworkerSummary[] = [];
+  @state() private checks: SafetyCheck[] = [];
   // rule_id → check label, for the detail modal's "triggered rule" cell.
   @state() private ruleLabels: Record<string, string> = {};
   @state() private loading = true;
   @state() private error: string | null = null;
   @state() private offset = 0;
   @state() private filters: Filters = {};
+  /** rule_id chip filter — set from ?rule_id=Y URL param or approval card
+   *  deep-link. Distinct from Filters so clearFilters() can selectively reset. */
+  @state() private ruleIdFilter: string | null = null;
   @state() private selected: SafetyDecision | null = null;
 
   private readonly api = getApiClient();
@@ -84,6 +88,17 @@ export class SafetyDecisionsPage extends LitElement {
 
   override async connectedCallback(): Promise<void> {
     super.connectedCallback();
+    // G6: read initial filters from URL hash query params (?check_id=X&rule_id=Y).
+    // The app uses hash routing (#/manage/safety-log?check_id=...).
+    const hash = window.location.hash;
+    const qmark = hash.indexOf('?');
+    if (qmark !== -1) {
+      const params = new URLSearchParams(hash.slice(qmark + 1));
+      const checkId = params.get('check_id');
+      const ruleId = params.get('rule_id');
+      if (checkId) this.filters = { ...this.filters, check_id: checkId };
+      if (ruleId) this.ruleIdFilter = ruleId;
+    }
     // Admin-surface lookups (tenant id for CSV, coworker names) and the rule
     // list (for the detail modal's rule→label map) are best-effort — a failure
     // must not block the v1 decisions read.
@@ -96,6 +111,11 @@ export class SafetyDecisionsPage extends LitElement {
       this.coworkers = await listCoworkers();
     } catch {
       this.coworkers = [];
+    }
+    try {
+      this.checks = await this.api.listSafetyChecks();
+    } catch {
+      this.checks = [];
     }
     try {
       const rules = await this.api.listSafetyRules();
@@ -118,6 +138,8 @@ export class SafetyDecisionsPage extends LitElement {
         stage: this.filters.stage,
         fromTs: this.filters.from_ts,
         toTs: this.filters.to_ts,
+        checkId: this.filters.check_id,
+        ruleId: this.ruleIdFilter ?? undefined,
         limit: PAGE_SIZE,
         offset: this.offset,
       });
@@ -145,6 +167,13 @@ export class SafetyDecisionsPage extends LitElement {
 
   private clearFilters(): void {
     this.filters = {};
+    this.ruleIdFilter = null; // Clear filters resets everything including rule_id chip.
+    this.offset = 0;
+    void this.refresh();
+  }
+
+  private clearRuleIdFilter(): void {
+    this.ruleIdFilter = null;
     this.offset = 0;
     void this.refresh();
   }
@@ -260,6 +289,18 @@ export class SafetyDecisionsPage extends LitElement {
   private renderFilters(): TemplateResult {
     return html`
       <div class="rm-saf-filters" data-testid="saf-filters">
+        ${this.ruleIdFilter
+          ? html`<span class="rm-saf-rule-chip" data-testid="saf-rule-id-chip">
+              🛡 Rule: ${this.ruleLabels[this.ruleIdFilter] ?? this.ruleIdFilter.slice(0, 8)}
+              <button
+                type="button"
+                class="rm-saf-chip-close"
+                aria-label="Remove rule filter"
+                data-testid="saf-rule-chip-remove"
+                @click=${() => this.clearRuleIdFilter()}
+              >×</button>
+            </span>`
+          : nothing}
         <select
           aria-label="Filter by verdict"
           data-testid="saf-filter-verdict"
@@ -296,6 +337,19 @@ export class SafetyDecisionsPage extends LitElement {
           ${this.coworkers.map(
             (c) => html`<option value=${c.id} ?selected=${this.filters.coworker_id === c.id}>
               ${c.name}
+            </option>`,
+          )}
+        </select>
+        <select
+          aria-label="Filter by check"
+          data-testid="saf-filter-check"
+          @change=${(e: Event) =>
+            this.setFilter('check_id', (e.target as HTMLSelectElement).value)}
+        >
+          <option value="" ?selected=${!this.filters.check_id}>all checks</option>
+          ${this.checks.map(
+            (c) => html`<option value=${c.id} ?selected=${this.filters.check_id === c.id}>
+              ${c.id}
             </option>`,
           )}
         </select>
