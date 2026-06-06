@@ -1,16 +1,16 @@
 """Publisher for ``egress.mcp.changed`` deltas from the v1 surface.
 
-Mirrors :func:`webui.admin._publish_mcp_for_coworker` but works
-against a single ``MCPServerRow`` rather than a coworker's tool
-list. Reuses the same core-NATS connection ``webui.main.lifespan``
-already installs via :func:`webui.admin.set_mcp_publisher` — we
-look it up lazily so callers don't have to thread the handle
-through every test fixture.
+Publishes against a single ``MCPServerRow`` (the ``/mcp-servers``
+surface). Owns the process-wide NATS handle the gateway hot-reload
+broadcasts ride on: ``webui.main.lifespan`` installs it via
+:func:`set_mcp_publisher` at boot and clears it on shutdown; callers
+look it up lazily so they don't have to thread the handle through
+every test fixture.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from rolemesh.core.logger import get_logger
@@ -24,7 +24,28 @@ logger = get_logger()
 __all__ = [
     "publish_mcp_server_changed",
     "publish_mcp_server_deleted",
+    "set_mcp_publisher",
 ]
+
+
+# Process-wide NATS client used for MCP registry-change broadcasts. Set
+# from the WebUI bootstrap (``webui.main.lifespan``); ``None`` means
+# hot-reload broadcasts are off (the gateway still gets a current
+# snapshot at orchestrator boot, so functionality degrades gracefully —
+# operators just wait for a gateway restart for tool edits to land).
+_mcp_publisher: Any = None
+
+
+def set_mcp_publisher(nc: Any) -> None:
+    """Attach or detach the process-wide NATS client used for MCP
+    registry-change broadcasts.
+
+    Type stays ``Any`` to keep ``nats`` types out of this module's
+    import surface; the caller in ``webui.main`` already has the typed
+    handle.
+    """
+    global _mcp_publisher
+    _mcp_publisher = nc
 
 
 def _build_entry(row: MCPServerRow):
@@ -43,14 +64,8 @@ def _build_entry(row: MCPServerRow):
 
 
 def _get_publisher():
-    """Return the NATS client the admin module already owns, or None.
-
-    Lazy import keeps a circular reference at bay (admin imports from
-    v1.coworkers in turn).
-    """
-    from webui import admin
-
-    return admin._mcp_publisher
+    """Return the process-wide NATS client, or None when unset."""
+    return _mcp_publisher
 
 
 async def publish_mcp_server_changed(*, action: str, row: MCPServerRow) -> None:

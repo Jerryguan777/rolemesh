@@ -36,7 +36,6 @@ from rolemesh.db import (
     tenant_conn,
 )
 from webui import auth
-from webui.admin import router as admin_router
 from webui.config import (
     CORS_ORIGINS,
     DATABASE_URL,
@@ -123,21 +122,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     set_credential_vault(create_credential_vault_from_env())
 
-    from webui import admin as _admin
-
-    # Wire the MCP-registry hot-reload publisher. When an admin
-    # creates/updates an agent's tools, the PATCH handler emits one
-    # ``egress.mcp.changed`` event per tool so the gateway can update
-    # routes without an orchestrator restart. Uses core NATS (not
-    # JetStream) — the broadcast is at-most-once but the gateway's
-    # snapshot fetch on boot handles missed deltas as a backstop.
-    _admin.set_mcp_publisher(_nc)
-
     # v1.1 §7: wire the coworker hot-reload publisher. PATCH on
     # /api/v1/coworkers/{id} (model_id change) emits
     # ``web.coworker.restart`` via JetStream so the orchestrator
     # re-reads the row without a full restart.
-    from webui.v1 import coworker_events, run_events, ws_stream
+    from webui.v1 import coworker_events, mcp_events, run_events, ws_stream
+
+    # Wire the MCP-registry hot-reload publisher. When an operator
+    # creates/updates an MCP server, the v1 handler emits one
+    # ``egress.mcp.changed`` event so the gateway can update routes
+    # without an orchestrator restart. Uses core NATS (not JetStream) —
+    # the broadcast is at-most-once but the gateway's snapshot fetch on
+    # boot handles missed deltas as a backstop.
+    mcp_events.set_mcp_publisher(_nc)
 
     coworker_events.set_jetstream(js)
     # v1.1 §4 (INV-6): wire the run-cancel publisher. POST
@@ -159,7 +156,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     coworker_events.set_jetstream(None)
     run_events.set_jetstream(None)
     ws_stream.set_jetstream(None)
-    _admin.set_mcp_publisher(None)
+    mcp_events.set_mcp_publisher(None)
     set_credential_vault(None)
     await auth.close_auth()
     await _close_db()
@@ -304,9 +301,6 @@ async def get_messages(
 
     return JSONResponse(result)
 
-
-# Admin API router (legacy /api/admin)
-app.include_router(admin_router)
 
 # v1 router: new prefixed surface introduced by webui-backend v1.1.
 from webui.api_v1 import router as api_v1_router  # noqa: E402

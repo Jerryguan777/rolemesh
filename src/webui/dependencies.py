@@ -122,9 +122,3 @@ def user_can_see_resource(
     if created_by is not None and created_by == user.user_id:
         return True
     return user_can(user.role, manage_action)  # type: ignore[arg-type]
-
-
-# Pre-built dependencies for common use
-require_manage_tenant = require_action("manage_tenant")  # owner only
-require_manage_agents = require_action("manage_agents")  # admin+
-require_manage_users = require_action("manage_users")  # admin+

@@ -822,10 +822,9 @@ SafetyRuleAuditAction = Literal["created", "updated", "deleted"]
 class SafetyRule(BaseModel):
     """Wire projection of a ``safety_rules`` row.
 
-    Read-only on the v1 surface: writes (create/update/delete) stay
-    on ``/api/admin/safety/rules`` per design §3 Phase 4. The schema
-    intentionally mirrors the admin response shape verbatim so a
-    future switch to v1 writes is additive.
+    Returned by the v1 read endpoints and the create/update write
+    endpoints alike (``POST``/``PATCH /api/v1/safety/rules`` —
+    ``SafetyRuleCreate`` / ``SafetyRuleUpdate`` are the request bodies).
     """
 
     model_config = ConfigDict(extra="forbid")

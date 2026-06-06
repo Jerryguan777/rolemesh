@@ -1,9 +1,9 @@
 """Integration tests for ``/api/v1/safety/*`` (design §3 Phase 4).
 
-Six GET endpoints exercised end-to-end against a real Postgres
-testcontainer (per ``tests/conftest.py``). The v1 surface is read-
-only: write paths (`POST/PATCH/DELETE /safety/rules`) stay on the
-admin surface and are not covered here.
+The GET endpoints exercised end-to-end against a real Postgres
+testcontainer (per ``tests/conftest.py``). The rule write paths
+(`POST/PATCH/DELETE /safety/rules`) and the CSV export now live on the
+v1 surface too and are covered in ``test_v1_safety_writes.py``.
 
 The tests deliberately seed data via ``rolemesh.db.safety`` helpers
 (the same path the admin endpoints use) so the test catches drift

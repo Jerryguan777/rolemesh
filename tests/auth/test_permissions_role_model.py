@@ -17,7 +17,7 @@ from rolemesh.auth.permissions import (
     user_can,
 )
 
-# The complete §4 fine-grained action set the v1 surface gates on.
+# The complete §3 fine-grained action set the v1 surface gates on.
 _V1_ACTIONS = {
     "agent.create",
     "agent.manage",
@@ -28,6 +28,10 @@ _V1_ACTIONS = {
     "approval_policy.manage",
     "credential.byok.manage",
     "safety.read",
+    "safety.rule.manage",
+    "user.manage",
+    "tenant.manage",
+    "task.manage",
 }
 
 
@@ -38,17 +42,6 @@ _V1_ACTIONS = {
 
 def test_platform_admin_grants_every_v1_action() -> None:
     for action in _V1_ACTIONS:
-        assert user_can("platform_admin", action), action
-
-
-def test_platform_admin_grants_every_legacy_action() -> None:
-    for action in (
-        "manage_tenant",
-        "manage_agents",
-        "manage_users",
-        "view_all_conversations",
-        "use_agent",
-    ):
         assert user_can("platform_admin", action), action
 
 
@@ -81,20 +74,32 @@ def test_member_cannot_manage_shared_resources() -> None:
     assert not user_can("member", "approval_policy.manage")
     assert not user_can("member", "credential.byok.manage")
     assert not user_can("member", "safety.read")
+    # Tenant-administration capabilities migrated off /api/admin are
+    # withheld from members too.
+    assert not user_can("member", "safety.rule.manage")
+    assert not user_can("member", "user.manage")
+    assert not user_can("member", "tenant.manage")
+    assert not user_can("member", "task.manage")
 
 
-def test_admin_has_manage_but_not_byok_credentials() -> None:
+def test_admin_has_manage_but_not_byok_credentials_or_tenant() -> None:
     assert user_can("admin", "agent.manage")
     assert user_can("admin", "skill.manage")
     assert user_can("admin", "mcp.configure")
     assert user_can("admin", "approval_policy.manage")
     assert user_can("admin", "safety.read")
-    # BYOK credential management is owner+ only (§4 matrix).
+    # Tenant-administration capabilities admin DOES hold.
+    assert user_can("admin", "safety.rule.manage")
+    assert user_can("admin", "user.manage")
+    assert user_can("admin", "task.manage")
+    # BYOK credential management and tenant settings are owner-only (§3).
     assert not user_can("admin", "credential.byok.manage")
+    assert not user_can("admin", "tenant.manage")
 
 
-def test_owner_has_byok_credentials() -> None:
+def test_owner_has_byok_credentials_and_tenant_settings() -> None:
     assert user_can("owner", "credential.byok.manage")
+    assert user_can("owner", "tenant.manage")
     for action in _V1_ACTIONS:
         assert user_can("owner", action), action
 

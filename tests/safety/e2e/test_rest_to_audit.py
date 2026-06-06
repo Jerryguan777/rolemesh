@@ -60,13 +60,9 @@ from rolemesh.safety.subscriber import (
     SafetyEventsSubscriber,
     TrustedCoworker,
 )
-from webui import admin
-from webui.dependencies import (
-    get_current_user,
-    require_manage_agents,
-    require_manage_tenant,
-    require_manage_users,
-)
+from webui.api_v1 import router as api_v1_router
+from webui.dependencies import get_current_user
+from webui.v1.errors import install_error_handler
 
 pytestmark = pytest.mark.usefixtures("test_db")
 
@@ -102,17 +98,16 @@ class _TrustedRec:
 
 def _build_app(user: AuthenticatedUser) -> FastAPI:
     app = FastAPI()
-    app.include_router(admin.router)
+    install_error_handler(app)
+    app.include_router(api_v1_router)
 
     async def _return_user() -> AuthenticatedUser:
         return user
 
-    # Override all the auth dependencies so the test focuses on the
-    # safety layer, not OIDC/role plumbing.
+    # Override auth so the test focuses on the safety layer, not the
+    # OIDC/role plumbing (the route's safety.rule.manage gate resolves
+    # through get_current_user).
     app.dependency_overrides[get_current_user] = _return_user
-    app.dependency_overrides[require_manage_agents] = _return_user
-    app.dependency_overrides[require_manage_tenant] = _return_user
-    app.dependency_overrides[require_manage_users] = _return_user
     return app
 
 
@@ -187,7 +182,7 @@ class TestRestCreateToAudit:
         #    scoping, and actor attribution all happen here.
         async with _client(app) as client:
             r = await client.post(
-                "/api/admin/safety/rules",
+                "/api/v1/safety/rules",
                 json={
                     "stage": "pre_tool_call",
                     "check_id": "pii.regex",
@@ -201,7 +196,7 @@ class TestRestCreateToAudit:
             # Same HTTP surface: GET /rules must surface the rule we
             # just created. A cross-tenant leak would be caught by
             # TestCrossTenantListing below.
-            r = await client.get("/api/admin/safety/rules")
+            r = await client.get("/api/v1/safety/rules")
             assert r.status_code == 200
             assert any(row["id"] == rule_id for row in r.json())
 
@@ -274,7 +269,7 @@ class TestRestPatchPropagates:
 
         async with _client(app) as client:
             r = await client.post(
-                "/api/admin/safety/rules",
+                "/api/v1/safety/rules",
                 json={
                     "stage": "pre_tool_call",
                     "check_id": "pii.regex",
@@ -297,7 +292,7 @@ class TestRestPatchPropagates:
 
             # PATCH through HTTP, not direct update.
             r = await client.patch(
-                f"/api/admin/safety/rules/{rule_id}",
+                f"/api/v1/safety/rules/{rule_id}",
                 json={"enabled": False},
             )
             assert r.status_code == 200
@@ -345,7 +340,7 @@ class TestRestDeleteAudit:
 
         async with _client(app) as client:
             r = await client.post(
-                "/api/admin/safety/rules",
+                "/api/v1/safety/rules",
                 json={
                     "stage": "pre_tool_call",
                     "check_id": "pii.regex",
@@ -356,7 +351,7 @@ class TestRestDeleteAudit:
             rule_id = r.json()["id"]
 
             r = await client.delete(
-                f"/api/admin/safety/rules/{rule_id}"
+                f"/api/v1/safety/rules/{rule_id}"
             )
             assert r.status_code == 204
 
@@ -393,7 +388,7 @@ class TestCrossTenantListing:
 
         async with _client(app_a) as c_a, _client(app_b) as c_b:
             r = await c_a.post(
-                "/api/admin/safety/rules",
+                "/api/v1/safety/rules",
                 json={
                     "stage": "pre_tool_call",
                     "check_id": "pii.regex",
@@ -404,13 +399,13 @@ class TestCrossTenantListing:
             created_id = r.json()["id"]
 
             # B's list must be empty.
-            r = await c_b.get("/api/admin/safety/rules")
+            r = await c_b.get("/api/v1/safety/rules")
             assert r.status_code == 200
             assert r.json() == []
 
             # B's direct GET by id must 404 (not 403 — avoids
             # existence leakage).
             r = await c_b.get(
-                f"/api/admin/safety/rules/{created_id}"
+                f"/api/v1/safety/rules/{created_id}"
             )
             assert r.status_code == 404

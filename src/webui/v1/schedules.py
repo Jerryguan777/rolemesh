@@ -1,16 +1,17 @@
-"""``/api/v1/schedules`` REST surface (PR24 — read-only).
+"""``/api/v1/schedules`` REST surface (PR24 reads + admin delete migration).
 
-The orchestrator owns scheduled-task creation and mutation: cron /
-interval / once triggers fire from inside the agent process and the
-helper functions in :mod:`rolemesh.db.task` are how it persists state.
+The orchestrator owns scheduled-task creation and *schedule* mutation:
+cron / interval / once triggers fire from inside the agent process and
+the helper functions in :mod:`rolemesh.db.task` are how it persists
+state. Letting the SPA edit a trigger schedule independent of the
+orchestrator's runtime view would create a stale-cache race the design
+hasn't worked through yet, so trigger create/update stay off v1.
 
-This module exposes the table read-side for the UI so a user can
-answer "what tasks does this coworker have scheduled" without going
-through the orchestrator IPC. Writes are intentionally not on the
-v1 surface — letting the SPA mutate the trigger schedule independent
-of the orchestrator's runtime view would create a stale-cache race
-the design hasn't worked through yet (orchestrator caches its task
-list and only refreshes on schedule fire).
+Reads (``get_current_user`` only — allowlisted in the default-deny
+meta-test) answer "what tasks does this coworker have scheduled". The
+``DELETE`` was migrated off the legacy ``/api/admin/tasks/{id}`` face:
+task removal is a tenant-management operation gated by ``task.manage``
+(admin+), with cross-tenant ids reading as 404.
 """
 
 from __future__ import annotations
@@ -18,14 +19,15 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import asyncpg
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 
 from rolemesh.db import (
+    delete_task,
     get_all_tasks,
     get_task_by_id,
     get_tasks_for_coworker,
 )
-from webui.dependencies import get_current_user
+from webui.dependencies import get_current_user, require_action
 from webui.schemas_v1 import ScheduledTask
 from webui.v1.errors import raise_error_response
 
@@ -85,3 +87,29 @@ async def get_schedule_endpoint(
             details={"task_id": task_id},
         )
     return _to_response(row)
+
+
+@router.delete("/{task_id}", status_code=204)
+async def delete_schedule_endpoint(
+    task_id: str,
+    user: AuthenticatedUser = Depends(require_action("task.manage")),
+) -> Response:
+    """Delete a scheduled task (cross-tenant / unknown id → 404).
+
+    Migrated from ``DELETE /api/admin/tasks/{task_id}``. Gated by
+    ``task.manage`` (admin+); a malformed UUID is treated as not-found
+    rather than 500, matching the read endpoints.
+    """
+    try:
+        row = await get_task_by_id(task_id, tenant_id=user.tenant_id)
+    except asyncpg.DataError:
+        row = None
+    if row is None:
+        raise_error_response(
+            "NOT_FOUND",
+            "Scheduled task not found.",
+            status_code=404,
+            details={"task_id": task_id},
+        )
+    await delete_task(task_id, tenant_id=user.tenant_id)
+    return Response(status_code=204)

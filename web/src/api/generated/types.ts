@@ -970,14 +970,22 @@ export interface paths {
         };
         /**
          * List safety rules for the caller's tenant
-         * @description Phase 4 (design §3) — GET-only on the v1 surface. Writes
-         *     (create/update/delete) stay on the admin surface because
-         *     rule mutation is an admin-only operation; see the design
-         *     doc for the locked decision.
+         * @description Returns the tenant's own rules plus the visible platform-owned
+         *     rules (read-only, `source=platform`). Reads gate on
+         *     `safety.read`.
          */
         get: operations["listSafetyRules"];
         put?: never;
-        post?: never;
+        /**
+         * Create a tenant safety rule
+         * @description Gated by `safety.rule.manage` (owner + admin). The body is
+         *     validated against the check registry — an unknown `check_id`,
+         *     an unsupported `stage`, a config the check's model rejects, or a
+         *     `slow` check at `pre_tool_call` that overlaps a reversible tool
+         *     returns `400 INVALID_RULE`. A non-null `coworker_id` outside the
+         *     caller's tenant returns 404 (existence is not leaked).
+         */
+        post: operations["createSafetyRule"];
         delete?: never;
         options?: never;
         head?: never;
@@ -996,10 +1004,21 @@ export interface paths {
         get: operations["getSafetyRule"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete a tenant safety rule
+         * @description Gated by `safety.rule.manage`. Cross-tenant / unknown id → 404.
+         */
+        delete: operations["deleteSafetyRule"];
         options?: never;
         head?: never;
-        patch?: never;
+        /**
+         * Update a tenant safety rule
+         * @description Gated by `safety.rule.manage`. Re-validates when `check_id` /
+         *     `stage` / `config` change so the effective triple stays runnable
+         *     (`400 INVALID_RULE` on failure). Only tenant-owned rule ids
+         *     resolve; a cross-tenant / unknown / platform id returns 404.
+         */
+        patch: operations["updateSafetyRule"];
         trace?: never;
     };
     "/api/v1/safety/rules/{id}/audit": {
@@ -1061,9 +1080,7 @@ export interface paths {
          * Paginated safety decisions for the caller's tenant
          * @description Returns `{ total, items }` so the SPA renders pagination
          *     without a second count call. `limit` is capped at 200
-         *     server-side; the admin `decisions.csv` export covers bulk
-         *     retrieval (intentionally NOT migrated to v1 per design
-         *     §3 Phase 4 — the CSV surface stays admin-only).
+         *     server-side; the `decisions.csv` export covers bulk retrieval.
          */
         get: operations["listSafetyDecisions"];
         put?: never;
@@ -1086,10 +1103,35 @@ export interface paths {
         /**
          * Single safety decision detail
          * @description Cross-tenant lookups return 404 (not 403) so UUID existence
-         *     does not leak across tenants — same convention as the admin
-         *     endpoint.
+         *     does not leak across tenants.
          */
         get: operations["getSafetyDecision"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/safety/decisions.csv": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Stream the tenant's safety decisions as CSV
+         * @description Streaming CSV export (Postgres cursor, constant memory) for the
+         *     caller's tenant — derived from the session, no tenant id in the
+         *     path. Reads gate on `safety.read`. Columns are a flat,
+         *     operator-friendly pivot view (`findings` flattened to parallel
+         *     code/severity lists); the full JSON for any row is at
+         *     `GET /api/v1/safety/decisions/{id}`. Cells are RFC-4180 quoted
+         *     and formula-injection guarded.
+         */
+        get: operations["exportSafetyDecisionsCsv"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1134,7 +1176,13 @@ export interface paths {
         get: operations["schedulesGet"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * Delete a scheduled task
+         * @description Removes a scheduled task. Gated by `task.manage` (owner +
+         *     admin); reads on this surface stay auth-only. A cross-tenant /
+         *     unknown id returns 404.
+         */
+        delete: operations["schedulesDelete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1244,6 +1292,92 @@ export interface paths {
         head?: never;
         /** Update a platform model (admin only) */
         patch: operations["adminModelsUpdate"];
+        trace?: never;
+    };
+    "/api/v1/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the tenant's users
+         * @description Gated by `user.manage` (owner + admin). Returns every user in
+         *     the caller's tenant.
+         */
+        get: operations["listUsers"];
+        put?: never;
+        /**
+         * Create a user in the tenant
+         * @description Gated by `user.manage`. Creating a user with `role=owner`
+         *     requires the caller to be an owner (admins get `403 FORBIDDEN`).
+         */
+        post: operations["createUser"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/users/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Fetch one user
+         * @description Gated by `user.manage`. A user outside the caller's tenant
+         *     returns 404 (existence is not leaked).
+         */
+        get: operations["getUser"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete a user
+         * @description Gated by `user.manage`. Deleting yourself returns
+         *     `400 INVALID_REQUEST`. Cross-tenant / unknown id → 404.
+         */
+        delete: operations["deleteUser"];
+        options?: never;
+        head?: never;
+        /**
+         * Update a user
+         * @description Gated by `user.manage`. Assigning `role=owner` requires the
+         *     caller to be an owner (admins get `403 FORBIDDEN`). Cross-tenant
+         *     / unknown id → 404.
+         */
+        patch: operations["updateUser"];
+        trace?: never;
+    };
+    "/api/v1/tenant": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Fetch the caller's tenant settings
+         * @description Owner-only (`tenant.manage`). Admins and members get
+         *     `403 FORBIDDEN`.
+         */
+        get: operations["getTenant"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update the caller's tenant settings
+         * @description Owner-only (`tenant.manage`). Only `name` and
+         *     `max_concurrent_containers` are mutable here.
+         */
+        patch: operations["updateTenant"];
         trace?: never;
     };
 }
@@ -2357,6 +2491,92 @@ export interface components {
             note?: string | null;
         };
         WsClientFrame: components["schemas"]["WsClientFrameRequestRun"] | components["schemas"]["WsClientFrameRequestCancel"] | components["schemas"]["WsClientFrameRequestStop"] | components["schemas"]["WsClientFrameApprovalDecision"];
+        UserResponse: {
+            id: string;
+            tenant_id: string;
+            name: string;
+            email?: string | null;
+            /** @enum {string} */
+            role: "owner" | "admin" | "member";
+            /**
+             * @description Map of channel type → external identity id (e.g.
+             *     `{"telegram": "12345"}`).
+             */
+            channel_ids: {
+                [key: string]: string;
+            };
+            created_at: string;
+        };
+        /**
+         * @description Detailed user view. Currently identical to `UserResponse`; the
+         *     former per-user agent-grant list was removed when access moved to
+         *     coworker visibility + ownership.
+         */
+        UserDetailResponse: components["schemas"]["UserResponse"];
+        UserCreate: {
+            name: string;
+            email?: string | null;
+            /**
+             * @description Creating an `owner` requires the caller to be an owner.
+             * @default member
+             * @enum {string}
+             */
+            role: "owner" | "admin" | "member";
+            channel_ids?: {
+                [key: string]: string;
+            };
+        };
+        UserUpdate: {
+            name?: string;
+            /** @description Send "" to clear; omit or null to leave unchanged. */
+            email?: string | null;
+            /**
+             * @description Assigning `owner` requires the caller to be an owner.
+             * @enum {string}
+             */
+            role?: "owner" | "admin" | "member";
+        };
+        TenantResponse: {
+            id: string;
+            name: string;
+            slug?: string | null;
+            plan?: string | null;
+            max_concurrent_containers: number;
+            created_at: string;
+        };
+        TenantUpdate: {
+            name?: string;
+            max_concurrent_containers?: number;
+        };
+        SafetyRuleCreate: {
+            stage: components["schemas"]["SafetyStage"];
+            check_id: string;
+            config?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Format: uuid
+             * @description `null` → tenant-wide rule. Non-null binds to one coworker and
+             *     must be in the caller's tenant (else 404).
+             */
+            coworker_id?: string | null;
+            /** @default 100 */
+            priority: number;
+            /** @default true */
+            enabled: boolean;
+            /** @default  */
+            description: string;
+        };
+        SafetyRuleUpdate: {
+            stage?: components["schemas"]["SafetyStage"];
+            check_id?: string;
+            config?: {
+                [key: string]: unknown;
+            };
+            priority?: number;
+            enabled?: boolean;
+            description?: string;
+        };
     };
     responses: {
         /** @description Malformed request. */
@@ -4013,6 +4233,35 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
         };
     };
+    createSafetyRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SafetyRuleCreate"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SafetyRule"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["Unprocessable"];
+        };
+    };
     getSafetyRule: {
         parameters: {
             query?: never;
@@ -4035,6 +4284,60 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    deleteSafetyRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateSafetyRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SafetyRuleUpdate"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SafetyRule"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["Unprocessable"];
         };
     };
     listSafetyRuleAudit: {
@@ -4149,6 +4452,34 @@ export interface operations {
             404: components["responses"]["NotFound"];
         };
     };
+    exportSafetyDecisionsCsv: {
+        parameters: {
+            query?: {
+                from_ts?: string;
+                to_ts?: string;
+                verdict_action?: components["schemas"]["SafetyVerdictAction"];
+                coworker_id?: string;
+                stage?: components["schemas"]["SafetyStage"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description CSV stream (attachment). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/csv": string;
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
     schedulesList: {
         parameters: {
             query?: {
@@ -4194,6 +4525,29 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    schedulesDelete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
         };
     };
@@ -4403,6 +4757,185 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Model"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["Unprocessable"];
+        };
+    };
+    listUsers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserResponse"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    createUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UserCreate"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            422: components["responses"]["Unprocessable"];
+        };
+    };
+    getUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserDetailResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateUser: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UserUpdate"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["Unprocessable"];
+        };
+    };
+    getTenant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateTenant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TenantUpdate"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TenantResponse"];
                 };
             };
             401: components["responses"]["Unauthorized"];

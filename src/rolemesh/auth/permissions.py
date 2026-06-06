@@ -17,27 +17,16 @@ UserRole = Literal["platform_admin", "owner", "admin", "member"]
 
 # Tenant-plane role -> action capability table.
 #
-# Two families of actions live here side by side:
-#   * Coarse ``manage_*`` / ``use_agent`` / ``view_all_conversations`` actions
-#     serve the legacy ``/api/admin/*`` surface (do NOT remove them).
-#   * Fine-grained ``<resource>.<verb>`` actions gate the ``/api/v1/*`` surface
-#     (PLAN.md §4 matrix). Mutations on shared/infra resources require the
-#     matching ``*.manage`` / ``*.configure`` capability; an ownership-escape
-#     (``require_manage_or_owner``) lets a member act on their OWN resource
-#     even without the capability.
+# Fine-grained ``<resource>.<verb>`` actions gate the ``/api/v1/*`` surface.
+# Mutations on shared/infra resources require the matching ``*.manage`` /
+# ``*.configure`` capability; an ownership-escape (``require_manage_or_owner``)
+# lets a member act on their OWN resource even without the capability.
 #
 # ``platform_admin`` is intentionally absent from this literal table — it is
 # derived below as a superset so it can never silently drift out of date when a
 # new action is added to any tenant role.
 _TENANT_ROLE_ACTIONS: dict[str, set[str]] = {
     "owner": {
-        # Legacy coarse actions (/api/admin/*).
-        "manage_tenant",
-        "manage_agents",
-        "manage_users",
-        "view_all_conversations",
-        "use_agent",
-        # Fine-grained /api/v1 actions.
         "agent.create",
         "agent.manage",
         "agent.use",
@@ -47,15 +36,14 @@ _TENANT_ROLE_ACTIONS: dict[str, set[str]] = {
         "approval_policy.manage",
         "credential.byok.manage",
         "safety.read",
+        "safety.rule.manage",
+        "user.manage",
+        "tenant.manage",
+        "task.manage",
     },
     "admin": {
-        # Legacy coarse actions (/api/admin/*).
-        "manage_agents",
-        "manage_users",
-        "view_all_conversations",
-        "use_agent",
-        # Fine-grained /api/v1 actions. Admin lacks BYOK credential
-        # management (owner-only) per the §4 matrix.
+        # Admin lacks BYOK credential management and tenant settings (both
+        # owner-only) per the §3 role matrix.
         "agent.create",
         "agent.manage",
         "agent.use",
@@ -64,10 +52,11 @@ _TENANT_ROLE_ACTIONS: dict[str, set[str]] = {
         "mcp.configure",
         "approval_policy.manage",
         "safety.read",
+        "safety.rule.manage",
+        "user.manage",
+        "task.manage",
     },
     "member": {
-        # Legacy coarse action.
-        "use_agent",
         # A member may create and use agents/skills, and (via the
         # ownership-escape helper) manage the ones they created — but the
         # ``*.manage`` capability that reaches others'/shared resources is
