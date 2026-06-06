@@ -188,7 +188,7 @@ async def delete_conversation_endpoint(
 ) -> Response:
     """Delete a conversation; FK ON DELETE CASCADE removes messages and runs.
 
-    Per design §3 "DELETE 语义" table, conversations are owned by
+    Per design §3 "DELETE semantics" table, conversations are owned by
     coworkers and their children (messages, runs) cascade. The
     pre-check 404 keeps the response idempotent — a second DELETE
     of the same id surfaces as 404 rather than 204, which matches

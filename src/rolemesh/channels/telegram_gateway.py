@@ -89,7 +89,7 @@ async def _short_circuit_group(update: Update) -> bool:
 
 # v6.1 §P1.4 link guidance — wire strings live in
 # ``rolemesh.channels.admission`` so admission + link flows share a
-# single source of truth (see F2 / "引导文本统一一处").
+# single source of truth (see F2 / "onboarding text in one place").
 
 
 async def _handle_start_command(

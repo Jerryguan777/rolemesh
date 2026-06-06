@@ -779,7 +779,7 @@ class Run(BaseModel):
     Matches the lifecycle helper's snapshot shape (id /
     conversation_id / status / started_at / completed_at / usage /
     error). The SPA's reconnect path calls ``GET /api/v1/runs/{id}``
-    to decide whether to re-subscribe — see design §4 "重连".
+    to decide whether to re-subscribe — see design §4 "reconnect".
     """
 
     model_config = ConfigDict(extra="forbid")

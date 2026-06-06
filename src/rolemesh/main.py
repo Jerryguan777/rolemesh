@@ -635,7 +635,7 @@ async def _auto_create_telegram_1on1_conversation(
     for an *already admitted* sender.
 
     Counterpart of ``_auto_create_web_conversation``: the design's
-    "已关联→建 conv" implicit case. ``admission_user_id`` is the
+    "already-linked -> create conv" implicit case. ``admission_user_id`` is the
     resolved RoleMesh user_id from ``admit_telegram_1on1`` — passed
     in so the row lands with ``user_id`` populated on first write
     instead of needing the lazy-backfill UPDATE later.

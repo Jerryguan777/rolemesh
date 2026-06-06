@@ -228,7 +228,7 @@ async def delete_channel_identity(
 ) -> bool:
     """Unbind one identity row; returns True iff a row was deleted.
 
-    v6.1 §P1.4 contract (边界 table, row 3): same-transaction NULL of
+    v6.1 §P1.4 contract (boundary table, row 3): same-transaction NULL of
     ``conv.user_id`` on every 1:1 conversation the deleted identity
     was the sole authorising binding for. Without that, a different
     RoleMesh user who later re-links the same channel (the
