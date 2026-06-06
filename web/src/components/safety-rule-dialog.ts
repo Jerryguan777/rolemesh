@@ -103,45 +103,63 @@ function _translateFastApiError(err: {
   }
 }
 
-// Presentation lists for the per-check config forms. Human label first, the
-// technical code as a muted subtitle (§8.5: behaviour primary, code for
-// debugging). These are UI-only; the backend keys are the codes.
+// G7 — schema-driven enum rendering (spec §6.12.5).
+// Human-readable labels for known enum values. Unknown values fall through to
+// raw-value display (reverse-drift property: backend adds new enum → frontend
+// renders it immediately with the raw code as fallback label).
+const ENUM_LABELS: Record<string, string> = {
+  // pii.regex pattern keys (uppercase)
+  SSN: 'US Social Security numbers',
+  CREDIT_CARD: 'Credit card numbers',
+  EMAIL: 'Email addresses',
+  PHONE_US: 'Phone numbers (US)',
+  IP_ADDRESS: 'IP addresses',
+  // presidio.pii entity codes (PII.* prefix not used in current backend enum)
+  EMAIL_ADDRESS: 'Email addresses',
+  PHONE_NUMBER: 'Phone numbers',
+  US_SSN: 'US Social Security numbers',
+  PERSON: "People's names",
+  LOCATION: 'Locations',
+  DATE_TIME: 'Dates and times',
+  // openai_moderation categories (lowercase codes from backend enum)
+  sexual: 'Sexual content',
+  hate: 'Hate speech',
+  harassment: 'Harassment',
+  'self-harm': 'Self-harm',
+  violence: 'Violence',
+};
 
-// pii.regex: backend key is `patterns: { SSN: true, ... }` (uppercase, dict of bool).
-// Each entry: [backendKey, humanLabel]. Frontend stores as Set<backendKey>.
-const PII_REGEX_ENTITIES: [string, string][] = [
-  ['SSN', 'US Social Security numbers'],
-  ['CREDIT_CARD', 'Credit card numbers'],
-  ['EMAIL', 'Email addresses'],
-  ['PHONE_US', 'Phone numbers'],
-  ['IP_ADDRESS', 'IP addresses'],
+export function enumLabel(v: string): string {
+  return ENUM_LABELS[v] ?? v;
+}
+
+/** Read enum values from a check's config_schema field.
+ *  `kind` is 'items' for array-item enums (presidio codes, moderation
+ *  categories) or 'propertyNames' for dict-key enums (pii.regex patterns).
+ *  Returns [] when schema or the field is absent — caller falls back to the
+ *  hardcoded ENUM_LABELS keys (defensive §6, hard constraint #6). */
+export function getSchemaEnum(
+  check: SafetyCheck | null,
+  fieldPath: string,
+  kind: 'items' | 'propertyNames',
+): string[] {
+  const schema = check?.config_schema as Record<string, unknown> | null | undefined;
+  if (!schema || typeof schema !== 'object') return [];
+  const props = (schema['properties'] as Record<string, unknown> | undefined) ?? {};
+  const field = props[fieldPath] as Record<string, unknown> | undefined;
+  if (!field) return [];
+  const node = (field[kind] as Record<string, unknown> | undefined) ?? {};
+  return Array.isArray(node['enum']) ? (node['enum'] as string[]) : [];
+}
+
+// Fallback entity lists for when config_schema is absent (pre-PR-#58 deploys
+// or null schema). Keeps the form functional even without schema data.
+const PII_REGEX_FALLBACK: string[] = ['SSN', 'CREDIT_CARD', 'EMAIL', 'PHONE_US', 'IP_ADDRESS'];
+const PRESIDIO_FALLBACK: string[] = [
+  'EMAIL_ADDRESS', 'PHONE_NUMBER', 'US_SSN', 'CREDIT_CARD',
+  'PERSON', 'LOCATION', 'IP_ADDRESS', 'DATE_TIME',
 ];
-const PRESIDIO_ENTITIES: [string, string][] = [
-  ['EMAIL_ADDRESS', 'Email addresses'],
-  ['PHONE_NUMBER', 'Phone numbers'],
-  ['US_SSN', 'US Social Security numbers'],
-  ['CREDIT_CARD', 'Credit card numbers'],
-  ['PERSON', "People's names"],
-  ['LOCATION', 'Locations'],
-  ['IP_ADDRESS', 'IP addresses'],
-  ['DATE_TIME', 'Dates and times'],
-];
-const MODERATION_CATEGORIES: [string, string][] = [
-  ['sexual', 'Sexual content'],
-  ['hate', 'Hate speech'],
-  ['harassment', 'Harassment'],
-  ['self-harm', 'Self-harm'],
-  ['violence', 'Violence'],
-];
-const SECRET_PLUGINS: [string, string][] = [
-  ['aws', 'AWS keys'],
-  ['github', 'GitHub tokens'],
-  ['slack', 'Slack tokens'],
-  ['stripe', 'Stripe keys'],
-  ['jwt', 'Login tokens (JWT)'],
-  ['basic_auth', 'Basic auth credentials'],
-  ['private_key', 'Private keys'],
-];
+const MODERATION_FALLBACK: string[] = ['sexual', 'hate', 'harassment', 'self-harm', 'violence'];
 
 @customElement('rm-safety-rule-dialog')
 export class SafetyRuleDialog extends LitElement {
@@ -948,7 +966,7 @@ export class SafetyRuleDialog extends LitElement {
       case 'pii-entities':
         // Internally stored as _piiKeys (Set<backendKey>); converted to
         // { patterns: { SSN: true, ... } } on save (see _buildBackendConfig).
-        return this.renderPiiEntityGrid();
+        return this.renderPiiEntityGrid(check);
       case 'secret-plugins':
         // Backend SecretScannerConfig has action_override only — no plugin
         // selection. Show an info note instead of a broken checkbox grid.
@@ -960,7 +978,7 @@ export class SafetyRuleDialog extends LitElement {
       case 'presidio-routing':
         // Stored internally as { routing: {CODE→action}, threshold } and
         // converted to { block_codes, redact_codes, score_threshold } on save.
-        return this.renderRouting(check, 'type', PRESIDIO_ENTITIES, true);
+        return this.renderRouting(check, 'type', true);
       case 'moderation-routing':
         // Stored internally as { routing: {cat→action} } and converted to
         // { block_categories, warn_categories } on save. Only block/warn
@@ -975,14 +993,19 @@ export class SafetyRuleDialog extends LitElement {
     }
   }
 
-  private renderPiiEntityGrid(): TemplateResult {
+  private renderPiiEntityGrid(check: SafetyCheck): TemplateResult {
+    // G7: read enum values from config_schema; fall back to static list.
+    const keys =
+      getSchemaEnum(check, 'patterns', 'propertyNames').length > 0
+        ? getSchemaEnum(check, 'patterns', 'propertyNames')
+        : PII_REGEX_FALLBACK;
     // _piiKeys holds the Set of selected backend keys (SSN, CREDIT_CARD, …).
     const selected = new Set((this.config['_piiKeys'] as string[]) ?? []);
     return html`
       <label class="block text-[12.5px] font-medium mb-1">What to look for</label>
       <div class="rm-saf-cfg-checks">
-        ${PII_REGEX_ENTITIES.map(
-          ([backendKey, lbl]) => html`<label>
+        ${keys.map(
+          (backendKey) => html`<label>
             <input
               type="checkbox"
               ?checked=${selected.has(backendKey)}
@@ -993,7 +1016,7 @@ export class SafetyRuleDialog extends LitElement {
                 this.config = { ...this.config, _piiKeys: [...next] };
               }}
             />
-            ${lbl}
+            ${enumLabel(backendKey)}
           </label>`,
         )}
       </div>
@@ -1061,6 +1084,11 @@ export class SafetyRuleDialog extends LitElement {
   // Moderation routing: only block/warn per category — the schema has no
   // require_approval_categories field, so we filter it from the options.
   private renderModerationRouting(check: SafetyCheck): TemplateResult {
+    // G7: read categories from config_schema; fall back to static list.
+    const categoryKeys =
+      getSchemaEnum(check, 'block_categories', 'items').length > 0
+        ? getSchemaEnum(check, 'block_categories', 'items')
+        : MODERATION_FALLBACK;
     const stage = this.stage as SafetyStage;
     const routing = (this.config['routing'] as Record<string, string>) ?? {};
     // Only block and warn are expressible per-category.
@@ -1074,10 +1102,10 @@ export class SafetyRuleDialog extends LitElement {
         <span class="rm-saf-lblnote">leave any blank to let it through</span>
       </label>
       <div class="rm-saf-routing-table" data-testid="saf-routing">
-        ${MODERATION_CATEGORIES.map(
-          ([code, lbl]) => html`<div class="rm-saf-routing-row">
+        ${categoryKeys.map(
+          (code) => html`<div class="rm-saf-routing-row">
             <div>
-              <div class="rm-saf-rcode">${lbl}</div>
+              <div class="rm-saf-rcode">${enumLabel(code)}</div>
               <div class="rm-saf-rdesc">${code}</div>
             </div>
             <select
@@ -1244,15 +1272,18 @@ export class SafetyRuleDialog extends LitElement {
     `;
   }
 
-  // Per-finding routing table (Experience 2). Each row: human label + code +
-  // a dropdown of supportable actions (server-driven, minus allow — the empty
-  // "— allow these —" option is the allow case). presidio also has a threshold.
+  // Per-finding routing table (Experience 2). For presidio.pii only.
+  // Codes are read from config_schema items.enum; fall back to static list.
   private renderRouting(
     check: SafetyCheck,
     noun: 'type' | 'category',
-    rows: [string, string][],
     withThreshold: boolean,
   ): TemplateResult {
+    // G7: derive entity codes from config_schema (block_codes items.enum).
+    const codes =
+      getSchemaEnum(check, 'block_codes', 'items').length > 0
+        ? getSchemaEnum(check, 'block_codes', 'items')
+        : PRESIDIO_FALLBACK;
     const stage = this.stage as SafetyStage;
     const routing = (this.config['routing'] as Record<string, string>) ?? {};
     const options = supportedActions(check, stage).filter((a) => a !== 'allow');
@@ -1263,10 +1294,10 @@ export class SafetyRuleDialog extends LitElement {
         <span class="rm-saf-lblnote">leave any blank to let it through</span>
       </label>
       <div class="rm-saf-routing-table" data-testid="saf-routing">
-        ${rows.map(
-          ([code, lbl]) => html`<div class="rm-saf-routing-row">
+        ${codes.map(
+          (code) => html`<div class="rm-saf-routing-row">
             <div>
-              <div class="rm-saf-rcode">${lbl}</div>
+              <div class="rm-saf-rcode">${enumLabel(code)}</div>
               <div class="rm-saf-rdesc">${code}</div>
             </div>
             <select

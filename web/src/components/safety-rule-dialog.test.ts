@@ -478,6 +478,67 @@ describe('SafetyRuleDialog — host-list onBlur normalization (G1/G2)', () => {
   });
 });
 
+// G7 — schema-driven enum rendering (spec §6.12.5)
+import { enumLabel, getSchemaEnum } from './safety-rule-dialog.js';
+
+describe('getSchemaEnum (G7)', () => {
+  const piiWithSchema: SafetyCheck = {
+    ...piiRegex,
+    config_schema: {
+      type: 'object',
+      properties: {
+        patterns: {
+          type: 'object',
+          propertyNames: { enum: ['SSN', 'CREDIT_CARD', 'EMAIL'] },
+        },
+        block_codes: { type: 'array', items: { enum: ['PII.SSN', 'PII.EMAIL'] } },
+      },
+    },
+  };
+
+  it('reads propertyNames.enum for dict-key fields', () => {
+    const keys = getSchemaEnum(piiWithSchema, 'patterns', 'propertyNames');
+    expect(keys).toEqual(['SSN', 'CREDIT_CARD', 'EMAIL']);
+  });
+
+  it('reads items.enum for array fields', () => {
+    const keys = getSchemaEnum(piiWithSchema, 'block_codes', 'items');
+    expect(keys).toEqual(['PII.SSN', 'PII.EMAIL']);
+  });
+
+  it('returns [] when check is null', () => {
+    expect(getSchemaEnum(null, 'patterns', 'propertyNames')).toEqual([]);
+  });
+
+  it('returns [] when config_schema is null', () => {
+    expect(getSchemaEnum(piiRegex, 'patterns', 'propertyNames')).toEqual([]);
+  });
+
+  it('returns [] when field is not in schema', () => {
+    expect(getSchemaEnum(piiWithSchema, 'nonexistent_field', 'items')).toEqual([]);
+  });
+
+  it('returns [] when the enum node is missing', () => {
+    const noEnum: SafetyCheck = {
+      ...piiRegex,
+      config_schema: { type: 'object', properties: { patterns: { type: 'object' } } },
+    };
+    expect(getSchemaEnum(noEnum, 'patterns', 'propertyNames')).toEqual([]);
+  });
+});
+
+describe('enumLabel (G7)', () => {
+  it('returns human label for known keys', () => {
+    expect(enumLabel('SSN')).toBe('US Social Security numbers');
+    expect(enumLabel('sexual')).toBe('Sexual content');
+  });
+
+  it('falls back to raw value for unknown keys', () => {
+    expect(enumLabel('PII.WAS_FORM_C')).toBe('PII.WAS_FORM_C');
+    expect(enumLabel('UNKNOWN_CAT')).toBe('UNKNOWN_CAT');
+  });
+});
+
 // G4 — client-side schema validation (spec §6.12.3 / §6.18)
 describe('SafetyRuleDialog — schema validation (G4)', () => {
   // A SafetyCheck with a realistic config_schema for pii.regex.
