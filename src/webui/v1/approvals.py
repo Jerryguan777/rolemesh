@@ -30,7 +30,7 @@ from rolemesh.db.approval import (
     list_pending_requests_for_tenant,
     update_approval_policy,
 )
-from webui.dependencies import get_current_user
+from webui.dependencies import get_current_user, require_action
 from webui.schemas_v1 import (
     ApprovalPolicy,
     ApprovalPolicyCreate,
@@ -149,7 +149,7 @@ async def list_policies_endpoint(
 @policies_router.post("", response_model=ApprovalPolicy, status_code=201)
 async def create_policy_endpoint(
     body: ApprovalPolicyCreate,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("approval_policy.manage")),
 ) -> ApprovalPolicy:
     """Create a policy. ``condition_expr`` is validated at the schema layer."""
     policy = await create_approval_policy(
@@ -176,7 +176,7 @@ async def get_policy_endpoint(
 async def patch_policy_endpoint(
     policy_id: str,
     body: ApprovalPolicyUpdate,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("approval_policy.manage")),
 ) -> ApprovalPolicy:
     """Partial update; absent fields are left alone (``model_fields_set``).
 
@@ -212,7 +212,7 @@ async def patch_policy_endpoint(
 @policies_router.delete("/{policy_id}", status_code=204)
 async def delete_policy_endpoint(
     policy_id: str,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("approval_policy.manage")),
 ) -> Response:
     """Delete a policy. 404 if it does not exist in the caller's tenant."""
     await _get_policy_or_404(policy_id, tenant_id=user.tenant_id)

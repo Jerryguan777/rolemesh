@@ -52,6 +52,9 @@ extend-immutable-calls = [
     "fastapi.File",
     "fastapi.Cookie",
     "fastapi.Security",
+    # Pure dependency factory: builds a FastAPI dependency once at import,
+    # mirroring the framework's own ``Depends`` idiom in parameter defaults.
+    "webui.dependencies.require_action",
 ]
 
 [format]

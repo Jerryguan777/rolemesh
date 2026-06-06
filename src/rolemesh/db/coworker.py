@@ -1,4 +1,4 @@
-"""Coworker CRUD + user-agent assignments."""
+"""Coworker CRUD."""
 
 from __future__ import annotations
 
@@ -6,26 +6,25 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from rolemesh.auth.permissions import AgentPermissions
-from rolemesh.core.types import ContainerConfig, Coworker, User
+from rolemesh.core.types import ContainerConfig, Coworker
 from rolemesh.db._pool import admin_conn, tenant_conn
-from rolemesh.db.user import _record_to_user
 
 if TYPE_CHECKING:
     import asyncpg
 
 __all__ = [
-    "assign_agent_to_user",
     "create_coworker",
     "delete_coworker",
-    "get_agents_for_user",
     "get_all_coworkers",
     "get_coworker",
     "get_coworker_by_folder",
     "get_coworkers_for_tenant",
-    "get_users_for_agent",
-    "unassign_agent_from_user",
+    "set_coworker_visibility",
     "update_coworker",
 ]
+
+# The two-valued visibility domain (mirrors the DB CHECK constraint).
+_VALID_VISIBILITY: frozenset[str] = frozenset({"private", "shared"})
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +66,7 @@ async def create_coworker(
     permissions: AgentPermissions | None = None,
     model_id: str | None = None,
     created_by_user_id: str | None = None,
+    visibility: str = "private",
 ) -> Coworker:
     """Create a new coworker row.
 
@@ -79,7 +79,15 @@ async def create_coworker(
     ``model_id`` and ``created_by_user_id`` are v1.1 additions (design
     §2.2). Both are NULLABLE on the DB so the existing admin call
     sites that omit them keep working — the v1 router populates them.
+
+    ``visibility`` (feat/roles PR3) defaults to ``'private'`` so a newly
+    created coworker is a personal draft until its creator shares it.
+    Validated against the same ``{'private','shared'}`` domain the DB
+    CHECK enforces, so a bad value fails fast rather than as an opaque
+    CHECK violation.
     """
+    if visibility not in _VALID_VISIBILITY:
+        raise ValueError(f"invalid visibility {visibility!r}")
     cc_json: str | None = None
     if container_config:
         cc_json = json.dumps(
@@ -97,9 +105,9 @@ async def create_coworker(
             """
             INSERT INTO coworkers (tenant_id, name, folder, agent_backend, system_prompt,
                 container_config, max_concurrent, permissions,
-                model_id, created_by_user_id)
+                model_id, created_by_user_id, visibility)
             VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb,
-                $9::uuid, $10::uuid)
+                $9::uuid, $10::uuid, $11)
             RETURNING *
             """,
             tenant_id,
@@ -112,6 +120,7 @@ async def create_coworker(
             json.dumps(effective_perms.to_dict()),
             model_id,
             created_by_user_id,
+            visibility,
         )
     assert row is not None
     return _record_to_coworker(row)
@@ -144,6 +153,9 @@ def _record_to_coworker(row: asyncpg.Record) -> Coworker:
         permissions=permissions,
         model_id=str(model_id_val) if model_id_val else None,
         created_by_user_id=str(created_by_val) if created_by_val else None,
+        visibility=(
+            row.get("visibility") if hasattr(row, "get") else None
+        ) or "private",
     )
 
 
@@ -176,14 +188,73 @@ async def get_coworker_by_folder(tenant_id: str, folder: str) -> Coworker | None
     return _record_to_coworker(row)
 
 
-async def get_coworkers_for_tenant(tenant_id: str) -> list[Coworker]:
-    """Get all coworkers for a tenant."""
+async def get_coworkers_for_tenant(
+    tenant_id: str,
+    *,
+    requesting_user_id: str | None = None,
+    include_all: bool = True,
+) -> list[Coworker]:
+    """Get coworkers for a tenant.
+
+    ``include_all`` (the DEFAULT) preserves the historical unfiltered
+    behavior: every internal caller (orchestrator load paths, OIDC
+    auto-assign, the legacy admin surface) needs ALL rows and must NOT
+    be visibility-scoped. Only the v1 list endpoint opts in to filtering
+    by passing ``include_all=False`` together with ``requesting_user_id``.
+
+    When filtering, the visibility predicate is exactly the SQL mirror of
+    :func:`webui.dependencies.user_can_see_resource`'s SEE rule for a
+    non-manager caller:
+
+        visibility = 'shared' OR created_by_user_id = :requesting_user_id
+
+    ``created_by_user_id = $2`` is three-valued-logic safe: a row with
+    ``created_by_user_id IS NULL`` yields ``NULL`` (not TRUE) for that
+    comparison, so an un-attributed private row never leaks to a member.
+    Managers (owner/admin/platform_admin) call with ``include_all=True``
+    so no predicate is added and they see every row.
+    """
     async with tenant_conn(tenant_id) as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM coworkers WHERE tenant_id = $1::uuid ORDER BY name",
+        if include_all:
+            rows = await conn.fetch(
+                "SELECT * FROM coworkers WHERE tenant_id = $1::uuid "
+                "ORDER BY name",
+                tenant_id,
+            )
+        else:
+            rows = await conn.fetch(
+                "SELECT * FROM coworkers WHERE tenant_id = $1::uuid "
+                "AND (visibility = 'shared' OR created_by_user_id = $2::uuid) "
+                "ORDER BY name",
+                tenant_id,
+                requesting_user_id,
+            )
+    return [_record_to_coworker(row) for row in rows]
+
+
+async def set_coworker_visibility(
+    coworker_id: str, *, visibility: str, tenant_id: str
+) -> Coworker | None:
+    """Flip a coworker's ``visibility`` (share / unshare).
+
+    Validates the value against the same domain the DB CHECK enforces so
+    a typo surfaces as ``ValueError`` rather than an opaque CHECK
+    violation. Returns the updated row, or ``None`` when no coworker with
+    that id exists in ``tenant_id`` (the handler maps that to 404).
+    """
+    if visibility not in _VALID_VISIBILITY:
+        raise ValueError(f"invalid visibility {visibility!r}")
+    async with tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow(
+            "UPDATE coworkers SET visibility = $1 "
+            "WHERE id = $2::uuid AND tenant_id = $3::uuid RETURNING *",
+            visibility,
+            coworker_id,
             tenant_id,
         )
-    return [_record_to_coworker(row) for row in rows]
+    if row is None:
+        return None
+    return _record_to_coworker(row)
 
 
 async def get_all_coworkers() -> list[Coworker]:
@@ -276,74 +347,5 @@ async def delete_coworker(coworker_id: str, *, tenant_id: str) -> bool:
             tenant_id,
         )
     return result == "DELETE 1"
-
-
-
-
-# ---------------------------------------------------------------------------
-# User-Agent assignment CRUD
-# ---------------------------------------------------------------------------
-
-
-async def assign_agent_to_user(user_id: str, coworker_id: str, tenant_id: str) -> None:
-    """Assign a coworker (agent) to a user."""
-    async with tenant_conn(tenant_id) as conn:
-        await conn.execute(
-            """
-            INSERT INTO user_agent_assignments (user_id, coworker_id, tenant_id)
-            VALUES ($1::uuid, $2::uuid, $3::uuid)
-            ON CONFLICT (user_id, coworker_id) DO NOTHING
-            """,
-            user_id,
-            coworker_id,
-            tenant_id,
-        )
-
-
-async def unassign_agent_from_user(
-    user_id: str, coworker_id: str, *, tenant_id: str
-) -> None:
-    """Remove a coworker assignment from a user."""
-    async with tenant_conn(tenant_id) as conn:
-        await conn.execute(
-            "DELETE FROM user_agent_assignments "
-            "WHERE user_id = $1::uuid AND coworker_id = $2::uuid "
-            "AND tenant_id = $3::uuid",
-            user_id,
-            coworker_id,
-            tenant_id,
-        )
-
-
-async def get_agents_for_user(user_id: str, *, tenant_id: str) -> list[Coworker]:
-    """Get all coworkers assigned to a user, scoped to ``tenant_id``."""
-    async with tenant_conn(tenant_id) as conn:
-        rows = await conn.fetch(
-            """
-            SELECT c.* FROM coworkers c
-            JOIN user_agent_assignments uaa ON c.id = uaa.coworker_id
-            WHERE uaa.user_id = $1::uuid AND uaa.tenant_id = $2::uuid
-            ORDER BY c.name
-            """,
-            user_id,
-            tenant_id,
-        )
-    return [_record_to_coworker(row) for row in rows]
-
-
-async def get_users_for_agent(coworker_id: str, *, tenant_id: str) -> list[User]:
-    """Get all users assigned to a coworker, scoped to ``tenant_id``."""
-    async with tenant_conn(tenant_id) as conn:
-        rows = await conn.fetch(
-            """
-            SELECT u.* FROM users u
-            JOIN user_agent_assignments uaa ON u.id = uaa.user_id
-            WHERE uaa.coworker_id = $1::uuid AND uaa.tenant_id = $2::uuid
-            ORDER BY u.name
-            """,
-            coworker_id,
-            tenant_id,
-        )
-    return [_record_to_user(row) for row in rows]
 
 

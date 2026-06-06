@@ -33,7 +33,6 @@ OIDC_CLAIM_TENANT_ID: str = os.environ.get("OIDC_CLAIM_TENANT_ID", "")
 OIDC_CLAIM_GROUPS: str = os.environ.get("OIDC_CLAIM_GROUPS", "")  # claim name carrying groups
 OIDC_GROUP_ROLE_MAP: str = os.environ.get("OIDC_GROUP_ROLE_MAP", "")  # JSON
 OIDC_ADAPTER: str = os.environ.get("OIDC_ADAPTER", "")  # module path
-OIDC_AUTO_ASSIGN_TO_ALL: bool = os.environ.get("OIDC_AUTO_ASSIGN_TO_ALL", "false").lower() == "true"
 
 # Refresh token cookie configuration (webui-only, not part of OIDCConfig)
 OIDC_COOKIE_SAMESITE: str = os.environ.get("OIDC_COOKIE_SAMESITE", "lax")  # lax | strict | none
@@ -63,7 +62,6 @@ class OIDCConfig:
     scope_role_map: dict[str, str] = field(default_factory=dict)
     group_role_map: dict[str, str] = field(default_factory=dict)
     adapter_spec: str = ""  # module.path.ClassName for OIDC_ADAPTER
-    auto_assign_to_all: bool = False
 
     @staticmethod
     def _parse_json_map(env_name: str) -> dict[str, str]:
@@ -97,7 +95,6 @@ class OIDCConfig:
             scope_role_map=cls._parse_json_map("OIDC_SCOPE_ROLE_MAP"),
             group_role_map=cls._parse_json_map("OIDC_GROUP_ROLE_MAP"),
             adapter_spec=os.environ.get("OIDC_ADAPTER", ""),
-            auto_assign_to_all=os.environ.get("OIDC_AUTO_ASSIGN_TO_ALL", "false").lower() == "true",
         )
 
 

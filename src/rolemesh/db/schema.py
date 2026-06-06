@@ -395,19 +395,49 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         "ALTER TABLE coworkers "
         "ADD COLUMN IF NOT EXISTS created_by_user_id UUID REFERENCES users(id)"
     )
-    # User-agent assignment table
+    # feat/roles PR3: per-resource visibility (personal draft space).
+    #   'private' — visible only to its creator + role-managers.
+    #   'shared'  — visible to every member of the tenant.
+    #
+    # The two-step ordering is load-bearing for a safe upgrade:
+    #   1. ``ADD COLUMN ... NOT NULL DEFAULT 'shared'`` runs the column's
+    #      default against EVERY pre-existing row, so legacy coworkers
+    #      (including the many with ``created_by_user_id IS NULL``) stay
+    #      visible to members exactly as they were before this column —
+    #      a 'private' backfill would have made them vanish from every
+    #      member's list.
+    #   2. ``ALTER COLUMN ... SET DEFAULT 'private'`` flips the default so
+    #      that NEW coworkers default to private (the personal-draft
+    #      semantics). The flip does not touch existing rows.
+    # On a fresh DB step 1 creates the column empty (no rows to backfill)
+    # and step 2 still leaves the column private-by-default — both an
+    # upgraded and a greenfield DB converge to the same end state.
+    await conn.execute(
+        "ALTER TABLE coworkers "
+        "ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'shared'"
+    )
+    await conn.execute(
+        "ALTER TABLE coworkers ALTER COLUMN visibility SET DEFAULT 'private'"
+    )
     await conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_agent_assignments (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            coworker_id UUID NOT NULL REFERENCES coworkers(id) ON DELETE CASCADE,
-            tenant_id UUID NOT NULL REFERENCES tenants(id),
-            assigned_at TIMESTAMPTZ DEFAULT now(),
-            UNIQUE (user_id, coworker_id)
-        )
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'coworkers_visibility_check'
+                  AND conrelid = 'coworkers'::regclass
+            ) THEN
+                ALTER TABLE coworkers ADD CONSTRAINT coworkers_visibility_check
+                    CHECK (visibility IN ('private', 'shared'));
+            END IF;
+        END $$
     """)
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_uaa_user ON user_agent_assignments(user_id)")
-    await conn.execute("CREATE INDEX IF NOT EXISTS idx_uaa_coworker ON user_agent_assignments(coworker_id)")
+    # The user-agent assignment table was removed (feat/roles): access is
+    # governed by coworker visibility + created_by_user_id ownership, never an
+    # explicit per-user grant table. Drop it idempotently so upgraded
+    # deployments that already created it shed the table (fresh DBs never
+    # create it in the first place).
+    await conn.execute("DROP TABLE IF EXISTS user_agent_assignments CASCADE")
 
     # Coworker <-> MCP server association (v1.1 §2.1). ``enabled_tools``
     # = NULL means "all tools enabled" (the common case); an empty
@@ -550,6 +580,29 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         "CREATE INDEX IF NOT EXISTS idx_skills_tenant_enabled "
         "ON skills(tenant_id, enabled)"
     )
+    # feat/roles PR3: per-skill visibility — same two-step backfill
+    # contract as ``coworkers.visibility`` above (existing rows -> shared,
+    # new rows -> private). See that block for the ordering rationale.
+    await conn.execute(
+        "ALTER TABLE skills "
+        "ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'shared'"
+    )
+    await conn.execute(
+        "ALTER TABLE skills ALTER COLUMN visibility SET DEFAULT 'private'"
+    )
+    await conn.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'skills_visibility_check'
+                  AND conrelid = 'skills'::regclass
+            ) THEN
+                ALTER TABLE skills ADD CONSTRAINT skills_visibility_check
+                    CHECK (visibility IN ('private', 'shared'));
+            END IF;
+        END $$
+    """)
 
     # skill_files holds the file tree. Path validation: positive
     # whitelist (each segment alphanumeric-led, only [A-Za-z0-9_.-]),
@@ -1534,7 +1587,6 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     await _enable_rls_on(conn, "sessions")
     await _enable_rls_on(conn, "coworkers")            # D8
     await _enable_rls_on(conn, "channel_bindings")
-    await _enable_rls_on(conn, "user_agent_assignments")
     await _enable_rls_on(conn, "users")                # D9
     await _enable_rls_on(conn, "oidc_user_tokens")     # D10 (tenant_id backfilled above)
     await _enable_rls_on(conn, "skills")               # skills feature: standard tenant_id scope

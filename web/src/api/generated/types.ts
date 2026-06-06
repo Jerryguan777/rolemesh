@@ -197,6 +197,53 @@ export interface paths {
         patch: operations["updateCoworker"];
         trace?: never;
     };
+    "/api/v1/coworkers/{id}/share": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Make a coworker shared (tenant-wide)
+         * @description Self-serve visibility flip to `shared` (feat/roles). A member
+         *     may share a coworker they created; owner/admin/platform_admin
+         *     may share any. Idempotent. Returns the updated coworker.
+         */
+        post: operations["shareCoworker"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/coworkers/{id}/unshare": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Make a coworker private again (creator + managers only)
+         * @description Visibility flip back to `private` (feat/roles). Same own-or-manage
+         *     gate as share. Returns the updated coworker.
+         */
+        post: operations["unshareCoworker"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/coworkers/{id}/conversations": {
         parameters: {
             query?: never;
@@ -492,6 +539,53 @@ export interface paths {
          *     coworker currently bound to this skill.
          */
         patch: operations["updateSkill"];
+        trace?: never;
+    };
+    "/api/v1/skills/{id}/share": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Make a skill shared (tenant-wide)
+         * @description Self-serve visibility flip to `shared` (feat/roles). A member
+         *     may share a skill they created; owner/admin/platform_admin may
+         *     share any. Idempotent. Returns the updated skill.
+         */
+        post: operations["shareSkill"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/skills/{id}/unshare": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Make a skill private again (creator + managers only)
+         * @description Visibility flip back to `private` (feat/roles). Same
+         *     own-or-manage gate as share. Returns the updated skill.
+         */
+        post: operations["unshareSkill"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/skills/{id}/files": {
@@ -1135,6 +1229,15 @@ export interface components {
         };
         /** @enum {string} */
         CoworkerStatus: "active" | "paused" | "disabled";
+        /**
+         * @description Per-resource visibility (feat/roles). `private` — visible only
+         *     to the creator and role-managers (owner/admin/platform_admin);
+         *     `shared` — visible to and usable by every member of the tenant.
+         *     New resources default to `private`; legacy rows were backfilled
+         *     to `shared`.
+         * @enum {string}
+         */
+        Visibility: "private" | "shared";
         Coworker: {
             /** Format: uuid */
             id: string;
@@ -1150,6 +1253,7 @@ export interface components {
             max_concurrent: number;
             /** Format: uuid */
             created_by_user_id?: string | null;
+            visibility: components["schemas"]["Visibility"];
             /** Format: date-time */
             created_at: string;
         };
@@ -1521,6 +1625,7 @@ export interface components {
             updated_at: string;
             /** Format: uuid */
             created_by_user_id?: string | null;
+            visibility: components["schemas"]["Visibility"];
         };
         /**
          * @description List-view projection — drops the file map and frontmatter.
@@ -1540,6 +1645,7 @@ export interface components {
              *     can spot orphaned vs heavily-shared skills.
              */
             bound_coworker_count: number;
+            visibility: components["schemas"]["Visibility"];
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
@@ -2515,6 +2621,56 @@ export interface operations {
             422: components["responses"]["Unprocessable"];
         };
     };
+    shareCoworker: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Coworker"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    unshareCoworker: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Coworker"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
     listCoworkerConversations: {
         parameters: {
             query?: never;
@@ -3037,6 +3193,56 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    shareSkill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Skill"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    unshareSkill: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Skill"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
         };
     };

@@ -26,7 +26,7 @@ from rolemesh.db import (
     list_mcp_servers,
     update_mcp_server,
 )
-from webui.dependencies import get_current_user
+from webui.dependencies import get_current_user, require_action
 from webui.schemas_v1 import MCPServer, MCPServerCreate, MCPServerUpdate
 from webui.v1 import mcp_events
 from webui.v1.errors import ErrorResponseException, raise_error_response
@@ -81,7 +81,7 @@ async def list_endpoint(
 @router.post("", response_model=MCPServer, status_code=201)
 async def create_endpoint(
     body: MCPServerCreate,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("mcp.configure")),
 ) -> MCPServer:
     try:
         row = await create_mcp_server(
@@ -120,7 +120,7 @@ async def get_endpoint(
 async def patch_endpoint(
     mcp_id: str,
     body: MCPServerUpdate,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("mcp.configure")),
 ) -> MCPServer:
     """Partial update; ``None`` clears nullable columns, absent leaves alone.
 
@@ -168,7 +168,7 @@ async def patch_endpoint(
 @router.delete("/{mcp_id}", status_code=204)
 async def delete_endpoint(
     mcp_id: str,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("mcp.configure")),
 ) -> Response:
     """Delete an MCP server.
 

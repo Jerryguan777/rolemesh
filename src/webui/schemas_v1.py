@@ -25,6 +25,9 @@ BackendName = Literal["claude", "pi"]
 ModelProvider = Literal["anthropic", "bedrock", "openai", "google"]
 ModelFamily = Literal["claude", "gpt", "gemini", "llama"]
 CoworkerStatus = Literal["active", "paused", "disabled"]
+# feat/roles PR3: per-resource visibility. 'private' = creator + managers
+# only; 'shared' = whole tenant.
+Visibility = Literal["private", "shared"]
 AuthMode = Literal["external", "oidc", "builtin", "bootstrap"]
 UserRole = Literal["owner", "admin", "member"]
 
@@ -143,6 +146,10 @@ class Coworker(BaseModel):
     status: CoworkerStatus
     max_concurrent: int = Field(ge=1)
     created_by_user_id: str | None = None
+    # Always populated server-side (the DB column is NOT NULL), so this is
+    # a REQUIRED response field — keep it without a default so the yaml
+    # ``required`` list and the model agree (test_openapi_contract).
+    visibility: Visibility
     created_at: str
 
 
@@ -641,6 +648,8 @@ class Skill(BaseModel):
     created_at: str
     updated_at: str
     created_by_user_id: str | None = None
+    # Required response field (DB column is NOT NULL) — see Coworker.
+    visibility: Visibility
 
 
 class SkillSummary(BaseModel):
@@ -659,6 +668,7 @@ class SkillSummary(BaseModel):
     description: str
     enabled: bool
     bound_coworker_count: int
+    visibility: Visibility
     created_at: str
     updated_at: str
 

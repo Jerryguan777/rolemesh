@@ -13,33 +13,100 @@ from typing import Literal
 # User roles
 # ---------------------------------------------------------------------------
 
-UserRole = Literal["owner", "admin", "member"]
+UserRole = Literal["platform_admin", "owner", "admin", "member"]
 
-_USER_ROLE_ACTIONS: dict[str, set[str]] = {
+# Tenant-plane role -> action capability table.
+#
+# Two families of actions live here side by side:
+#   * Coarse ``manage_*`` / ``use_agent`` / ``view_all_conversations`` actions
+#     serve the legacy ``/api/admin/*`` surface (do NOT remove them).
+#   * Fine-grained ``<resource>.<verb>`` actions gate the ``/api/v1/*`` surface
+#     (PLAN.md §4 matrix). Mutations on shared/infra resources require the
+#     matching ``*.manage`` / ``*.configure`` capability; an ownership-escape
+#     (``require_manage_or_owner``) lets a member act on their OWN resource
+#     even without the capability.
+#
+# ``platform_admin`` is intentionally absent from this literal table — it is
+# derived below as a superset so it can never silently drift out of date when a
+# new action is added to any tenant role.
+_TENANT_ROLE_ACTIONS: dict[str, set[str]] = {
     "owner": {
+        # Legacy coarse actions (/api/admin/*).
         "manage_tenant",
         "manage_agents",
         "manage_users",
         "view_all_conversations",
         "use_agent",
+        # Fine-grained /api/v1 actions.
+        "agent.create",
+        "agent.manage",
+        "agent.use",
+        "skill.create",
+        "skill.manage",
+        "mcp.configure",
+        "approval_policy.manage",
+        "credential.byok.manage",
+        "safety.read",
     },
     "admin": {
+        # Legacy coarse actions (/api/admin/*).
         "manage_agents",
         "manage_users",
         "view_all_conversations",
         "use_agent",
+        # Fine-grained /api/v1 actions. Admin lacks BYOK credential
+        # management (owner-only) per the §4 matrix.
+        "agent.create",
+        "agent.manage",
+        "agent.use",
+        "skill.create",
+        "skill.manage",
+        "mcp.configure",
+        "approval_policy.manage",
+        "safety.read",
     },
     "member": {
+        # Legacy coarse action.
         "use_agent",
+        # A member may create and use agents/skills, and (via the
+        # ownership-escape helper) manage the ones they created — but the
+        # ``*.manage`` capability that reaches others'/shared resources is
+        # withheld here.
+        "agent.create",
+        "agent.use",
+        "skill.create",
     },
+}
+
+# Platform-plane-only actions (not granted to any tenant role). Empty today;
+# kept as an explicit seam so future platform-wide capabilities are added in
+# one obvious place.
+_PLATFORM_ONLY_ACTIONS: set[str] = set()
+
+
+def _all_known_actions() -> set[str]:
+    """Union of every action referenced by any tenant role + platform-only."""
+    actions: set[str] = set(_PLATFORM_ONLY_ACTIONS)
+    for role_actions in _TENANT_ROLE_ACTIONS.values():
+        actions |= role_actions
+    return actions
+
+
+# ``platform_admin`` is the superset of every action: every tenant-role action
+# plus any platform-only action. Derived (not hand-copied) so it cannot rot —
+# adding an action to any role above automatically grants it to platform_admin.
+_USER_ROLE_ACTIONS: dict[str, set[str]] = {
+    **_TENANT_ROLE_ACTIONS,
+    "platform_admin": _all_known_actions(),
 }
 
 
 def user_can(role: UserRole, action: str) -> bool:
-    """Check if a user role permits a given action.
+    """Check if a user role permits a given action. Fail-closed.
 
-    Actions: manage_tenant, manage_agents, manage_users,
-             view_all_conversations, use_agent.
+    Unknown roles and unknown actions deny by default
+    (``_USER_ROLE_ACTIONS.get(role, set())`` yields the empty set).
+    ``platform_admin`` is the superset of all known actions.
     """
     return action in _USER_ROLE_ACTIONS.get(role, set())
 

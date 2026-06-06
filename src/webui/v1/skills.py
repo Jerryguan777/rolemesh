@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 import asyncpg
 from fastapi import APIRouter, Depends, Response
 
+from rolemesh.auth.permissions import user_can
 from rolemesh.core.skills import (
     SKILL_MANIFEST_NAME,
     SkillValidationError,
@@ -42,9 +43,15 @@ from rolemesh.db import (
     list_skills_for_coworker,
     list_skills_for_tenant,
     set_skill_file,
+    set_skill_visibility,
     update_skill,
 )
-from webui.dependencies import get_current_user
+from webui.dependencies import (
+    get_current_user,
+    require_action,
+    require_manage_or_owner,
+    user_can_see_resource,
+)
 from webui.schemas_v1 import (
     CoworkerSkillBinding,
     Skill,
@@ -92,6 +99,7 @@ def _skill_to_response(s: SkillDataclass) -> Skill:
         created_at=s.created_at,
         updated_at=s.updated_at,
         created_by_user_id=s.created_by_user_id,
+        visibility=s.visibility,  # type: ignore[arg-type]
     )
 
 
@@ -114,6 +122,7 @@ def _skill_to_summary(s: SkillDataclass, bound_count: int) -> SkillSummary:
         description=description,
         enabled=s.enabled,
         bound_coworker_count=bound_count,
+        visibility=s.visibility,  # type: ignore[arg-type]
         created_at=s.created_at,
         updated_at=s.updated_at,
     )
@@ -156,12 +165,32 @@ def _normalize_files(
     return out
 
 
-async def _get_skill_or_404(skill_id: str, *, tenant_id: str) -> SkillDataclass:
+async def _get_skill_or_404(
+    skill_id: str,
+    *,
+    tenant_id: str,
+    user: AuthenticatedUser | None = None,
+) -> SkillDataclass:
+    """Fetch one skill; 404 on miss / wrong tenant.
+
+    feat/roles PR3: when ``user`` is supplied, a skill the caller may not
+    SEE/USE (another member's private skill, caller lacking
+    ``skill.manage``) collapses to the same 404 as "does not exist" so a
+    private draft's existence is not leaked. The manage paths (PATCH /
+    DELETE / file writes) pass ``user=None`` so a foreign private skill
+    surfaces as a 403 from ``require_manage_or_owner`` — matching the
+    pre-PR3 ownership-escape contract the S1 tests pin.
+    """
     try:
         skill = await get_skill(skill_id, tenant_id=tenant_id)
     except asyncpg.DataError:
         skill = None
-    if skill is None:
+    if skill is None or (
+        user is not None
+        and not user_can_see_resource(
+            manage_action="skill.manage", resource=skill, user=user,
+        )
+    ):
         raise_error_response(
             "NOT_FOUND",
             "Skill not found.",
@@ -171,7 +200,7 @@ async def _get_skill_or_404(skill_id: str, *, tenant_id: str) -> SkillDataclass:
     return skill
 
 
-async def _ensure_coworker(coworker_id: str, *, tenant_id: str) -> None:
+async def _get_coworker_or_404(coworker_id: str, *, tenant_id: str) -> object:
     try:
         cw = await get_coworker(coworker_id, tenant_id=tenant_id)
     except asyncpg.DataError:
@@ -183,6 +212,11 @@ async def _ensure_coworker(coworker_id: str, *, tenant_id: str) -> None:
             status_code=404,
             details={"coworker_id": coworker_id},
         )
+    return cw
+
+
+async def _ensure_coworker(coworker_id: str, *, tenant_id: str) -> None:
+    await _get_coworker_or_404(coworker_id, tenant_id=tenant_id)
 
 
 async def _broadcast_skills_changed(
@@ -210,7 +244,16 @@ async def _broadcast_skills_changed(
 async def list_skills_endpoint(
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> list[SkillSummary]:
-    skills = await list_skills_for_tenant(user.tenant_id)
+    # feat/roles PR3 visibility: a manager (skill.manage) sees every
+    # catalog skill; a member sees shared + their own private. Row-level
+    # predicate lives in ``list_skills_for_tenant`` (SQL mirror of
+    # ``user_can_see_resource``); the route stays auth-only (allowlisted).
+    can_manage = user_can(user.role, "skill.manage")  # type: ignore[arg-type]
+    skills = await list_skills_for_tenant(
+        user.tenant_id,
+        requesting_user_id=user.user_id,
+        include_all=can_manage,
+    )
     summaries: list[SkillSummary] = []
     for s in skills:
         bound = await list_coworkers_for_skill(s.id, tenant_id=user.tenant_id)
@@ -221,7 +264,7 @@ async def list_skills_endpoint(
 @skills_router.post("", response_model=Skill, status_code=201)
 async def create_skill_endpoint(
     body: SkillCreate,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("skill.create")),
 ) -> Skill:
     try:
         validate_skill_name(body.name)
@@ -308,7 +351,9 @@ async def get_skill_endpoint(
     skill_id: str,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> Skill:
-    skill = await _get_skill_or_404(skill_id, tenant_id=user.tenant_id)
+    skill = await _get_skill_or_404(
+        skill_id, tenant_id=user.tenant_id, user=user,
+    )
     return _skill_to_response(skill)
 
 
@@ -316,9 +361,14 @@ async def get_skill_endpoint(
 async def update_skill_endpoint(
     skill_id: str,
     body: SkillUpdate,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("skill.create")),
 ) -> Skill:
     existing = await _get_skill_or_404(skill_id, tenant_id=user.tenant_id)
+    # Ownership-escape: a member may edit a skill they created; reaching a
+    # shared/others' skill requires ``skill.manage``.
+    require_manage_or_owner(
+        manage_action="skill.manage", resource=existing, user=user,
+    )
     set_fields = body.model_fields_set
 
     # ``name`` is read-only on PATCH (see SkillUpdate docstring). Accept
@@ -454,9 +504,12 @@ async def update_skill_endpoint(
 @skills_router.delete("/{skill_id}", status_code=204)
 async def delete_skill_endpoint(
     skill_id: str,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("skill.create")),
 ) -> Response:
-    await _get_skill_or_404(skill_id, tenant_id=user.tenant_id)
+    skill = await _get_skill_or_404(skill_id, tenant_id=user.tenant_id)
+    require_manage_or_owner(
+        manage_action="skill.manage", resource=skill, user=user,
+    )
     coworker_ids = await list_coworkers_for_skill(
         skill_id, tenant_id=user.tenant_id,
     )
@@ -481,6 +534,62 @@ async def delete_skill_endpoint(
     return Response(status_code=204)
 
 
+async def _set_skill_visibility_or_404(
+    skill_id: str, *, visibility: str, user: AuthenticatedUser,
+) -> Skill:
+    """Shared body for skill share / unshare.
+
+    The route carries the low ``skill.create`` capability; this helper
+    escalates to ``require_manage_or_owner`` so a member may flip their
+    OWN skill while a manager may flip any. Fetch passes ``user=None`` so
+    a member targeting a foreign private skill gets the consistent 403
+    from the ownership gate (a MANAGE attempt), matching PATCH/DELETE.
+    """
+    existing = await _get_skill_or_404(skill_id, tenant_id=user.tenant_id)
+    require_manage_or_owner(
+        manage_action="skill.manage", resource=existing, user=user,
+    )
+    updated = await set_skill_visibility(
+        skill_id, visibility=visibility, tenant_id=user.tenant_id,
+    )
+    if updated is None:
+        raise_error_response(
+            "NOT_FOUND",
+            "Skill not found.",
+            status_code=404,
+            details={"skill_id": skill_id},
+        )
+    return _skill_to_response(updated)
+
+
+@skills_router.post("/{skill_id}/share", response_model=Skill)
+async def share_skill_endpoint(
+    skill_id: str,
+    user: AuthenticatedUser = Depends(require_action("skill.create")),
+) -> Skill:
+    """Make a skill ``shared`` (visible / bindable tenant-wide).
+
+    Self-serve: a member shares their OWN draft; a manager may share any.
+    Gated by the ``skill.create`` route capability + in-handler
+    ``require_manage_or_owner`` escalation (so this mutation is NOT in the
+    auth-only allowlist).
+    """
+    return await _set_skill_visibility_or_404(
+        skill_id, visibility="shared", user=user,
+    )
+
+
+@skills_router.post("/{skill_id}/unshare", response_model=Skill)
+async def unshare_skill_endpoint(
+    skill_id: str,
+    user: AuthenticatedUser = Depends(require_action("skill.create")),
+) -> Skill:
+    """Make a skill ``private`` again (creator + managers only)."""
+    return await _set_skill_visibility_or_404(
+        skill_id, visibility="private", user=user,
+    )
+
+
 # ---------------------------------------------------------------------------
 # File endpoints
 # ---------------------------------------------------------------------------
@@ -491,7 +600,9 @@ async def list_skill_files_endpoint(
     skill_id: str,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> list[str]:
-    skill = await _get_skill_or_404(skill_id, tenant_id=user.tenant_id)
+    skill = await _get_skill_or_404(
+        skill_id, tenant_id=user.tenant_id, user=user,
+    )
     return sorted(skill.files.keys())
 
 
@@ -501,7 +612,9 @@ async def get_skill_file_endpoint(
     path: str,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> SkillFile:
-    skill = await _get_skill_or_404(skill_id, tenant_id=user.tenant_id)
+    skill = await _get_skill_or_404(
+        skill_id, tenant_id=user.tenant_id, user=user,
+    )
     if path not in skill.files:
         raise_error_response(
             "NOT_FOUND",
@@ -517,9 +630,12 @@ async def put_skill_file_endpoint(
     skill_id: str,
     path: str,
     body: SkillFileUpsert,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("skill.create")),
 ) -> SkillFile:
-    await _get_skill_or_404(skill_id, tenant_id=user.tenant_id)
+    skill = await _get_skill_or_404(skill_id, tenant_id=user.tenant_id)
+    require_manage_or_owner(
+        manage_action="skill.manage", resource=skill, user=user,
+    )
     try:
         validate_skill_file_path(path)
     except SkillValidationError as exc:
@@ -558,9 +674,12 @@ async def put_skill_file_endpoint(
 async def delete_skill_file_endpoint(
     skill_id: str,
     path: str,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("skill.create")),
 ) -> Response:
-    await _get_skill_or_404(skill_id, tenant_id=user.tenant_id)
+    skill = await _get_skill_or_404(skill_id, tenant_id=user.tenant_id)
+    require_manage_or_owner(
+        manage_action="skill.manage", resource=skill, user=user,
+    )
     if path == SKILL_MANIFEST_NAME:
         raise ErrorResponseException(
             status_code=409,
@@ -654,16 +773,27 @@ async def list_coworker_skills_endpoint(
 async def enable_coworker_skill_endpoint(
     coworker_id: str,
     skill_id: str,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("agent.use")),
 ) -> CoworkerSkillBinding:
     """Bind a catalog skill to this coworker (idempotent).
 
     Re-enabling an already-enabled binding is a no-op. Re-enabling
     a disabled binding flips the junction flag back to true. Both
     cases publish ``skills_changed``.
+
+    Mutates the coworker's skill set (agent config): the route requires
+    ``agent.use`` and the handler escalates to ``agent.manage``-or-own.
     """
-    await _ensure_coworker(coworker_id, tenant_id=user.tenant_id)
-    await _get_skill_or_404(skill_id, tenant_id=user.tenant_id)
+    cw = await _get_coworker_or_404(coworker_id, tenant_id=user.tenant_id)
+    require_manage_or_owner(
+        manage_action="agent.manage", resource=cw, user=user,
+    )
+    # USE enforcement on the SKILL being attached: a member may only bind
+    # a skill they can see (shared, or their own private one). Binding a
+    # foreign private skill collapses to 404 — same existence-hiding
+    # convention as fetch. Passing ``user`` routes through the single
+    # ``user_can_see_resource`` helper.
+    await _get_skill_or_404(skill_id, tenant_id=user.tenant_id, user=user)
     ok = await enable_skill_for_coworker(
         skill_id=skill_id,
         coworker_id=coworker_id,
@@ -689,14 +819,20 @@ async def enable_coworker_skill_endpoint(
 async def disable_coworker_skill_endpoint(
     coworker_id: str,
     skill_id: str,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("agent.use")),
 ) -> Response:
     """Remove the ``coworker_skills`` binding row.
 
     Distinct from "enable=false" — this deletes the binding outright,
     matching the v1 DELETE convention. The catalog skill survives.
+
+    Mutates the coworker's skill set (agent config): route ``agent.use``,
+    handler escalates to ``agent.manage``-or-own.
     """
-    await _ensure_coworker(coworker_id, tenant_id=user.tenant_id)
+    cw = await _get_coworker_or_404(coworker_id, tenant_id=user.tenant_id)
+    require_manage_or_owner(
+        manage_action="agent.manage", resource=cw, user=user,
+    )
     removed = await disable_skill_for_coworker(
         skill_id=skill_id,
         coworker_id=coworker_id,

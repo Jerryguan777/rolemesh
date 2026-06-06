@@ -31,7 +31,7 @@ from rolemesh.db import (
     list_requests_for_conversation,
     tenant_conn,
 )
-from webui.dependencies import get_current_user
+from webui.dependencies import get_current_user, require_action
 from webui.schemas_v1 import (
     ApprovalRequest,
     Conversation,
@@ -118,7 +118,9 @@ async def list_coworker_conversations(
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> list[Conversation]:
     """List conversations for a coworker, ordered by ``created_at``."""
-    await _get_coworker_or_404(coworker_id, user.tenant_id)
+    # USE/SEE enforcement: a member may not enumerate conversations of a
+    # coworker they cannot see (another member's private one) — 404.
+    await _get_coworker_or_404(coworker_id, user.tenant_id, user=user)
     convs = await get_conversations_for_coworker(
         coworker_id, tenant_id=user.tenant_id
     )
@@ -133,7 +135,7 @@ async def list_coworker_conversations(
 async def create_coworker_conversation(
     coworker_id: str,
     body: ConversationCreate,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("agent.use")),
 ) -> Conversation:
     """Create a new web conversation under a coworker.
 
@@ -142,7 +144,12 @@ async def create_coworker_conversation(
     and generates a unique ``channel_chat_id``. All conversations are
     1:1 — the agent always responds.
     """
-    cw = await _get_coworker_or_404(coworker_id, user.tenant_id)
+    # USE enforcement (feat/roles PR3 feed-forward): a member must NOT be
+    # able to open a conversation against another member's PRIVATE
+    # coworker. ``_get_coworker_or_404(user=...)`` collapses not-visible
+    # to 404 so existence is not leaked; a shared coworker or the
+    # member's own private one passes.
+    cw = await _get_coworker_or_404(coworker_id, user.tenant_id, user=user)
     binding_id = await _ensure_web_binding(cw.id, user.tenant_id)  # type: ignore[attr-defined]
     chat_id = str(uuid.uuid4())
     conv = await create_conversation(
@@ -177,7 +184,7 @@ async def get_conversation_endpoint(
 @conversations_router.delete("/{conversation_id}", status_code=204)
 async def delete_conversation_endpoint(
     conversation_id: str,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("agent.use")),
 ) -> Response:
     """Delete a conversation; FK ON DELETE CASCADE removes messages and runs.
 

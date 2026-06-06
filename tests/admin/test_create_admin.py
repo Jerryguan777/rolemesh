@@ -19,11 +19,12 @@ import pytest
 from rolemesh.admin.cli import _build_parser, _cmd_create_admin
 from rolemesh.admin.core import (
     PLATFORM_ADMIN_ROLE,
+    PLATFORM_TENANT_SLUG,
     AdminProvisionError,
     create_admin,
     ensure_seed_admin,
 )
-from rolemesh.db import DEFAULT_TENANT, get_tenant_by_slug
+from rolemesh.db import get_tenant_by_slug
 from rolemesh.db._pool import admin_conn
 
 pytestmark = pytest.mark.usefixtures("test_db")
@@ -43,17 +44,37 @@ async def _user_count_by_email(email: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-async def test_creates_platform_admin_in_default_tenant() -> None:
+async def test_creates_platform_admin_in_sentinel_tenant() -> None:
     result = await create_admin(email="a@b.com")
 
     assert result.created is True
     assert result.role == PLATFORM_ADMIN_ROLE
-    assert result.tenant_slug == DEFAULT_TENANT
+    assert result.tenant_slug == PLATFORM_TENANT_SLUG
     assert result.email == "a@b.com"
-    default = await get_tenant_by_slug(DEFAULT_TENANT)
-    assert default is not None
-    assert result.tenant_id == default.id
+    sentinel = await get_tenant_by_slug(PLATFORM_TENANT_SLUG)
+    assert sentinel is not None
+    assert result.tenant_id == sentinel.id
     assert await _user_count_by_email("a@b.com") == 1
+
+
+async def test_sentinel_tenant_created_once_and_reused() -> None:
+    """Provisioning two platform_admins must not duplicate the sentinel tenant.
+
+    Regression guard: the anchor tenant is created idempotently. A second
+    platform_admin (distinct email) must land in the SAME ``__platform__``
+    tenant row, not a fresh one.
+    """
+    first = await create_admin(email="one@b.com")
+    second = await create_admin(email="two@b.com")
+
+    assert first.tenant_id == second.tenant_id
+    async with admin_conn() as conn:
+        row = await conn.fetchrow(
+            "SELECT COUNT(*) AS n FROM tenants WHERE slug = $1",
+            PLATFORM_TENANT_SLUG,
+        )
+    assert row is not None
+    assert int(row["n"]) == 1
 
 
 async def test_create_admin_is_idempotent() -> None:
