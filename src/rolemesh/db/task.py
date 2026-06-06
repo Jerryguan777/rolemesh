@@ -247,6 +247,13 @@ async def get_due_tasks(tenant_id: str | None = None) -> list[ScheduledTask]:
     Treats both ``None`` and ``""`` as "global scheduler scan" so an
     empty string from a misconfigured caller doesn't enter
     ``tenant_conn`` and silently filter every row to zero.
+
+    Tasks belonging to a *suspended* tenant are excluded from the
+    cross-tenant scheduler sweep: a suspended tenant's schedules pause
+    (they are neither run nor failed/deleted) and resume on its own once
+    the tenant is reactivated — the rows are untouched, just not picked
+    up. The join lives here, at the single point the scheduler reads from,
+    rather than in the per-tick dispatch loop.
     """
     now = datetime.now(UTC)
     if tenant_id:
@@ -264,14 +271,17 @@ async def get_due_tasks(tenant_id: str | None = None) -> list[ScheduledTask]:
     else:
         # inv-1-ok: cross-tenant scheduler sweep — the tenant_id-less
         # branch is the documented multi-tenant scheduler path; the
-        # caller iterates results to dispatch jobs per-tenant.
+        # caller iterates results to dispatch jobs per-tenant. Runs under
+        # admin_conn (BYPASSRLS) so the join to ``tenants`` is visible.
         async with admin_conn() as conn:
             rows = await conn.fetch(
                 """
-                SELECT * FROM scheduled_tasks
-                WHERE status = 'active' AND next_run IS NOT NULL
-                  AND next_run <= $1
-                ORDER BY next_run
+                SELECT st.* FROM scheduled_tasks st
+                JOIN tenants t ON t.id = st.tenant_id
+                WHERE st.status = 'active' AND t.status = 'active'
+                  AND st.next_run IS NOT NULL
+                  AND st.next_run <= $1
+                ORDER BY st.next_run
                 """,
                 now,
             )
