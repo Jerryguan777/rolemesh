@@ -141,6 +141,15 @@ async def _seed_platform_safety_rules(
     and post-``TRUNCATE`` re-seeds (``_reset_test_data``) are safe. Only
     the ``default`` tier is seeded this phase; ``floor`` /
     ``transparent_floor`` are carried in the schema for future use.
+
+    Each row is stamped ``is_seeded = TRUE`` so the platform-admin write
+    API can enforce disable-only on the factory defaults. The ON CONFLICT
+    branch is a deliberate DO UPDATE (not DO NOTHING) that touches ONLY
+    ``is_seeded``: it backfills the flag on a DB created before the column
+    existed, while leaving a platform-admin's config / enabled / priority /
+    description edits untouched — those survive every re-seed. Only the
+    five shipped identities can conflict here; a PA-created rule has a
+    different (tier, check_id, stage) and is never stamped.
     """
     import json
 
@@ -148,9 +157,10 @@ async def _seed_platform_safety_rules(
         await conn.execute(
             """
             INSERT INTO platform_safety_rules
-                (tier, stage, check_id, config, priority, description)
-            VALUES ('default', $1, $2, $3::jsonb, $4, $5)
-            ON CONFLICT (tier, check_id, stage) DO NOTHING
+                (tier, stage, check_id, config, priority, description, is_seeded)
+            VALUES ('default', $1, $2, $3::jsonb, $4, $5, TRUE)
+            ON CONFLICT (tier, check_id, stage)
+                DO UPDATE SET is_seeded = TRUE
             """,
             stage,
             check_id,
@@ -1239,10 +1249,25 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             priority        INTEGER NOT NULL DEFAULT 1000,
             enabled         BOOLEAN NOT NULL DEFAULT TRUE,
             description     TEXT NOT NULL DEFAULT '',
+            -- ``is_seeded`` marks the shipped factory defaults (seeded at
+            -- build time, insert-if-absent). They are managed disable-only:
+            -- the platform-admin write API forbids hard-deleting them
+            -- (a delete would be undone by the next seed on a fresh DB),
+            -- but config / enabled edits ARE allowed and survive re-seed
+            -- (the seed is ON CONFLICT DO NOTHING). PA-created rules carry
+            -- FALSE and allow full CRUD.
+            is_seeded       BOOLEAN NOT NULL DEFAULT FALSE,
             created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
             updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
         )
     """)
+    # Backfill for a pre-existing DB created before the is_seeded column.
+    # Idempotent ADD COLUMN IF NOT EXISTS; the column defaults FALSE, then
+    # the seed below stamps TRUE on the rows it owns (its UPDATE branch).
+    await conn.execute(
+        "ALTER TABLE platform_safety_rules "
+        "ADD COLUMN IF NOT EXISTS is_seeded BOOLEAN NOT NULL DEFAULT FALSE"
+    )
     # Identity for the idempotent seed: one platform rule per
     # (tier, check_id, stage). The seed's ON CONFLICT keys on this.
     await conn.execute(

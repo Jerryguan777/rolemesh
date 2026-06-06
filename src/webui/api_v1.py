@@ -37,6 +37,7 @@ from webui.v1.credentials import router as credentials_router
 from webui.v1.mcp_servers import router as mcp_servers_router
 from webui.v1.models import router as models_router
 from webui.v1.platform_credentials import router as platform_credentials_router
+from webui.v1.platform_safety import router as platform_safety_router
 from webui.v1.platform_tenants import router as platform_tenants_router
 from webui.v1.runs import router as runs_router
 from webui.v1.safety import router as safety_router
@@ -92,6 +93,8 @@ router.include_router(bindings_router)
 router.include_router(admin_models_router)
 # Credential pool — platform-plane key management (platform_admin only).
 router.include_router(platform_credentials_router)
+# Platform safety rules — cross-tenant rule catalog (platform_admin only).
+router.include_router(platform_safety_router)
 # Tenant lifecycle — platform-plane provision/suspend/resume (platform_admin
 # only). Distinct from the owner-only /tenant settings surface below.
 router.include_router(platform_tenants_router)

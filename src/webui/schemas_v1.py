@@ -1413,6 +1413,72 @@ class SafetyRuleAuditPage(BaseModel):
     offset: int = Field(ge=0)
 
 
+# ---------------------------------------------------------------------------
+# Platform safety rules (cross-tenant, platform_admin only)
+# ---------------------------------------------------------------------------
+
+
+PlatformSafetyTier = Literal["floor", "transparent_floor", "default"]
+
+
+class PlatformSafetyRule(BaseModel):
+    """Wire projection of a ``platform_safety_rules`` row (all tiers).
+
+    The platform-admin surface, unlike the tenant read, exposes ALL tiers
+    (floor included) and the ``is_seeded`` flag. ``is_seeded`` rules are the
+    shipped factory defaults: editable / disablable but never hard-deletable
+    (a delete would be undone by the next build-time seed).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    tier: PlatformSafetyTier
+    stage: SafetyStage
+    check_id: str
+    config: dict[str, object] = Field(default_factory=dict)
+    priority: int
+    enabled: bool
+    description: str
+    is_seeded: bool
+    created_at: str
+    updated_at: str
+
+
+class PlatformSafetyRuleCreate(BaseModel):
+    """``POST /api/v1/platform/safety/rules`` body.
+
+    ``tier`` / ``stage`` / ``check_id`` form the rule identity. The handler
+    additionally validates ``check_id`` against the safety check registry and
+    that the check supports ``stage`` (400 ``INVALID_RULE`` otherwise).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tier: PlatformSafetyTier
+    stage: SafetyStage
+    check_id: str = Field(min_length=1, max_length=128)
+    config: dict[str, object] = Field(default_factory=dict)
+    priority: int = Field(1000, ge=-1000, le=1000)
+    description: str = Field("", max_length=500)
+
+
+class PlatformSafetyRuleUpdate(BaseModel):
+    """``PATCH /api/v1/platform/safety/rules/{id}`` body.
+
+    Only the mutable fields — ``tier`` / ``stage`` / ``check_id`` are the
+    immutable identity and cannot be patched (create a new rule instead).
+    Every field is optional; omitted fields are left untouched.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    config: dict[str, object] | None = None
+    priority: int | None = Field(None, ge=-1000, le=1000)
+    description: str | None = Field(None, max_length=500)
+    enabled: bool | None = None
+
+
 class MessagePage(BaseModel):
     """Cursor page of conversation messages.
 

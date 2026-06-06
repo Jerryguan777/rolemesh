@@ -22,9 +22,20 @@ Two read paths, deliberately on different pools:
     Floor-tier rows are filtered out here — that is where the three-tier
     visibility contract lives.
 
-This phase exposes no write helpers: the 5 default-tier rules are seeded
-via schema seeding (:func:`rolemesh.db.schema._seed_platform_safety_rules`)
-and there is no platform-admin write REST yet.
+Write helpers (:func:`create_platform_rule`, :func:`update_platform_rule`,
+:func:`set_platform_rule_enabled`, :func:`delete_platform_rule`) and the
+all-tiers reads (:func:`list_all_platform_rules`, :func:`get_platform_rule`)
+back the platform-admin REST surface (``/api/v1/platform/safety/rules``).
+They run on **admin_conn**: ``rolemesh_app`` holds SELECT but never
+INSERT/UPDATE/DELETE on this catalog (see schema GRANTs), so writes MUST
+use the cross-tenant maintenance pool. Unlike the tenant-facing read,
+these surface ALL tiers (floor included) — the platform operator manages
+floor; only its *visibility* is suppressed for tenants.
+
+The 5 default-tier rules are still seeded at build time
+(:func:`rolemesh.db.schema._seed_platform_safety_rules`) and carry
+``is_seeded = TRUE``; they are managed disable-only (the write API
+forbids hard-deleting them — a delete would be undone by the next seed).
 """
 
 from __future__ import annotations
@@ -39,8 +50,14 @@ if TYPE_CHECKING:
 
 __all__ = [
     "VISIBLE_TIERS",
+    "create_platform_rule",
+    "delete_platform_rule",
     "fetch_platform_rule_snapshots",
+    "get_platform_rule",
+    "list_all_platform_rules",
     "list_visible_platform_rules",
+    "set_platform_rule_enabled",
+    "update_platform_rule",
 ]
 
 # Tiers a tenant is allowed to SEE. ``floor`` is intentionally absent —
@@ -86,6 +103,7 @@ def _row_to_dict(row: asyncpg.Record) -> dict[str, Any]:
         "priority": int(row["priority"]),
         "enabled": bool(row["enabled"]),
         "description": row["description"] or "",
+        "is_seeded": bool(row["is_seeded"]),
         "created_at": row["created_at"].isoformat() if row["created_at"] else "",
         "updated_at": row["updated_at"].isoformat() if row["updated_at"] else "",
     }
@@ -131,3 +149,149 @@ async def list_visible_platform_rules(tenant_id: str) -> list[dict[str, Any]]:
             list(VISIBLE_TIERS),
         )
     return [_row_to_dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Platform-admin management (admin_conn) — all tiers, including floor.
+# ---------------------------------------------------------------------------
+
+
+async def list_all_platform_rules() -> list[dict[str, Any]]:
+    """Every platform rule across ALL tiers (floor included).
+
+    For the platform-admin surface — the operator manages floor too, so
+    (unlike :func:`list_visible_platform_rules`) nothing is filtered.
+    Runs on ``admin_conn``: this is platform-plane management, not a
+    tenant read.
+    """
+    async with admin_conn() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT * FROM platform_safety_rules
+            ORDER BY tier, priority DESC, created_at
+            """
+        )
+    return [_row_to_dict(r) for r in rows]
+
+
+async def get_platform_rule(rule_id: str) -> dict[str, Any] | None:
+    """One platform rule by id, any tier (or None). ``admin_conn``."""
+    async with admin_conn() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM platform_safety_rules WHERE id = $1", rule_id
+        )
+    return _row_to_dict(row) if row is not None else None
+
+
+async def create_platform_rule(
+    *,
+    tier: str,
+    stage: str,
+    check_id: str,
+    config: dict[str, Any],
+    priority: int,
+    description: str,
+) -> dict[str, Any]:
+    """Insert a platform-admin-created rule (``is_seeded = FALSE``).
+
+    ``admin_conn`` — the business role cannot write this catalog. The
+    UNIQUE ``(tier, check_id, stage)`` identity is enforced by the DB; a
+    duplicate raises ``asyncpg.UniqueViolationError`` for the caller to
+    map to a 409.
+    """
+    async with admin_conn() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO platform_safety_rules
+                (tier, stage, check_id, config, priority, description,
+                 is_seeded)
+            VALUES ($1, $2, $3, $4::jsonb, $5, $6, FALSE)
+            RETURNING *
+            """,
+            tier,
+            stage,
+            check_id,
+            json.dumps(config),
+            priority,
+            description,
+        )
+    # INSERT ... RETURNING always yields a row; the assert narrows the
+    # asyncpg ``Record | None`` type for the projector.
+    assert row is not None
+    return _row_to_dict(row)
+
+
+async def update_platform_rule(
+    rule_id: str,
+    *,
+    config: dict[str, Any] | None = None,
+    priority: int | None = None,
+    description: str | None = None,
+    enabled: bool | None = None,
+) -> dict[str, Any] | None:
+    """Patch a platform rule's mutable fields (or None if no such id).
+
+    Only ``config`` / ``priority`` / ``description`` / ``enabled`` are
+    mutable — ``tier`` / ``stage`` / ``check_id`` form the rule identity
+    and are immutable (change = create a new rule). Each ``None`` argument
+    leaves its column untouched via ``COALESCE``. Seeded defaults are
+    editable here; ``is_seeded`` only gates DELETE, not edits. ``admin_conn``.
+    """
+    config_json = json.dumps(config) if config is not None else None
+    async with admin_conn() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE platform_safety_rules
+            SET config      = COALESCE($2::jsonb, config),
+                priority    = COALESCE($3, priority),
+                description = COALESCE($4, description),
+                enabled     = COALESCE($5, enabled),
+                updated_at  = now()
+            WHERE id = $1
+            RETURNING *
+            """,
+            rule_id,
+            config_json,
+            priority,
+            description,
+            enabled,
+        )
+    return _row_to_dict(row) if row is not None else None
+
+
+async def set_platform_rule_enabled(
+    rule_id: str, *, enabled: bool
+) -> dict[str, Any] | None:
+    """Toggle a platform rule's ``enabled`` flag (or None if no such id).
+
+    Backs the dedicated enable/disable endpoints; disable is also the
+    sanctioned way to suppress a seeded default. ``admin_conn``.
+    """
+    async with admin_conn() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE platform_safety_rules
+            SET enabled = $2, updated_at = now()
+            WHERE id = $1
+            RETURNING *
+            """,
+            rule_id,
+            enabled,
+        )
+    return _row_to_dict(row) if row is not None else None
+
+
+async def delete_platform_rule(rule_id: str) -> bool:
+    """Hard-delete a platform rule; True if a row was removed.
+
+    Does NOT itself enforce the seeded-default guard — the REST layer
+    fetches first and refuses (409) when ``is_seeded`` so it can return a
+    clear "disable instead" message rather than a silent miss. ``admin_conn``.
+    """
+    async with admin_conn() as conn:
+        result = await conn.execute(
+            "DELETE FROM platform_safety_rules WHERE id = $1", rule_id
+        )
+    # asyncpg returns the command tag, e.g. "DELETE 1" / "DELETE 0";
+    # the id is a PK so at most one row is ever affected.
+    return result == "DELETE 1"

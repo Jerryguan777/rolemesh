@@ -85,10 +85,15 @@ _TENANT_ROLE_ACTIONS: dict[str, set[str]] = {
 #     ``tenant.manage`` (an owner editing their OWN tenant's settings): this
 #     one operates a tenant AS a customer across the platform and must never
 #     be reachable by any tenant role.
+#   * safety.platform.manage — mutate the cross-tenant platform safety rule
+#     catalog (``platform_safety_rules`` via ``/api/v1/platform/safety/rules``).
+#     Tenants READ the visible tiers through ``safety.read``; only the platform
+#     operator writes them, since one platform rule enforces on every tenant.
 _PLATFORM_ONLY_ACTIONS: set[str] = {
     "credential.pool.manage",
     "model.manage",
     "platform.tenant.manage",
+    "safety.platform.manage",
 }
 
 
