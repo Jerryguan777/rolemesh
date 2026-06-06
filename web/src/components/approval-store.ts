@@ -7,7 +7,7 @@
 // conversation. Three inputs feed it:
 //   - `event.approval.requested`  → a new pending card (idempotent on id)
 //   - `event.approval.resolved`   → an existing card flips to its terminal state
-//   - `GET /api/v1/approval-requests` (reconnect) → the authoritative pending set
+//   - `GET /api/v1/approvals/requests` (reconnect) → the authoritative pending set
 //
 // Every function is pure and returns a fresh array (Lit `@state` change
 // detection is reference-based), never mutating the input. The one exception to

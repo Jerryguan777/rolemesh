@@ -1,16 +1,14 @@
-"""``/api/v1/admin/models`` REST surface (PR24).
+"""``/api/v1/platform/models`` write surface (platform model catalog).
 
-The platform model catalog is read-everyone, write-operator-only. The
-read surface lives at ``/api/v1/models`` and is open to any
-authenticated user; this module owns the writes (POST / PATCH /
-DELETE) behind a role check.
-
-Why split read and write paths under different prefixes? The frontend
-calls the read endpoints on every coworker-create dialog open; an
-RBAC denial there would break the happy path for everyone. Keeping
-the writes on a separate `/admin/models` path lets the SPA gate the
-admin UI behind `me.role == "owner"` without having to special-case
-403 responses on the read path.
+The model catalog is platform-global (no tenant scoping) and read by
+every authenticated user — the read surface lives at ``/api/v1/models``
+and is open so the coworker-create dialog never hits an RBAC denial on
+its happy path. This module owns the writes (POST / PATCH / DELETE),
+which mutate that shared catalog and so are gated to the platform
+operator via the platform-only ``model.manage`` capability
+(``platform_admin`` only — a tenant ``owner`` must NOT be able to edit a
+catalog every other tenant sees). Writes live on the ``/platform/*``
+plane to keep that "operator-only, cross-tenant" boundary obvious.
 """
 
 from __future__ import annotations
@@ -28,14 +26,14 @@ from rolemesh.db import (
     soft_delete_model,
     update_model,
 )
-from webui.dependencies import get_current_user
+from webui.dependencies import require_action
 from webui.schemas_v1 import Model, ModelCreate, ModelUpdate
 from webui.v1.errors import ErrorResponseException, raise_error_response
 
 if TYPE_CHECKING:
     from rolemesh.auth.provider import AuthenticatedUser
 
-router = APIRouter(prefix="/admin/models", tags=["Admin"])
+router = APIRouter(prefix="/platform/models", tags=["Platform"])
 
 
 def _to_response(m: ModelRow) -> Model:
@@ -50,28 +48,11 @@ def _to_response(m: ModelRow) -> Model:
     )
 
 
-def _require_owner(user: AuthenticatedUser) -> None:
-    """Enforce the role gate for write operations.
-
-    Spelled out at the top of every write handler rather than via a
-    FastAPI dependency so the role rule reads next to the operation it
-    guards — easier to audit when a future PR adds a new write
-    endpoint and forgets to wire the dependency.
-    """
-    if user.role != "owner":
-        raise ErrorResponseException(
-            status_code=403,
-            code="FORBIDDEN",
-            message="Only tenant owners may mutate the platform model catalog.",
-        )
-
-
 @router.post("", response_model=Model, status_code=201)
 async def create_model_endpoint(
     body: ModelCreate,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("model.manage")),
 ) -> Model:
-    _require_owner(user)
     try:
         row = await create_model(
             provider=body.provider,
@@ -97,9 +78,8 @@ async def create_model_endpoint(
 async def update_model_endpoint(
     model_id: str,
     body: ModelUpdate,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("model.manage")),
 ) -> Model:
-    _require_owner(user)
     try:
         updated = await update_model(
             model_id,
@@ -121,9 +101,8 @@ async def update_model_endpoint(
 @router.delete("/{model_id}", status_code=204)
 async def delete_model_endpoint(
     model_id: str,
-    user: AuthenticatedUser = Depends(get_current_user),
+    user: AuthenticatedUser = Depends(require_action("model.manage")),
 ) -> Response:
-    _require_owner(user)
     # Confirm the model exists before checking usage — that gives a
     # distinct 404 vs 409 path so the SPA can tell "this model is
     # gone" from "this model is still in use".

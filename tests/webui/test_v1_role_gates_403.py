@@ -8,7 +8,7 @@ accidentally over-tight.
 
 The ownership-escape cases are the subtle ones: a member CAN update/delete a
 coworker/skill they created, and CANNOT touch one created by someone else (the
-gate falls back to requiring ``agent.manage`` / ``skill.manage``).
+gate falls back to requiring ``coworker.manage`` / ``skill.manage``).
 
 Auth is injected by overriding ``get_current_user`` with a fixed role, so the
 role under test is exactly the one the gate sees (``require_action`` resolves
@@ -104,13 +104,13 @@ async def _seed_skill(tenant_id: str, *, created_by: str | None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# coworkers: create requires agent.create (all roles); manage gated for member
+# coworkers: create requires coworker.create (all roles); manage gated for member
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_member_can_create_coworker() -> None:
-    """agent.create is granted to member — the boundary role passes."""
+    """coworker.create is granted to member — the boundary role passes."""
     tid = await _tenant()
     uid = await _user(tid, "member")
     app = _build_app(_authed(tid, uid, "member"))
@@ -152,7 +152,7 @@ async def test_member_cannot_manage_unattributed_coworker() -> None:
     """Three-valued logic: created_by_user_id IS NULL is NOT 'mine'.
 
     A member must not be able to claim an un-attributed (legacy/system)
-    coworker as their own; NULL falls through to requiring agent.manage.
+    coworker as their own; NULL falls through to requiring coworker.manage.
     """
     tid = await _tenant()
     member_id = await _user(tid, "member")
@@ -166,7 +166,7 @@ async def test_member_cannot_manage_unattributed_coworker() -> None:
 
 @pytest.mark.asyncio
 async def test_admin_can_manage_any_coworker() -> None:
-    """agent.manage holder reaches a coworker they did not create."""
+    """coworker.manage holder reaches a coworker they did not create."""
     tid = await _tenant()
     creator = await _user(tid, "member")
     admin_id = await _user(tid, "admin")
@@ -279,12 +279,12 @@ async def test_member_cannot_write_approval_policy_admin_can() -> None:
 
     member_app = _build_app(_authed(tid, member_id, "member"))
     async with _client(member_app) as c:
-        denied = await c.post("/api/v1/approval-policies", json=payload)
+        denied = await c.post("/api/v1/approvals/policies", json=payload)
     assert denied.status_code == 403, denied.text
 
     admin_app = _build_app(_authed(tid, admin_id, "admin"))
     async with _client(admin_app) as c:
-        ok = await c.post("/api/v1/approval-policies", json=payload)
+        ok = await c.post("/api/v1/approvals/policies", json=payload)
     assert ok.status_code == 201, ok.text
 
 
@@ -304,7 +304,7 @@ async def test_only_owner_can_put_credential() -> None:
     for uid, role in ((member_id, "member"), (admin_id, "admin")):
         app = _build_app(_authed(tid, uid, role))
         async with _client(app) as c:
-            denied = await c.put("/api/v1/tenant/credentials/anthropic", json=body)
+            denied = await c.put("/api/v1/credentials/anthropic", json=body)
         assert denied.status_code == 403, f"{role}: {denied.text}"
 
     # Owner is the boundary role: the PUT must pass the gate AND succeed.
@@ -314,7 +314,7 @@ async def test_only_owner_can_put_credential() -> None:
     try:
         owner_app = _build_app(_authed(tid, owner_id, "owner"))
         async with _client(owner_app) as c:
-            resp = await c.put("/api/v1/tenant/credentials/anthropic", json=body)
+            resp = await c.put("/api/v1/credentials/anthropic", json=body)
         assert resp.status_code == 200, resp.text
     finally:
         set_credential_vault(None)
@@ -328,12 +328,12 @@ async def test_admin_cannot_list_credentials_owner_can() -> None:
 
     admin_app = _build_app(_authed(tid, admin_id, "admin"))
     async with _client(admin_app) as c:
-        denied = await c.get("/api/v1/tenant/credentials")
+        denied = await c.get("/api/v1/credentials")
     assert denied.status_code == 403, denied.text
 
     owner_app = _build_app(_authed(tid, owner_id, "owner"))
     async with _client(owner_app) as c:
-        ok = await c.get("/api/v1/tenant/credentials")
+        ok = await c.get("/api/v1/credentials")
     assert ok.status_code == 200, ok.text
 
 
@@ -370,5 +370,5 @@ async def test_platform_admin_passes_owner_only_credential_gate() -> None:
     pa_id = await _user(tid, "platform_admin")
     app = _build_app(_authed(tid, pa_id, "platform_admin"))
     async with _client(app) as c:
-        ok = await c.get("/api/v1/tenant/credentials")
+        ok = await c.get("/api/v1/credentials")
     assert ok.status_code == 200, ok.text

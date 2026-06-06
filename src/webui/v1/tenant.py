@@ -5,9 +5,9 @@ Equivalence migration of the legacy ``/api/admin/tenant`` GET/PATCH
 response shape, gated by the owner-only ``tenant.manage`` capability,
 returning the design §13 error envelope.
 
-The ``/tenant`` prefix sits alongside (not in conflict with) the
-``/tenant/credentials`` sub-surface served by :mod:`webui.v1.credentials`
-— FastAPI matches the more specific path first.
+This resource only carries tenant *settings*; per-tenant credentials are
+a separate top-level resource at ``/api/v1/credentials``
+(:mod:`webui.v1.credentials`).
 """
 
 from __future__ import annotations

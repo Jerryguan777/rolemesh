@@ -6,7 +6,7 @@
 // reject controls.
 //
 // State scope: the component self-holds its own `ApprovalRequest[]`
-// fetched from `GET /api/v1/approval-requests` WITHOUT a conversation_id
+// fetched from `GET /api/v1/approvals/requests` WITHOUT a conversation_id
 // filter (tenant-wide; RLS scopes to the user's tenant server-side). The
 // approval-store is deliberately NOT lifted to the shell — the inbox and
 // the chat panel each keep their own view; the inbox is fed by explicit

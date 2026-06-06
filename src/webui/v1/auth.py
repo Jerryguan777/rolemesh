@@ -133,20 +133,6 @@ async def post_ws_ticket(
     return WsTicket(ticket=token, expires_in_s=exp)
 
 
-@router.get("/me", response_model=Me, include_in_schema=False)
-async def get_me_auth_alias(
-    user: AuthenticatedUser = Depends(get_current_user),
-) -> Me:
-    """Convenience alias under ``/auth/me`` — same body as ``/me``.
-
-    The yaml only documents ``/api/v1/me``; this alias exists so a
-    typo in the SPA path doesn't 404 silently. Kept out of the
-    OpenAPI schema (``include_in_schema=False``) so it doesn't
-    drift the freshness check.
-    """
-    return _user_to_me(user)
-
-
 me_router = APIRouter(tags=["Auth"])
 
 

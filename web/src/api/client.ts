@@ -337,7 +337,7 @@ export class ApiClient {
   // ------------------------------------------------------------------
 
   async listCredentials(): Promise<CredentialResponse[]> {
-    const resp = await fetch(`${this.baseUrl}/api/v1/tenant/credentials`, {
+    const resp = await fetch(`${this.baseUrl}/api/v1/credentials`, {
       method: 'GET',
       headers: this.headers(),
     });
@@ -353,7 +353,7 @@ export class ApiClient {
     body: CredentialUpsert,
   ): Promise<CredentialResponse> {
     const resp = await fetch(
-      `${this.baseUrl}/api/v1/tenant/credentials/${encodeURIComponent(provider)}`,
+      `${this.baseUrl}/api/v1/credentials/${encodeURIComponent(provider)}`,
       {
         method: 'PUT',
         headers: this.headers({ 'Content-Type': 'application/json' }),
@@ -366,7 +366,7 @@ export class ApiClient {
 
   async deleteCredential(provider: ModelProvider): Promise<void> {
     const resp = await fetch(
-      `${this.baseUrl}/api/v1/tenant/credentials/${encodeURIComponent(provider)}`,
+      `${this.baseUrl}/api/v1/credentials/${encodeURIComponent(provider)}`,
       { method: 'DELETE', headers: this.headers() },
     );
     if (!resp.ok) throw await this.parseError(resp);
@@ -428,7 +428,7 @@ export class ApiClient {
     // Paged endpoint; request the max window and return the items so
     // callers keep their array shape (page-through UI is a follow-up).
     const resp = await fetch(
-      `${this.baseUrl}/api/v1/approval-policies?limit=200`,
+      `${this.baseUrl}/api/v1/approvals/policies?limit=200`,
       { method: 'GET', headers: this.headers() },
     );
     if (!resp.ok) throw await this.parseError(resp);
@@ -439,7 +439,7 @@ export class ApiClient {
   async createApprovalPolicy(
     body: ApprovalPolicyCreate,
   ): Promise<ApprovalPolicy> {
-    const resp = await fetch(`${this.baseUrl}/api/v1/approval-policies`, {
+    const resp = await fetch(`${this.baseUrl}/api/v1/approvals/policies`, {
       method: 'POST',
       headers: this.headers({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(body),
@@ -453,7 +453,7 @@ export class ApiClient {
     body: ApprovalPolicyUpdate,
   ): Promise<ApprovalPolicy> {
     const resp = await fetch(
-      `${this.baseUrl}/api/v1/approval-policies/${encodeURIComponent(id)}`,
+      `${this.baseUrl}/api/v1/approvals/policies/${encodeURIComponent(id)}`,
       {
         method: 'PATCH',
         headers: this.headers({ 'Content-Type': 'application/json' }),
@@ -466,7 +466,7 @@ export class ApiClient {
 
   async deleteApprovalPolicy(id: string): Promise<void> {
     const resp = await fetch(
-      `${this.baseUrl}/api/v1/approval-policies/${encodeURIComponent(id)}`,
+      `${this.baseUrl}/api/v1/approvals/policies/${encodeURIComponent(id)}`,
       { method: 'DELETE', headers: this.headers() },
     );
     if (!resp.ok) throw await this.parseError(resp);
@@ -481,7 +481,7 @@ export class ApiClient {
     const qs = new URLSearchParams({ limit: '200' });
     if (conversationId) qs.set('conversation_id', conversationId);
     const resp = await fetch(
-      `${this.baseUrl}/api/v1/approval-requests?${qs}`,
+      `${this.baseUrl}/api/v1/approvals/requests?${qs}`,
       { method: 'GET', headers: this.headers() },
     );
     if (!resp.ok) throw await this.parseError(resp);

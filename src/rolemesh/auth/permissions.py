@@ -27,9 +27,9 @@ UserRole = Literal["platform_admin", "owner", "admin", "member"]
 # new action is added to any tenant role.
 _TENANT_ROLE_ACTIONS: dict[str, set[str]] = {
     "owner": {
-        "agent.create",
-        "agent.manage",
-        "agent.use",
+        "coworker.create",
+        "coworker.manage",
+        "coworker.use",
         "skill.create",
         "skill.manage",
         "mcp.configure",
@@ -44,9 +44,9 @@ _TENANT_ROLE_ACTIONS: dict[str, set[str]] = {
     "admin": {
         # Admin lacks BYOK credential management and tenant settings (both
         # owner-only) per the §3 role matrix.
-        "agent.create",
-        "agent.manage",
-        "agent.use",
+        "coworker.create",
+        "coworker.manage",
+        "coworker.use",
         "skill.create",
         "skill.manage",
         "mcp.configure",
@@ -61,8 +61,8 @@ _TENANT_ROLE_ACTIONS: dict[str, set[str]] = {
         # ownership-escape helper) manage the ones they created — but the
         # ``*.manage`` capability that reaches others'/shared resources is
         # withheld here.
-        "agent.create",
-        "agent.use",
+        "coworker.create",
+        "coworker.use",
         "skill.create",
     },
 }
@@ -74,7 +74,11 @@ _TENANT_ROLE_ACTIONS: dict[str, set[str]] = {
 #     (``platform_provider_credentials``). Tenants elect the pool via their
 #     own ``credential.byok.manage``-gated route; only the platform operator
 #     configures the underlying keys.
-_PLATFORM_ONLY_ACTIONS: set[str] = {"credential.pool.manage"}
+#   * model.manage — mutate the platform-global model catalog
+#     (``/api/v1/platform/models``). Every tenant READS the catalog at
+#     ``/api/v1/models``; only the platform operator may write it (a tenant
+#     owner must not edit a catalog every other tenant sees).
+_PLATFORM_ONLY_ACTIONS: set[str] = {"credential.pool.manage", "model.manage"}
 
 
 def _all_known_actions() -> set[str]:

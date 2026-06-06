@@ -1,4 +1,4 @@
-"""Integration tests for ``/api/v1/tenant/credentials``.
+"""Integration tests for ``/api/v1/credentials``.
 
 Pins design §8.1 invariants from the HTTP layer:
 
@@ -90,7 +90,7 @@ async def test_put_credential_creates_then_get_lists_metadata_only(vault):
     user = await _make_user()
     async with _client(_build_app(user)) as ac:
         put = await ac.put(
-            "/api/v1/tenant/credentials/anthropic",
+            "/api/v1/credentials/anthropic",
             json={"api_key": "sk-ant-test-1234"},
             headers={"Authorization": "Bearer x"},
         )
@@ -103,7 +103,7 @@ async def test_put_credential_creates_then_get_lists_metadata_only(vault):
         assert "sk-ant-test-1234" not in put.text
 
         listing = await ac.get(
-            "/api/v1/tenant/credentials",
+            "/api/v1/credentials",
             headers={"Authorization": "Bearer x"},
         )
         assert listing.status_code == 200
@@ -129,7 +129,7 @@ async def test_put_credential_writes_fernet_ciphertext_not_plaintext(vault):
     sentinel = f"SENTINEL_LEAK_{uuid.uuid4().hex}"
     async with _client(_build_app(user)) as ac:
         put = await ac.put(
-            "/api/v1/tenant/credentials/anthropic",
+            "/api/v1/credentials/anthropic",
             json={"api_key": sentinel},
             headers={"Authorization": "Bearer x"},
         )
@@ -161,12 +161,12 @@ async def test_put_credential_overwrites_existing(vault):
     user = await _make_user()
     async with _client(_build_app(user)) as ac:
         first = await ac.put(
-            "/api/v1/tenant/credentials/anthropic",
+            "/api/v1/credentials/anthropic",
             json={"api_key": "first"},
             headers={"Authorization": "Bearer x"},
         )
         second = await ac.put(
-            "/api/v1/tenant/credentials/anthropic",
+            "/api/v1/credentials/anthropic",
             json={"api_key": "second"},
             headers={"Authorization": "Bearer x"},
         )
@@ -191,7 +191,7 @@ async def test_put_credential_with_extras_roundtrips(vault):
     user = await _make_user()
     async with _client(_build_app(user)) as ac:
         resp = await ac.put(
-            "/api/v1/tenant/credentials/bedrock",
+            "/api/v1/credentials/bedrock",
             json={"api_key": "akia-test", "extras": {"region": "us-east-1"}},
             headers={"Authorization": "Bearer x"},
         )
@@ -231,12 +231,12 @@ async def test_delete_credential_returns_409_when_in_use(vault):
 
     async with _client(_build_app(user)) as ac:
         await ac.put(
-            "/api/v1/tenant/credentials/anthropic",
+            "/api/v1/credentials/anthropic",
             json={"api_key": "sk-test"},
             headers={"Authorization": "Bearer x"},
         )
         resp = await ac.delete(
-            "/api/v1/tenant/credentials/anthropic",
+            "/api/v1/credentials/anthropic",
             headers={"Authorization": "Bearer x"},
         )
     assert resp.status_code == 409
@@ -249,19 +249,19 @@ async def test_delete_credential_succeeds_when_no_references(vault):
     user = await _make_user()
     async with _client(_build_app(user)) as ac:
         await ac.put(
-            "/api/v1/tenant/credentials/anthropic",
+            "/api/v1/credentials/anthropic",
             json={"api_key": "sk-test"},
             headers={"Authorization": "Bearer x"},
         )
         resp = await ac.delete(
-            "/api/v1/tenant/credentials/anthropic",
+            "/api/v1/credentials/anthropic",
             headers={"Authorization": "Bearer x"},
         )
     assert resp.status_code == 204
     # Subsequent GET shows the row is gone.
     async with _client(_build_app(user)) as ac:
         listing = await ac.get(
-            "/api/v1/tenant/credentials",
+            "/api/v1/credentials",
             headers={"Authorization": "Bearer x"},
         )
     assert listing.json() == []
@@ -271,7 +271,7 @@ async def test_delete_credential_returns_404_when_unknown(vault):
     user = await _make_user()
     async with _client(_build_app(user)) as ac:
         resp = await ac.delete(
-            "/api/v1/tenant/credentials/anthropic",
+            "/api/v1/credentials/anthropic",
             headers={"Authorization": "Bearer x"},
         )
     assert resp.status_code == 404
@@ -332,7 +332,7 @@ async def test_put_credential_publishes_restart_per_affected_coworker(
 
     async with _client(_build_app(user)) as ac:
         resp = await ac.put(
-            "/api/v1/tenant/credentials/anthropic",
+            "/api/v1/credentials/anthropic",
             json={"api_key": "sk-test"},
             headers={"Authorization": "Bearer x"},
         )
@@ -360,7 +360,7 @@ async def test_put_credential_does_not_publish_for_unused_provider(
 
     async with _client(_build_app(user)) as ac:
         resp = await ac.put(
-            "/api/v1/tenant/credentials/openai",
+            "/api/v1/credentials/openai",
             json={"api_key": "sk-test"},
             headers={"Authorization": "Bearer x"},
         )
@@ -378,7 +378,7 @@ async def test_put_credential_reports_byok_mode(vault):
     user = await _make_user()
     async with _client(_build_app(user)) as ac:
         put = await ac.put(
-            "/api/v1/tenant/credentials/anthropic",
+            "/api/v1/credentials/anthropic",
             json={"api_key": "sk-ant-test"},
             headers={"Authorization": "Bearer x"},
         )
@@ -386,7 +386,7 @@ async def test_put_credential_reports_byok_mode(vault):
         assert put.json()["mode"] == "byok"
 
         listing = await ac.get(
-            "/api/v1/tenant/credentials",
+            "/api/v1/credentials",
             headers={"Authorization": "Bearer x"},
         )
     assert listing.json()[0]["mode"] == "byok"
@@ -397,7 +397,7 @@ async def test_elect_pool_sets_pool_mode(vault):
     user = await _make_user()
     async with _client(_build_app(user)) as ac:
         resp = await ac.put(
-            "/api/v1/tenant/credentials/anthropic/pool",
+            "/api/v1/credentials/anthropic/pool",
             headers={"Authorization": "Bearer x"},
         )
         assert resp.status_code == 200, resp.text
@@ -405,7 +405,7 @@ async def test_elect_pool_sets_pool_mode(vault):
         assert resp.json()["mode"] == "pool"
 
         listing = await ac.get(
-            "/api/v1/tenant/credentials",
+            "/api/v1/credentials",
             headers={"Authorization": "Bearer x"},
         )
     body = listing.json()
@@ -423,12 +423,12 @@ async def test_elect_pool_retains_dormant_byok_key(vault):
     user = await _make_user()
     async with _client(_build_app(user)) as ac:
         await ac.put(
-            "/api/v1/tenant/credentials/anthropic",
+            "/api/v1/credentials/anthropic",
             json={"api_key": "sk-original"},
             headers={"Authorization": "Bearer x"},
         )
         await ac.put(
-            "/api/v1/tenant/credentials/anthropic/pool",
+            "/api/v1/credentials/anthropic/pool",
             headers={"Authorization": "Bearer x"},
         )
 
@@ -450,7 +450,7 @@ async def test_elect_pool_first_time_has_null_key(vault):
     user = await _make_user()
     async with _client(_build_app(user)) as ac:
         resp = await ac.put(
-            "/api/v1/tenant/credentials/openai/pool",
+            "/api/v1/credentials/openai/pool",
             headers={"Authorization": "Bearer x"},
         )
     assert resp.status_code == 200, resp.text
@@ -495,7 +495,7 @@ async def test_elect_pool_publishes_restart_per_affected_coworker(
 
     async with _client(_build_app(user)) as ac:
         resp = await ac.put(
-            "/api/v1/tenant/credentials/anthropic/pool",
+            "/api/v1/credentials/anthropic/pool",
             headers={"Authorization": "Bearer x"},
         )
     assert resp.status_code == 200
@@ -540,13 +540,13 @@ async def test_get_credentials_isolated_per_tenant(vault):
     b = await _make_user("b")
     async with _client(_build_app(a)) as ac:
         await ac.put(
-            "/api/v1/tenant/credentials/anthropic",
+            "/api/v1/credentials/anthropic",
             json={"api_key": "for-a"},
             headers={"Authorization": "Bearer x"},
         )
     async with _client(_build_app(b)) as ac:
         listing = await ac.get(
-            "/api/v1/tenant/credentials",
+            "/api/v1/credentials",
             headers={"Authorization": "Bearer x"},
         )
     assert listing.status_code == 200

@@ -106,7 +106,7 @@ async def get_run_endpoint(
 async def cancel_run_endpoint(
     run_id: str,
     response: Response,
-    user: AuthenticatedUser = Depends(require_action("agent.use")),
+    user: AuthenticatedUser = Depends(require_action("coworker.use")),
 ) -> Run:
     """Request cancellation of an in-flight run.
 

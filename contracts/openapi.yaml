@@ -30,12 +30,11 @@ tags:
   - name: Models
   - name: Runs
   - name: Skills
-  - name: ApprovalPolicies
+  - name: Approvals
   - name: Users
   - name: Tenant
   - name: Safety
-  - name: Schedules
-  - name: Admin
+  - name: Tasks
   - name: Platform
 
 paths:
@@ -566,7 +565,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
-  /api/v1/tenant/credentials:
+  /api/v1/credentials:
     get:
       tags: [Credentials]
       operationId: listTenantCredentials
@@ -587,7 +586,7 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
-  /api/v1/tenant/credentials/{provider}:
+  /api/v1/credentials/{provider}:
     parameters:
       - in: path
         name: provider
@@ -648,7 +647,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
 
-  /api/v1/tenant/credentials/{provider}/pool:
+  /api/v1/credentials/{provider}/pool:
     parameters:
       - in: path
         name: provider
@@ -1303,9 +1302,9 @@ paths:
   # ===================================================================
   # HITL tool approval (docs/21-hitl-approval-plan.md §10 S5)
   # ===================================================================
-  /api/v1/approval-policies:
+  /api/v1/approvals/policies:
     get:
-      tags: [ApprovalPolicies]
+      tags: [Approvals]
       operationId: listApprovalPolicies
       summary: List the tenant's HITL approval policies
       description: |
@@ -1325,7 +1324,7 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
     post:
-      tags: [ApprovalPolicies]
+      tags: [Approvals]
       operationId: createApprovalPolicy
       summary: Create an approval policy
       description: |
@@ -1352,11 +1351,11 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
-  /api/v1/approval-policies/{id}:
+  /api/v1/approvals/policies/{id}:
     parameters:
       - $ref: '#/components/parameters/IdInPath'
     get:
-      tags: [ApprovalPolicies]
+      tags: [Approvals]
       operationId: getApprovalPolicy
       security: [ { bearerAuth: [] } ]
       responses:
@@ -1370,7 +1369,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
     patch:
-      tags: [ApprovalPolicies]
+      tags: [Approvals]
       operationId: updateApprovalPolicy
       summary: Partially update an approval policy
       security: [ { bearerAuth: [] } ]
@@ -1392,7 +1391,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
     delete:
-      tags: [ApprovalPolicies]
+      tags: [Approvals]
       operationId: deleteApprovalPolicy
       summary: Delete an approval policy
       security: [ { bearerAuth: [] } ]
@@ -1404,9 +1403,9 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
-  /api/v1/approval-requests:
+  /api/v1/approvals/requests:
     get:
-      tags: [ApprovalPolicies]
+      tags: [Approvals]
       operationId: listPendingApprovalRequests
       summary: List in-flight pending approval requests (web reconnect)
       description: |
@@ -1810,10 +1809,10 @@ paths:
         '403':
           $ref: '#/components/responses/Forbidden'
 
-  /api/v1/schedules:
+  /api/v1/tasks:
     get:
-      tags: [Schedules]
-      operationId: schedulesList
+      tags: [Tasks]
+      operationId: tasksList
       summary: List scheduled tasks for the tenant
       description: |
         Read-only listing of the `scheduled_tasks` table for the
@@ -1840,10 +1839,10 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
-  /api/v1/schedules/{id}:
+  /api/v1/tasks/{id}:
     get:
-      tags: [Schedules]
-      operationId: schedulesGet
+      tags: [Tasks]
+      operationId: tasksGet
       summary: Fetch one scheduled task
       security: [ { bearerAuth: [] } ]
       parameters:
@@ -1859,8 +1858,8 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
     delete:
-      tags: [Schedules]
-      operationId: schedulesDelete
+      tags: [Tasks]
+      operationId: tasksDelete
       summary: Delete a scheduled task
       description: |
         Removes a scheduled task. Gated by `task.manage` (owner +
@@ -2015,15 +2014,16 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
-  /api/v1/admin/models:
+  /api/v1/platform/models:
     post:
-      tags: [Admin]
-      operationId: adminModelsCreate
-      summary: Register a new platform model (admin only)
+      tags: [Platform]
+      operationId: platformModelsCreate
+      summary: Register a new platform model (platform operator only)
       description: |
-        The `models` catalog is platform-managed — tenants pick from
-        it but only operators add rows. POST/PATCH/DELETE require
-        the `owner` role (design §13 role check).
+        The `models` catalog is platform-global — every tenant reads
+        it at `/api/v1/models`, but only the platform operator writes
+        it. POST/PATCH/DELETE require the platform-only `model.manage`
+        capability (platform_admin).
       security: [ { bearerAuth: [] } ]
       requestBody:
         required: true
@@ -2045,11 +2045,11 @@ paths:
         '422':
           $ref: '#/components/responses/Unprocessable'
 
-  /api/v1/admin/models/{id}:
+  /api/v1/platform/models/{id}:
     patch:
-      tags: [Admin]
-      operationId: adminModelsUpdate
-      summary: Update a platform model (admin only)
+      tags: [Platform]
+      operationId: platformModelsUpdate
+      summary: Update a platform model (platform operator only)
       security: [ { bearerAuth: [] } ]
       parameters:
         - { $ref: '#/components/parameters/IdInPath' }
@@ -2073,9 +2073,9 @@ paths:
         '422':
           $ref: '#/components/responses/Unprocessable'
     delete:
-      tags: [Admin]
-      operationId: adminModelsDelete
-      summary: Retire a platform model (admin only)
+      tags: [Platform]
+      operationId: platformModelsDelete
+      summary: Retire a platform model (platform operator only)
       description: |
         Soft delete — sets `active = false` rather than dropping the
         row so existing coworkers that point at the model keep
@@ -2963,7 +2963,7 @@ components:
           enum: [pending, approved, rejected, expired, cancelled]
           description: |
             Lifecycle status. Always `pending` on the tenant-wide inbox read
-            (`GET /approval-requests`); the conversation sub-resource
+            (`GET /approvals/requests`); the conversation sub-resource
             (`GET /conversations/{id}/approval-requests`) returns every state so
             resolved cards re-render inline in chat history.
         decided_at:

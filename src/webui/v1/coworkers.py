@@ -135,7 +135,7 @@ async def list_coworkers(
 ) -> CoworkerPage:
     """List coworkers visible to the caller (feat/roles PR3 visibility).
 
-    A manager (``agent.manage``: owner/admin/platform_admin) sees every
+    A manager (``coworker.manage``: owner/admin/platform_admin) sees every
     coworker in the tenant; a member sees only ``shared`` coworkers plus
     the private ones they created. The row-level predicate lives in
     :func:`rolemesh.db.get_coworkers_for_tenant`; it is the SQL mirror of
@@ -144,7 +144,7 @@ async def list_coworkers(
     allowlist); only the result SET narrows. ``total`` reflects the
     visible set, not the whole tenant.
     """
-    can_manage = user_can(user.role, "agent.manage")  # type: ignore[arg-type]
+    can_manage = user_can(user.role, "coworker.manage")  # type: ignore[arg-type]
     cws = await get_coworkers_for_tenant(
         user.tenant_id,
         requesting_user_id=user.user_id,
@@ -168,7 +168,7 @@ async def list_coworkers(
 @router.post("", response_model=Coworker, status_code=201)
 async def create_coworker_endpoint(
     body: CoworkerCreate,
-    user: AuthenticatedUser = Depends(require_action("agent.create")),
+    user: AuthenticatedUser = Depends(require_action("coworker.create")),
 ) -> Coworker:
     if body.model_id is not None:
         await _validate_model_and_credential(
@@ -258,7 +258,7 @@ async def _get_coworker_or_404(
     feat/roles PR3 USE/SEE enforcement: when ``user`` is supplied this
     helper additionally hides a coworker the caller may not see/use
     (a private coworker created by someone else, with the caller lacking
-    ``agent.manage``). It collapses "exists but not visible" to the SAME
+    ``coworker.manage``). It collapses "exists but not visible" to the SAME
     404 as "does not exist" so the endpoint never leaks the existence of
     another member's private draft. Read-only catalog reads that are
     intentionally tenant-wide (and already allowlisted) pass ``user=None``
@@ -271,7 +271,7 @@ async def _get_coworker_or_404(
     if cw is None or (
         user is not None
         and not user_can_see_resource(
-            manage_action="agent.manage", resource=cw, user=user,
+            manage_action="coworker.manage", resource=cw, user=user,
         )
     ):
         raise_error_response(
@@ -298,7 +298,7 @@ async def get_coworker_endpoint(
 async def patch_coworker_endpoint(
     coworker_id: str,
     body: CoworkerUpdate,
-    user: AuthenticatedUser = Depends(require_action("agent.use")),
+    user: AuthenticatedUser = Depends(require_action("coworker.use")),
 ) -> Coworker:
     """Update selected fields on a coworker.
 
@@ -311,11 +311,11 @@ async def patch_coworker_endpoint(
     even if the broadcast misses.
     """
     cw = await _get_coworker_or_404(coworker_id, user.tenant_id)
-    # Ownership-escape gate: the route requires only ``agent.use`` (member-
+    # Ownership-escape gate: the route requires only ``coworker.use`` (member-
     # reachable); a member may PATCH a coworker they created, but reaching
-    # someone else's / a shared one requires ``agent.manage``.
+    # someone else's / a shared one requires ``coworker.manage``.
     require_manage_or_owner(
-        manage_action="agent.manage", resource=cw, user=user,
+        manage_action="coworker.manage", resource=cw, user=user,
     )
     model_changed = body.model_id is not None and body.model_id != cw.model_id
 
@@ -374,7 +374,7 @@ async def patch_coworker_endpoint(
 @router.delete("/{coworker_id}", status_code=204)
 async def delete_coworker_endpoint(
     coworker_id: str,
-    user: AuthenticatedUser = Depends(require_action("agent.use")),
+    user: AuthenticatedUser = Depends(require_action("coworker.use")),
 ) -> Response:
     """Delete a coworker. DB FK ON DELETE CASCADE handles dependents.
 
@@ -382,13 +382,13 @@ async def delete_coworker_endpoint(
     conversations / runs / messages. No 409 path on this endpoint —
     the design treats coworkers as roots of their own subtree.
 
-    Ownership-escape gate: the route requires only ``agent.use``; a member
+    Ownership-escape gate: the route requires only ``coworker.use``; a member
     may delete their OWN coworker, others'/shared ones require
-    ``agent.manage``.
+    ``coworker.manage``.
     """
     cw = await _get_coworker_or_404(coworker_id, user.tenant_id)
     require_manage_or_owner(
-        manage_action="agent.manage", resource=cw, user=user,
+        manage_action="coworker.manage", resource=cw, user=user,
     )
     await delete_coworker(coworker_id, tenant_id=user.tenant_id)
     return Response(status_code=204)
@@ -399,7 +399,7 @@ async def _set_visibility_or_404(
 ) -> Coworker:
     """Shared body for share / unshare: own-or-manage gate then flip.
 
-    The route already carries the low ``agent.use`` capability; this
+    The route already carries the low ``coworker.use`` capability; this
     helper escalates to ``require_manage_or_owner`` so a member may flip
     their OWN coworker's visibility while a manager may flip any. The
     initial fetch passes ``user=None`` so a member trying to share a
@@ -409,7 +409,7 @@ async def _set_visibility_or_404(
     """
     cw = await _get_coworker_or_404(coworker_id, user.tenant_id)
     require_manage_or_owner(
-        manage_action="agent.manage", resource=cw, user=user,
+        manage_action="coworker.manage", resource=cw, user=user,
     )
     updated = await set_coworker_visibility(
         coworker_id, visibility=visibility, tenant_id=user.tenant_id,
@@ -427,13 +427,13 @@ async def _set_visibility_or_404(
 @router.post("/{coworker_id}/share", response_model=Coworker)
 async def share_coworker_endpoint(
     coworker_id: str,
-    user: AuthenticatedUser = Depends(require_action("agent.use")),
+    user: AuthenticatedUser = Depends(require_action("coworker.use")),
 ) -> Coworker:
     """Make a coworker ``shared`` (visible to the whole tenant).
 
     Self-serve, no review: a member shares their OWN draft; a manager
     may share any. Idempotent — sharing an already-shared coworker is a
-    no-op flip. Gated by the ``agent.use`` route capability + the
+    no-op flip. Gated by the ``coworker.use`` route capability + the
     in-handler ``require_manage_or_owner`` escalation (so this mutation
     is NOT in the auth-only allowlist).
     """
@@ -445,7 +445,7 @@ async def share_coworker_endpoint(
 @router.post("/{coworker_id}/unshare", response_model=Coworker)
 async def unshare_coworker_endpoint(
     coworker_id: str,
-    user: AuthenticatedUser = Depends(require_action("agent.use")),
+    user: AuthenticatedUser = Depends(require_action("coworker.use")),
 ) -> Coworker:
     """Make a coworker ``private`` again (creator + managers only).
 

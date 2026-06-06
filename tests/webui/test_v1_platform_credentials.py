@@ -206,7 +206,7 @@ async def test_platform_credentials_not_visible_to_tenant_credentials_list(vault
         )
     async with _client(_build_app(tenant)) as ac:
         listing = await ac.get(
-            "/api/v1/tenant/credentials",
+            "/api/v1/credentials",
             headers={"Authorization": "Bearer x"},
         )
     assert listing.status_code == 200

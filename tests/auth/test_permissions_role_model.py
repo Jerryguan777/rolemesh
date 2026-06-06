@@ -19,9 +19,9 @@ from rolemesh.auth.permissions import (
 
 # The complete §3 fine-grained action set the v1 surface gates on.
 _V1_ACTIONS = {
-    "agent.create",
-    "agent.manage",
-    "agent.use",
+    "coworker.create",
+    "coworker.manage",
+    "coworker.use",
     "skill.create",
     "skill.manage",
     "mcp.configure",
@@ -65,10 +65,10 @@ def test_platform_admin_superset_is_derived_not_hand_copied() -> None:
 
 def test_member_cannot_manage_shared_resources() -> None:
     # A member may create/use, but NOT reach the manage/configure capability.
-    assert user_can("member", "agent.create")
-    assert user_can("member", "agent.use")
+    assert user_can("member", "coworker.create")
+    assert user_can("member", "coworker.use")
     assert user_can("member", "skill.create")
-    assert not user_can("member", "agent.manage")
+    assert not user_can("member", "coworker.manage")
     assert not user_can("member", "skill.manage")
     assert not user_can("member", "mcp.configure")
     assert not user_can("member", "approval_policy.manage")
@@ -83,7 +83,7 @@ def test_member_cannot_manage_shared_resources() -> None:
 
 
 def test_admin_has_manage_but_not_byok_credentials_or_tenant() -> None:
-    assert user_can("admin", "agent.manage")
+    assert user_can("admin", "coworker.manage")
     assert user_can("admin", "skill.manage")
     assert user_can("admin", "mcp.configure")
     assert user_can("admin", "approval_policy.manage")
@@ -102,6 +102,16 @@ def test_owner_has_byok_credentials_and_tenant_settings() -> None:
     assert user_can("owner", "tenant.manage")
     for action in _V1_ACTIONS:
         assert user_can("owner", action), action
+
+
+def test_platform_only_actions_denied_to_every_tenant_role() -> None:
+    # Platform-plane capabilities (e.g. the global model catalog,
+    # credential pool) must be platform_admin-only — NOT even a tenant
+    # owner may hold them.
+    for action in _PLATFORM_ONLY_ACTIONS:
+        assert user_can("platform_admin", action), action
+        for role in ("owner", "admin", "member"):
+            assert not user_can(role, action), f"{role} must not hold {action}"
 
 
 # ---------------------------------------------------------------------------

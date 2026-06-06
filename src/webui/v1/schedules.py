@@ -1,17 +1,21 @@
-"""``/api/v1/schedules`` REST surface (PR24 reads + admin delete migration).
+"""``/api/v1/tasks`` REST surface — scheduled tasks.
 
-The orchestrator owns scheduled-task creation and *schedule* mutation:
-cron / interval / once triggers fire from inside the agent process and
-the helper functions in :mod:`rolemesh.db.task` are how it persists
-state. Letting the SPA edit a trigger schedule independent of the
-orchestrator's runtime view would create a stale-cache race the design
-hasn't worked through yet, so trigger create/update stay off v1.
+The path is ``/tasks`` to match the rest of the stack — the table is
+``scheduled_tasks``, the type ``ScheduledTask``, the capability
+``task.manage`` — leaving "schedule" only as the trigger-config
+vocabulary (``schedule_type`` / ``schedule_value``).
+
+The orchestrator owns task creation and trigger mutation: cron /
+interval / once triggers fire from inside the agent process and the
+helper functions in :mod:`rolemesh.db.task` persist state. Letting the
+SPA edit a trigger independent of the orchestrator's runtime view would
+create a stale-cache race the design hasn't worked through yet, so
+trigger create/update stay off v1.
 
 Reads (``get_current_user`` only — allowlisted in the default-deny
 meta-test) answer "what tasks does this coworker have scheduled". The
 ``DELETE`` was migrated off the legacy ``/api/admin/tasks/{id}`` face:
-task removal is a tenant-management operation gated by ``task.manage``
-(admin+), with cross-tenant ids reading as 404.
+task removal is gated by ``task.manage`` (admin+), cross-tenant ids 404.
 """
 
 from __future__ import annotations
@@ -37,7 +41,7 @@ if TYPE_CHECKING:
     from rolemesh.auth.provider import AuthenticatedUser
     from rolemesh.core.types import ScheduledTask as ScheduledTaskDataclass
 
-router = APIRouter(prefix="/schedules", tags=["Schedules"])
+router = APIRouter(prefix="/tasks", tags=["Tasks"])
 
 
 def _to_response(t: ScheduledTaskDataclass) -> ScheduledTask:

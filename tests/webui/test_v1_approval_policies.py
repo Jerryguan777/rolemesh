@@ -1,4 +1,4 @@
-"""REST attack-sim for ``/api/v1/approval-policies`` + ``/approval-requests``.
+"""REST attack-sim for ``/api/v1/approvals/policies`` + ``/approval-requests``.
 
 Hits the FastAPI app via httpx ASGI transport against a real Postgres
 testcontainer. The DB-layer scoping is already proven in
@@ -86,7 +86,7 @@ async def test_create_list_get_patch_delete_round_trip() -> None:
     user = await _make_actor("crud")
     async with _client(_build_app(user)) as ac:
         created = await ac.post(
-            "/api/v1/approval-policies",
+            "/api/v1/approvals/policies",
             json=_policy_body(
                 tool_name="*",
                 condition_expr={"field": "amount", "op": ">", "value": 100},
@@ -102,16 +102,16 @@ async def test_create_list_get_patch_delete_round_trip() -> None:
         assert created.json()["priority"] == 5
         assert created.json()["enabled"] is True
 
-        listing = await ac.get("/api/v1/approval-policies", headers=_AUTH)
+        listing = await ac.get("/api/v1/approvals/policies", headers=_AUTH)
         assert listing.status_code == 200
         assert [p["id"] for p in listing.json()["items"]] == [pid]
 
-        got = await ac.get(f"/api/v1/approval-policies/{pid}", headers=_AUTH)
+        got = await ac.get(f"/api/v1/approvals/policies/{pid}", headers=_AUTH)
         assert got.status_code == 200
         assert got.json()["tool_name"] == "*"
 
         patched = await ac.patch(
-            f"/api/v1/approval-policies/{pid}",
+            f"/api/v1/approvals/policies/{pid}",
             json={"enabled": False, "priority": 9},
             headers=_AUTH,
         )
@@ -123,9 +123,9 @@ async def test_create_list_get_patch_delete_round_trip() -> None:
             "field": "amount", "op": ">", "value": 100,
         }
 
-        deleted = await ac.delete(f"/api/v1/approval-policies/{pid}", headers=_AUTH)
+        deleted = await ac.delete(f"/api/v1/approvals/policies/{pid}", headers=_AUTH)
         assert deleted.status_code == 204
-        gone = await ac.get(f"/api/v1/approval-policies/{pid}", headers=_AUTH)
+        gone = await ac.get(f"/api/v1/approvals/policies/{pid}", headers=_AUTH)
         assert gone.status_code == 404
 
 
@@ -133,7 +133,7 @@ async def test_create_defaults_condition_to_always_true() -> None:
     user = await _make_actor("dflt")
     async with _client(_build_app(user)) as ac:
         created = await ac.post(
-            "/api/v1/approval-policies", json=_policy_body(), headers=_AUTH,
+            "/api/v1/approvals/policies", json=_policy_body(), headers=_AUTH,
         )
     assert created.status_code == 201
     assert created.json()["condition_expr"] == {"always": True}
@@ -160,7 +160,7 @@ async def test_create_rejects_malformed_condition(bad_expr: dict) -> None:
     user = await _make_actor("badc")
     async with _client(_build_app(user)) as ac:
         resp = await ac.post(
-            "/api/v1/approval-policies",
+            "/api/v1/approvals/policies",
             json=_policy_body(condition_expr=bad_expr),
             headers=_AUTH,
         )
@@ -171,11 +171,11 @@ async def test_patch_rejects_malformed_condition() -> None:
     user = await _make_actor("badp")
     async with _client(_build_app(user)) as ac:
         created = await ac.post(
-            "/api/v1/approval-policies", json=_policy_body(), headers=_AUTH,
+            "/api/v1/approvals/policies", json=_policy_body(), headers=_AUTH,
         )
         pid = created.json()["id"]
         resp = await ac.patch(
-            f"/api/v1/approval-policies/{pid}",
+            f"/api/v1/approvals/policies/{pid}",
             json={"condition_expr": {"op": "bogus"}},
             headers=_AUTH,
         )
@@ -188,7 +188,7 @@ async def test_body_cannot_smuggle_tenant_or_id() -> None:
     user = await _make_actor("smug")
     async with _client(_build_app(user)) as ac:
         resp = await ac.post(
-            "/api/v1/approval-policies",
+            "/api/v1/approvals/policies",
             json=_policy_body(tenant_id=str(uuid.uuid4()), id=str(uuid.uuid4())),
             headers=_AUTH,
         )
@@ -204,7 +204,7 @@ async def test_body_cannot_smuggle_tenant_or_id() -> None:
 async def _seed_policy_in(actor: AuthenticatedUser) -> str:
     async with _client(_build_app(actor)) as ac:
         created = await ac.post(
-            "/api/v1/approval-policies",
+            "/api/v1/approvals/policies",
             json=_policy_body(mcp_server_name="victim-srv", tool_name="secret"),
             headers=_AUTH,
         )
@@ -217,7 +217,7 @@ async def test_get_cross_tenant_policy_is_404() -> None:
     b = await _make_actor("b")
     victim = await _seed_policy_in(b)
     async with _client(_build_app(a)) as ac:
-        resp = await ac.get(f"/api/v1/approval-policies/{victim}", headers=_AUTH)
+        resp = await ac.get(f"/api/v1/approvals/policies/{victim}", headers=_AUTH)
     assert resp.status_code == 404
     assert resp.json()["code"] == "NOT_FOUND"
 
@@ -227,7 +227,7 @@ async def test_list_does_not_leak_other_tenant_policies() -> None:
     b = await _make_actor("b")
     await _seed_policy_in(b)
     async with _client(_build_app(a)) as ac:
-        listing = await ac.get("/api/v1/approval-policies", headers=_AUTH)
+        listing = await ac.get("/api/v1/approvals/policies", headers=_AUTH)
     assert listing.status_code == 200
     assert listing.json() == []
 
@@ -238,14 +238,14 @@ async def test_patch_cross_tenant_policy_is_404_and_leaves_victim_intact() -> No
     victim = await _seed_policy_in(b)
     async with _client(_build_app(a)) as ac:
         resp = await ac.patch(
-            f"/api/v1/approval-policies/{victim}",
+            f"/api/v1/approvals/policies/{victim}",
             json={"enabled": False, "priority": 999},
             headers=_AUTH,
         )
     assert resp.status_code == 404
     # B's policy is untouched — the cross-tenant PATCH wrote nothing.
     async with _client(_build_app(b)) as ac:
-        got = await ac.get(f"/api/v1/approval-policies/{victim}", headers=_AUTH)
+        got = await ac.get(f"/api/v1/approvals/policies/{victim}", headers=_AUTH)
     assert got.status_code == 200
     assert got.json()["enabled"] is True
     assert got.json()["priority"] == 0
@@ -257,12 +257,12 @@ async def test_delete_cross_tenant_policy_is_404_and_does_not_delete() -> None:
     victim = await _seed_policy_in(b)
     async with _client(_build_app(a)) as ac:
         resp = await ac.delete(
-            f"/api/v1/approval-policies/{victim}", headers=_AUTH,
+            f"/api/v1/approvals/policies/{victim}", headers=_AUTH,
         )
     assert resp.status_code == 404
     # Victim still exists for its owner.
     async with _client(_build_app(b)) as ac:
-        got = await ac.get(f"/api/v1/approval-policies/{victim}", headers=_AUTH)
+        got = await ac.get(f"/api/v1/approvals/policies/{victim}", headers=_AUTH)
     assert got.status_code == 200
 
 
@@ -271,9 +271,9 @@ async def test_garbage_uuid_collapses_to_same_404() -> None:
     well-formed-but-absent id — otherwise it's a uuid-shape oracle."""
     user = await _make_actor("garb")
     async with _client(_build_app(user)) as ac:
-        bad = await ac.get("/api/v1/approval-policies/not-a-uuid", headers=_AUTH)
+        bad = await ac.get("/api/v1/approvals/policies/not-a-uuid", headers=_AUTH)
         absent = await ac.get(
-            f"/api/v1/approval-policies/{uuid.uuid4()}", headers=_AUTH,
+            f"/api/v1/approvals/policies/{uuid.uuid4()}", headers=_AUTH,
         )
     assert bad.status_code == 404
     assert absent.status_code == 404
@@ -310,7 +310,7 @@ async def test_pending_requests_returns_own_tenant_only() -> None:
     a_req, a_cw = await _seed_pending_request(a)
     b_req, _ = await _seed_pending_request(b)
     async with _client(_build_app(a)) as ac:
-        resp = await ac.get("/api/v1/approval-requests", headers=_AUTH)
+        resp = await ac.get("/api/v1/approvals/requests", headers=_AUTH)
     assert resp.status_code == 200
     ids = {r["request_id"] for r in resp.json()["items"]}
     assert a_req in ids
@@ -337,7 +337,7 @@ async def test_pending_requests_conversation_filter_cannot_cross_tenant() -> Non
     await _seed_pending_request(b)
     async with _client(_build_app(a)) as ac:
         resp = await ac.get(
-            "/api/v1/approval-requests",
+            "/api/v1/approvals/requests",
             params={"conversation_id": str(uuid.uuid4())},
             headers=_AUTH,
         )

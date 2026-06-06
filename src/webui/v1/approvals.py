@@ -49,8 +49,8 @@ if TYPE_CHECKING:
     from agent_runner.approval.policy import ApprovalPolicy as ApprovalPolicyValue
     from rolemesh.auth.provider import AuthenticatedUser
 
-policies_router = APIRouter(prefix="/approval-policies", tags=["ApprovalPolicies"])
-requests_router = APIRouter(prefix="/approval-requests", tags=["ApprovalPolicies"])
+policies_router = APIRouter(prefix="/approvals/policies", tags=["Approvals"])
+requests_router = APIRouter(prefix="/approvals/requests", tags=["Approvals"])
 
 
 def _policy_to_response(p: ApprovalPolicyValue) -> ApprovalPolicy:

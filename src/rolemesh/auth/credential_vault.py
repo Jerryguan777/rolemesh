@@ -1,7 +1,7 @@
 """LLM provider credential vault.
 
 Encrypts the JSON payload (``{"api_key": "sk-...", ...}``) tenants
-PUT through ``/api/v1/tenant/credentials/{provider}``. The ciphertext
+PUT through ``/api/v1/credentials/{provider}``. The ciphertext
 lands in ``tenant_model_credentials.credential_data`` (BYTEA); the API
 list/get surface never re-derives plaintext from this column — design
 §8.1 envelope encryption model.

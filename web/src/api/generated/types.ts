@@ -371,7 +371,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/tenant/credentials": {
+    "/api/v1/credentials": {
         parameters: {
             query?: never;
             header?: never;
@@ -393,7 +393,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/tenant/credentials/{provider}": {
+    "/api/v1/credentials/{provider}": {
         parameters: {
             query?: never;
             header?: never;
@@ -427,7 +427,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/tenant/credentials/{provider}/pool": {
+    "/api/v1/credentials/{provider}/pool": {
         parameters: {
             query?: never;
             header?: never;
@@ -831,7 +831,7 @@ export interface paths {
         patch: operations["updateMCPServer"];
         trace?: never;
     };
-    "/api/v1/approval-policies": {
+    "/api/v1/approvals/policies": {
         parameters: {
             query?: never;
             header?: never;
@@ -862,7 +862,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/approval-policies/{id}": {
+    "/api/v1/approvals/policies/{id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -882,7 +882,7 @@ export interface paths {
         patch: operations["updateApprovalPolicy"];
         trace?: never;
     };
-    "/api/v1/approval-requests": {
+    "/api/v1/approvals/requests": {
         parameters: {
             query?: never;
             header?: never;
@@ -1140,7 +1140,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/schedules": {
+    "/api/v1/tasks": {
         parameters: {
             query?: never;
             header?: never;
@@ -1156,7 +1156,7 @@ export interface paths {
          *     scheduled" without round-tripping through the orchestrator
          *     IPC. A coworker filter is exposed for the per-coworker view.
          */
-        get: operations["schedulesList"];
+        get: operations["tasksList"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1165,7 +1165,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/schedules/{id}": {
+    "/api/v1/tasks/{id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -1173,7 +1173,7 @@ export interface paths {
             cookie?: never;
         };
         /** Fetch one scheduled task */
-        get: operations["schedulesGet"];
+        get: operations["tasksGet"];
         put?: never;
         post?: never;
         /**
@@ -1182,7 +1182,7 @@ export interface paths {
          *     admin); reads on this surface stay auth-only. A cross-tenant /
          *     unknown id returns 404.
          */
-        delete: operations["schedulesDelete"];
+        delete: operations["tasksDelete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1249,7 +1249,7 @@ export interface paths {
         patch: operations["bindingsUpdate"];
         trace?: never;
     };
-    "/api/v1/admin/models": {
+    "/api/v1/platform/models": {
         parameters: {
             query?: never;
             header?: never;
@@ -1259,19 +1259,20 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Register a new platform model (admin only)
-         * @description The `models` catalog is platform-managed — tenants pick from
-         *     it but only operators add rows. POST/PATCH/DELETE require
-         *     the `owner` role (design §13 role check).
+         * Register a new platform model (platform operator only)
+         * @description The `models` catalog is platform-global — every tenant reads
+         *     it at `/api/v1/models`, but only the platform operator writes
+         *     it. POST/PATCH/DELETE require the platform-only `model.manage`
+         *     capability (platform_admin).
          */
-        post: operations["adminModelsCreate"];
+        post: operations["platformModelsCreate"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v1/admin/models/{id}": {
+    "/api/v1/platform/models/{id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -1282,16 +1283,16 @@ export interface paths {
         put?: never;
         post?: never;
         /**
-         * Retire a platform model (admin only)
+         * Retire a platform model (platform operator only)
          * @description Soft delete — sets `active = false` rather than dropping the
          *     row so existing coworkers that point at the model keep
          *     rendering. Returns 409 if any coworker is still bound.
          */
-        delete: operations["adminModelsDelete"];
+        delete: operations["platformModelsDelete"];
         options?: never;
         head?: never;
-        /** Update a platform model (admin only) */
-        patch: operations["adminModelsUpdate"];
+        /** Update a platform model (platform operator only) */
+        patch: operations["platformModelsUpdate"];
         trace?: never;
     };
     "/api/v1/users": {
@@ -1797,7 +1798,7 @@ export interface components {
             rationale?: string | null;
             /**
              * @description Lifecycle status. Always `pending` on the tenant-wide inbox read
-             *     (`GET /approval-requests`); the conversation sub-resource
+             *     (`GET /approvals/requests`); the conversation sub-resource
              *     (`GET /conversations/{id}/approval-requests`) returns every state so
              *     resolved cards re-render inline in chat history.
              * @enum {string}
@@ -4592,7 +4593,7 @@ export interface operations {
             403: components["responses"]["Forbidden"];
         };
     };
-    schedulesList: {
+    tasksList: {
         parameters: {
             query?: {
                 /** @description Maximum number of items to return (default 50, max 200). */
@@ -4620,7 +4621,7 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
         };
     };
-    schedulesGet: {
+    tasksGet: {
         parameters: {
             query?: never;
             header?: never;
@@ -4644,7 +4645,7 @@ export interface operations {
             404: components["responses"]["NotFound"];
         };
     };
-    schedulesDelete: {
+    tasksDelete: {
         parameters: {
             query?: never;
             header?: never;
@@ -4799,7 +4800,7 @@ export interface operations {
             422: components["responses"]["Unprocessable"];
         };
     };
-    adminModelsCreate: {
+    platformModelsCreate: {
         parameters: {
             query?: never;
             header?: never;
@@ -4827,7 +4828,7 @@ export interface operations {
             422: components["responses"]["Unprocessable"];
         };
     };
-    adminModelsDelete: {
+    platformModelsDelete: {
         parameters: {
             query?: never;
             header?: never;
@@ -4851,7 +4852,7 @@ export interface operations {
             409: components["responses"]["Conflict"];
         };
     };
-    adminModelsUpdate: {
+    platformModelsUpdate: {
         parameters: {
             query?: never;
             header?: never;

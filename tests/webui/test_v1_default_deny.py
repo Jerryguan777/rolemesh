@@ -41,8 +41,6 @@ AUTH_ONLY_V1_ROUTES: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/auth/config"):
         "Boot-time auth-mode hint the SPA reads before it has a session.",
     # --- Identity (the caller's own row) ---------------------------------
-    ("GET", "/api/v1/auth/me"):
-        "Returns the caller's own identity only.",
     ("GET", "/api/v1/me"):
         "Returns the caller's own identity only.",
     ("POST", "/api/v1/auth/ws-ticket"):
@@ -88,15 +86,15 @@ AUTH_ONLY_V1_ROUTES: dict[tuple[str, str], str] = {
         "Read of the tenant's MCP server catalog.",
     ("GET", "/api/v1/mcp-servers/{mcp_id}"):
         "Read of one MCP server (no secrets in the response shape).",
-    ("GET", "/api/v1/approval-policies"):
+    ("GET", "/api/v1/approvals/policies"):
         "Read of the tenant's approval policies.",
-    ("GET", "/api/v1/approval-policies/{policy_id}"):
+    ("GET", "/api/v1/approvals/policies/{policy_id}"):
         "Read of one approval policy.",
-    ("GET", "/api/v1/approval-requests"):
+    ("GET", "/api/v1/approvals/requests"):
         "Read of the tenant's pending approval requests (inbox re-render).",
-    ("GET", "/api/v1/schedules"):
+    ("GET", "/api/v1/tasks"):
         "Read-only schedules surface; writes are not exposed on v1.",
-    ("GET", "/api/v1/schedules/{task_id}"):
+    ("GET", "/api/v1/tasks/{task_id}"):
         "Read of one scheduled task.",
     ("GET", "/api/v1/runs/{run_id}"):
         "Read of one run snapshot (SPA reconnect path).",
@@ -104,17 +102,9 @@ AUTH_ONLY_V1_ROUTES: dict[tuple[str, str], str] = {
         "Read of the platform model catalog (tenant-agnostic, no secrets).",
     ("GET", "/api/v1/models/{model_id}"):
         "Read of one platform model.",
-    # --- Operator-only writes gated IN-HANDLER (not via require_action) ---
-    # admin_models.py gates these with its own ``_require_owner(user)`` call at
-    # the top of each handler (a deliberate audit-locality choice predating
-    # this work). They are NOT ungated; they are simply gated by a mechanism
-    # the route-tag walker can't see, so they are allowlisted with this note.
-    ("POST", "/api/v1/admin/models"):
-        "Owner-gated in-handler via _require_owner (platform catalog write).",
-    ("PATCH", "/api/v1/admin/models/{model_id}"):
-        "Owner-gated in-handler via _require_owner (platform catalog write).",
-    ("DELETE", "/api/v1/admin/models/{model_id}"):
-        "Owner-gated in-handler via _require_owner (platform catalog write).",
+    # NOTE: the platform model-catalog WRITES (/api/v1/platform/models) are no
+    # longer here — they are now declaratively gated by
+    # require_action("model.manage") and so are covered by the route-tag walker.
 }
 
 
