@@ -369,6 +369,140 @@ async def test_put_credential_does_not_publish_for_unused_provider(
 
 
 # ---------------------------------------------------------------------------
+# Credential mode (byok / pool election)
+# ---------------------------------------------------------------------------
+
+
+async def test_put_credential_reports_byok_mode(vault):
+    """A BYOK PUT and the subsequent GET both report ``mode == 'byok'``."""
+    user = await _make_user()
+    async with _client(_build_app(user)) as ac:
+        put = await ac.put(
+            "/api/v1/tenant/credentials/anthropic",
+            json={"api_key": "sk-ant-test"},
+            headers={"Authorization": "Bearer x"},
+        )
+        assert put.status_code == 200, put.text
+        assert put.json()["mode"] == "byok"
+
+        listing = await ac.get(
+            "/api/v1/tenant/credentials",
+            headers={"Authorization": "Bearer x"},
+        )
+    assert listing.json()[0]["mode"] == "byok"
+
+
+async def test_elect_pool_sets_pool_mode(vault):
+    """``PUT /{provider}/pool`` flips the row to pool mode; GET reflects it."""
+    user = await _make_user()
+    async with _client(_build_app(user)) as ac:
+        resp = await ac.put(
+            "/api/v1/tenant/credentials/anthropic/pool",
+            headers={"Authorization": "Bearer x"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["provider"] == "anthropic"
+        assert resp.json()["mode"] == "pool"
+
+        listing = await ac.get(
+            "/api/v1/tenant/credentials",
+            headers={"Authorization": "Bearer x"},
+        )
+    body = listing.json()
+    assert len(body) == 1
+    assert body[0]["mode"] == "pool"
+
+
+async def test_elect_pool_retains_dormant_byok_key(vault):
+    """A byok→pool switch keeps the encrypted key dormant in the column.
+
+    Pins the "flip back without re-entering" guarantee: after electing
+    pool, the ciphertext is still present (mode is what changed), and it
+    still decrypts to the original key.
+    """
+    user = await _make_user()
+    async with _client(_build_app(user)) as ac:
+        await ac.put(
+            "/api/v1/tenant/credentials/anthropic",
+            json={"api_key": "sk-original"},
+            headers={"Authorization": "Bearer x"},
+        )
+        await ac.put(
+            "/api/v1/tenant/credentials/anthropic/pool",
+            headers={"Authorization": "Bearer x"},
+        )
+
+    pool = _get_admin_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT credential_mode, credential_data "
+            "FROM tenant_model_credentials "
+            "WHERE tenant_id = $1::uuid AND provider = 'anthropic'",
+            user.tenant_id,
+        )
+    assert row["credential_mode"] == "pool"
+    assert row["credential_data"] is not None
+    assert vault.decrypt_json(bytes(row["credential_data"]))["api_key"] == "sk-original"
+
+
+async def test_elect_pool_first_time_has_null_key(vault):
+    """Electing pool with no prior BYOK key inserts a NULL-ciphertext row."""
+    user = await _make_user()
+    async with _client(_build_app(user)) as ac:
+        resp = await ac.put(
+            "/api/v1/tenant/credentials/openai/pool",
+            headers={"Authorization": "Bearer x"},
+        )
+    assert resp.status_code == 200, resp.text
+
+    pool = _get_admin_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT credential_mode, credential_data "
+            "FROM tenant_model_credentials "
+            "WHERE tenant_id = $1::uuid AND provider = 'openai'",
+            user.tenant_id,
+        )
+    assert row["credential_mode"] == "pool"
+    assert row["credential_data"] is None
+
+
+async def test_elect_pool_publishes_restart_per_affected_coworker(
+    vault, monkeypatch,
+):
+    """Pool election restarts affected coworkers, like the BYOK path."""
+    user = await _make_user()
+    pool = _get_admin_pool()
+    async with pool.acquire() as conn:
+        anthropic_model = await conn.fetchval(
+            "SELECT id FROM models WHERE provider = 'anthropic' LIMIT 1",
+        )
+        cw = await conn.fetchval(
+            "INSERT INTO coworkers (tenant_id, name, folder, agent_backend, model_id) "
+            "VALUES ($1::uuid, $2, $3, $4, $5::uuid) RETURNING id",
+            user.tenant_id, "anthro-1", "anthro1", "claude", str(anthropic_model),
+        )
+
+    seen: list[str] = []
+
+    async def _capture(*, coworker_id: str, tenant_id: str) -> None:
+        seen.append(coworker_id)
+
+    monkeypatch.setattr(
+        "webui.v1.credentials.coworker_events.publish_coworker_restart",
+        _capture,
+    )
+
+    async with _client(_build_app(user)) as ac:
+        resp = await ac.put(
+            "/api/v1/tenant/credentials/anthropic/pool",
+            headers={"Authorization": "Bearer x"},
+        )
+    assert resp.status_code == 200
+    assert seen == [str(cw)]
+
+
+# ---------------------------------------------------------------------------
 # Log sanitisation — pinned at the helper layer (cheaper than mocking logger)
 # ---------------------------------------------------------------------------
 

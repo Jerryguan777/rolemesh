@@ -427,6 +427,91 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/tenant/credentials/{provider}/pool": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                provider: components["schemas"]["ModelProvider"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Elect the platform credential pool for one provider
+         * @description Sets the row's `mode` to `pool` so the resolver uses the
+         *     platform key instead of the tenant's own. Any existing BYOK
+         *     ciphertext is retained dormant so the tenant can flip back via
+         *     `PUT /{provider}` without re-entering it. This is the explicit
+         *     opt-in — until a tenant elects pool (or sets a BYOK key) the
+         *     provider stays unconfigured and agents on it fail closed; the
+         *     platform pool is never consumed silently. Restarts affected
+         *     coworkers like the BYOK path.
+         */
+        put: operations["electCredentialPool"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/platform/credentials": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the platform credential pool (no secrets)
+         * @description Platform-plane only (`credential.pool.manage`, granted to
+         *     `platform_admin`). Returns metadata only — the encrypted pool
+         *     key never appears on this surface.
+         */
+        get: operations["listPlatformCredentials"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/platform/credentials/{provider}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                provider: components["schemas"]["ModelProvider"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Create or overwrite the platform pool key for one provider
+         * @description Platform-plane only (`credential.pool.manage`). Body carries the
+         *     real API key in `api_key`; the webui process encrypts via the
+         *     same `CredentialVault` tenants use before INSERT / UPDATE on
+         *     `platform_provider_credentials`. Tenants electing `pool` for this
+         *     provider pick up the new key within the resolver's cache TTL — no
+         *     per-coworker restart fan-out.
+         */
+        put: operations["putPlatformCredential"];
+        post?: never;
+        /**
+         * Remove the platform pool key for one provider
+         * @description Platform-plane only (`credential.pool.manage`). Tenant rows that
+         *     elected `pool` for this provider are left intact; their next
+         *     resolve fails closed until a key is re-added. Returns `404` if no
+         *     pool key existed.
+         */
+        delete: operations["deletePlatformCredential"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/coworkers/{id}/mcp-servers": {
         parameters: {
             query?: never;
@@ -1362,6 +1447,20 @@ export interface components {
             created_at?: string | null;
         };
         CredentialResponse: {
+            provider: components["schemas"]["ModelProvider"];
+            /**
+             * @description Which key the provider resolves to: `byok` (the tenant's own
+             *     key) or `pool` (the platform credential pool). Metadata, not
+             *     a secret.
+             * @enum {string}
+             */
+            mode: "byok" | "pool";
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        PlatformCredentialResponse: {
             provider: components["schemas"]["ModelProvider"];
             /** Format: date-time */
             created_at: string;
@@ -2950,6 +3049,104 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+        };
+    };
+    electCredentialPool: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                provider: components["schemas"]["ModelProvider"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    listPlatformCredentials: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformCredentialResponse"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    putPlatformCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                provider: components["schemas"]["ModelProvider"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CredentialUpsert"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformCredentialResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            422: components["responses"]["Unprocessable"];
+        };
+    };
+    deletePlatformCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                provider: components["schemas"]["ModelProvider"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
         };
     };
     listCoworkerMCPBindings: {

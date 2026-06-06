@@ -632,6 +632,115 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
 
+  /api/v1/tenant/credentials/{provider}/pool:
+    parameters:
+      - in: path
+        name: provider
+        required: true
+        schema: { $ref: '#/components/schemas/ModelProvider' }
+    put:
+      tags: [Credentials]
+      operationId: electCredentialPool
+      summary: Elect the platform credential pool for one provider
+      description: |
+        Sets the row's `mode` to `pool` so the resolver uses the
+        platform key instead of the tenant's own. Any existing BYOK
+        ciphertext is retained dormant so the tenant can flip back via
+        `PUT /{provider}` without re-entering it. This is the explicit
+        opt-in — until a tenant elects pool (or sets a BYOK key) the
+        provider stays unconfigured and agents on it fail closed; the
+        platform pool is never consumed silently. Restarts affected
+        coworkers like the BYOK path.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CredentialResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/v1/platform/credentials:
+    get:
+      tags: [Platform]
+      operationId: listPlatformCredentials
+      summary: List the platform credential pool (no secrets)
+      description: |
+        Platform-plane only (`credential.pool.manage`, granted to
+        `platform_admin`). Returns metadata only — the encrypted pool
+        key never appears on this surface.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PlatformCredentialResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/v1/platform/credentials/{provider}:
+    parameters:
+      - in: path
+        name: provider
+        required: true
+        schema: { $ref: '#/components/schemas/ModelProvider' }
+    put:
+      tags: [Platform]
+      operationId: putPlatformCredential
+      summary: Create or overwrite the platform pool key for one provider
+      description: |
+        Platform-plane only (`credential.pool.manage`). Body carries the
+        real API key in `api_key`; the webui process encrypts via the
+        same `CredentialVault` tenants use before INSERT / UPDATE on
+        `platform_provider_credentials`. Tenants electing `pool` for this
+        provider pick up the new key within the resolver's cache TTL — no
+        per-coworker restart fan-out.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CredentialUpsert' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlatformCredentialResponse' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+    delete:
+      tags: [Platform]
+      operationId: deletePlatformCredential
+      summary: Remove the platform pool key for one provider
+      description: |
+        Platform-plane only (`credential.pool.manage`). Tenant rows that
+        elected `pool` for this provider are left intact; their next
+        resolve fails closed until a key is re-added. Returns `404` if no
+        pool key existed.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '204':
+          description: No content
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /api/v1/coworkers/{id}/mcp-servers:
     parameters:
       - $ref: '#/components/parameters/IdInPath'
@@ -2186,6 +2295,21 @@ components:
           nullable: true
 
     CredentialResponse:
+      type: object
+      required: [provider, mode, created_at, updated_at]
+      properties:
+        provider: { $ref: '#/components/schemas/ModelProvider' }
+        mode:
+          type: string
+          enum: [byok, pool]
+          description: |
+            Which key the provider resolves to: `byok` (the tenant's own
+            key) or `pool` (the platform credential pool). Metadata, not
+            a secret.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    PlatformCredentialResponse:
       type: object
       required: [provider, created_at, updated_at]
       properties:
