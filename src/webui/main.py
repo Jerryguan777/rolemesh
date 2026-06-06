@@ -13,14 +13,12 @@ from __future__ import annotations
 import rolemesh.bootstrap  # noqa: F401
 
 import os
-import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import asyncpg
 import nats
-from fastapi import FastAPI, Query
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -30,10 +28,7 @@ from rolemesh.auth.bootstrap_users import init_bootstrap_users
 from rolemesh.db import (
     _get_pool,
     close_database,
-    get_channel_binding_for_coworker,
-    get_coworker,
     init_database,
-    tenant_conn,
 )
 from webui import auth
 from webui.config import (
@@ -201,105 +196,6 @@ if CORS_ORIGINS:
 @app.get("/api/health")
 async def health() -> JSONResponse:
     return JSONResponse({"status": "ok"})
-
-
-async def _resolve_web_agent(agent_id: str, token: str) -> tuple[str, str] | JSONResponse:
-    """Authenticate and resolve the web binding for an agent.
-
-    Returns (binding_id, tenant_id) on success, or a JSONResponse error.
-    """
-    if not agent_id or not token:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    user = await auth.authenticate_ws(token)
-    if user is None:
-        return JSONResponse({"error": "Unauthorized"}, status_code=401)
-    try:
-        coworker = await get_coworker(agent_id, tenant_id=user.tenant_id)
-    except asyncpg.DataError:
-        coworker = None
-    if coworker is None:
-        return JSONResponse({"error": "Agent not found"}, status_code=404)
-    binding = await get_channel_binding_for_coworker(agent_id, "web", tenant_id=user.tenant_id)
-    if binding is None:
-        return JSONResponse({"error": "Web binding not found"}, status_code=404)
-    return binding.id, user.tenant_id
-
-
-@app.get("/api/conversations")
-async def list_conversations(
-    agent_id: str = Query(""),
-    token: str = Query(""),
-) -> JSONResponse:
-    """Return conversation list for a web binding."""
-    result_or_error = await _resolve_web_agent(agent_id, token)
-    if isinstance(result_or_error, JSONResponse):
-        return result_or_error
-    binding_id, tenant_id = result_or_error
-
-    async with tenant_conn(tenant_id) as conn:
-        rows = await conn.fetch(
-            """
-            SELECT c.channel_chat_id as chat_id,
-                   (SELECT content FROM messages m
-                    WHERE m.conversation_id = c.id AND m.is_from_me = FALSE
-                    ORDER BY m.timestamp LIMIT 1) as first_msg,
-                   (SELECT MAX(m.timestamp) FROM messages m
-                    WHERE m.conversation_id = c.id) as updated_at
-            FROM conversations c
-            WHERE c.channel_binding_id = $1::uuid
-              AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)
-            ORDER BY updated_at DESC NULLS LAST
-            """,
-            binding_id,
-        )
-
-    result = []
-    for row in rows:
-        first_msg = row["first_msg"] or ""
-        title = first_msg[:30] + ("..." if len(first_msg) > 30 else "") if first_msg else "New conversation"
-        updated_at = row["updated_at"].isoformat() if row["updated_at"] else ""
-        result.append({"chatId": row["chat_id"], "title": title, "updatedAt": updated_at})
-
-    return JSONResponse(result)
-
-
-@app.get("/api/conversations/{chat_id}/messages")
-async def get_messages(
-    chat_id: str,
-    agent_id: str = Query(""),
-    token: str = Query(""),
-) -> JSONResponse:
-    """Return message history for a conversation."""
-    result_or_error = await _resolve_web_agent(agent_id, token)
-    if isinstance(result_or_error, JSONResponse):
-        return result_or_error
-    binding_id, tenant_id = result_or_error
-
-    async with tenant_conn(tenant_id) as conn:
-        rows = await conn.fetch(
-            """
-            SELECT m.content, m.timestamp, m.is_from_me, m.is_bot_message
-            FROM messages m
-            JOIN conversations c ON c.id = m.conversation_id
-            WHERE c.channel_binding_id = $1::uuid
-              AND c.channel_chat_id = $2
-            ORDER BY m.timestamp
-            """,
-            binding_id,
-            chat_id,
-        )
-
-    result = []
-    for row in rows:
-        role = "assistant" if row["is_from_me"] or row["is_bot_message"] else "user"
-        content = row["content"] or ""
-        # Strip internal tags from assistant messages
-        if role == "assistant":
-            content = re.sub(r"<internal>[\s\S]*?</internal>", "", content).strip()
-        ts = row["timestamp"].isoformat() if row["timestamp"] else ""
-        result.append({"role": role, "content": content, "timestamp": ts})
-
-    return JSONResponse(result)
 
 
 # v1 router: new prefixed surface introduced by webui-backend v1.1.

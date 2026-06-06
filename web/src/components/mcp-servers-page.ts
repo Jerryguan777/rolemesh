@@ -4,7 +4,7 @@
 // editor stay out for now — design §6.3 D names the affordances
 // but the form here is intentionally narrow to keep the diff
 // reviewable. ``auth_mode=user`` shows a "requires user session"
-// hint per design ("e2e 验收 pending — OIDC 分支合入后启用").
+// hint per design ("e2e acceptance pending — enable after the OIDC branch lands").
 
 import { LitElement, html, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';

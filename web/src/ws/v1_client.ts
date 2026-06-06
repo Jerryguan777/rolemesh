@@ -17,7 +17,7 @@
 // adding a new event type requires editing the yaml first; the
 // freshness drift test catches forgetting to regenerate.
 //
-// Reconnect contract (design §4 "重连" flow + 01b Open Question 1):
+// Reconnect contract (design §4 "reconnect" flow + 01b Open Question 1):
 // every reconnect first does `GET /api/v1/runs/{id}` to learn the
 // authoritative status. If `completed/failed/cancelled/awaiting_reauth`
 // we skip the reconnect entirely so the UI doesn't subscribe to a

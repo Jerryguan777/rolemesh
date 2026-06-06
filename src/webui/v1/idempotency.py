@@ -18,7 +18,7 @@ Design intent (01b Open Question 3, locked):
   short-circuit publish-throttling.
 
 Why in-memory and not a KV / DB row: the design pin says
-"in-memory dict or KV-cache, not落 DB". The window is short
+"in-memory dict or KV-cache, not persisted to DB". The window is short
 enough that a webui restart simply loses dedup for a minute, which
 is acceptable: a redelivered ``request.run`` after a restart would
 re-INSERT and re-publish, and the second run's INSERT either

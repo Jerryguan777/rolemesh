@@ -180,7 +180,7 @@ export interface paths {
         /**
          * Delete a coworker (cascades conversations / runs / messages)
          * @description Cascading delete — conversations, runs and messages owned by
-         *     this coworker are removed. Design §3 "DELETE 语义" table.
+         *     this coworker are removed. Design §3 "DELETE semantics" table.
          */
         delete: operations["deleteCoworker"];
         options?: never;
@@ -276,7 +276,7 @@ export interface paths {
         post?: never;
         /**
          * Delete a conversation (cascades messages and runs)
-         * @description Cascading delete — design §3 "DELETE 语义" treats
+         * @description Cascading delete — design §3 "DELETE semantics" treats
          *     conversations as owned children of coworkers.
          */
         delete: operations["deleteConversation"];
@@ -920,7 +920,7 @@ export interface paths {
          * Fetch authoritative run state (used by WS reconnect)
          * @description Clients reconnecting to a stream first GET the run snapshot
          *     to decide whether the run is already terminal — design §4
-         *     "重连" flow.
+         *     "reconnect" flow.
          */
         get: operations["getRun"];
         put?: never;

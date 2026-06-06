@@ -361,7 +361,7 @@ async def delete_coworker_endpoint(
 ) -> Response:
     """Delete a coworker. DB FK ON DELETE CASCADE handles dependents.
 
-    Per design §3 "DELETE 语义" table, a coworker DELETE cascades to
+    Per design §3 "DELETE semantics" table, a coworker DELETE cascades to
     conversations / runs / messages. No 409 path on this endpoint —
     the design treats coworkers as roots of their own subtree.
 

@@ -923,7 +923,7 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             )
         """)
         # ``conversation_id`` FK uses ON DELETE CASCADE so a DELETE
-        # on conversations (design §3 "DELETE 语义") propagates to the
+        # on conversations (design §3 "DELETE semantics") propagates to the
         # message log. Without the cascade a v1 DELETE on a busy
         # conversation would 500 on a FK violation — the schema, not
         # the handler, is the right place to enforce the policy.

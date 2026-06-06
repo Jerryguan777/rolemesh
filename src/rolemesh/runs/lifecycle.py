@@ -15,7 +15,7 @@ Two operations:
   application-level promise.
 
 A separate :func:`get_run` exists so 01b's reconnect path (design
-§4 "重连") doesn't have to construct ad-hoc SELECTs.
+§4 "reconnect") doesn't have to construct ad-hoc SELECTs.
 
 Why ``conn`` is parameter-injected rather than acquired per-call:
 ``create_run`` is the first step in a transaction that also writes

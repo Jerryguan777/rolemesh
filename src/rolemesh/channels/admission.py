@@ -33,7 +33,7 @@ if TYPE_CHECKING:
 logger = get_logger()
 
 
-# v6.1 §P1.5 "引导文本统一一处" — every Telegram wire string the
+# v6.1 §P1.5 "onboarding text in one place" — every Telegram wire string the
 # user can see during the link / admission flow lives here, even
 # the ones whose physical reply happens inside
 # ``telegram_gateway._handle_start_command``. The two modules then

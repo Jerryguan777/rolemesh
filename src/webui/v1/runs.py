@@ -1,7 +1,7 @@
 """``/api/v1/runs/{id}`` and ``/api/v1/runs/{id}/cancel``.
 
 GET surfaces the lifecycle helper's snapshot — used by the SPA's
-reconnect path (design §4 "重连"). POST cancel is fire-and-forget:
+reconnect path (design §4 "reconnect"). POST cancel is fire-and-forget:
 it publishes a JetStream event for the orchestrator and returns
 202 immediately. The orchestrator stops the agent container and
 the lifecycle helper writes ``status='cancelled'`` once the
