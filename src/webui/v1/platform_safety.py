@@ -240,7 +240,15 @@ async def update_platform_rule_endpoint(
     so the effective rule stays runnable.
     """
     existing = await _get_rule_or_404(rule_id)
-    if body.config is not None:
+    # Re-validate a changed config against the rule's (immutable) check +
+    # stage — but ONLY when the check lives in the orchestrator registry.
+    # Seeded defaults often target container-side checks (secret_scanner,
+    # llm_guard.*) that are absent from this registry; rejecting their
+    # config edits would make seeded defaults uneditable. The runtime is
+    # permissive on such checks, so the admin edit is too.
+    if body.config is not None and get_orchestrator_registry().has(
+        existing["check_id"]
+    ):
         _validate_rule(existing["check_id"], existing["stage"], dict(body.config))
     updated = await update_platform_rule(
         rule_id,
