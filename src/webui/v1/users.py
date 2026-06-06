@@ -4,7 +4,7 @@ Equivalence migration of the legacy ``/api/admin/users`` endpoints
 (``webui.admin``) onto the ``/api/v1`` conventions: the same DB calls
 and response shapes, but gated by the fine-grained ``user.manage``
 capability, returning the design §13 error envelope, and treating
-cross-tenant rows as ``404`` (never ``403`` —存在性不外泄).
+cross-tenant rows as ``404`` (never ``403`` — existence is not leaked).
 
 Only ``owner`` may create or assign the ``owner`` role; that business
 rule is enforced in-handler (the route-level gate is the broader
