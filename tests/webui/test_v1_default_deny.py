@@ -41,8 +41,6 @@ AUTH_ONLY_V1_ROUTES: dict[tuple[str, str], str] = {
     ("GET", "/api/v1/auth/config"):
         "Boot-time auth-mode hint the SPA reads before it has a session.",
     # --- Identity (the caller's own row) ---------------------------------
-    ("GET", "/api/v1/auth/me"):
-        "Returns the caller's own identity only.",
     ("GET", "/api/v1/me"):
         "Returns the caller's own identity only.",
     ("POST", "/api/v1/auth/ws-ticket"):
