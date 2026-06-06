@@ -63,7 +63,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _AUDITED_FILES = [
     _PROJECT_ROOT / "src/rolemesh/db/skill.py",
     _PROJECT_ROOT / "src/rolemesh/container/skill_projection.py",
-    _PROJECT_ROOT / "src/webui/admin.py",
+    _PROJECT_ROOT / "src/webui/v1/skills.py",
 ]
 
 

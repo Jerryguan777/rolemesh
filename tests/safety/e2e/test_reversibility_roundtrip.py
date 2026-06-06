@@ -54,13 +54,9 @@ from rolemesh.safety.tool_reversibility import (
     resolve_from_full_tool_name,
 )
 from rolemesh.safety.types import CostClass, SafetyContext, Stage, Verdict
-from webui import admin
-from webui.dependencies import (
-    get_current_user,
-    require_manage_agents,
-    require_manage_tenant,
-    require_manage_users,
-)
+from webui.api_v1 import router as api_v1_router
+from webui.dependencies import get_current_user
+from webui.v1.errors import install_error_handler
 
 pytestmark = pytest.mark.usefixtures("test_db")
 
@@ -282,15 +278,13 @@ def slow_check_registered() -> Any:
 
 def _build_app(user: AuthenticatedUser) -> FastAPI:
     app = FastAPI()
-    app.include_router(admin.router)
+    install_error_handler(app)
+    app.include_router(api_v1_router)
 
     async def _return_user() -> AuthenticatedUser:
         return user
 
     app.dependency_overrides[get_current_user] = _return_user
-    app.dependency_overrides[require_manage_agents] = _return_user
-    app.dependency_overrides[require_manage_tenant] = _return_user
-    app.dependency_overrides[require_manage_users] = _return_user
     return app
 
 
@@ -350,7 +344,7 @@ class TestRestGuardWithPersistedReversibility:
             base_url="http://test",
         ) as client:
             r = await client.post(
-                "/api/admin/safety/rules",
+                "/api/v1/safety/rules",
                 json={
                     "stage": "pre_tool_call",
                     "check_id": "stub.slow.pretool",
@@ -359,7 +353,7 @@ class TestRestGuardWithPersistedReversibility:
                 },
             )
         assert r.status_code == 400
-        detail = r.json()["detail"]
+        detail = r.json()["message"]
         assert "stub.slow.pretool" in detail
         assert "list_pulls" in detail
         assert "100 ms" in detail
@@ -398,7 +392,7 @@ class TestRestGuardWithPersistedReversibility:
             base_url="http://test",
         ) as client:
             r = await client.post(
-                "/api/admin/safety/rules",
+                "/api/v1/safety/rules",
                 json={
                     "stage": "pre_tool_call",
                     "check_id": "stub.slow.pretool",

@@ -27,6 +27,7 @@ from rolemesh.db import (
     create_safety_rule,
     create_tenant,
     create_user,
+    insert_safety_decision,
 )
 from webui.api_v1 import router as api_v1_router
 from webui.dependencies import get_current_user
@@ -251,3 +252,41 @@ async def test_decisions_csv_member_forbidden() -> None:
     async with _client(_build_app(user)) as ac:
         resp = await ac.get("/api/v1/safety/decisions.csv", headers=_HDRS)
     assert resp.status_code == 403
+
+
+async def test_decisions_csv_escapes_and_scopes_to_tenant() -> None:
+    # Seed a decision carrying adversarial text (comma + a formula-
+    # injection prefix) and confirm the export (a) includes it for the
+    # owning tenant, (b) RFC-4180 quotes the comma field, (c) neutralises
+    # the leading '=' so a spreadsheet won't execute it, and (d) does NOT
+    # leak another tenant's rows (session-derived tenant + RLS).
+    owner = await _make_user("owner")
+    await insert_safety_decision(
+        tenant_id=owner.tenant_id,
+        stage="pre_tool_call",
+        verdict_action="block",
+        triggered_rule_ids=[],
+        findings=[{"code": "PII", "severity": "high", "message": "ssn"}],
+        context_digest="d",
+        context_summary='=HYPERLINK("evil"),tool=x',
+    )
+    other = await _make_user("owner")
+    await insert_safety_decision(
+        tenant_id=other.tenant_id,
+        stage="pre_tool_call",
+        verdict_action="block",
+        triggered_rule_ids=[],
+        findings=[],
+        context_digest="d",
+        context_summary="OTHER-TENANT-SECRET",
+    )
+    async with _client(_build_app(owner)) as ac:
+        resp = await ac.get("/api/v1/safety/decisions.csv", headers=_HDRS)
+    assert resp.status_code == 200, resp.text
+    body = resp.text
+    # Leading '=' is neutralised with a single quote, and the comma/quote
+    # field is RFC-4180 wrapped: `"'=HYPERLINK(""evil""),tool=x"`.
+    assert "'=HYPERLINK" in body
+    assert "tool=x" in body
+    # Cross-tenant row must not appear (session tenant + RLS scope).
+    assert "OTHER-TENANT-SECRET" not in body

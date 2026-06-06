@@ -71,7 +71,7 @@ _LEGACY_SKILL_CREATED_BY = re.compile(
 _AUDITED_FILES = [
     _PROJECT_ROOT / "src/rolemesh/db/skill.py",
     _PROJECT_ROOT / "src/rolemesh/core/types.py",
-    _PROJECT_ROOT / "src/webui/admin.py",
+    _PROJECT_ROOT / "src/webui/v1/skills.py",
     _PROJECT_ROOT / "src/webui/schemas.py",
 ]
 
