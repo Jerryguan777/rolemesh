@@ -889,6 +889,184 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /api/v1/platform/safety/rules:
+    get:
+      tags: [Platform]
+      operationId: listPlatformSafetyRules
+      summary: List all platform safety rules (every tier, incl. floor)
+      description: |
+        Platform-plane only (`safety.platform.manage`, granted to
+        `platform_admin`). Unlike the tenant-facing `/api/v1/safety/rules`
+        read — which surfaces only the visible tiers — this returns ALL
+        tiers including `floor`, plus the `is_seeded` flag.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PlatformSafetyRule' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [Platform]
+      operationId: createPlatformSafetyRule
+      summary: Create a platform safety rule
+      description: |
+        Platform-plane only (`safety.platform.manage`). The body is
+        validated against the safety check registry — an unknown
+        `check_id`, an unsupported `stage`, or an invalid `action_override`
+        returns `400 INVALID_RULE`. A duplicate `(tier, check_id, stage)`
+        identity returns `409`. Created rules carry `is_seeded=false` and
+        allow full CRUD.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PlatformSafetyRuleCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlatformSafetyRule' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
+  /api/v1/platform/safety/rules/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [Platform]
+      operationId: getPlatformSafetyRule
+      summary: Get one platform safety rule (any tier)
+      description: Platform-plane only (`safety.platform.manage`).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlatformSafetyRule' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Platform]
+      operationId: updatePlatformSafetyRule
+      summary: Update a platform safety rule
+      description: |
+        Platform-plane only (`safety.platform.manage`). Patches the mutable
+        fields — `config` / `priority` / `description` / `enabled`. The
+        identity (`tier` / `stage` / `check_id`) is immutable. A changed
+        `config` is re-validated (`400 INVALID_RULE`) when the check is in
+        the orchestrator registry. Seeded defaults are editable here.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PlatformSafetyRuleUpdate' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlatformSafetyRule' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+    delete:
+      tags: [Platform]
+      operationId: deletePlatformSafetyRule
+      summary: Delete a platform safety rule
+      description: |
+        Platform-plane only (`safety.platform.manage`). A seeded factory
+        default (`is_seeded=true`) cannot be hard-deleted (`409`
+        `SEEDED_RULE_IMMUTABLE`) — the next build-time seed would recreate
+        it; disable it instead. Unknown id → 404.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '204':
+          description: No content
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /api/v1/platform/safety/rules/{id}/enable:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    post:
+      tags: [Platform]
+      operationId: enablePlatformSafetyRule
+      summary: Enable a platform safety rule
+      description: Platform-plane only (`safety.platform.manage`).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlatformSafetyRule' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/platform/safety/rules/{id}/disable:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    post:
+      tags: [Platform]
+      operationId: disablePlatformSafetyRule
+      summary: Disable a platform safety rule
+      description: |
+        Platform-plane only (`safety.platform.manage`). Also the sanctioned
+        way to suppress a seeded factory default (which cannot be deleted).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlatformSafetyRule' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /api/v1/coworkers/{id}/mcp-servers:
     parameters:
       - $ref: '#/components/parameters/IdInPath'
@@ -4338,3 +4516,64 @@ components:
         priority: { type: integer, minimum: -1000, maximum: 1000 }
         enabled: { type: boolean }
         description: { type: string, maxLength: 500 }
+
+    PlatformSafetyTier:
+      type: string
+      enum: [floor, transparent_floor, default]
+
+    PlatformSafetyRule:
+      type: object
+      required:
+        - id
+        - tier
+        - stage
+        - check_id
+        - priority
+        - enabled
+        - description
+        - is_seeded
+        - created_at
+        - updated_at
+      properties:
+        id: { type: string, format: uuid }
+        tier: { $ref: '#/components/schemas/PlatformSafetyTier' }
+        stage: { $ref: '#/components/schemas/SafetyStage' }
+        check_id: { type: string }
+        config:
+          type: object
+          additionalProperties: true
+        priority: { type: integer }
+        enabled: { type: boolean }
+        description: { type: string }
+        is_seeded:
+          type: boolean
+          description: |
+            True for the shipped factory defaults (seeded at build time).
+            These are managed disable-only: editable and disablable, but a
+            hard DELETE is refused (`409`) since the next seed would
+            recreate them. Platform-admin-created rules carry `false`.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    PlatformSafetyRuleCreate:
+      type: object
+      required: [tier, stage, check_id]
+      properties:
+        tier: { $ref: '#/components/schemas/PlatformSafetyTier' }
+        stage: { $ref: '#/components/schemas/SafetyStage' }
+        check_id: { type: string, minLength: 1, maxLength: 128 }
+        config:
+          type: object
+          additionalProperties: true
+        priority: { type: integer, minimum: -1000, maximum: 1000, default: 1000 }
+        description: { type: string, maxLength: 500, default: "" }
+
+    PlatformSafetyRuleUpdate:
+      type: object
+      properties:
+        config:
+          type: object
+          additionalProperties: true
+        priority: { type: integer, minimum: -1000, maximum: 1000 }
+        description: { type: string, maxLength: 500 }
+        enabled: { type: boolean }
