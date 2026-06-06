@@ -52,6 +52,7 @@ from rolemesh.auth.ws_ticket import (
 from rolemesh.core.logger import get_logger
 from rolemesh.db import (
     get_conversation,
+    get_tenant_status,
     store_message,
     tenant_conn,
 )
@@ -134,9 +135,9 @@ async def _verify_handshake(
     # arrive with a pre-minted ticket, not a Bearer token — so a still-valid
     # ticket issued before suspension is rejected here. (A suspended tenant
     # also cannot mint a *new* ticket: ``POST /auth/ws-ticket`` runs through
-    # the REST chokepoint.)
-    from rolemesh.db import get_tenant_status
-
+    # the REST chokepoint.) ``get_tenant_status`` is imported at module level
+    # so the handshake tests can stub it the same way they stub
+    # ``get_conversation`` (avoiding asyncpg's sync-TestClient cross-loop).
     if await get_tenant_status(payload.tenant_id) == "suspended":
         await ws.close(
             code=_CLOSE_TENANT_SUSPENDED,

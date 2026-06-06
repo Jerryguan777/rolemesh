@@ -137,6 +137,13 @@ def stub_conv(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
         return holder.get("conv")
 
     monkeypatch.setattr(ws_stream, "get_conversation", _fake)
+
+    # The handshake also reads tenant lifecycle status now; stub it active
+    # for the same sync-TestClient/asyncpg reason get_conversation is stubbed.
+    async def _fake_status(_tenant_id: str) -> str:
+        return "active"
+
+    monkeypatch.setattr(ws_stream, "get_tenant_status", _fake_status)
     return holder
 
 
