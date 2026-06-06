@@ -43,6 +43,8 @@ from webui.v1.skills import (
     coworker_skills_router,
     skills_router,
 )
+from webui.v1.tenant import router as tenant_router
+from webui.v1.users import router as users_router
 
 router = APIRouter(prefix="/api/v1")
 
@@ -93,3 +95,7 @@ router.include_router(channel_links_router)
 # pending-request read for web-reconnect card re-render.
 router.include_router(approval_policies_router)
 router.include_router(approval_requests_router)
+# Tenant administration surfaces migrated off the legacy /api/admin face:
+# user CRUD (user.manage) + tenant settings (tenant.manage, owner-only).
+router.include_router(users_router)
+router.include_router(tenant_router)

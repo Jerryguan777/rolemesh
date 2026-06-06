@@ -47,6 +47,10 @@ _TENANT_ROLE_ACTIONS: dict[str, set[str]] = {
         "approval_policy.manage",
         "credential.byok.manage",
         "safety.read",
+        "safety.rule.manage",
+        "user.manage",
+        "tenant.manage",
+        "task.manage",
     },
     "admin": {
         # Legacy coarse actions (/api/admin/*).
@@ -55,7 +59,7 @@ _TENANT_ROLE_ACTIONS: dict[str, set[str]] = {
         "view_all_conversations",
         "use_agent",
         # Fine-grained /api/v1 actions. Admin lacks BYOK credential
-        # management (owner-only) per the §4 matrix.
+        # management and tenant settings (both owner-only) per the §4 matrix.
         "agent.create",
         "agent.manage",
         "agent.use",
@@ -64,6 +68,9 @@ _TENANT_ROLE_ACTIONS: dict[str, set[str]] = {
         "mcp.configure",
         "approval_policy.manage",
         "safety.read",
+        "safety.rule.manage",
+        "user.manage",
+        "task.manage",
     },
     "member": {
         # Legacy coarse action.
