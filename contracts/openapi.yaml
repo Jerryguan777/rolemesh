@@ -756,6 +756,139 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /api/v1/platform/tenants:
+    get:
+      tags: [Platform]
+      operationId: listPlatformTenants
+      summary: List all tenants (platform lifecycle)
+      description: |
+        Platform-plane only (`platform.tenant.manage`, granted to
+        `platform_admin`). Returns every tenant, including suspended ones
+        and the reserved `__platform__` sentinel, with lifecycle `status`.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/PlatformTenantResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [Platform]
+      operationId: provisionPlatformTenant
+      summary: Provision a new tenant
+      description: |
+        Platform-plane only (`platform.tenant.manage`). Creates a tenant in
+        the `active` state. The reserved `__platform__` slug is rejected
+        (`403`); a slug already in use returns `409`.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PlatformTenantProvision' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlatformTenantResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
+  /api/v1/platform/tenants/{tenant_id}:
+    parameters:
+      - in: path
+        name: tenant_id
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Platform]
+      operationId: getPlatformTenant
+      summary: Fetch one tenant (platform lifecycle)
+      description: Platform-plane only (`platform.tenant.manage`).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlatformTenantResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/platform/tenants/{tenant_id}/suspend:
+    parameters:
+      - in: path
+        name: tenant_id
+        required: true
+        schema: { type: string }
+    post:
+      tags: [Platform]
+      operationId: suspendPlatformTenant
+      summary: Suspend a tenant
+      description: |
+        Platform-plane only (`platform.tenant.manage`). Sets `status` to
+        `suspended`: the tenant's users can no longer authenticate and its
+        scheduled tasks pause (they are not failed/deleted). Idempotent. The
+        reserved `__platform__` sentinel cannot be suspended (`403`).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlatformTenantResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/platform/tenants/{tenant_id}/resume:
+    parameters:
+      - in: path
+        name: tenant_id
+        required: true
+        schema: { type: string }
+    post:
+      tags: [Platform]
+      operationId: resumePlatformTenant
+      summary: Resume a suspended tenant
+      description: |
+        Platform-plane only (`platform.tenant.manage`). Sets `status` back to
+        `active` (suspend is reversible). Idempotent. The reserved
+        `__platform__` sentinel is refused (`403`).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PlatformTenantResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /api/v1/coworkers/{id}/mcp-servers:
     parameters:
       - $ref: '#/components/parameters/IdInPath'
@@ -2663,6 +2796,35 @@ components:
         provider: { $ref: '#/components/schemas/ModelProvider' }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+
+    TenantStatus:
+      type: string
+      enum: [active, suspended]
+      description: |
+        Platform tenant lifecycle state. `suspended` tenants cannot
+        authenticate and their scheduled tasks pause until resumed.
+
+    PlatformTenantResponse:
+      type: object
+      required: [id, name, max_concurrent_containers, status, created_at]
+      description: |
+        A tenant on the platform lifecycle plane (carries `status`).
+        Distinct from `TenantResponse` (owner self-service settings).
+      properties:
+        id: { type: string }
+        name: { type: string }
+        slug: { type: string, nullable: true }
+        plan: { type: string, nullable: true }
+        max_concurrent_containers: { type: integer }
+        status: { $ref: '#/components/schemas/TenantStatus' }
+        created_at: { type: string }
+
+    PlatformTenantProvision:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        slug: { type: string, nullable: true, maxLength: 60 }
 
     CredentialUpsert:
       type: object
