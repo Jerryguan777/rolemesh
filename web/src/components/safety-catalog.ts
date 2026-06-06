@@ -412,9 +412,10 @@ export function safWhatPhrase(
     return `allow only ${n || 'listed'} host${n === 1 ? '' : 's'}`;
   }
   if (checkId === 'egress.domain_rule') {
-    // egress.domain_rule uses `domain_pattern` (single string per rule).
-    const p = config?.['domain_pattern'] as string | undefined;
-    return p ? `allow ${p}` : 'allow listed domains';
+    // Post PR #55: domain_patterns is list[str] (was singular domain_pattern: str).
+    const patterns = (config?.['domain_patterns'] as string[]) ?? [];
+    const n = patterns.length;
+    return n > 0 ? `allow ${n} domain${n === 1 ? '' : 's'}` : 'allow listed domains';
   }
   if (checkId === 'openai_moderation') {
     // Backend: { block_categories: [...], warn_categories: [...] }

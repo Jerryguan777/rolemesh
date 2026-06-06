@@ -2,9 +2,8 @@
 // Safety log page (spec §7) — pins the v1 read split + the revamped list.
 //
 // Reads (list + detail + rules-for-labels) go through the typed v1 ApiClient;
-// CSV export stays on admin (not on v1 per design §3 Phase 4). Also pins the
-// filter set: verdict / stage / coworker — NO check dropdown (the v1 endpoint
-// has no check_id filter and we don't extend the contract).
+// CSV export stays on admin (not on v1 per design §3 Phase 4).
+// G6: check dropdown + rule_id chip + URL deep-link params (PR #57 backend).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -12,12 +11,14 @@ const {
   listDecisionsSpy,
   getDecisionSpy,
   listRulesSpy,
+  listChecksSpy,
   getTenantIdSpy,
   listCoworkersSpy,
 } = vi.hoisted(() => ({
   listDecisionsSpy: vi.fn(),
   getDecisionSpy: vi.fn(),
   listRulesSpy: vi.fn(),
+  listChecksSpy: vi.fn(),
   getTenantIdSpy: vi.fn(),
   listCoworkersSpy: vi.fn(),
 }));
@@ -32,6 +33,7 @@ vi.mock('../api/client.js', async () => {
       listSafetyDecisions: listDecisionsSpy,
       getSafetyDecision: getDecisionSpy,
       listSafetyRules: listRulesSpy,
+      listSafetyChecks: listChecksSpy,
     }),
   };
 });
@@ -93,6 +95,7 @@ describe('SafetyDecisionsPage', () => {
     listDecisionsSpy.mockResolvedValue({ total: 0, items: [] });
     getDecisionSpy.mockResolvedValue(makeDecision());
     listRulesSpy.mockResolvedValue([]);
+    listChecksSpy.mockResolvedValue([{ id: 'pii.regex', version: '1', stages: [], cost_class: 'cheap', action_model: 'fixed', natural_actions: {}, supported_actions: {}, supported_codes: [], config_schema: null }]);
     getTenantIdSpy.mockResolvedValue('t1');
     listCoworkersSpy.mockResolvedValue([{ id: 'ops', name: 'Ops coworker' }]);
   });
@@ -144,13 +147,64 @@ describe('SafetyDecisionsPage', () => {
     page.remove();
   });
 
-  it('exposes verdict / stage / coworker filters but NOT a check filter', async () => {
+  it('exposes verdict / stage / coworker / check filter dropdowns (G6)', async () => {
     const page = await mount([]);
     expect(page.querySelector('[data-testid="saf-filter-verdict"]')).not.toBeNull();
     expect(page.querySelector('[data-testid="saf-filter-stage"]')).not.toBeNull();
     expect(page.querySelector('[data-testid="saf-filter-coworker"]')).not.toBeNull();
-    // The v1 endpoint has no check_id filter — the 4th dropdown is omitted.
-    expect(page.querySelector('[data-testid="saf-filter-check"]')).toBeNull();
+    // G6: check filter is now present (PR #57 added check_id param to backend).
+    expect(page.querySelector('[data-testid="saf-filter-check"]')).not.toBeNull();
+    page.remove();
+  });
+
+  // G6: check_id filter passes through to listSafetyDecisions
+  it('check filter sends check_id to the API (G6)', async () => {
+    const page = await mount([]);
+    const checkSel = page.querySelector('[data-testid="saf-filter-check"]') as HTMLSelectElement;
+    checkSel.value = 'pii.regex';
+    checkSel.dispatchEvent(new Event('change'));
+    await page.updateComplete;
+    await Promise.resolve();
+    const lastArgs = listDecisionsSpy.mock.calls.at(-1)![0];
+    expect(lastArgs.checkId).toBe('pii.regex');
+    page.remove();
+  });
+
+  // G6: rule_id chip filter
+  it('rule_id chip is hidden when no ruleIdFilter is set (G6)', async () => {
+    const page = await mount([]);
+    expect(page.querySelector('[data-testid="saf-rule-id-chip"]')).toBeNull();
+    page.remove();
+  });
+
+  it('rule_id chip × removes chip and clears filter from API call (G6)', async () => {
+    const page = await mount([]);
+    // @ts-expect-error private
+    page.ruleIdFilter = 'sr-123';
+    await page.updateComplete;
+    const chip = page.querySelector('[data-testid="saf-rule-id-chip"]');
+    expect(chip).not.toBeNull();
+    const closeBtn = page.querySelector('[data-testid="saf-rule-chip-remove"]') as HTMLButtonElement;
+    closeBtn.click();
+    await page.updateComplete;
+    await Promise.resolve();
+    expect(page.querySelector('[data-testid="saf-rule-id-chip"]')).toBeNull();
+    const lastArgs = listDecisionsSpy.mock.calls.at(-1)![0];
+    expect(lastArgs.ruleId).toBeUndefined();
+    page.remove();
+  });
+
+  it('clearFilters resets ruleIdFilter too (G6)', async () => {
+    const page = await mount([]);
+    // @ts-expect-error private
+    page.ruleIdFilter = 'sr-123';
+    await page.updateComplete;
+    (page.querySelector('[data-testid="saf-clear-filters"]') as HTMLButtonElement).click();
+    await page.updateComplete;
+    await Promise.resolve();
+    expect(page.querySelector('[data-testid="saf-rule-id-chip"]')).toBeNull();
+    const lastArgs = listDecisionsSpy.mock.calls.at(-1)![0];
+    expect(lastArgs.ruleId).toBeUndefined();
     page.remove();
   });
 
