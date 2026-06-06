@@ -229,13 +229,13 @@ describe('SafetyRuleDialog — action_override write rule', () => {
 
   it('never writes action_override for a config_routed check; converts to backend format', async () => {
     // Backend format for presidio is block_codes/redact_codes, not routing.
-    const el = await mount({ duplicating: makeRule({ check_id: 'presidio.pii', stage: 'post_tool_result', config: { block_codes: ['US_SSN'], redact_codes: [] } }) });
+    const el = await mount({ duplicating: makeRule({ check_id: 'presidio.pii', stage: 'post_tool_result', config: { block_codes: ['PII.SSN'], redact_codes: [] } }) });
     ($(el, '[data-testid="saf-submit"]') as HTMLButtonElement).click();
     await el.updateComplete;
     await Promise.resolve();
     const [body] = createRuleSpy.mock.calls[0];
     expect((body.config as Record<string, unknown>).action_override).toBeUndefined();
-    expect((body.config as Record<string, unknown>).block_codes).toEqual(['US_SSN']);
+    expect((body.config as Record<string, unknown>).block_codes).toEqual(['PII.SSN']);
     expect((body.config as Record<string, unknown>).redact_codes).toEqual([]);
     el.remove();
   });
@@ -250,13 +250,13 @@ describe('SafetyRuleDialog — presidio routing form ⇄ backend format round-tr
         id: 'r5',
         check_id: 'presidio.pii',
         stage: 'post_tool_result',
-        config: { block_codes: ['US_SSN'], redact_codes: ['EMAIL_ADDRESS'], score_threshold: 0.6 },
+        config: { block_codes: ['PII.SSN'], redact_codes: ['PII.EMAIL'], score_threshold: 0.6 },
       }),
     });
     // The routing select for EMAIL_ADDRESS should exist (loaded from redact_codes).
     const emailSel = $<HTMLSelectElement>(
       el,
-      '[data-testid="saf-routing"] select[data-routing-code="EMAIL_ADDRESS"]',
+      '[data-testid="saf-routing"] select[data-routing-code="PII.EMAIL"]',
     )!;
     expect(emailSel).not.toBeNull();
     // Save without touching → round-trips back to block_codes/redact_codes.
@@ -264,8 +264,8 @@ describe('SafetyRuleDialog — presidio routing form ⇄ backend format round-tr
     await el.updateComplete;
     await Promise.resolve();
     const [, body] = updateRuleSpy.mock.calls[0];
-    expect((body.config as Record<string, unknown>).block_codes).toEqual(['US_SSN']);
-    expect((body.config as Record<string, unknown>).redact_codes).toEqual(['EMAIL_ADDRESS']);
+    expect((body.config as Record<string, unknown>).block_codes).toEqual(['PII.SSN']);
+    expect((body.config as Record<string, unknown>).redact_codes).toEqual(['PII.EMAIL']);
     expect((body.config as Record<string, unknown>).score_threshold).toBeDefined();
     el.remove();
   });
@@ -310,12 +310,12 @@ describe('SafetyRuleDialog — presidio routing form ⇄ backend format round-tr
         id: 'r6',
         check_id: 'presidio.pii',
         stage: 'post_tool_result',
-        config: { block_codes: ['US_SSN'], redact_codes: ['EMAIL_ADDRESS'] },
+        config: { block_codes: ['PII.SSN'], redact_codes: ['PII.EMAIL'] },
       }),
     });
     const emailSel = $<HTMLSelectElement>(
       el,
-      '[data-testid="saf-routing"] select[data-routing-code="EMAIL_ADDRESS"]',
+      '[data-testid="saf-routing"] select[data-routing-code="PII.EMAIL"]',
     )!;
     // Clear EMAIL_ADDRESS routing → it should vanish from redact_codes.
     emailSel.value = '';
@@ -325,7 +325,7 @@ describe('SafetyRuleDialog — presidio routing form ⇄ backend format round-tr
     await el.updateComplete;
     await Promise.resolve();
     const [, body] = updateRuleSpy.mock.calls[0];
-    expect((body.config as Record<string, unknown>).block_codes).toEqual(['US_SSN']);
+    expect((body.config as Record<string, unknown>).block_codes).toEqual(['PII.SSN']);
     expect((body.config as Record<string, unknown>).redact_codes).toEqual([]);
     el.remove();
   });
@@ -530,7 +530,9 @@ describe('getSchemaEnum (G7)', () => {
 describe('enumLabel (G7)', () => {
   it('returns human label for known keys', () => {
     expect(enumLabel('SSN')).toBe('US Social Security numbers');
-    expect(enumLabel('sexual')).toBe('Sexual content');
+    // Backend stable codes (MODERATION.*)
+    expect(enumLabel('MODERATION.SEXUAL')).toBe('Sexual content');
+    expect(enumLabel('PII.SSN')).toBe('US Social Security numbers');
   });
 
   it('falls back to raw value for unknown keys', () => {

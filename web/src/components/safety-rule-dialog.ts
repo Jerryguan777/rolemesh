@@ -108,25 +108,34 @@ function _translateFastApiError(err: {
 // raw-value display (reverse-drift property: backend adds new enum → frontend
 // renders it immediately with the raw code as fallback label).
 const ENUM_LABELS: Record<string, string> = {
-  // pii.regex pattern keys (uppercase)
+  // pii.regex pattern keys (uppercase, from _CONFIG_KEY_TO_CODE in pii_regex.py)
   SSN: 'US Social Security numbers',
   CREDIT_CARD: 'Credit card numbers',
   EMAIL: 'Email addresses',
   PHONE_US: 'Phone numbers (US)',
   IP_ADDRESS: 'IP addresses',
-  // presidio.pii entity codes (PII.* prefix not used in current backend enum)
-  EMAIL_ADDRESS: 'Email addresses',
-  PHONE_NUMBER: 'Phone numbers',
-  US_SSN: 'US Social Security numbers',
-  PERSON: "People's names",
-  LOCATION: 'Locations',
-  DATE_TIME: 'Dates and times',
-  // openai_moderation categories (lowercase codes from backend enum)
-  sexual: 'Sexual content',
-  hate: 'Hate speech',
-  harassment: 'Harassment',
-  'self-harm': 'Self-harm',
-  violence: 'Violence',
+  // presidio.pii entity codes (PII.* stable codes from PresidioPIICode enum)
+  'PII.SSN': 'US Social Security numbers',
+  'PII.CREDIT_CARD': 'Credit card numbers',
+  'PII.EMAIL': 'Email addresses',
+  'PII.PHONE': 'Phone numbers',
+  'PII.IP_ADDRESS': 'IP addresses',
+  'PII.PERSON_NAME': "People's names",
+  'PII.LOCATION': 'Locations',
+  'PII.DATE_TIME': 'Dates and times',
+  'PII.URL': 'URLs',
+  'PII.IBAN': 'IBAN bank account numbers',
+  'PII.US_BANK_NUMBER': 'US bank account numbers',
+  'PII.US_DRIVER_LICENSE': 'US driver license numbers',
+  'PII.US_PASSPORT': 'US passport numbers',
+  'PII.MEDICAL_LICENSE': 'Medical license numbers',
+  // openai_moderation stable codes (MODERATION.* from ModerationCode enum)
+  'MODERATION.HARASSMENT': 'Harassment',
+  'MODERATION.HATE': 'Hate speech',
+  'MODERATION.VIOLENCE': 'Violence',
+  'MODERATION.SEXUAL': 'Sexual content',
+  'MODERATION.SELF_HARM': 'Self-harm',
+  'MODERATION.ILLICIT': 'Illicit content',
 };
 
 export function enumLabel(v: string): string {
@@ -153,13 +162,21 @@ export function getSchemaEnum(
 }
 
 // Fallback entity lists for when config_schema is absent (pre-PR-#58 deploys
-// or null schema). Keeps the form functional even without schema data.
+// or null schema). Must use the backend's stable codes, NOT Presidio library
+// entity names or OpenAI API category strings — verified against:
+//   PresidioPIICode  in src/rolemesh/safety/checks/presidio_pii.py
+//   ModerationCode   in src/rolemesh/safety/checks/openai_moderation.py
 const PII_REGEX_FALLBACK: string[] = ['SSN', 'CREDIT_CARD', 'EMAIL', 'PHONE_US', 'IP_ADDRESS'];
 const PRESIDIO_FALLBACK: string[] = [
-  'EMAIL_ADDRESS', 'PHONE_NUMBER', 'US_SSN', 'CREDIT_CARD',
-  'PERSON', 'LOCATION', 'IP_ADDRESS', 'DATE_TIME',
+  'PII.SSN', 'PII.CREDIT_CARD', 'PII.EMAIL', 'PII.PHONE', 'PII.IP_ADDRESS',
+  'PII.PERSON_NAME', 'PII.LOCATION', 'PII.DATE_TIME', 'PII.URL',
+  'PII.IBAN', 'PII.US_BANK_NUMBER', 'PII.US_DRIVER_LICENSE',
+  'PII.US_PASSPORT', 'PII.MEDICAL_LICENSE',
 ];
-const MODERATION_FALLBACK: string[] = ['sexual', 'hate', 'harassment', 'self-harm', 'violence'];
+const MODERATION_FALLBACK: string[] = [
+  'MODERATION.HARASSMENT', 'MODERATION.HATE', 'MODERATION.VIOLENCE',
+  'MODERATION.SEXUAL', 'MODERATION.SELF_HARM', 'MODERATION.ILLICIT',
+];
 
 @customElement('rm-safety-rule-dialog')
 export class SafetyRuleDialog extends LitElement {
