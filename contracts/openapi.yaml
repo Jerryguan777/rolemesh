@@ -30,7 +30,7 @@ tags:
   - name: Models
   - name: Runs
   - name: Skills
-  - name: ApprovalPolicies
+  - name: Approvals
   - name: Users
   - name: Tenant
   - name: Safety
@@ -1302,9 +1302,9 @@ paths:
   # ===================================================================
   # HITL tool approval (docs/21-hitl-approval-plan.md §10 S5)
   # ===================================================================
-  /api/v1/approval-policies:
+  /api/v1/approvals/policies:
     get:
-      tags: [ApprovalPolicies]
+      tags: [Approvals]
       operationId: listApprovalPolicies
       summary: List the tenant's HITL approval policies
       description: |
@@ -1324,7 +1324,7 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
     post:
-      tags: [ApprovalPolicies]
+      tags: [Approvals]
       operationId: createApprovalPolicy
       summary: Create an approval policy
       description: |
@@ -1351,11 +1351,11 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
-  /api/v1/approval-policies/{id}:
+  /api/v1/approvals/policies/{id}:
     parameters:
       - $ref: '#/components/parameters/IdInPath'
     get:
-      tags: [ApprovalPolicies]
+      tags: [Approvals]
       operationId: getApprovalPolicy
       security: [ { bearerAuth: [] } ]
       responses:
@@ -1369,7 +1369,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
     patch:
-      tags: [ApprovalPolicies]
+      tags: [Approvals]
       operationId: updateApprovalPolicy
       summary: Partially update an approval policy
       security: [ { bearerAuth: [] } ]
@@ -1391,7 +1391,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
     delete:
-      tags: [ApprovalPolicies]
+      tags: [Approvals]
       operationId: deleteApprovalPolicy
       summary: Delete an approval policy
       security: [ { bearerAuth: [] } ]
@@ -1403,9 +1403,9 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
-  /api/v1/approval-requests:
+  /api/v1/approvals/requests:
     get:
-      tags: [ApprovalPolicies]
+      tags: [Approvals]
       operationId: listPendingApprovalRequests
       summary: List in-flight pending approval requests (web reconnect)
       description: |
@@ -2963,7 +2963,7 @@ components:
           enum: [pending, approved, rejected, expired, cancelled]
           description: |
             Lifecycle status. Always `pending` on the tenant-wide inbox read
-            (`GET /approval-requests`); the conversation sub-resource
+            (`GET /approvals/requests`); the conversation sub-resource
             (`GET /conversations/{id}/approval-requests`) returns every state so
             resolved cards re-render inline in chat history.
         decided_at:

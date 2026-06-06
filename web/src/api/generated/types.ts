@@ -831,7 +831,7 @@ export interface paths {
         patch: operations["updateMCPServer"];
         trace?: never;
     };
-    "/api/v1/approval-policies": {
+    "/api/v1/approvals/policies": {
         parameters: {
             query?: never;
             header?: never;
@@ -862,7 +862,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/approval-policies/{id}": {
+    "/api/v1/approvals/policies/{id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -882,7 +882,7 @@ export interface paths {
         patch: operations["updateApprovalPolicy"];
         trace?: never;
     };
-    "/api/v1/approval-requests": {
+    "/api/v1/approvals/requests": {
         parameters: {
             query?: never;
             header?: never;
@@ -1798,7 +1798,7 @@ export interface components {
             rationale?: string | null;
             /**
              * @description Lifecycle status. Always `pending` on the tenant-wide inbox read
-             *     (`GET /approval-requests`); the conversation sub-resource
+             *     (`GET /approvals/requests`); the conversation sub-resource
              *     (`GET /conversations/{id}/approval-requests`) returns every state so
              *     resolved cards re-render inline in chat history.
              * @enum {string}

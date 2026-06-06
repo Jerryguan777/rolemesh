@@ -279,12 +279,12 @@ async def test_member_cannot_write_approval_policy_admin_can() -> None:
 
     member_app = _build_app(_authed(tid, member_id, "member"))
     async with _client(member_app) as c:
-        denied = await c.post("/api/v1/approval-policies", json=payload)
+        denied = await c.post("/api/v1/approvals/policies", json=payload)
     assert denied.status_code == 403, denied.text
 
     admin_app = _build_app(_authed(tid, admin_id, "admin"))
     async with _client(admin_app) as c:
-        ok = await c.post("/api/v1/approval-policies", json=payload)
+        ok = await c.post("/api/v1/approvals/policies", json=payload)
     assert ok.status_code == 201, ok.text
 
 

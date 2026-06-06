@@ -86,11 +86,11 @@ AUTH_ONLY_V1_ROUTES: dict[tuple[str, str], str] = {
         "Read of the tenant's MCP server catalog.",
     ("GET", "/api/v1/mcp-servers/{mcp_id}"):
         "Read of one MCP server (no secrets in the response shape).",
-    ("GET", "/api/v1/approval-policies"):
+    ("GET", "/api/v1/approvals/policies"):
         "Read of the tenant's approval policies.",
-    ("GET", "/api/v1/approval-policies/{policy_id}"):
+    ("GET", "/api/v1/approvals/policies/{policy_id}"):
         "Read of one approval policy.",
-    ("GET", "/api/v1/approval-requests"):
+    ("GET", "/api/v1/approvals/requests"):
         "Read of the tenant's pending approval requests (inbox re-render).",
     ("GET", "/api/v1/schedules"):
         "Read-only schedules surface; writes are not exposed on v1.",
