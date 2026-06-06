@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     import asyncpg
 
 __all__ = [
+    "count_coworkers_for_tenant",
     "create_coworker",
     "delete_coworker",
     "get_all_coworkers",
@@ -188,48 +189,72 @@ async def get_coworker_by_folder(tenant_id: str, folder: str) -> Coworker | None
     return _record_to_coworker(row)
 
 
+def _coworker_visibility_sql(
+    tenant_id: str,
+    *,
+    requesting_user_id: str | None,
+    include_all: bool,
+) -> tuple[str, list[object]]:
+    """WHERE clause + params shared by the visibility-scoped list/count.
+
+    ``created_by_user_id = $2`` is three-valued-logic safe: a row with
+    ``created_by_user_id IS NULL`` yields ``NULL`` (not TRUE), so an
+    un-attributed private row never leaks to a member. Managers pass
+    ``include_all=True`` so no predicate is added.
+    """
+    where = "tenant_id = $1::uuid"
+    params: list[object] = [tenant_id]
+    if not include_all:
+        params.append(requesting_user_id)
+        where += " AND (visibility = 'shared' OR created_by_user_id = $2::uuid)"
+    return where, params
+
+
 async def get_coworkers_for_tenant(
     tenant_id: str,
     *,
     requesting_user_id: str | None = None,
     include_all: bool = True,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> list[Coworker]:
-    """Get coworkers for a tenant.
+    """Get coworkers for a tenant, optionally visibility-scoped and paginated.
 
     ``include_all`` (the DEFAULT) preserves the historical unfiltered
     behavior: every internal caller (orchestrator load paths, OIDC
-    auto-assign, the legacy admin surface) needs ALL rows and must NOT
-    be visibility-scoped. Only the v1 list endpoint opts in to filtering
-    by passing ``include_all=False`` together with ``requesting_user_id``.
-
-    When filtering, the visibility predicate is exactly the SQL mirror of
-    :func:`webui.dependencies.user_can_see_resource`'s SEE rule for a
-    non-manager caller:
-
-        visibility = 'shared' OR created_by_user_id = :requesting_user_id
-
-    ``created_by_user_id = $2`` is three-valued-logic safe: a row with
-    ``created_by_user_id IS NULL`` yields ``NULL`` (not TRUE) for that
-    comparison, so an un-attributed private row never leaks to a member.
-    Managers (owner/admin/platform_admin) call with ``include_all=True``
-    so no predicate is added and they see every row.
+    auto-assign) needs ALL rows and must NOT be visibility-scoped. Only
+    the v1 list endpoint opts in to filtering by passing
+    ``include_all=False`` together with ``requesting_user_id`` (the
+    predicate is the SQL mirror of
+    :func:`webui.dependencies.user_can_see_resource`'s SEE rule).
     """
+    where, params = _coworker_visibility_sql(
+        tenant_id, requesting_user_id=requesting_user_id, include_all=include_all,
+    )
+    sql = f"SELECT * FROM coworkers WHERE {where} ORDER BY name"
+    if limit is not None:
+        params.extend((limit, offset))
+        sql += f" LIMIT ${len(params) - 1} OFFSET ${len(params)}"
     async with tenant_conn(tenant_id) as conn:
-        if include_all:
-            rows = await conn.fetch(
-                "SELECT * FROM coworkers WHERE tenant_id = $1::uuid "
-                "ORDER BY name",
-                tenant_id,
-            )
-        else:
-            rows = await conn.fetch(
-                "SELECT * FROM coworkers WHERE tenant_id = $1::uuid "
-                "AND (visibility = 'shared' OR created_by_user_id = $2::uuid) "
-                "ORDER BY name",
-                tenant_id,
-                requesting_user_id,
-            )
+        rows = await conn.fetch(sql, *params)
     return [_record_to_coworker(row) for row in rows]
+
+
+async def count_coworkers_for_tenant(
+    tenant_id: str,
+    *,
+    requesting_user_id: str | None = None,
+    include_all: bool = True,
+) -> int:
+    """Count coworkers visible to the caller (same predicate as the list)."""
+    where, params = _coworker_visibility_sql(
+        tenant_id, requesting_user_id=requesting_user_id, include_all=include_all,
+    )
+    async with tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow(
+            f"SELECT COUNT(*) AS n FROM coworkers WHERE {where}", *params,
+        )
+    return int(row["n"]) if row else 0
 
 
 async def set_coworker_visibility(

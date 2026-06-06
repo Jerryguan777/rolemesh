@@ -1319,3 +1319,36 @@ class ApprovalRequestPage(BaseModel):
     total: int = Field(ge=0)
     limit: int = Field(ge=1)
     offset: int = Field(ge=0)
+
+
+class CoworkerPage(BaseModel):
+    """Offset/limit page of coworkers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[Coworker]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
+class SkillSummaryPage(BaseModel):
+    """Offset/limit page of skill summaries."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[SkillSummary]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
+class MCPServerPage(BaseModel):
+    """Offset/limit page of MCP servers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[MCPServer]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)

@@ -32,6 +32,7 @@ from rolemesh.core.skills import (
 from rolemesh.core.types import Skill as SkillDataclass
 from rolemesh.core.types import SkillFile as SkillFileDataclass
 from rolemesh.db import (
+    count_skills_for_tenant,
     create_skill,
     delete_skill,
     delete_skill_file,
@@ -59,9 +60,11 @@ from webui.schemas_v1 import (
     SkillFile,
     SkillFileUpsert,
     SkillSummary,
+    SkillSummaryPage,
     SkillUpdate,
 )
 from webui.v1 import coworker_events
+from webui.v1._pagination import DEFAULT_PAGE_LIMIT, LimitParam, OffsetParam
 from webui.v1.errors import ErrorResponseException, raise_error_response
 
 if TYPE_CHECKING:
@@ -240,16 +243,26 @@ async def _broadcast_skills_changed(
 # ---------------------------------------------------------------------------
 
 
-@skills_router.get("", response_model=list[SkillSummary])
+@skills_router.get("", response_model=SkillSummaryPage)
 async def list_skills_endpoint(
+    limit: LimitParam = DEFAULT_PAGE_LIMIT,
+    offset: OffsetParam = 0,
     user: AuthenticatedUser = Depends(get_current_user),
-) -> list[SkillSummary]:
+) -> SkillSummaryPage:
     # feat/roles PR3 visibility: a manager (skill.manage) sees every
     # catalog skill; a member sees shared + their own private. Row-level
     # predicate lives in ``list_skills_for_tenant`` (SQL mirror of
     # ``user_can_see_resource``); the route stays auth-only (allowlisted).
+    # ``total`` reflects the visible set, not the whole catalog.
     can_manage = user_can(user.role, "skill.manage")  # type: ignore[arg-type]
     skills = await list_skills_for_tenant(
+        user.tenant_id,
+        requesting_user_id=user.user_id,
+        include_all=can_manage,
+        limit=limit,
+        offset=offset,
+    )
+    total = await count_skills_for_tenant(
         user.tenant_id,
         requesting_user_id=user.user_id,
         include_all=can_manage,
@@ -258,7 +271,9 @@ async def list_skills_endpoint(
     for s in skills:
         bound = await list_coworkers_for_skill(s.id, tenant_id=user.tenant_id)
         summaries.append(_skill_to_summary(s, bound_count=len(bound)))
-    return summaries
+    return SkillSummaryPage(
+        items=summaries, total=total, limit=limit, offset=offset,
+    )
 
 
 @skills_router.post("", response_model=Skill, status_code=201)

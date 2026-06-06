@@ -23,6 +23,8 @@ import {
 } from './coworker-wizard.js';
 import type { Backend, Coworker, CredentialResponse, Model } from '../api/client.js';
 
+const pageOf = <T,>(items: T[]) => ({ items, total: items.length, limit: 200, offset: 0 });
+
 // ---------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------
@@ -202,12 +204,12 @@ describe('<rm-coworker-wizard>', () => {
         respond: () => jsonResp(CREDS_ANT),
       },
       {
-        match: (u) => u === '/api/v1/mcp-servers',
-        respond: () => jsonResp([]),
+        match: (u) => u.split('?')[0] === '/api/v1/mcp-servers',
+        respond: () => jsonResp(pageOf([])),
       },
       {
-        match: (u) => u === '/api/v1/skills',
-        respond: () => jsonResp([]),
+        match: (u) => u.split('?')[0] === '/api/v1/skills',
+        respond: () => jsonResp(pageOf([])),
       },
       {
         match: (u, i) => u === '/api/v1/coworkers' && i?.method === 'POST',
@@ -456,8 +458,8 @@ describe('<rm-coworker-wizard>', () => {
       { match: (u) => u.startsWith('/api/v1/models'), respond: () => jsonResp(MODELS) },
       { match: (u) => u === '/api/v1/tenant/credentials', respond: () => jsonResp(CREDS_ANT) },
       {
-        match: (u) => u === '/api/v1/mcp-servers',
-        respond: () => jsonResp([
+        match: (u) => u.split('?')[0] === '/api/v1/mcp-servers',
+        respond: () => jsonResp(pageOf([
           {
             id: 'mmmmmmmm-0000-0000-0000-000000000001',
             tenant_id: 't',
@@ -468,9 +470,9 @@ describe('<rm-coworker-wizard>', () => {
             created_at: '2026-05-20T00:00:00Z',
             updated_at: '2026-05-20T00:00:00Z',
           },
-        ]),
+        ])),
       },
-      { match: (u) => u === '/api/v1/skills', respond: () => jsonResp([]) },
+      { match: (u) => u.split('?')[0] === '/api/v1/skills', respond: () => jsonResp(pageOf([])) },
       {
         match: (u, i) => u === '/api/v1/coworkers' && i?.method === 'POST',
         respond: () => jsonResp(CREATED_COWORKER, 201),
@@ -545,8 +547,8 @@ describe('<rm-coworker-wizard>', () => {
       { match: (u) => u.endsWith('/api/v1/backends'), respond: () => jsonResp(BACKENDS) },
       { match: (u) => u.startsWith('/api/v1/models'), respond: () => jsonResp(MODELS) },
       { match: (u) => u === '/api/v1/tenant/credentials', respond: () => jsonResp(CREDS_ANT) },
-      { match: (u) => u === '/api/v1/mcp-servers', respond: () => jsonResp([]) },
-      { match: (u) => u === '/api/v1/skills', respond: () => jsonResp([]) },
+      { match: (u) => u.split('?')[0] === '/api/v1/mcp-servers', respond: () => jsonResp(pageOf([])) },
+      { match: (u) => u.split('?')[0] === '/api/v1/skills', respond: () => jsonResp(pageOf([])) },
       // Existing MCP bindings: seed the wizard with one already-bound
       // server so we can verify it ends up in originalMcpServerIds.
       {
@@ -654,8 +656,8 @@ describe('<rm-coworker-wizard>', () => {
       { match: (u) => u.endsWith('/api/v1/backends'), respond: () => jsonResp(BACKENDS) },
       { match: (u) => u.startsWith('/api/v1/models'), respond: () => jsonResp(MODELS) },
       { match: (u) => u === '/api/v1/tenant/credentials', respond: () => jsonResp(CREDS_ANT) },
-      { match: (u) => u === '/api/v1/mcp-servers', respond: () => jsonResp([]) },
-      { match: (u) => u === '/api/v1/skills', respond: () => jsonResp([]) },
+      { match: (u) => u.split('?')[0] === '/api/v1/mcp-servers', respond: () => jsonResp(pageOf([])) },
+      { match: (u) => u.split('?')[0] === '/api/v1/skills', respond: () => jsonResp(pageOf([])) },
     ]);
     const el = mount();
     el.open = true;
@@ -693,8 +695,8 @@ describe('<rm-coworker-wizard>', () => {
       { match: (u) => u.endsWith('/api/v1/backends'), respond: () => jsonResp(BACKENDS) },
       { match: (u) => u.startsWith('/api/v1/models'), respond: () => jsonResp(MODELS) },
       { match: (u) => u === '/api/v1/tenant/credentials', respond: () => jsonResp(CREDS_ANT) },
-      { match: (u) => u === '/api/v1/mcp-servers', respond: () => jsonResp(MCP_LIST) },
-      { match: (u) => u === '/api/v1/skills', respond: () => jsonResp(SKILL_LIST) },
+      { match: (u) => u.split('?')[0] === '/api/v1/mcp-servers', respond: () => jsonResp(pageOf(MCP_LIST)) },
+      { match: (u) => u.split('?')[0] === '/api/v1/skills', respond: () => jsonResp(pageOf(SKILL_LIST)) },
     ]);
     const el = mount();
     el.open = true;
@@ -768,12 +770,12 @@ describe('<rm-coworker-wizard>', () => {
       { match: (u) => u.startsWith('/api/v1/models'), respond: () => jsonResp(MODELS) },
       { match: (u) => u === '/api/v1/tenant/credentials', respond: () => jsonResp(CREDS_ANT) },
       {
-        match: (u) => u === '/api/v1/mcp-servers',
-        respond: () => jsonResp([
+        match: (u) => u.split('?')[0] === '/api/v1/mcp-servers',
+        respond: () => jsonResp(pageOf([
           { id: 'm1', name: 'a', tenant_id: 't', config: {}, created_at: '', updated_at: '' },
-        ]),
+        ])),
       },
-      { match: (u) => u === '/api/v1/skills', respond: () => jsonResp([]) },
+      { match: (u) => u.split('?')[0] === '/api/v1/skills', respond: () => jsonResp(pageOf([])) },
     ]);
     const el = mount();
     el.open = true;

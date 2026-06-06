@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     import asyncpg
 
 __all__ = [
+    "count_skills_for_tenant",
     "create_skill",
     "create_skill_for_coworker",
     "delete_skill",
@@ -283,42 +284,72 @@ async def get_skill(
     return _record_to_skill(row, files)
 
 
+def _skill_visibility_sql(
+    tenant_id: str,
+    *,
+    requesting_user_id: str | None,
+    include_all: bool,
+) -> tuple[str, list[object]]:
+    """WHERE clause + params shared by the visibility-scoped list/count.
+
+    NULL-safe mirror of ``user_can_see_resource`` for a non-manager:
+    ``visibility = 'shared' OR created_by_user_id = :requesting_user_id``.
+    """
+    where = "tenant_id = $1::uuid"
+    params: list[object] = [tenant_id]
+    if not include_all:
+        params.append(requesting_user_id)
+        where += " AND (visibility = 'shared' OR created_by_user_id = $2::uuid)"
+    return where, params
+
+
+async def count_skills_for_tenant(
+    tenant_id: str,
+    *,
+    requesting_user_id: str | None = None,
+    include_all: bool = True,
+) -> int:
+    """Count catalog skills visible to the caller (same predicate as list)."""
+    where, params = _skill_visibility_sql(
+        tenant_id, requesting_user_id=requesting_user_id, include_all=include_all,
+    )
+    async with tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow(
+            f"SELECT COUNT(*) AS n FROM skills WHERE {where}", *params,
+        )
+    return int(row["n"]) if row else 0
+
+
 async def list_skills_for_tenant(
     tenant_id: str,
     *,
     with_files: bool = False,
     requesting_user_id: str | None = None,
     include_all: bool = True,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> list[Skill]:
-    """List catalog skills for ``tenant_id``.
+    """List catalog skills for ``tenant_id``, optionally scoped/paginated.
 
     Backs the v1 flat ``GET /api/v1/skills``. ``with_files`` defaults
     False because the list shape drops body content; the per-skill
     detail endpoint passes True.
 
     ``include_all`` (the DEFAULT) preserves the historical unfiltered
-    behavior for internal/admin callers. The v1 list endpoint opts into
+    behavior for internal callers. The v1 list endpoint opts into
     visibility scoping by passing ``include_all=False`` +
-    ``requesting_user_id``; the predicate is the SQL mirror of
-    :func:`webui.dependencies.user_can_see_resource` for a non-manager
-    (``visibility = 'shared' OR created_by_user_id = :requesting_user_id``)
-    and is NULL-safe (a NULL ``created_by_user_id`` never equals the
-    caller, so an un-attributed private skill stays hidden).
+    ``requesting_user_id`` (SQL mirror of ``user_can_see_resource`` for a
+    non-manager; NULL-safe so an un-attributed private skill stays hidden).
     """
+    where, params = _skill_visibility_sql(
+        tenant_id, requesting_user_id=requesting_user_id, include_all=include_all,
+    )
+    sql = f"SELECT * FROM skills WHERE {where} ORDER BY name"
+    if limit is not None:
+        params.extend((limit, offset))
+        sql += f" LIMIT ${len(params) - 1} OFFSET ${len(params)}"
     async with tenant_conn(tenant_id) as conn:
-        if include_all:
-            rows = await conn.fetch(
-                "SELECT * FROM skills WHERE tenant_id = $1::uuid ORDER BY name",
-                tenant_id,
-            )
-        else:
-            rows = await conn.fetch(
-                "SELECT * FROM skills WHERE tenant_id = $1::uuid "
-                "AND (visibility = 'shared' OR created_by_user_id = $2::uuid) "
-                "ORDER BY name",
-                tenant_id,
-                requesting_user_id,
-            )
+        rows = await conn.fetch(sql, *params)
         result: list[Skill] = []
         if with_files and rows:
             ids = [r["id"] for r in rows]

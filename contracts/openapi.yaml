@@ -224,14 +224,15 @@ paths:
       operationId: listCoworkers
       summary: List coworkers visible to the caller
       security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/LimitParam' }
+        - { $ref: '#/components/parameters/OffsetParam' }
       responses:
         '200':
           description: OK
           content:
             application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/Coworker' }
+              schema: { $ref: '#/components/schemas/CoworkerPage' }
         '401':
           $ref: '#/components/responses/Unauthorized'
     post:
@@ -852,14 +853,15 @@ paths:
       operationId: listSkills
       summary: List the tenant's catalog skills
       security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/LimitParam' }
+        - { $ref: '#/components/parameters/OffsetParam' }
       responses:
         '200':
           description: OK
           content:
             application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/SkillSummary' }
+              schema: { $ref: '#/components/schemas/SkillSummaryPage' }
         '401':
           $ref: '#/components/responses/Unauthorized'
     post:
@@ -1182,14 +1184,15 @@ paths:
       operationId: listMCPServers
       summary: List the tenant's MCP servers
       security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/LimitParam' }
+        - { $ref: '#/components/parameters/OffsetParam' }
       responses:
         '200':
           description: OK
           content:
             application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/MCPServer' }
+              schema: { $ref: '#/components/schemas/MCPServerPage' }
         '401':
           $ref: '#/components/responses/Unauthorized'
     post:
@@ -3430,6 +3433,39 @@ components:
         items:
           type: array
           items: { $ref: '#/components/schemas/ApprovalRequest' }
+        total: { type: integer, minimum: 0 }
+        limit: { type: integer, minimum: 1 }
+        offset: { type: integer, minimum: 0 }
+
+    CoworkerPage:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Coworker' }
+        total: { type: integer, minimum: 0 }
+        limit: { type: integer, minimum: 1 }
+        offset: { type: integer, minimum: 0 }
+
+    SkillSummaryPage:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/SkillSummary' }
+        total: { type: integer, minimum: 0 }
+        limit: { type: integer, minimum: 1 }
+        offset: { type: integer, minimum: 0 }
+
+    MCPServerPage:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/MCPServer' }
         total: { type: integer, minimum: 0 }
         limit: { type: integer, minimum: 1 }
         offset: { type: integer, minimum: 0 }

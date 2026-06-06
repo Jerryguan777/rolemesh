@@ -2116,6 +2116,24 @@ export interface components {
             limit: number;
             offset: number;
         };
+        CoworkerPage: {
+            items: components["schemas"]["Coworker"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
+        SkillSummaryPage: {
+            items: components["schemas"]["SkillSummary"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
+        MCPServerPage: {
+            items: components["schemas"]["MCPServer"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
         SafetyRuleAuditEntry: {
             /** Format: uuid */
             id: string;
@@ -2850,7 +2868,12 @@ export interface operations {
     };
     listCoworkers: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Maximum number of items to return (default 50, max 200). */
+                limit?: components["parameters"]["LimitParam"];
+                /** @description Number of items to skip from the start of the ordered set. */
+                offset?: components["parameters"]["OffsetParam"];
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -2863,7 +2886,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Coworker"][];
+                    "application/json": components["schemas"]["CoworkerPage"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -3514,7 +3537,12 @@ export interface operations {
     };
     listSkills: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Maximum number of items to return (default 50, max 200). */
+                limit?: components["parameters"]["LimitParam"];
+                /** @description Number of items to skip from the start of the ordered set. */
+                offset?: components["parameters"]["OffsetParam"];
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -3527,7 +3555,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SkillSummary"][];
+                    "application/json": components["schemas"]["SkillSummaryPage"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -3903,7 +3931,12 @@ export interface operations {
     };
     listMCPServers: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Maximum number of items to return (default 50, max 200). */
+                limit?: components["parameters"]["LimitParam"];
+                /** @description Number of items to skip from the start of the ordered set. */
+                offset?: components["parameters"]["OffsetParam"];
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -3916,7 +3949,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["MCPServer"][];
+                    "application/json": components["schemas"]["MCPServerPage"];
                 };
             };
             401: components["responses"]["Unauthorized"];

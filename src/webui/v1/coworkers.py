@@ -30,6 +30,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from rolemesh.auth.permissions import user_can
 from rolemesh.core.backend_capabilities import BackendCompatError, validate_combo
 from rolemesh.db import (
+    count_coworkers_for_tenant,
     create_coworker,
     delete_coworker,
     get_coworker,
@@ -45,8 +46,9 @@ from webui.dependencies import (
     require_manage_or_owner,
     user_can_see_resource,
 )
-from webui.schemas_v1 import Coworker, CoworkerCreate, CoworkerUpdate
+from webui.schemas_v1 import Coworker, CoworkerCreate, CoworkerPage, CoworkerUpdate
 from webui.v1 import coworker_events
+from webui.v1._pagination import DEFAULT_PAGE_LIMIT, LimitParam, OffsetParam
 from webui.v1.errors import ErrorResponseException, raise_error_response
 
 if TYPE_CHECKING:
@@ -125,10 +127,12 @@ async def _validate_model_and_credential(
         )
 
 
-@router.get("", response_model=list[Coworker])
+@router.get("", response_model=CoworkerPage)
 async def list_coworkers(
+    limit: LimitParam = DEFAULT_PAGE_LIMIT,
+    offset: OffsetParam = 0,
     user: AuthenticatedUser = Depends(get_current_user),
-) -> list[Coworker]:
+) -> CoworkerPage:
     """List coworkers visible to the caller (feat/roles PR3 visibility).
 
     A manager (``agent.manage``: owner/admin/platform_admin) sees every
@@ -137,15 +141,28 @@ async def list_coworkers(
     :func:`rolemesh.db.get_coworkers_for_tenant`; it is the SQL mirror of
     :func:`webui.dependencies.user_can_see_resource`. This is NOT a new
     capability gate — the route stays auth-only (in the meta-test
-    allowlist); only the result SET narrows.
+    allowlist); only the result SET narrows. ``total`` reflects the
+    visible set, not the whole tenant.
     """
     can_manage = user_can(user.role, "agent.manage")  # type: ignore[arg-type]
     cws = await get_coworkers_for_tenant(
         user.tenant_id,
         requesting_user_id=user.user_id,
         include_all=can_manage,
+        limit=limit,
+        offset=offset,
     )
-    return [_coworker_to_response(c) for c in cws]
+    total = await count_coworkers_for_tenant(
+        user.tenant_id,
+        requesting_user_id=user.user_id,
+        include_all=can_manage,
+    )
+    return CoworkerPage(
+        items=[_coworker_to_response(c) for c in cws],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.post("", response_model=Coworker, status_code=201)

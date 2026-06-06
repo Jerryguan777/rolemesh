@@ -177,7 +177,7 @@ async def test_list_skills_returns_summary_with_zero_bound_count() -> None:
         )
         resp = await ac.get("/api/v1/skills", headers=_HDRS)
     assert resp.status_code == 200
-    rows = resp.json()
+    rows = resp.json()["items"]
     assert any(s["name"] == "a" and s["bound_coworker_count"] == 0 for s in rows)
 
 
@@ -472,7 +472,7 @@ async def test_cross_tenant_list_excludes_other_tenant() -> None:
         )
     async with _client(_build_app(user_a)) as ac:
         resp = await ac.get("/api/v1/skills", headers=_HDRS)
-    names = {s["name"] for s in resp.json()}
+    names = {s["name"] for s in resp.json()["items"]}
     assert "secret-b" not in names
 
 
@@ -737,5 +737,5 @@ async def test_patch_files_refreshes_frontmatter_description() -> None:
             headers=_HDRS,
         )
         listing = await ac.get("/api/v1/skills", headers=_HDRS)
-    summaries = {s["name"]: s for s in listing.json()}
+    summaries = {s["name"]: s for s in listing.json()["items"]}
     assert summaries["rdesc"]["description"] == new_desc

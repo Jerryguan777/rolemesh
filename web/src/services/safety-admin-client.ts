@@ -341,8 +341,12 @@ export interface CoworkerSummary {
 }
 
 export async function listCoworkers(): Promise<CoworkerSummary[]> {
-  const res = await apiFetch('/api/v1/coworkers');
+  // Paged endpoint; request the max window and read items (the decisions
+  // filter only needs id/name for the dropdown).
+  const res = await apiFetch('/api/v1/coworkers?limit=200');
   if (!res.ok) return [];
-  const body = (await res.json()) as Array<{ id: string; name: string }>;
-  return body.map((c) => ({ id: c.id, name: c.name }));
+  const body = (await res.json()) as {
+    items: Array<{ id: string; name: string }>;
+  };
+  return body.items.map((c) => ({ id: c.id, name: c.name }));
 }

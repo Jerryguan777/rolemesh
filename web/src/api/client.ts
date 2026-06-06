@@ -224,12 +224,14 @@ export class ApiClient {
   }
 
   async listCoworkers(): Promise<Coworker[]> {
-    const resp = await fetch(`${this.baseUrl}/api/v1/coworkers`, {
+    // Paged endpoint; request the max window and return items so callers
+    // keep their array shape (full page-through UI is a follow-up).
+    const resp = await fetch(`${this.baseUrl}/api/v1/coworkers?limit=200`, {
       method: 'GET',
       headers: this.headers(),
     });
     if (!resp.ok) throw await this.parseError(resp);
-    return (await resp.json()) as Coworker[];
+    return ((await resp.json()) as components['schemas']['CoworkerPage']).items;
   }
 
   /** Patch selected fields on a coworker. Backend treats ABSENT keys
@@ -368,12 +370,13 @@ export class ApiClient {
   // ------------------------------------------------------------------
 
   async listMCPServers(): Promise<MCPServer[]> {
-    const resp = await fetch(`${this.baseUrl}/api/v1/mcp-servers`, {
+    // Paged endpoint; request the max window and return items (see above).
+    const resp = await fetch(`${this.baseUrl}/api/v1/mcp-servers?limit=200`, {
       method: 'GET',
       headers: this.headers(),
     });
     if (!resp.ok) throw await this.parseError(resp);
-    return (await resp.json()) as MCPServer[];
+    return ((await resp.json()) as components['schemas']['MCPServerPage']).items;
   }
 
   async createMCPServer(body: MCPServerCreate): Promise<MCPServer> {
@@ -503,12 +506,14 @@ export class ApiClient {
   // ------------------------------------------------------------------
 
   async listSkills(): Promise<SkillSummary[]> {
-    const resp = await fetch(`${this.baseUrl}/api/v1/skills`, {
+    // Paged endpoint; request the max window and return items (see above).
+    const resp = await fetch(`${this.baseUrl}/api/v1/skills?limit=200`, {
       method: 'GET',
       headers: this.headers(),
     });
     if (!resp.ok) throw await this.parseError(resp);
-    return (await resp.json()) as SkillSummary[];
+    return ((await resp.json()) as components['schemas']['SkillSummaryPage'])
+      .items;
   }
 
   async getSkill(id: string): Promise<Skill> {
