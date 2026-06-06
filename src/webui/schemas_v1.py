@@ -1352,3 +1352,44 @@ class MCPServerPage(BaseModel):
     total: int = Field(ge=0)
     limit: int = Field(ge=1)
     offset: int = Field(ge=0)
+
+
+class ConversationPage(BaseModel):
+    """Offset/limit page of conversations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[Conversation]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
+class SafetyRuleAuditPage(BaseModel):
+    """Offset/limit page of safety rule audit entries."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[SafetyRuleAuditEntry]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
+class MessagePage(BaseModel):
+    """Cursor page of conversation messages.
+
+    Messages use cursor pagination, NOT offset/limit like the other
+    collections: chat history is append-only and read newest-first
+    ("load older"), so offset paging would shift or duplicate rows as
+    new messages arrive mid-scroll. The server seeks on ``(timestamp,
+    id)``. ``items`` are returned oldest-first (natural display order);
+    when ``has_more`` is true, ``next_cursor`` is passed back as the
+    ``before`` query param to fetch the next older page.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[Message]
+    has_more: bool
+    next_cursor: str | None = None

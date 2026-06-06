@@ -392,14 +392,15 @@ paths:
       tags: [Conversations]
       operationId: listCoworkerConversations
       security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/LimitParam' }
+        - { $ref: '#/components/parameters/OffsetParam' }
       responses:
         '200':
           description: OK
           content:
             application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/Conversation' }
+              schema: { $ref: '#/components/schemas/ConversationPage' }
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -468,14 +469,21 @@ paths:
       tags: [Conversations]
       operationId: listConversationMessages
       security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: before
+          in: query
+          required: false
+          description: >-
+            Opaque cursor from a previous page's next_cursor; returns the
+            page of messages immediately older than it.
+          schema: { type: string }
+        - { $ref: '#/components/parameters/LimitParam' }
       responses:
         '200':
           description: OK
           content:
             application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/Message' }
+              schema: { $ref: '#/components/schemas/MessagePage' }
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -1637,14 +1645,13 @@ paths:
           in: query
           required: false
           schema: { type: integer, minimum: 1, maximum: 500, default: 200 }
+        - { $ref: '#/components/parameters/OffsetParam' }
       responses:
         '200':
           description: OK
           content:
             application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/SafetyRuleAuditEntry' }
+              schema: { $ref: '#/components/schemas/SafetyRuleAuditPage' }
         '401':
           $ref: '#/components/responses/Unauthorized'
         '404':
@@ -3469,6 +3476,43 @@ components:
         total: { type: integer, minimum: 0 }
         limit: { type: integer, minimum: 1 }
         offset: { type: integer, minimum: 0 }
+
+    ConversationPage:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Conversation' }
+        total: { type: integer, minimum: 0 }
+        limit: { type: integer, minimum: 1 }
+        offset: { type: integer, minimum: 0 }
+
+    SafetyRuleAuditPage:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/SafetyRuleAuditEntry' }
+        total: { type: integer, minimum: 0 }
+        limit: { type: integer, minimum: 1 }
+        offset: { type: integer, minimum: 0 }
+
+    MessagePage:
+      type: object
+      required: [items, has_more]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Message' }
+        has_more: { type: boolean }
+        next_cursor:
+          type: string
+          nullable: true
+          description: >-
+            Opaque cursor for the next OLDER page; pass back as the
+            `before` query param. Null when there are no older messages.
 
     SafetyRuleAuditEntry:
       type: object

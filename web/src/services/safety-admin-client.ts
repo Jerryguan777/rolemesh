@@ -253,15 +253,23 @@ export async function deleteRule(ruleId: string): Promise<void> {
   }
 }
 
+interface SafetyRuleAuditPage {
+  items: SafetyRuleAuditEntry[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 export async function listRuleAudit(
   ruleId: string,
   limit = 200,
 ): Promise<SafetyRuleAuditEntry[]> {
   // Tenant is derived from the session server-side (no tenant id in path).
+  // Paged endpoint; return items so callers keep the array shape.
   const res = await apiFetch(
     `/api/v1/safety/rules/${encodeURIComponent(ruleId)}/audit?limit=${limit}`,
   );
-  return jsonOrThrow<SafetyRuleAuditEntry[]>(res);
+  return (await jsonOrThrow<SafetyRuleAuditPage>(res)).items;
 }
 
 export async function listDecisions(

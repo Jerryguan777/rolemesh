@@ -375,7 +375,7 @@ async def test_rule_audit_timeline_newest_first() -> None:
             f"/api/v1/safety/rules/{rule.id}/audit", headers=_HDRS,
         )
     assert resp.status_code == 200, resp.text
-    rows = resp.json()
+    rows = resp.json()["items"]
     assert len(rows) >= 2
     # Ordering: most recent first
     timestamps = [r["created_at"] for r in rows]

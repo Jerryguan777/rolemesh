@@ -261,12 +261,15 @@ export class ApiClient {
   }
 
   async listCoworkerConversations(coworkerId: string): Promise<Conversation[]> {
+    // Paged endpoint; request the max window and return items (array shape
+    // preserved for callers; full page-through UI is a follow-up).
     const resp = await fetch(
-      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(coworkerId)}/conversations`,
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(coworkerId)}/conversations?limit=200`,
       { method: 'GET', headers: this.headers() },
     );
     if (!resp.ok) throw await this.parseError(resp);
-    return (await resp.json()) as Conversation[];
+    return ((await resp.json()) as components['schemas']['ConversationPage'])
+      .items;
   }
 
   /** Create a fresh web-channel conversation for a coworker. The
@@ -290,12 +293,16 @@ export class ApiClient {
   }
 
   async listMessages(conversationId: string): Promise<Message[]> {
+    // Cursor-paginated endpoint. Request the max window and return the
+    // (oldest-first) items so existing callers keep their array shape; this
+    // shows the newest 200 messages. "Load older" via next_cursor is a
+    // follow-up once the chat UI grows a scrollback control.
     const resp = await fetch(
-      `${this.baseUrl}/api/v1/conversations/${encodeURIComponent(conversationId)}/messages`,
+      `${this.baseUrl}/api/v1/conversations/${encodeURIComponent(conversationId)}/messages?limit=200`,
       { method: 'GET', headers: this.headers() },
     );
     if (!resp.ok) throw await this.parseError(resp);
-    return (await resp.json()) as Message[];
+    return ((await resp.json()) as components['schemas']['MessagePage']).items;
   }
 
   async getRun(runId: string): Promise<Run | null> {
@@ -661,12 +668,14 @@ export class ApiClient {
     ruleId: string,
     limit = 200,
   ): Promise<SafetyRuleAuditEntry[]> {
+    // Paged endpoint; return items so callers keep their array shape.
     const resp = await fetch(
       `${this.baseUrl}/api/v1/safety/rules/${encodeURIComponent(ruleId)}/audit?limit=${limit}`,
       { method: 'GET', headers: this.headers() },
     );
     if (!resp.ok) throw await this.parseError(resp);
-    return (await resp.json()) as SafetyRuleAuditEntry[];
+    return ((await resp.json()) as components['schemas']['SafetyRuleAuditPage'])
+      .items;
   }
 
   async listSafetyChecks(): Promise<SafetyCheck[]> {

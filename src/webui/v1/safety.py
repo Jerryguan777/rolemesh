@@ -31,6 +31,7 @@ from rolemesh.auth.bootstrap_actor import resolve_actor_user_id
 from rolemesh.db import (
     count_safety_decisions,
     count_safety_rules,
+    count_safety_rules_audit,
     create_safety_rule,
     delete_safety_rule,
     get_safety_decision,
@@ -55,6 +56,7 @@ from webui.schemas_v1 import (
     SafetyFinding,
     SafetyRule,
     SafetyRuleAuditEntry,
+    SafetyRuleAuditPage,
     SafetyRulePage,
     SafetyStage,
     SafetyVerdictAction,
@@ -491,27 +493,40 @@ async def get_rule(
 
 @router.get(
     "/rules/{rule_id}/audit",
-    response_model=list[SafetyRuleAuditEntry],
+    response_model=SafetyRuleAuditPage,
 )
 async def list_rule_audit(
     rule_id: str,
     limit: int = Query(default=200, ge=1, le=500),
+    offset: OffsetParam = 0,
     user: AuthenticatedUser = Depends(require_action("safety.read")),
-) -> list[SafetyRuleAuditEntry]:
-    """Change-history timeline for one rule, newest first.
+) -> SafetyRuleAuditPage:
+    """Change-history timeline for one rule, newest first (offset/limit paged).
 
     Probes the parent rule via :func:`_get_rule_or_404` before
     reading audit rows — without this guard, a cross-tenant rule_id
     would return an empty 200 (because the audit table is RLS-
     scoped) which is itself a weak signal of "wrong tenant".
+
+    Keeps its own ``limit`` cap (max 500, vs the shared 200) because a
+    compliance timeline is occasionally read in larger pulls.
     """
     await _get_rule_or_404(rule_id, tenant_id=user.tenant_id)
     rows = await list_safety_rules_audit(
         tenant_id=user.tenant_id,
         rule_id=rule_id,
         limit=limit,
+        offset=offset,
     )
-    return [_audit_row_to_response(r) for r in rows]
+    total = await count_safety_rules_audit(
+        tenant_id=user.tenant_id, rule_id=rule_id,
+    )
+    return SafetyRuleAuditPage(
+        items=[_audit_row_to_response(r) for r in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/checks", response_model=list[SafetyCheck])

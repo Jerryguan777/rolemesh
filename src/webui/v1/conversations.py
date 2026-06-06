@@ -15,13 +15,15 @@ no second filter; instead it asks the DB helper to scope, and
 
 from __future__ import annotations
 
+import base64
 import uuid
 from typing import TYPE_CHECKING
 
 import asyncpg
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Query, Response
 
 from rolemesh.db import (
+    count_conversations_for_coworker,
     create_channel_binding,
     create_conversation,
     delete_conversation,
@@ -36,8 +38,11 @@ from webui.schemas_v1 import (
     ApprovalRequest,
     Conversation,
     ConversationCreate,
+    ConversationPage,
     Message,
+    MessagePage,
 )
+from webui.v1._pagination import DEFAULT_PAGE_LIMIT, LimitParam, OffsetParam
 from webui.v1.approvals import _request_to_response
 from webui.v1.coworkers import _get_coworker_or_404
 from webui.v1.errors import raise_error_response
@@ -111,20 +116,30 @@ async def _get_conversation_or_404(
 
 @coworker_conversations_router.get(
     "/{coworker_id}/conversations",
-    response_model=list[Conversation],
+    response_model=ConversationPage,
 )
 async def list_coworker_conversations(
     coworker_id: str,
+    limit: LimitParam = DEFAULT_PAGE_LIMIT,
+    offset: OffsetParam = 0,
     user: AuthenticatedUser = Depends(get_current_user),
-) -> list[Conversation]:
-    """List conversations for a coworker, ordered by ``created_at``."""
+) -> ConversationPage:
+    """List conversations for a coworker, ordered by ``created_at`` (paged)."""
     # USE/SEE enforcement: a member may not enumerate conversations of a
     # coworker they cannot see (another member's private one) — 404.
     await _get_coworker_or_404(coworker_id, user.tenant_id, user=user)
     convs = await get_conversations_for_coworker(
-        coworker_id, tenant_id=user.tenant_id
+        coworker_id, tenant_id=user.tenant_id, limit=limit, offset=offset,
     )
-    return [_conversation_to_response(c) for c in convs]
+    total = await count_conversations_for_coworker(
+        coworker_id, tenant_id=user.tenant_id,
+    )
+    return ConversationPage(
+        items=[_conversation_to_response(c) for c in convs],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @coworker_conversations_router.post(
@@ -199,44 +214,99 @@ async def delete_conversation_endpoint(
     return Response(status_code=204)
 
 
+def _encode_message_cursor(ts_iso: str, msg_id: str) -> str:
+    """Opaque cursor = base64("<timestamp_iso>|<message_id>")."""
+    return base64.urlsafe_b64encode(f"{ts_iso}|{msg_id}".encode()).decode()
+
+
+def _decode_message_cursor(cursor: str) -> tuple[str, str]:
+    """Inverse of :func:`_encode_message_cursor`. Raises ValueError on junk."""
+    raw = base64.urlsafe_b64decode(cursor.encode()).decode()
+    ts_iso, sep, msg_id = raw.partition("|")
+    if not sep or not ts_iso or not msg_id:
+        raise ValueError("malformed cursor")
+    return ts_iso, msg_id
+
+
 @conversations_router.get(
     "/{conversation_id}/messages",
-    response_model=list[Message],
+    response_model=MessagePage,
 )
 async def list_conversation_messages(
     conversation_id: str,
+    before: str | None = Query(
+        default=None,
+        description=(
+            "Opaque cursor from a previous page's next_cursor; returns the "
+            "page of messages immediately OLDER than it."
+        ),
+    ),
+    limit: LimitParam = DEFAULT_PAGE_LIMIT,
     user: AuthenticatedUser = Depends(get_current_user),
-) -> list[Message]:
-    """Return persisted messages for a conversation, ordered by timestamp.
+) -> MessagePage:
+    """Return persisted messages for a conversation (cursor-paginated).
+
+    Messages page with a ``(timestamp, id)`` cursor rather than
+    offset/limit — chat history is append-only and read "load older",
+    so an offset would shift or duplicate rows as new messages arrive
+    mid-scroll. ``items`` come back oldest-first (display order); when
+    ``has_more`` is true, pass ``next_cursor`` as ``before`` to fetch the
+    next older page.
 
     The wire-level ``role`` projects ``is_from_me`` / ``is_bot_message``
     onto ``user`` / ``assistant``. Token usage and sender metadata are
-    intentionally omitted from the wire schema — the WS event stream
-    surfaces live usage; persisted history only needs role / content /
-    timestamp for re-render.
+    intentionally omitted — the WS event stream surfaces live usage;
+    persisted history only needs role / content / timestamp for re-render.
     """
     await _get_conversation_or_404(conversation_id, user.tenant_id)
-    async with tenant_conn(user.tenant_id) as conn:
-        rows = await conn.fetch(
-            """
-            SELECT id,
-                   content,
-                   timestamp,
-                   is_from_me,
-                   is_bot_message,
-                   run_id::text AS run_id
-              FROM messages
-             WHERE conversation_id = $1::uuid
-               AND tenant_id       = $2::uuid
-             ORDER BY timestamp
-            """,
-            conversation_id,
-            user.tenant_id,
+
+    where = "conversation_id = $1::uuid AND tenant_id = $2::uuid"
+    params: list[object] = [conversation_id, user.tenant_id]
+    if before is not None:
+        try:
+            cur_ts, cur_id = _decode_message_cursor(before)
+        except ValueError:
+            raise_error_response(
+                "INVALID_CURSOR",
+                "Malformed pagination cursor.",
+                status_code=400,
+            )
+        # messages.id is TEXT (client-supplied ids), so the cursor tiebreak
+        # compares it as text — no ::uuid cast.
+        params.extend((cur_ts, cur_id))
+        where += " AND (timestamp, id) < ($3::timestamptz, $4)"
+    params.append(limit + 1)  # over-fetch one to detect has_more
+    sql = (
+        "SELECT id, content, timestamp, is_from_me, is_bot_message, "
+        "run_id::text AS run_id FROM messages WHERE "
+        + where
+        + f" ORDER BY timestamp DESC, id DESC LIMIT ${len(params)}"
+    )
+    try:
+        async with tenant_conn(user.tenant_id) as conn:
+            rows_desc = await conn.fetch(sql, *params)
+    except asyncpg.DataError:
+        # A cursor that decodes but carries a non-UUID / bad timestamp.
+        raise_error_response(
+            "INVALID_CURSOR",
+            "Malformed pagination cursor.",
+            status_code=400,
         )
-    out: list[Message] = []
-    for row in rows:
+
+    has_more = len(rows_desc) > limit
+    rows_desc = rows_desc[:limit]
+    next_cursor: str | None = None
+    if has_more and rows_desc:
+        oldest = rows_desc[-1]
+        next_cursor = _encode_message_cursor(
+            oldest["timestamp"].isoformat() if oldest["timestamp"] else "",
+            str(oldest["id"]),
+        )
+
+    items: list[Message] = []
+    for row in reversed(rows_desc):  # oldest-first for display
         role = "assistant" if (row["is_from_me"] or row["is_bot_message"]) else "user"
-        out.append(
+        items.append(
             Message(
                 id=row["id"],
                 role=role,  # type: ignore[arg-type]
@@ -245,7 +315,7 @@ async def list_conversation_messages(
                 run_id=row["run_id"],
             )
         )
-    return out
+    return MessagePage(items=items, has_more=has_more, next_cursor=next_cursor)
 
 
 @conversations_router.get(

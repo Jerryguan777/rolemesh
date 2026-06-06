@@ -2134,6 +2134,24 @@ export interface components {
             limit: number;
             offset: number;
         };
+        ConversationPage: {
+            items: components["schemas"]["Conversation"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
+        SafetyRuleAuditPage: {
+            items: components["schemas"]["SafetyRuleAuditEntry"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
+        MessagePage: {
+            items: components["schemas"]["Message"][];
+            has_more: boolean;
+            /** @description Opaque cursor for the next OLDER page; pass back as the `before` query param. Null when there are no older messages. */
+            next_cursor?: string | null;
+        };
         SafetyRuleAuditEntry: {
             /** Format: uuid */
             id: string;
@@ -3051,7 +3069,12 @@ export interface operations {
     };
     listCoworkerConversations: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Maximum number of items to return (default 50, max 200). */
+                limit?: components["parameters"]["LimitParam"];
+                /** @description Number of items to skip from the start of the ordered set. */
+                offset?: components["parameters"]["OffsetParam"];
+            };
             header?: never;
             path: {
                 id: components["parameters"]["IdInPath"];
@@ -3066,7 +3089,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Conversation"][];
+                    "application/json": components["schemas"]["ConversationPage"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -3151,7 +3174,12 @@ export interface operations {
     };
     listConversationMessages: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Opaque cursor from a previous page's next_cursor; returns the page of messages immediately older than it. */
+                before?: string;
+                /** @description Maximum number of items to return (default 50, max 200). */
+                limit?: components["parameters"]["LimitParam"];
+            };
             header?: never;
             path: {
                 id: components["parameters"]["IdInPath"];
@@ -3166,7 +3194,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Message"][];
+                    "application/json": components["schemas"]["MessagePage"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -4426,6 +4454,8 @@ export interface operations {
         parameters: {
             query?: {
                 limit?: number;
+                /** @description Number of items to skip from the start of the ordered set. */
+                offset?: components["parameters"]["OffsetParam"];
             };
             header?: never;
             path: {
@@ -4441,7 +4471,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SafetyRuleAuditEntry"][];
+                    "application/json": components["schemas"]["SafetyRuleAuditPage"];
                 };
             };
             401: components["responses"]["Unauthorized"];

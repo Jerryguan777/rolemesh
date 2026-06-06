@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     import asyncpg
 
 __all__ = [
+    "count_conversations_for_coworker",
     "create_channel_binding",
     "create_conversation",
     "delete_channel_binding",
@@ -396,18 +397,35 @@ async def get_conversation_for_notification(conversation_id: str) -> Conversatio
 
 
 async def get_conversations_for_coworker(
-    coworker_id: str, *, tenant_id: str
+    coworker_id: str, *, tenant_id: str, limit: int | None = None, offset: int = 0,
 ) -> list[Conversation]:
-    """Get all conversations for a coworker."""
+    """Get conversations for a coworker (oldest first), optionally paginated."""
+    sql = (
+        "SELECT * FROM conversations "
+        "WHERE coworker_id = $1::uuid AND tenant_id = $2::uuid "
+        "ORDER BY created_at"
+    )
+    params: list[object] = [coworker_id, tenant_id]
+    if limit is not None:
+        params.extend((limit, offset))
+        sql += f" LIMIT ${len(params) - 1} OFFSET ${len(params)}"
     async with tenant_conn(tenant_id) as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM conversations "
-            "WHERE coworker_id = $1::uuid AND tenant_id = $2::uuid "
-            "ORDER BY created_at",
+        rows = await conn.fetch(sql, *params)
+    return [_record_to_conversation(row) for row in rows]
+
+
+async def count_conversations_for_coworker(
+    coworker_id: str, *, tenant_id: str,
+) -> int:
+    """Total conversation count for a coworker (for the pagination envelope)."""
+    async with tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow(
+            "SELECT COUNT(*) AS n FROM conversations "
+            "WHERE coworker_id = $1::uuid AND tenant_id = $2::uuid",
             coworker_id,
             tenant_id,
         )
-    return [_record_to_conversation(row) for row in rows]
+    return int(row["n"]) if row else 0
 
 
 async def get_all_conversations() -> list[Conversation]:
