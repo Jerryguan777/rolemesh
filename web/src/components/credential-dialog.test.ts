@@ -8,7 +8,7 @@
 //   - Bedrock specifically renders 4 fields (per locked decision):
 //     access key id (api_key slot), secret, region (default us-west-2),
 //     and optional session token.
-//   - Save → PUT /tenant/credentials/{provider} with the right body
+//   - Save → PUT /credentials/{provider} with the right body
 //     shape `{api_key, extras: {...}}` (or `extras: null` when no
 //     extras are needed).
 //   - Save success fires `credential-saved` AND clears the form
@@ -37,7 +37,7 @@ function installFetch(): Stub {
   const stub: Stub = { restore: () => {}, calls: [], shouldFail: null };
   globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
-    const m = /\/api\/v1\/tenant\/credentials\/(\w+)$/.exec(url);
+    const m = /\/api\/v1\/credentials\/(\w+)$/.exec(url);
     if (m && init?.method === 'PUT') {
       const body = JSON.parse(init.body as string);
       stub.calls.push({ url, body });
@@ -169,7 +169,7 @@ describe('<rm-credential-dialog>', () => {
 
     expect(stub!.calls).toHaveLength(1);
     expect(stub!.calls[0]).toMatchObject({
-      url: expect.stringContaining('/tenant/credentials/openai'),
+      url: expect.stringContaining('/credentials/openai'),
       body: {
         api_key: 'sk-fake',
         extras: { api_base: 'https://gateway.example.com/v1' },

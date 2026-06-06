@@ -371,7 +371,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/tenant/credentials": {
+    "/api/v1/credentials": {
         parameters: {
             query?: never;
             header?: never;
@@ -393,7 +393,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/tenant/credentials/{provider}": {
+    "/api/v1/credentials/{provider}": {
         parameters: {
             query?: never;
             header?: never;
@@ -427,7 +427,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/tenant/credentials/{provider}/pool": {
+    "/api/v1/credentials/{provider}/pool": {
         parameters: {
             query?: never;
             header?: never;

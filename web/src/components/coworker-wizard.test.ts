@@ -200,7 +200,7 @@ describe('<rm-coworker-wizard>', () => {
       },
       {
         match: (u, i) =>
-          u === '/api/v1/tenant/credentials' && (i?.method ?? 'GET') === 'GET',
+          u === '/api/v1/credentials' && (i?.method ?? 'GET') === 'GET',
         respond: () => jsonResp(CREDS_ANT),
       },
       {
@@ -456,7 +456,7 @@ describe('<rm-coworker-wizard>', () => {
     fetchStub = installFetch([
       { match: (u) => u.endsWith('/api/v1/backends'), respond: () => jsonResp(BACKENDS) },
       { match: (u) => u.startsWith('/api/v1/models'), respond: () => jsonResp(MODELS) },
-      { match: (u) => u === '/api/v1/tenant/credentials', respond: () => jsonResp(CREDS_ANT) },
+      { match: (u) => u === '/api/v1/credentials', respond: () => jsonResp(CREDS_ANT) },
       {
         match: (u) => u.split('?')[0] === '/api/v1/mcp-servers',
         respond: () => jsonResp(pageOf([
@@ -546,7 +546,7 @@ describe('<rm-coworker-wizard>', () => {
     fetchStub = installFetch([
       { match: (u) => u.endsWith('/api/v1/backends'), respond: () => jsonResp(BACKENDS) },
       { match: (u) => u.startsWith('/api/v1/models'), respond: () => jsonResp(MODELS) },
-      { match: (u) => u === '/api/v1/tenant/credentials', respond: () => jsonResp(CREDS_ANT) },
+      { match: (u) => u === '/api/v1/credentials', respond: () => jsonResp(CREDS_ANT) },
       { match: (u) => u.split('?')[0] === '/api/v1/mcp-servers', respond: () => jsonResp(pageOf([])) },
       { match: (u) => u.split('?')[0] === '/api/v1/skills', respond: () => jsonResp(pageOf([])) },
       // Existing MCP bindings: seed the wizard with one already-bound
@@ -655,7 +655,7 @@ describe('<rm-coworker-wizard>', () => {
     fetchStub = installFetch([
       { match: (u) => u.endsWith('/api/v1/backends'), respond: () => jsonResp(BACKENDS) },
       { match: (u) => u.startsWith('/api/v1/models'), respond: () => jsonResp(MODELS) },
-      { match: (u) => u === '/api/v1/tenant/credentials', respond: () => jsonResp(CREDS_ANT) },
+      { match: (u) => u === '/api/v1/credentials', respond: () => jsonResp(CREDS_ANT) },
       { match: (u) => u.split('?')[0] === '/api/v1/mcp-servers', respond: () => jsonResp(pageOf([])) },
       { match: (u) => u.split('?')[0] === '/api/v1/skills', respond: () => jsonResp(pageOf([])) },
     ]);
@@ -694,7 +694,7 @@ describe('<rm-coworker-wizard>', () => {
     fetchStub = installFetch([
       { match: (u) => u.endsWith('/api/v1/backends'), respond: () => jsonResp(BACKENDS) },
       { match: (u) => u.startsWith('/api/v1/models'), respond: () => jsonResp(MODELS) },
-      { match: (u) => u === '/api/v1/tenant/credentials', respond: () => jsonResp(CREDS_ANT) },
+      { match: (u) => u === '/api/v1/credentials', respond: () => jsonResp(CREDS_ANT) },
       { match: (u) => u.split('?')[0] === '/api/v1/mcp-servers', respond: () => jsonResp(pageOf(MCP_LIST)) },
       { match: (u) => u.split('?')[0] === '/api/v1/skills', respond: () => jsonResp(pageOf(SKILL_LIST)) },
     ]);
@@ -768,7 +768,7 @@ describe('<rm-coworker-wizard>', () => {
     fetchStub = installFetch([
       { match: (u) => u.endsWith('/api/v1/backends'), respond: () => jsonResp(BACKENDS) },
       { match: (u) => u.startsWith('/api/v1/models'), respond: () => jsonResp(MODELS) },
-      { match: (u) => u === '/api/v1/tenant/credentials', respond: () => jsonResp(CREDS_ANT) },
+      { match: (u) => u === '/api/v1/credentials', respond: () => jsonResp(CREDS_ANT) },
       {
         match: (u) => u.split('?')[0] === '/api/v1/mcp-servers',
         respond: () => jsonResp(pageOf([

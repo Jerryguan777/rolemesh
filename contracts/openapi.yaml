@@ -565,7 +565,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
-  /api/v1/tenant/credentials:
+  /api/v1/credentials:
     get:
       tags: [Credentials]
       operationId: listTenantCredentials
@@ -586,7 +586,7 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
-  /api/v1/tenant/credentials/{provider}:
+  /api/v1/credentials/{provider}:
     parameters:
       - in: path
         name: provider
@@ -647,7 +647,7 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
 
-  /api/v1/tenant/credentials/{provider}/pool:
+  /api/v1/credentials/{provider}/pool:
     parameters:
       - in: path
         name: provider

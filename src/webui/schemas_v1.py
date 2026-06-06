@@ -322,7 +322,7 @@ class PlatformCredentialResponse(BaseModel):
 
 
 class CredentialUpsert(BaseModel):
-    """``PUT /api/v1/tenant/credentials/{provider}`` body.
+    """``PUT /api/v1/credentials/{provider}`` body.
 
     Today only ``api_key`` is recognised. Provider-specific extras
     (``api_base``, ``region``, ...) ride on top via ``extras`` so

@@ -337,7 +337,7 @@ export class ApiClient {
   // ------------------------------------------------------------------
 
   async listCredentials(): Promise<CredentialResponse[]> {
-    const resp = await fetch(`${this.baseUrl}/api/v1/tenant/credentials`, {
+    const resp = await fetch(`${this.baseUrl}/api/v1/credentials`, {
       method: 'GET',
       headers: this.headers(),
     });
@@ -353,7 +353,7 @@ export class ApiClient {
     body: CredentialUpsert,
   ): Promise<CredentialResponse> {
     const resp = await fetch(
-      `${this.baseUrl}/api/v1/tenant/credentials/${encodeURIComponent(provider)}`,
+      `${this.baseUrl}/api/v1/credentials/${encodeURIComponent(provider)}`,
       {
         method: 'PUT',
         headers: this.headers({ 'Content-Type': 'application/json' }),
@@ -366,7 +366,7 @@ export class ApiClient {
 
   async deleteCredential(provider: ModelProvider): Promise<void> {
     const resp = await fetch(
-      `${this.baseUrl}/api/v1/tenant/credentials/${encodeURIComponent(provider)}`,
+      `${this.baseUrl}/api/v1/credentials/${encodeURIComponent(provider)}`,
       { method: 'DELETE', headers: this.headers() },
     );
     if (!resp.ok) throw await this.parseError(resp);

@@ -304,7 +304,7 @@ async def test_only_owner_can_put_credential() -> None:
     for uid, role in ((member_id, "member"), (admin_id, "admin")):
         app = _build_app(_authed(tid, uid, role))
         async with _client(app) as c:
-            denied = await c.put("/api/v1/tenant/credentials/anthropic", json=body)
+            denied = await c.put("/api/v1/credentials/anthropic", json=body)
         assert denied.status_code == 403, f"{role}: {denied.text}"
 
     # Owner is the boundary role: the PUT must pass the gate AND succeed.
@@ -314,7 +314,7 @@ async def test_only_owner_can_put_credential() -> None:
     try:
         owner_app = _build_app(_authed(tid, owner_id, "owner"))
         async with _client(owner_app) as c:
-            resp = await c.put("/api/v1/tenant/credentials/anthropic", json=body)
+            resp = await c.put("/api/v1/credentials/anthropic", json=body)
         assert resp.status_code == 200, resp.text
     finally:
         set_credential_vault(None)
@@ -328,12 +328,12 @@ async def test_admin_cannot_list_credentials_owner_can() -> None:
 
     admin_app = _build_app(_authed(tid, admin_id, "admin"))
     async with _client(admin_app) as c:
-        denied = await c.get("/api/v1/tenant/credentials")
+        denied = await c.get("/api/v1/credentials")
     assert denied.status_code == 403, denied.text
 
     owner_app = _build_app(_authed(tid, owner_id, "owner"))
     async with _client(owner_app) as c:
-        ok = await c.get("/api/v1/tenant/credentials")
+        ok = await c.get("/api/v1/credentials")
     assert ok.status_code == 200, ok.text
 
 
@@ -370,5 +370,5 @@ async def test_platform_admin_passes_owner_only_credential_gate() -> None:
     pa_id = await _user(tid, "platform_admin")
     app = _build_app(_authed(tid, pa_id, "platform_admin"))
     async with _client(app) as c:
-        ok = await c.get("/api/v1/tenant/credentials")
+        ok = await c.get("/api/v1/credentials")
     assert ok.status_code == 200, ok.text

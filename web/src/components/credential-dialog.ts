@@ -3,7 +3,7 @@
 // Wraps <rm-dialog> (v2-A primitive). Knows which provider the user
 // is configuring; renders the right set of fields (anthropic = one
 // API key, bedrock = AWS quartet, etc.) and writes via PUT
-// /api/v1/tenant/credentials/{provider} with the open-shape
+// /api/v1/credentials/{provider} with the open-shape
 // `extras: { ... }` map per OpenAPI.
 //
 // Invariants:

@@ -88,8 +88,8 @@ def test_phase_1_endpoints_listed_in_design_are_present_in_yaml() -> None:
         "/api/v1/mcp-servers/{id}",
         "/api/v1/models",
         "/api/v1/models/{id}",
-        "/api/v1/tenant/credentials",
-        "/api/v1/tenant/credentials/{provider}",
+        "/api/v1/credentials",
+        "/api/v1/credentials/{provider}",
         "/api/v1/runs/{id}",
         "/api/v1/runs/{id}/cancel",
     }

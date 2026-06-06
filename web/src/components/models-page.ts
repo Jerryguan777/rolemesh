@@ -1,7 +1,7 @@
 // Read-only Models catalog (#/models).
 //
 // Lists `GET /api/v1/models` grouped by provider, augmented with
-// the tenant's `GET /tenant/credentials` so each provider header
+// the tenant's `GET /credentials` so each provider header
 // shows ready / needs-credential status. The grouping logic is in
 // `services/models-grouping.ts` so the v2-B coworker wizard and
 // this page share one source of truth.

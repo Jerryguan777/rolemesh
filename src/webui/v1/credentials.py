@@ -1,4 +1,8 @@
-"""``/api/v1/tenant/credentials`` REST surface (design §3 Phase 2, §8.1).
+"""``/api/v1/credentials`` REST surface (design §3 Phase 2, §8.1).
+
+Tenant-plane resource (tenant is implicit, derived from the session —
+no ``/tenant/`` path prefix; cf. the platform-plane counterpart at
+``/api/v1/platform/credentials``).
 
 Stores tenant-scoped LLM provider API keys behind envelope
 encryption. ``GET`` returns metadata only — the encrypted payload
@@ -35,7 +39,7 @@ if TYPE_CHECKING:
 
 logger = get_logger()
 
-router = APIRouter(prefix="/tenant/credentials", tags=["Credentials"])
+router = APIRouter(prefix="/credentials", tags=["Credentials"])
 
 
 def _credential_to_response(row: CredentialRow) -> CredentialResponse:
