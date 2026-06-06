@@ -102,17 +102,9 @@ AUTH_ONLY_V1_ROUTES: dict[tuple[str, str], str] = {
         "Read of the platform model catalog (tenant-agnostic, no secrets).",
     ("GET", "/api/v1/models/{model_id}"):
         "Read of one platform model.",
-    # --- Operator-only writes gated IN-HANDLER (not via require_action) ---
-    # admin_models.py gates these with its own ``_require_owner(user)`` call at
-    # the top of each handler (a deliberate audit-locality choice predating
-    # this work). They are NOT ungated; they are simply gated by a mechanism
-    # the route-tag walker can't see, so they are allowlisted with this note.
-    ("POST", "/api/v1/admin/models"):
-        "Owner-gated in-handler via _require_owner (platform catalog write).",
-    ("PATCH", "/api/v1/admin/models/{model_id}"):
-        "Owner-gated in-handler via _require_owner (platform catalog write).",
-    ("DELETE", "/api/v1/admin/models/{model_id}"):
-        "Owner-gated in-handler via _require_owner (platform catalog write).",
+    # NOTE: the platform model-catalog WRITES (/api/v1/platform/models) are no
+    # longer here — they are now declaratively gated by
+    # require_action("model.manage") and so are covered by the route-tag walker.
 }
 
 

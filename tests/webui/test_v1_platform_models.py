@@ -1,7 +1,7 @@
-"""Integration tests for ``/api/v1/admin/models`` (PR24).
+"""Integration tests for ``/api/v1/platform/models`` (PR24).
 
 Platform model catalog writes. Three big behaviors to pin:
-  1. Role gate — only owners may mutate the catalog
+  1. Role gate — only platform_admin may mutate the catalog (model.manage)
   2. Soft-delete semantics — in-use rows return 409, not destruction
   3. (provider, model_id) uniqueness
 """
@@ -49,7 +49,7 @@ def _build_app(user: AuthenticatedUser) -> FastAPI:
     return app
 
 
-async def _make_user(role: str = "owner") -> AuthenticatedUser:
+async def _make_user(role: str = "platform_admin") -> AuthenticatedUser:
     t = await create_tenant(
         name="T", slug=f"adm-{uuid.uuid4().hex[:8]}",
     )
@@ -65,10 +65,10 @@ async def _make_user(role: str = "owner") -> AuthenticatedUser:
 
 
 async def test_create_model_happy_path() -> None:
-    user = await _make_user("owner")
+    user = await _make_user("platform_admin")
     async with _client(_build_app(user)) as ac:
         resp = await ac.post(
-            "/api/v1/admin/models",
+            "/api/v1/platform/models",
             json={
                 "provider": "anthropic",
                 "model_id": f"claude-opus-{uuid.uuid4().hex[:6]}",
@@ -83,14 +83,15 @@ async def test_create_model_happy_path() -> None:
     assert body["is_active"] is True
 
 
-async def test_create_model_rejected_for_non_owner() -> None:
-    # Role gate: members get 403 with a FORBIDDEN code. Pins the
-    # specific code so the SPA can branch on it (e.g. hide the
-    # admin UI for non-owners rather than show a generic error).
-    user = await _make_user("member")
+@pytest.mark.parametrize("role", ["member", "admin", "owner"])
+async def test_create_model_rejected_for_non_platform_admin(role: str) -> None:
+    # model.manage is platform-only: NO tenant role (not even owner) may
+    # mutate the global catalog. The route-level require_action gate returns
+    # a plain 403 (not the {code: FORBIDDEN} envelope).
+    user = await _make_user(role)
     async with _client(_build_app(user)) as ac:
         resp = await ac.post(
-            "/api/v1/admin/models",
+            "/api/v1/platform/models",
             json={
                 "provider": "anthropic",
                 "model_id": "x",
@@ -100,15 +101,14 @@ async def test_create_model_rejected_for_non_owner() -> None:
             headers=_HDRS,
         )
     assert resp.status_code == 403
-    assert resp.json()["code"] == "FORBIDDEN"
 
 
 async def test_create_model_duplicate_returns_409() -> None:
-    user = await _make_user("owner")
+    user = await _make_user("platform_admin")
     model_id_str = f"dup-{uuid.uuid4().hex[:6]}"
     async with _client(_build_app(user)) as ac:
         first = await ac.post(
-            "/api/v1/admin/models",
+            "/api/v1/platform/models",
             json={
                 "provider": "anthropic",
                 "model_id": model_id_str,
@@ -119,7 +119,7 @@ async def test_create_model_duplicate_returns_409() -> None:
         )
         assert first.status_code == 201
         second = await ac.post(
-            "/api/v1/admin/models",
+            "/api/v1/platform/models",
             json={
                 "provider": "anthropic",
                 "model_id": model_id_str,
@@ -132,7 +132,7 @@ async def test_create_model_duplicate_returns_409() -> None:
 
 
 async def test_patch_model_updates_display_name_and_is_active() -> None:
-    user = await _make_user("owner")
+    user = await _make_user("platform_admin")
     row = await create_model(
         provider="anthropic",
         model_id=f"patch-{uuid.uuid4().hex[:6]}",
@@ -141,7 +141,7 @@ async def test_patch_model_updates_display_name_and_is_active() -> None:
     )
     async with _client(_build_app(user)) as ac:
         resp = await ac.patch(
-            f"/api/v1/admin/models/{row.id}",
+            f"/api/v1/platform/models/{row.id}",
             json={"display_name": "After", "is_active": False},
             headers=_HDRS,
         )
@@ -154,7 +154,7 @@ async def test_patch_model_updates_display_name_and_is_active() -> None:
 async def test_delete_unused_model_succeeds_with_soft_delete() -> None:
     # No coworker bindings → DELETE returns 204 and flips
     # is_active=false (not a row drop).
-    user = await _make_user("owner")
+    user = await _make_user("platform_admin")
     row = await create_model(
         provider="anthropic",
         model_id=f"un-{uuid.uuid4().hex[:6]}",
@@ -163,7 +163,7 @@ async def test_delete_unused_model_succeeds_with_soft_delete() -> None:
     )
     async with _client(_build_app(user)) as ac:
         resp = await ac.delete(
-            f"/api/v1/admin/models/{row.id}", headers=_HDRS,
+            f"/api/v1/platform/models/{row.id}", headers=_HDRS,
         )
     assert resp.status_code == 204
     after = await get_model_by_id(row.id)
@@ -175,7 +175,7 @@ async def test_delete_in_use_model_returns_409() -> None:
     # Bind a coworker to the model first, then DELETE — 409 with
     # the bound count surfaced so the UI can show "N coworkers
     # depend on this".
-    user = await _make_user("owner")
+    user = await _make_user("platform_admin")
     row = await create_model(
         provider="anthropic",
         model_id=f"used-{uuid.uuid4().hex[:6]}",
@@ -190,7 +190,7 @@ async def test_delete_in_use_model_returns_409() -> None:
     )
     async with _client(_build_app(user)) as ac:
         resp = await ac.delete(
-            f"/api/v1/admin/models/{row.id}", headers=_HDRS,
+            f"/api/v1/platform/models/{row.id}", headers=_HDRS,
         )
     assert resp.status_code == 409
     body = resp.json()
@@ -203,16 +203,16 @@ async def test_delete_in_use_model_returns_409() -> None:
 
 
 async def test_delete_missing_model_returns_404() -> None:
-    user = await _make_user("owner")
+    user = await _make_user("platform_admin")
     async with _client(_build_app(user)) as ac:
         resp = await ac.delete(
-            f"/api/v1/admin/models/{uuid.uuid4()}", headers=_HDRS,
+            f"/api/v1/platform/models/{uuid.uuid4()}", headers=_HDRS,
         )
     assert resp.status_code == 404
 
 
-async def test_patch_non_owner_rejected() -> None:
-    # Both PATCH and DELETE need the role gate; pin the PATCH path
+async def test_patch_non_platform_admin_rejected() -> None:
+    # Both PATCH and DELETE need the model.manage gate; pin the PATCH path
     # separately so a future refactor that re-wires only POST
     # doesn't open a hole.
     user = await _make_user("member")
@@ -224,7 +224,7 @@ async def test_patch_non_owner_rejected() -> None:
     )
     async with _client(_build_app(user)) as ac:
         resp = await ac.patch(
-            f"/api/v1/admin/models/{row.id}",
+            f"/api/v1/platform/models/{row.id}",
             json={"display_name": "should-fail"},
             headers=_HDRS,
         )

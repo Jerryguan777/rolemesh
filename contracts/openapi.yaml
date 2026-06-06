@@ -35,7 +35,6 @@ tags:
   - name: Tenant
   - name: Safety
   - name: Schedules
-  - name: Admin
   - name: Platform
 
 paths:
@@ -2015,15 +2014,16 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
-  /api/v1/admin/models:
+  /api/v1/platform/models:
     post:
-      tags: [Admin]
-      operationId: adminModelsCreate
-      summary: Register a new platform model (admin only)
+      tags: [Platform]
+      operationId: platformModelsCreate
+      summary: Register a new platform model (platform operator only)
       description: |
-        The `models` catalog is platform-managed — tenants pick from
-        it but only operators add rows. POST/PATCH/DELETE require
-        the `owner` role (design §13 role check).
+        The `models` catalog is platform-global — every tenant reads
+        it at `/api/v1/models`, but only the platform operator writes
+        it. POST/PATCH/DELETE require the platform-only `model.manage`
+        capability (platform_admin).
       security: [ { bearerAuth: [] } ]
       requestBody:
         required: true
@@ -2045,11 +2045,11 @@ paths:
         '422':
           $ref: '#/components/responses/Unprocessable'
 
-  /api/v1/admin/models/{id}:
+  /api/v1/platform/models/{id}:
     patch:
-      tags: [Admin]
-      operationId: adminModelsUpdate
-      summary: Update a platform model (admin only)
+      tags: [Platform]
+      operationId: platformModelsUpdate
+      summary: Update a platform model (platform operator only)
       security: [ { bearerAuth: [] } ]
       parameters:
         - { $ref: '#/components/parameters/IdInPath' }
@@ -2073,9 +2073,9 @@ paths:
         '422':
           $ref: '#/components/responses/Unprocessable'
     delete:
-      tags: [Admin]
-      operationId: adminModelsDelete
-      summary: Retire a platform model (admin only)
+      tags: [Platform]
+      operationId: platformModelsDelete
+      summary: Retire a platform model (platform operator only)
       description: |
         Soft delete — sets `active = false` rather than dropping the
         row so existing coworkers that point at the model keep

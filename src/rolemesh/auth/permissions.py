@@ -74,7 +74,11 @@ _TENANT_ROLE_ACTIONS: dict[str, set[str]] = {
 #     (``platform_provider_credentials``). Tenants elect the pool via their
 #     own ``credential.byok.manage``-gated route; only the platform operator
 #     configures the underlying keys.
-_PLATFORM_ONLY_ACTIONS: set[str] = {"credential.pool.manage"}
+#   * model.manage — mutate the platform-global model catalog
+#     (``/api/v1/platform/models``). Every tenant READS the catalog at
+#     ``/api/v1/models``; only the platform operator may write it (a tenant
+#     owner must not edit a catalog every other tenant sees).
+_PLATFORM_ONLY_ACTIONS: set[str] = {"credential.pool.manage", "model.manage"}
 
 
 def _all_known_actions() -> set[str]:

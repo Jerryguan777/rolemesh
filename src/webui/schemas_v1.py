@@ -1247,9 +1247,9 @@ class ChannelBindingUpdate(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Admin model writes (PR24). The /api/v1/models GET path stays
-# tenant-readable; the /api/v1/admin/models writes require role check
-# at the handler layer.
+# Platform model-catalog writes. The /api/v1/models GET path stays
+# tenant-readable; the /api/v1/platform/models writes require the
+# platform-only model.manage capability (platform_admin).
 # ---------------------------------------------------------------------------
 
 

@@ -104,6 +104,16 @@ def test_owner_has_byok_credentials_and_tenant_settings() -> None:
         assert user_can("owner", action), action
 
 
+def test_platform_only_actions_denied_to_every_tenant_role() -> None:
+    # Platform-plane capabilities (e.g. the global model catalog,
+    # credential pool) must be platform_admin-only — NOT even a tenant
+    # owner may hold them.
+    for action in _PLATFORM_ONLY_ACTIONS:
+        assert user_can("platform_admin", action), action
+        for role in ("owner", "admin", "member"):
+            assert not user_can(role, action), f"{role} must not hold {action}"
+
+
 # ---------------------------------------------------------------------------
 # Fail-closed
 # ---------------------------------------------------------------------------

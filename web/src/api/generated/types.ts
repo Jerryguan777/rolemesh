@@ -1249,7 +1249,7 @@ export interface paths {
         patch: operations["bindingsUpdate"];
         trace?: never;
     };
-    "/api/v1/admin/models": {
+    "/api/v1/platform/models": {
         parameters: {
             query?: never;
             header?: never;
@@ -1259,19 +1259,20 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Register a new platform model (admin only)
-         * @description The `models` catalog is platform-managed — tenants pick from
-         *     it but only operators add rows. POST/PATCH/DELETE require
-         *     the `owner` role (design §13 role check).
+         * Register a new platform model (platform operator only)
+         * @description The `models` catalog is platform-global — every tenant reads
+         *     it at `/api/v1/models`, but only the platform operator writes
+         *     it. POST/PATCH/DELETE require the platform-only `model.manage`
+         *     capability (platform_admin).
          */
-        post: operations["adminModelsCreate"];
+        post: operations["platformModelsCreate"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/api/v1/admin/models/{id}": {
+    "/api/v1/platform/models/{id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -1282,16 +1283,16 @@ export interface paths {
         put?: never;
         post?: never;
         /**
-         * Retire a platform model (admin only)
+         * Retire a platform model (platform operator only)
          * @description Soft delete — sets `active = false` rather than dropping the
          *     row so existing coworkers that point at the model keep
          *     rendering. Returns 409 if any coworker is still bound.
          */
-        delete: operations["adminModelsDelete"];
+        delete: operations["platformModelsDelete"];
         options?: never;
         head?: never;
-        /** Update a platform model (admin only) */
-        patch: operations["adminModelsUpdate"];
+        /** Update a platform model (platform operator only) */
+        patch: operations["platformModelsUpdate"];
         trace?: never;
     };
     "/api/v1/users": {
@@ -4799,7 +4800,7 @@ export interface operations {
             422: components["responses"]["Unprocessable"];
         };
     };
-    adminModelsCreate: {
+    platformModelsCreate: {
         parameters: {
             query?: never;
             header?: never;
@@ -4827,7 +4828,7 @@ export interface operations {
             422: components["responses"]["Unprocessable"];
         };
     };
-    adminModelsDelete: {
+    platformModelsDelete: {
         parameters: {
             query?: never;
             header?: never;
@@ -4851,7 +4852,7 @@ export interface operations {
             409: components["responses"]["Conflict"];
         };
     };
-    adminModelsUpdate: {
+    platformModelsUpdate: {
         parameters: {
             query?: never;
             header?: never;
