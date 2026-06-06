@@ -30,6 +30,8 @@ tags:
   - name: Runs
   - name: Skills
   - name: ApprovalPolicies
+  - name: Users
+  - name: Tenant
 
 paths:
   # ===================================================================
@@ -1372,10 +1374,9 @@ paths:
       operationId: listSafetyRules
       summary: List safety rules for the caller's tenant
       description: |
-        Phase 4 (design §3) — GET-only on the v1 surface. Writes
-        (create/update/delete) stay on the admin surface because
-        rule mutation is an admin-only operation; see the design
-        doc for the locked decision.
+        Returns the tenant's own rules plus the visible platform-owned
+        rules (read-only, `source=platform`). Reads gate on
+        `safety.read`.
       security: [ { bearerAuth: [] } ]
       parameters:
         - name: coworker_id
@@ -1400,6 +1401,39 @@ paths:
                 items: { $ref: '#/components/schemas/SafetyRule' }
         '401':
           $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Safety]
+      operationId: createSafetyRule
+      summary: Create a tenant safety rule
+      description: |
+        Gated by `safety.rule.manage` (owner + admin). The body is
+        validated against the check registry — an unknown `check_id`,
+        an unsupported `stage`, a config the check's model rejects, or a
+        `slow` check at `pre_tool_call` that overlaps a reversible tool
+        returns `400 INVALID_RULE`. A non-null `coworker_id` outside the
+        caller's tenant returns 404 (existence is not leaked).
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SafetyRuleCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SafetyRule' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
 
   /api/v1/safety/rules/{id}:
     parameters:
@@ -1416,6 +1450,53 @@ paths:
               schema: { $ref: '#/components/schemas/SafetyRule' }
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Safety]
+      operationId: updateSafetyRule
+      summary: Update a tenant safety rule
+      description: |
+        Gated by `safety.rule.manage`. Re-validates when `check_id` /
+        `stage` / `config` change so the effective triple stays runnable
+        (`400 INVALID_RULE` on failure). Only tenant-owned rule ids
+        resolve; a cross-tenant / unknown / platform id returns 404.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SafetyRuleUpdate' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SafetyRule' }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+    delete:
+      tags: [Safety]
+      operationId: deleteSafetyRule
+      summary: Delete a tenant safety rule
+      description: |
+        Gated by `safety.rule.manage`. Cross-tenant / unknown id → 404.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '204':
+          description: No content
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
 
@@ -1480,9 +1561,7 @@ paths:
       description: |
         Returns `{ total, items }` so the SPA renders pagination
         without a second count call. `limit` is capped at 200
-        server-side; the admin `decisions.csv` export covers bulk
-        retrieval (intentionally NOT migrated to v1 per design
-        §3 Phase 4 — the CSV surface stays admin-only).
+        server-side; the `decisions.csv` export covers bulk retrieval.
       security: [ { bearerAuth: [] } ]
       parameters:
         - name: verdict_action
@@ -1547,8 +1626,7 @@ paths:
       summary: Single safety decision detail
       description: |
         Cross-tenant lookups return 404 (not 403) so UUID existence
-        does not leak across tenants — same convention as the admin
-        endpoint.
+        does not leak across tenants.
       security: [ { bearerAuth: [] } ]
       responses:
         '200':
@@ -1560,6 +1638,52 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+
+  /api/v1/safety/decisions.csv:
+    get:
+      tags: [Safety]
+      operationId: exportSafetyDecisionsCsv
+      summary: Stream the tenant's safety decisions as CSV
+      description: |
+        Streaming CSV export (Postgres cursor, constant memory) for the
+        caller's tenant — derived from the session, no tenant id in the
+        path. Reads gate on `safety.read`. Columns are a flat,
+        operator-friendly pivot view (`findings` flattened to parallel
+        code/severity lists); the full JSON for any row is at
+        `GET /api/v1/safety/decisions/{id}`. Cells are RFC-4180 quoted
+        and formula-injection guarded.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - name: from_ts
+          in: query
+          required: false
+          schema: { type: string, format: date-time }
+        - name: to_ts
+          in: query
+          required: false
+          schema: { type: string, format: date-time }
+        - name: verdict_action
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/SafetyVerdictAction' }
+        - name: coworker_id
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: stage
+          in: query
+          required: false
+          schema: { $ref: '#/components/schemas/SafetyStage' }
+      responses:
+        '200':
+          description: CSV stream (attachment).
+          content:
+            text/csv:
+              schema: { type: string }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
 
   /api/v1/schedules:
     get:
@@ -1607,6 +1731,26 @@ paths:
               schema: { $ref: '#/components/schemas/ScheduledTask' }
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Schedules]
+      operationId: schedulesDelete
+      summary: Delete a scheduled task
+      description: |
+        Removes a scheduled task. Gated by `task.manage` (owner +
+        admin); reads on this surface stay auth-only. A cross-tenant /
+        unknown id returns 404.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/IdInPath' }
+      responses:
+        '204':
+          description: No content
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
 
@@ -1825,6 +1969,173 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+
+  /api/v1/users:
+    get:
+      tags: [Users]
+      operationId: listUsers
+      summary: List the tenant's users
+      description: |
+        Gated by `user.manage` (owner + admin). Returns every user in
+        the caller's tenant.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/UserResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [Users]
+      operationId: createUser
+      summary: Create a user in the tenant
+      description: |
+        Gated by `user.manage`. Creating a user with `role=owner`
+        requires the caller to be an owner (admins get `403 FORBIDDEN`).
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
+  /api/v1/users/{id}:
+    parameters:
+      - $ref: '#/components/parameters/IdInPath'
+    get:
+      tags: [Users]
+      operationId: getUser
+      summary: Fetch one user
+      description: |
+        Gated by `user.manage`. A user outside the caller's tenant
+        returns 404 (existence is not leaked).
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserDetailResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Users]
+      operationId: updateUser
+      summary: Update a user
+      description: |
+        Gated by `user.manage`. Assigning `role=owner` requires the
+        caller to be an owner (admins get `403 FORBIDDEN`). Cross-tenant
+        / unknown id → 404.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserUpdate' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+    delete:
+      tags: [Users]
+      operationId: deleteUser
+      summary: Delete a user
+      description: |
+        Gated by `user.manage`. Deleting yourself returns
+        `400 INVALID_REQUEST`. Cross-tenant / unknown id → 404.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '204':
+          description: No content
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/v1/tenant:
+    get:
+      tags: [Tenant]
+      operationId: getTenant
+      summary: Fetch the caller's tenant settings
+      description: |
+        Owner-only (`tenant.manage`). Admins and members get
+        `403 FORBIDDEN`.
+      security: [ { bearerAuth: [] } ]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TenantResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Tenant]
+      operationId: updateTenant
+      summary: Update the caller's tenant settings
+      description: |
+        Owner-only (`tenant.manage`). Only `name` and
+        `max_concurrent_containers` are mutable here.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TenantUpdate' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TenantResponse' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
 
 components:
   securitySchemes:
@@ -3458,3 +3769,117 @@ components:
           request.cancel: '#/components/schemas/WsClientFrameRequestCancel'
           request.stop: '#/components/schemas/WsClientFrameRequestStop'
           request.approval_decision: '#/components/schemas/WsClientFrameApprovalDecision'
+
+    # -----------------------------------------------------------------
+    # Tenant administration (migrated off /api/admin): users + tenant.
+    # -----------------------------------------------------------------
+    UserResponse:
+      type: object
+      required: [id, tenant_id, name, role, channel_ids, created_at]
+      properties:
+        id: { type: string }
+        tenant_id: { type: string }
+        name: { type: string }
+        email: { type: string, nullable: true }
+        role:
+          type: string
+          enum: [owner, admin, member]
+        channel_ids:
+          type: object
+          additionalProperties: { type: string }
+          description: |
+            Map of channel type → external identity id (e.g.
+            `{"telegram": "12345"}`).
+        created_at: { type: string }
+
+    UserDetailResponse:
+      allOf:
+        - $ref: '#/components/schemas/UserResponse'
+      description: |
+        Detailed user view. Currently identical to `UserResponse`; the
+        former per-user agent-grant list was removed when access moved to
+        coworker visibility + ownership.
+
+    UserCreate:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        email: { type: string, nullable: true }
+        role:
+          type: string
+          enum: [owner, admin, member]
+          default: member
+          description: |
+            Creating an `owner` requires the caller to be an owner.
+        channel_ids:
+          type: object
+          additionalProperties: { type: string }
+
+    UserUpdate:
+      type: object
+      properties:
+        name: { type: string, minLength: 1, maxLength: 200 }
+        email:
+          type: string
+          nullable: true
+          description: Send "" to clear; omit or null to leave unchanged.
+        role:
+          type: string
+          enum: [owner, admin, member]
+          description: Assigning `owner` requires the caller to be an owner.
+
+    TenantResponse:
+      type: object
+      required: [id, name, max_concurrent_containers, created_at]
+      properties:
+        id: { type: string }
+        name: { type: string }
+        slug: { type: string, nullable: true }
+        plan: { type: string, nullable: true }
+        max_concurrent_containers: { type: integer }
+        created_at: { type: string }
+
+    TenantUpdate:
+      type: object
+      properties:
+        name: { type: string }
+        max_concurrent_containers:
+          type: integer
+          minimum: 1
+          maximum: 100
+
+    # -----------------------------------------------------------------
+    # Safety rule write bodies (migrated off /api/admin/safety/rules).
+    # -----------------------------------------------------------------
+    SafetyRuleCreate:
+      type: object
+      required: [stage, check_id]
+      properties:
+        stage: { $ref: '#/components/schemas/SafetyStage' }
+        check_id: { type: string, minLength: 1, maxLength: 128 }
+        config:
+          type: object
+          additionalProperties: true
+        coworker_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: |
+            `null` → tenant-wide rule. Non-null binds to one coworker and
+            must be in the caller's tenant (else 404).
+        priority: { type: integer, minimum: -1000, maximum: 1000, default: 100 }
+        enabled: { type: boolean, default: true }
+        description: { type: string, maxLength: 500, default: "" }
+
+    SafetyRuleUpdate:
+      type: object
+      properties:
+        stage: { $ref: '#/components/schemas/SafetyStage' }
+        check_id: { type: string, minLength: 1, maxLength: 128 }
+        config:
+          type: object
+          additionalProperties: true
+        priority: { type: integer, minimum: -1000, maximum: 1000 }
+        enabled: { type: boolean }
+        description: { type: string, maxLength: 500 }
