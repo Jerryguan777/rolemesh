@@ -68,7 +68,7 @@ def require_manage_or_owner(
 
     Called from *inside* a handler (it needs the loaded row), as the complement
     to the route-level capability gate. The route should carry the lowest
-    sensible capability (e.g. ``agent.use``); this helper then lets a member
+    sensible capability (e.g. ``coworker.use``); this helper then lets a member
     who created the resource manage their OWN copy while still blocking them
     from others'/shared ones.
 

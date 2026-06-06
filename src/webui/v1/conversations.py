@@ -150,7 +150,7 @@ async def list_coworker_conversations(
 async def create_coworker_conversation(
     coworker_id: str,
     body: ConversationCreate,
-    user: AuthenticatedUser = Depends(require_action("agent.use")),
+    user: AuthenticatedUser = Depends(require_action("coworker.use")),
 ) -> Conversation:
     """Create a new web conversation under a coworker.
 
@@ -199,7 +199,7 @@ async def get_conversation_endpoint(
 @conversations_router.delete("/{conversation_id}", status_code=204)
 async def delete_conversation_endpoint(
     conversation_id: str,
-    user: AuthenticatedUser = Depends(require_action("agent.use")),
+    user: AuthenticatedUser = Depends(require_action("coworker.use")),
 ) -> Response:
     """Delete a conversation; FK ON DELETE CASCADE removes messages and runs.
 

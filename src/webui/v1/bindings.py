@@ -107,7 +107,7 @@ async def list_bindings_endpoint(
 async def create_binding_endpoint(
     coworker_id: str,
     body: ChannelBindingCreate,
-    user: AuthenticatedUser = Depends(require_action("agent.manage")),
+    user: AuthenticatedUser = Depends(require_action("coworker.manage")),
 ) -> ChannelBinding:
     await _ensure_coworker(coworker_id, tenant_id=user.tenant_id)
     try:
@@ -153,7 +153,7 @@ async def update_binding_endpoint(
     coworker_id: str,
     binding_id: str,
     body: ChannelBindingUpdate,
-    user: AuthenticatedUser = Depends(require_action("agent.manage")),
+    user: AuthenticatedUser = Depends(require_action("coworker.manage")),
 ) -> ChannelBinding:
     await _ensure_coworker(coworker_id, tenant_id=user.tenant_id)
     await _get_binding_for_coworker(
@@ -183,7 +183,7 @@ async def update_binding_endpoint(
 async def delete_binding_endpoint(
     coworker_id: str,
     binding_id: str,
-    user: AuthenticatedUser = Depends(require_action("agent.manage")),
+    user: AuthenticatedUser = Depends(require_action("coworker.manage")),
 ) -> Response:
     await _ensure_coworker(coworker_id, tenant_id=user.tenant_id)
     await _get_binding_for_coworker(

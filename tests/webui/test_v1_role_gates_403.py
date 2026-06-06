@@ -8,7 +8,7 @@ accidentally over-tight.
 
 The ownership-escape cases are the subtle ones: a member CAN update/delete a
 coworker/skill they created, and CANNOT touch one created by someone else (the
-gate falls back to requiring ``agent.manage`` / ``skill.manage``).
+gate falls back to requiring ``coworker.manage`` / ``skill.manage``).
 
 Auth is injected by overriding ``get_current_user`` with a fixed role, so the
 role under test is exactly the one the gate sees (``require_action`` resolves
@@ -104,13 +104,13 @@ async def _seed_skill(tenant_id: str, *, created_by: str | None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# coworkers: create requires agent.create (all roles); manage gated for member
+# coworkers: create requires coworker.create (all roles); manage gated for member
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_member_can_create_coworker() -> None:
-    """agent.create is granted to member — the boundary role passes."""
+    """coworker.create is granted to member — the boundary role passes."""
     tid = await _tenant()
     uid = await _user(tid, "member")
     app = _build_app(_authed(tid, uid, "member"))
@@ -152,7 +152,7 @@ async def test_member_cannot_manage_unattributed_coworker() -> None:
     """Three-valued logic: created_by_user_id IS NULL is NOT 'mine'.
 
     A member must not be able to claim an un-attributed (legacy/system)
-    coworker as their own; NULL falls through to requiring agent.manage.
+    coworker as their own; NULL falls through to requiring coworker.manage.
     """
     tid = await _tenant()
     member_id = await _user(tid, "member")
@@ -166,7 +166,7 @@ async def test_member_cannot_manage_unattributed_coworker() -> None:
 
 @pytest.mark.asyncio
 async def test_admin_can_manage_any_coworker() -> None:
-    """agent.manage holder reaches a coworker they did not create."""
+    """coworker.manage holder reaches a coworker they did not create."""
     tid = await _tenant()
     creator = await _user(tid, "member")
     admin_id = await _user(tid, "admin")

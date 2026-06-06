@@ -27,9 +27,9 @@ UserRole = Literal["platform_admin", "owner", "admin", "member"]
 # new action is added to any tenant role.
 _TENANT_ROLE_ACTIONS: dict[str, set[str]] = {
     "owner": {
-        "agent.create",
-        "agent.manage",
-        "agent.use",
+        "coworker.create",
+        "coworker.manage",
+        "coworker.use",
         "skill.create",
         "skill.manage",
         "mcp.configure",
@@ -44,9 +44,9 @@ _TENANT_ROLE_ACTIONS: dict[str, set[str]] = {
     "admin": {
         # Admin lacks BYOK credential management and tenant settings (both
         # owner-only) per the §3 role matrix.
-        "agent.create",
-        "agent.manage",
-        "agent.use",
+        "coworker.create",
+        "coworker.manage",
+        "coworker.use",
         "skill.create",
         "skill.manage",
         "mcp.configure",
@@ -61,8 +61,8 @@ _TENANT_ROLE_ACTIONS: dict[str, set[str]] = {
         # ownership-escape helper) manage the ones they created — but the
         # ``*.manage`` capability that reaches others'/shared resources is
         # withheld here.
-        "agent.create",
-        "agent.use",
+        "coworker.create",
+        "coworker.use",
         "skill.create",
     },
 }

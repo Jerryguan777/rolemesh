@@ -788,7 +788,7 @@ async def list_coworker_skills_endpoint(
 async def enable_coworker_skill_endpoint(
     coworker_id: str,
     skill_id: str,
-    user: AuthenticatedUser = Depends(require_action("agent.use")),
+    user: AuthenticatedUser = Depends(require_action("coworker.use")),
 ) -> CoworkerSkillBinding:
     """Bind a catalog skill to this coworker (idempotent).
 
@@ -797,11 +797,11 @@ async def enable_coworker_skill_endpoint(
     cases publish ``skills_changed``.
 
     Mutates the coworker's skill set (agent config): the route requires
-    ``agent.use`` and the handler escalates to ``agent.manage``-or-own.
+    ``coworker.use`` and the handler escalates to ``coworker.manage``-or-own.
     """
     cw = await _get_coworker_or_404(coworker_id, tenant_id=user.tenant_id)
     require_manage_or_owner(
-        manage_action="agent.manage", resource=cw, user=user,
+        manage_action="coworker.manage", resource=cw, user=user,
     )
     # USE enforcement on the SKILL being attached: a member may only bind
     # a skill they can see (shared, or their own private one). Binding a
@@ -834,19 +834,19 @@ async def enable_coworker_skill_endpoint(
 async def disable_coworker_skill_endpoint(
     coworker_id: str,
     skill_id: str,
-    user: AuthenticatedUser = Depends(require_action("agent.use")),
+    user: AuthenticatedUser = Depends(require_action("coworker.use")),
 ) -> Response:
     """Remove the ``coworker_skills`` binding row.
 
     Distinct from "enable=false" — this deletes the binding outright,
     matching the v1 DELETE convention. The catalog skill survives.
 
-    Mutates the coworker's skill set (agent config): route ``agent.use``,
-    handler escalates to ``agent.manage``-or-own.
+    Mutates the coworker's skill set (agent config): route ``coworker.use``,
+    handler escalates to ``coworker.manage``-or-own.
     """
     cw = await _get_coworker_or_404(coworker_id, tenant_id=user.tenant_id)
     require_manage_or_owner(
-        manage_action="agent.manage", resource=cw, user=user,
+        manage_action="coworker.manage", resource=cw, user=user,
     )
     removed = await disable_skill_for_coworker(
         skill_id=skill_id,
