@@ -188,3 +188,76 @@ async def test_get_schedule_404_on_malformed_uuid() -> None:
     async with _client(_build_app(user)) as ac:
         resp = await ac.get("/api/v1/schedules/not-a-uuid", headers=_HDRS)
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# DELETE /schedules/{task_id} — migrated from /api/admin/tasks/{id}
+# (task.manage; admin+). Reads stay auth-only; the write is gated.
+# ---------------------------------------------------------------------------
+
+
+async def _user_in_tenant(tenant_id: str, role: str) -> AuthenticatedUser:
+    u = await create_user(
+        tenant_id=tenant_id, name=role,
+        email=f"{role}-{uuid.uuid4().hex[:6]}@x.com",
+        role=role,  # type: ignore[arg-type]
+    )
+    return AuthenticatedUser(
+        user_id=u.id, tenant_id=tenant_id, role=role,  # type: ignore[arg-type]
+        email="x@x.com", name="X",
+    )
+
+
+async def test_delete_schedule_owner_ok() -> None:
+    user, cw = await _make_user_and_coworker("dok")
+    tid = await _seed_task(
+        tenant_id=user.tenant_id, coworker_id=cw, prompt="doomed",
+    )
+    async with _client(_build_app(user)) as ac:
+        resp = await ac.delete(f"/api/v1/schedules/{tid}", headers=_HDRS)
+        assert resp.status_code == 204
+        # Confirm it's gone.
+        after = await ac.get(f"/api/v1/schedules/{tid}", headers=_HDRS)
+    assert after.status_code == 404
+
+
+async def test_delete_schedule_admin_ok() -> None:
+    owner, cw = await _make_user_and_coworker("dadm")
+    admin = await _user_in_tenant(owner.tenant_id, "admin")
+    tid = await _seed_task(
+        tenant_id=owner.tenant_id, coworker_id=cw, prompt="x",
+    )
+    async with _client(_build_app(admin)) as ac:
+        resp = await ac.delete(f"/api/v1/schedules/{tid}", headers=_HDRS)
+    assert resp.status_code == 204
+
+
+async def test_delete_schedule_member_forbidden() -> None:
+    owner, cw = await _make_user_and_coworker("dmem")
+    member = await _user_in_tenant(owner.tenant_id, "member")
+    tid = await _seed_task(
+        tenant_id=owner.tenant_id, coworker_id=cw, prompt="x",
+    )
+    async with _client(_build_app(member)) as ac:
+        resp = await ac.delete(f"/api/v1/schedules/{tid}", headers=_HDRS)
+    assert resp.status_code == 403
+
+
+async def test_delete_schedule_unknown_404() -> None:
+    user, _ = await _make_user_and_coworker("d404")
+    async with _client(_build_app(user)) as ac:
+        resp = await ac.delete(
+            f"/api/v1/schedules/{uuid.uuid4()}", headers=_HDRS,
+        )
+    assert resp.status_code == 404
+
+
+async def test_delete_schedule_cross_tenant_404() -> None:
+    user_a, _ = await _make_user_and_coworker("dxa")
+    user_b, cw_b = await _make_user_and_coworker("dxb")
+    tid_b = await _seed_task(
+        tenant_id=user_b.tenant_id, coworker_id=cw_b, prompt="b-only",
+    )
+    async with _client(_build_app(user_a)) as ac:
+        resp = await ac.delete(f"/api/v1/schedules/{tid_b}", headers=_HDRS)
+    assert resp.status_code == 404
