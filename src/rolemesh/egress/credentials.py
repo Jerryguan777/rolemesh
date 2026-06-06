@@ -106,7 +106,17 @@ class CredentialResolver:
     ) -> dict[str, Any]:
         """Return the decrypted credential dict for one tenant + provider.
 
-        Raises :class:`MissingCredentialError` if the row is absent.
+        Routes on the row's ``credential_mode`` (credential pool §3):
+
+        * no row → unconfigured → :class:`MissingCredentialError`
+          (opt-in, fail closed — a tenant must explicitly elect byok or
+          pool before an agent on this provider can run).
+        * ``'pool'`` → decrypt the platform pool key; a missing pool key
+          is itself a :class:`MissingCredentialError`.
+        * ``'byok'`` → decrypt the tenant's own key (guaranteed present
+          by the byok-requires-key CHECK, so a byok row never silently
+          falls through to the pool).
+
         Lets :class:`cryptography.fernet.InvalidToken` propagate on a
         wrong master key — see module docstring.
         """
@@ -122,11 +132,23 @@ class CredentialResolver:
         # constructs :class:`CredentialResolver` (it uses
         # :class:`RemoteCredentialResolver`). Pulling ``rolemesh.db``
         # at the module top would crash the gateway on boot.
-        from rolemesh.db.model import get_credential_ciphertext
+        from rolemesh.db.model import (
+            get_credential_mode_and_ciphertext,
+            get_platform_credential_ciphertext,
+        )
 
-        blob = await get_credential_ciphertext(tenant_id, provider)
-        if blob is None:
+        row = await get_credential_mode_and_ciphertext(tenant_id, provider)
+        if row is None:
             raise MissingCredentialError(tenant_id, provider)
+        mode, byok_blob = row
+        if mode == "pool":
+            blob = await get_platform_credential_ciphertext(provider)
+            if blob is None:
+                raise MissingCredentialError(tenant_id, provider)
+        else:  # 'byok' — CHECK guarantees a non-NULL key
+            blob = byok_blob
+            if blob is None:  # defensive; CHECK should make this unreachable
+                raise MissingCredentialError(tenant_id, provider)
 
         decrypted = self._vault.decrypt_json(blob)
         self._cache[key] = (decrypted, now + self._ttl)
