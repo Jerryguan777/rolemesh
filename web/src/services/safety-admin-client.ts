@@ -1,9 +1,12 @@
 /**
- * Client for /api/admin/safety/* and /api/admin/tenants/{tid}/safety/*
+ * Client for the tenant safety admin surface under /api/v1/safety/*
+ * (migrated off the legacy admin face).
  *
- * Auth: Bearer header (admin endpoints do not accept ?token= query
+ * Auth: Bearer header (these endpoints do not accept ?token= query
  * params like the chat endpoints). Token is sourced from the shared
- * OIDC helper; 401s silently refresh once.
+ * OIDC helper; 401s silently refresh once. Decisions / audit / CSV
+ * derive the tenant from the authenticated session — no tenant id in
+ * the path. Errors use the v1 envelope ({ code, message, details? }).
  */
 import { getStoredToken, refreshTokenSilent } from './oidc-auth.js';
 
@@ -137,8 +140,11 @@ async function jsonOrThrow<T>(res: Response): Promise<T> {
   if (!res.ok) {
     let detail = '';
     try {
-      const body = (await res.json()) as { detail?: unknown };
-      detail = typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail);
+      // v1 error envelope: { code, message, details? }.
+      const body = (await res.json()) as { message?: unknown; code?: unknown };
+      if (typeof body.message === 'string') detail = body.message;
+      else if (typeof body.code === 'string') detail = body.code;
+      else detail = JSON.stringify(body);
     } catch {
       detail = res.statusText;
     }
@@ -178,7 +184,7 @@ if (typeof window !== 'undefined') {
 /** Returns the current admin's tenant_id. Cached for the session. */
 export async function getTenantId(): Promise<string> {
   if (_cachedTenantId) return _cachedTenantId;
-  const res = await apiFetch('/api/admin/tenant');
+  const res = await apiFetch('/api/v1/tenant');
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const body = (await res.json()) as { id: string };
   _cachedTenantId = body.id;
@@ -191,7 +197,7 @@ export function clearTenantIdCache(): void {
 }
 
 export async function listChecks(): Promise<SafetyCheckMeta[]> {
-  const res = await apiFetch('/api/admin/safety/checks');
+  const res = await apiFetch('/api/v1/safety/checks');
   return jsonOrThrow<SafetyCheckMeta[]>(res);
 }
 
@@ -205,12 +211,12 @@ export async function listRules(filters: {
     stage: filters.stage,
     enabled: filters.enabled === undefined ? undefined : String(filters.enabled),
   });
-  const res = await apiFetch(`/api/admin/safety/rules${qs}`);
+  const res = await apiFetch(`/api/v1/safety/rules${qs}`);
   return jsonOrThrow<SafetyRule[]>(res);
 }
 
 export async function createRule(body: SafetyRuleCreateBody): Promise<SafetyRule> {
-  const res = await apiFetch('/api/admin/safety/rules', {
+  const res = await apiFetch('/api/v1/safety/rules', {
     method: 'POST',
     body: JSON.stringify(body),
   });
@@ -221,7 +227,7 @@ export async function updateRule(
   ruleId: string,
   body: SafetyRuleUpdateBody,
 ): Promise<SafetyRule> {
-  const res = await apiFetch(`/api/admin/safety/rules/${encodeURIComponent(ruleId)}`, {
+  const res = await apiFetch(`/api/v1/safety/rules/${encodeURIComponent(ruleId)}`, {
     method: 'PATCH',
     body: JSON.stringify(body),
   });
@@ -229,7 +235,7 @@ export async function updateRule(
 }
 
 export async function deleteRule(ruleId: string): Promise<void> {
-  const res = await apiFetch(`/api/admin/safety/rules/${encodeURIComponent(ruleId)}`, {
+  const res = await apiFetch(`/api/v1/safety/rules/${encodeURIComponent(ruleId)}`, {
     method: 'DELETE',
   });
   if (!res.ok && res.status !== 204) {
@@ -238,18 +244,17 @@ export async function deleteRule(ruleId: string): Promise<void> {
 }
 
 export async function listRuleAudit(
-  tenantId: string,
   ruleId: string,
   limit = 200,
 ): Promise<SafetyRuleAuditEntry[]> {
+  // Tenant is derived from the session server-side (no tenant id in path).
   const res = await apiFetch(
-    `/api/admin/tenants/${encodeURIComponent(tenantId)}/safety/rules/${encodeURIComponent(ruleId)}/audit?limit=${limit}`,
+    `/api/v1/safety/rules/${encodeURIComponent(ruleId)}/audit?limit=${limit}`,
   );
   return jsonOrThrow<SafetyRuleAuditEntry[]>(res);
 }
 
 export async function listDecisions(
-  tenantId: string,
   filters: {
     verdict_action?: SafetyVerdictAction;
     coworker_id?: string;
@@ -269,18 +274,13 @@ export async function listDecisions(
     limit: filters.limit,
     offset: filters.offset,
   });
-  const res = await apiFetch(
-    `/api/admin/tenants/${encodeURIComponent(tenantId)}/safety/decisions${qs}`,
-  );
+  const res = await apiFetch(`/api/v1/safety/decisions${qs}`);
   return jsonOrThrow<DecisionsPage>(res);
 }
 
-export async function getDecision(
-  tenantId: string,
-  decisionId: string,
-): Promise<SafetyDecision> {
+export async function getDecision(decisionId: string): Promise<SafetyDecision> {
   const res = await apiFetch(
-    `/api/admin/tenants/${encodeURIComponent(tenantId)}/safety/decisions/${encodeURIComponent(decisionId)}`,
+    `/api/v1/safety/decisions/${encodeURIComponent(decisionId)}`,
   );
   return jsonOrThrow<SafetyDecision>(res);
 }
@@ -290,7 +290,6 @@ export async function getDecision(
  * the Authorization header can't be set on <a href> so we inline
  * the token via the standard header-in-URL fallback. */
 export function decisionsCsvUrl(
-  tenantId: string,
   filters: {
     verdict_action?: SafetyVerdictAction;
     coworker_id?: string;
@@ -302,7 +301,7 @@ export function decisionsCsvUrl(
   // CSV endpoint requires Bearer header — browsers can't attach one
   // on a plain <a href> click. Callers should use apiFetch + blob
   // instead; keep this function as a convenience for constructing
-  // the path half.
+  // the path half. Tenant is derived from the session server-side.
   const qs = buildQuery({
     verdict_action: filters.verdict_action,
     coworker_id: filters.coworker_id,
@@ -310,14 +309,13 @@ export function decisionsCsvUrl(
     from_ts: filters.from_ts,
     to_ts: filters.to_ts,
   });
-  return `/api/admin/tenants/${encodeURIComponent(tenantId)}/safety/decisions.csv${qs}`;
+  return `/api/v1/safety/decisions.csv${qs}`;
 }
 
 export async function downloadDecisionsCsv(
-  tenantId: string,
-  filters: Parameters<typeof decisionsCsvUrl>[1] = {},
+  filters: Parameters<typeof decisionsCsvUrl>[0] = {},
 ): Promise<Blob> {
-  const url = decisionsCsvUrl(tenantId, filters);
+  const url = decisionsCsvUrl(filters);
   if (!url) throw new Error('csv url unavailable');
   const res = await apiFetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -333,7 +331,7 @@ export interface CoworkerSummary {
 }
 
 export async function listCoworkers(): Promise<CoworkerSummary[]> {
-  const res = await apiFetch('/api/admin/agents');
+  const res = await apiFetch('/api/v1/coworkers');
   if (!res.ok) return [];
   const body = (await res.json()) as Array<{ id: string; name: string }>;
   return body.map((c) => ({ id: c.id, name: c.name }));

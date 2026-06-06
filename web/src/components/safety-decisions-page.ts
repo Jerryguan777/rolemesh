@@ -206,7 +206,7 @@ export class SafetyDecisionsPage extends LitElement {
   private async exportCsv(): Promise<void> {
     if (!this.tenantId) return;
     try {
-      const blob = await downloadDecisionsCsv(this.tenantId, this.filters);
+      const blob = await downloadDecisionsCsv(this.filters);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
