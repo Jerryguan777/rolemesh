@@ -125,7 +125,7 @@ async def test_list_rules_returns_only_caller_tenant() -> None:
     async with _client(_build_app(a)) as ac:
         resp = await ac.get("/api/v1/safety/rules", headers=_HDRS)
     assert resp.status_code == 200, resp.text
-    rows = resp.json()
+    rows = resp.json()["items"]
     rule_ids = {r["id"] for r in rows}
     assert rule_a.id in rule_ids
     assert rule_b.id not in rule_ids
@@ -153,7 +153,7 @@ async def test_list_rules_orders_by_priority_then_updated_desc() -> None:
     async with _client(_build_app(user)) as ac:
         resp = await ac.get("/api/v1/safety/rules", headers=_HDRS)
     assert resp.status_code == 200
-    ids = [r["id"] for r in resp.json()]
+    ids = [r["id"] for r in resp.json()["items"]]
     assert ids.index(high.id) < ids.index(mid.id) < ids.index(low.id)
 
 
@@ -179,7 +179,7 @@ async def test_list_rules_filters_by_coworker_id() -> None:
             f"/api/v1/safety/rules?coworker_id={cw}", headers=_HDRS,
         )
     assert resp.status_code == 200
-    ids = {r["id"] for r in resp.json()}
+    ids = {r["id"] for r in resp.json()["items"]}
     assert bound.id in ids
     assert tenant_wide.id not in ids
 
@@ -205,7 +205,7 @@ async def test_list_rules_filters_by_stage_and_enabled() -> None:
             headers=_HDRS,
         )
     assert resp.status_code == 200
-    rows = resp.json()
+    rows = resp.json()["items"]
     # Tenant-owned rows respect the exact filter.
     tenant_ids = {r["id"] for r in rows if r["source"] == "tenant"}
     assert tenant_ids == {on.id}
@@ -235,7 +235,7 @@ async def test_list_rules_surfaces_platform_rules_read_only() -> None:
     async with _client(_build_app(user)) as ac:
         resp = await ac.get("/api/v1/safety/rules", headers=_HDRS)
     assert resp.status_code == 200, resp.text
-    rows = resp.json()
+    rows = resp.json()["items"]
     platform = [r for r in rows if r["source"] == "platform"]
     assert len(platform) == 5  # the 5 default-tier rules
     assert all(r["editable"] is False for r in platform)

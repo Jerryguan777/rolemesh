@@ -1268,3 +1268,54 @@ class ModelUpdate(BaseModel):
 
     display_name: str | None = Field(default=None, min_length=1, max_length=200)
     is_active: bool | None = None
+
+
+# ---------------------------------------------------------------------------
+# Pagination envelopes (offset/limit). One named class per resource keeps the
+# generated TS type names clean; all share the {items, total, limit, offset}
+# shape established by SafetyDecisionPage. See webui.v1._pagination.
+# ---------------------------------------------------------------------------
+
+
+class SafetyRulePage(BaseModel):
+    """Offset/limit page of safety rules."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[SafetyRule]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
+class ScheduledTaskPage(BaseModel):
+    """Offset/limit page of scheduled tasks."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ScheduledTask]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
+class ApprovalPolicyPage(BaseModel):
+    """Offset/limit page of approval policies."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ApprovalPolicy]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
+class ApprovalRequestPage(BaseModel):
+    """Offset/limit page of approval requests."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ApprovalRequest]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)

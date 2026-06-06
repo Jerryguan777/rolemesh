@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     import asyncpg
 
 __all__ = [
+    "count_users_for_tenant",
     "create_external_tenant_mapping",
     "create_user",
     "create_user_with_external_sub",
@@ -309,14 +310,32 @@ async def resolve_user_for_auth(user_id: str) -> tuple[str, str] | None:
     return (str(row["tenant_id"]), str(row["role"]))
 
 
-async def get_users_for_tenant(tenant_id: str) -> list[User]:
-    """Get all users for a tenant."""
+async def get_users_for_tenant(
+    tenant_id: str, *, limit: int | None = None, offset: int = 0,
+) -> list[User]:
+    """Get users for a tenant, ordered by name.
+
+    ``limit`` bounds the page (``None`` means no bound, for internal
+    callers); ``offset`` skips from the start of the ordered set.
+    """
+    sql = "SELECT * FROM users WHERE tenant_id = $1::uuid ORDER BY name"
+    params: list[object] = [tenant_id]
+    if limit is not None:
+        params.extend((limit, offset))
+        sql += f" LIMIT ${len(params) - 1} OFFSET ${len(params)}"
     async with tenant_conn(tenant_id) as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM users WHERE tenant_id = $1::uuid ORDER BY name",
+        rows = await conn.fetch(sql, *params)
+    return [_record_to_user(row) for row in rows]
+
+
+async def count_users_for_tenant(tenant_id: str) -> int:
+    """Total user count for a tenant (for the pagination envelope)."""
+    async with tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow(
+            "SELECT COUNT(*) AS n FROM users WHERE tenant_id = $1::uuid",
             tenant_id,
         )
-    return [_record_to_user(row) for row in rows]
+    return int(row["n"]) if row else 0
 
 
 async def update_user(

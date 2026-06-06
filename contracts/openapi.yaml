@@ -1302,14 +1302,15 @@ paths:
         tiebreak order). Tenant-scoped via RLS — never returns another
         tenant's policies.
       security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/LimitParam' }
+        - { $ref: '#/components/parameters/OffsetParam' }
       responses:
         '200':
           description: OK
           content:
             application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/ApprovalPolicy' }
+              schema: { $ref: '#/components/schemas/ApprovalPolicyPage' }
         '401':
           $ref: '#/components/responses/Unauthorized'
     post:
@@ -1406,6 +1407,8 @@ paths:
         surface another tenant's request.
       security: [ { bearerAuth: [] } ]
       parameters:
+        - { $ref: '#/components/parameters/LimitParam' }
+        - { $ref: '#/components/parameters/OffsetParam' }
         - name: conversation_id
           in: query
           required: false
@@ -1416,9 +1419,7 @@ paths:
           description: OK
           content:
             application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/ApprovalRequest' }
+              schema: { $ref: '#/components/schemas/ApprovalRequestPage' }
         '401':
           $ref: '#/components/responses/Unauthorized'
 
@@ -1493,6 +1494,8 @@ paths:
         `safety.read`.
       security: [ { bearerAuth: [] } ]
       parameters:
+        - { $ref: '#/components/parameters/LimitParam' }
+        - { $ref: '#/components/parameters/OffsetParam' }
         - name: coworker_id
           in: query
           required: false
@@ -1510,9 +1513,7 @@ paths:
           description: OK
           content:
             application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/SafetyRule' }
+              schema: { $ref: '#/components/schemas/SafetyRulePage' }
         '401':
           $ref: '#/components/responses/Unauthorized'
     post:
@@ -1813,6 +1814,8 @@ paths:
         IPC. A coworker filter is exposed for the per-coworker view.
       security: [ { bearerAuth: [] } ]
       parameters:
+        - { $ref: '#/components/parameters/LimitParam' }
+        - { $ref: '#/components/parameters/OffsetParam' }
         - name: coworker_id
           in: query
           required: false
@@ -1823,9 +1826,7 @@ paths:
           description: OK
           content:
             application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/ScheduledTask' }
+              schema: { $ref: '#/components/schemas/ScheduledTaskPage' }
         '401':
           $ref: '#/components/responses/Unauthorized'
 
@@ -2093,14 +2094,15 @@ paths:
         Gated by `user.manage` (owner + admin). Returns every user in
         the caller's tenant.
       security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/LimitParam' }
+        - { $ref: '#/components/parameters/OffsetParam' }
       responses:
         '200':
           description: OK
           content:
             application/json:
-              schema:
-                type: array
-                items: { $ref: '#/components/schemas/UserResponse' }
+              schema: { $ref: '#/components/schemas/UserPage' }
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -2266,6 +2268,25 @@ components:
       schema:
         type: string
         format: uuid
+    LimitParam:
+      name: limit
+      in: query
+      required: false
+      description: Maximum number of items to return (default 50, max 200).
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 50
+    OffsetParam:
+      name: offset
+      in: query
+      required: false
+      description: Number of items to skip from the start of the ordered set.
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
 
   responses:
     BadRequest:
@@ -3355,6 +3376,63 @@ components:
         offset:
           type: integer
           minimum: 0
+
+    # Offset/limit page envelopes. One named schema per resource (clean TS
+    # type names); all share {items, total, limit, offset}.
+    UserPage:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/UserResponse' }
+        total: { type: integer, minimum: 0 }
+        limit: { type: integer, minimum: 1 }
+        offset: { type: integer, minimum: 0 }
+
+    SafetyRulePage:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/SafetyRule' }
+        total: { type: integer, minimum: 0 }
+        limit: { type: integer, minimum: 1 }
+        offset: { type: integer, minimum: 0 }
+
+    ScheduledTaskPage:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ScheduledTask' }
+        total: { type: integer, minimum: 0 }
+        limit: { type: integer, minimum: 1 }
+        offset: { type: integer, minimum: 0 }
+
+    ApprovalPolicyPage:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ApprovalPolicy' }
+        total: { type: integer, minimum: 0 }
+        limit: { type: integer, minimum: 1 }
+        offset: { type: integer, minimum: 0 }
+
+    ApprovalRequestPage:
+      type: object
+      required: [items, total, limit, offset]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/ApprovalRequest' }
+        total: { type: integer, minimum: 0 }
+        limit: { type: integer, minimum: 1 }
+        offset: { type: integer, minimum: 0 }
 
     SafetyRuleAuditEntry:
       type: object

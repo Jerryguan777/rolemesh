@@ -201,6 +201,13 @@ export async function listChecks(): Promise<SafetyCheckMeta[]> {
   return jsonOrThrow<SafetyCheckMeta[]>(res);
 }
 
+interface SafetyRulePage {
+  items: SafetyRule[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 export async function listRules(filters: {
   coworker_id?: string;
   stage?: SafetyStage;
@@ -210,9 +217,12 @@ export async function listRules(filters: {
     coworker_id: filters.coworker_id,
     stage: filters.stage,
     enabled: filters.enabled === undefined ? undefined : String(filters.enabled),
+    // Paged endpoint; request the max window and return items so callers
+    // keep the array shape (full page-through UI is a follow-up).
+    limit: 200,
   });
   const res = await apiFetch(`/api/v1/safety/rules${qs}`);
-  return jsonOrThrow<SafetyRule[]>(res);
+  return (await jsonOrThrow<SafetyRulePage>(res)).items;
 }
 
 export async function createRule(body: SafetyRuleCreateBody): Promise<SafetyRule> {

@@ -2086,6 +2086,36 @@ export interface components {
             limit: number;
             offset: number;
         };
+        UserPage: {
+            items: components["schemas"]["UserResponse"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
+        SafetyRulePage: {
+            items: components["schemas"]["SafetyRule"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
+        ScheduledTaskPage: {
+            items: components["schemas"]["ScheduledTask"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
+        ApprovalPolicyPage: {
+            items: components["schemas"]["ApprovalPolicy"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
+        ApprovalRequestPage: {
+            items: components["schemas"]["ApprovalRequest"][];
+            total: number;
+            limit: number;
+            offset: number;
+        };
         SafetyRuleAuditEntry: {
             /** Format: uuid */
             id: string;
@@ -2644,6 +2674,10 @@ export interface components {
     };
     parameters: {
         IdInPath: string;
+        /** @description Maximum number of items to return (default 50, max 200). */
+        LimitParam: number;
+        /** @description Number of items to skip from the start of the ordered set. */
+        OffsetParam: number;
     };
     requestBodies: never;
     headers: never;
@@ -4006,7 +4040,12 @@ export interface operations {
     };
     listApprovalPolicies: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Maximum number of items to return (default 50, max 200). */
+                limit?: components["parameters"]["LimitParam"];
+                /** @description Number of items to skip from the start of the ordered set. */
+                offset?: components["parameters"]["OffsetParam"];
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -4019,7 +4058,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ApprovalPolicy"][];
+                    "application/json": components["schemas"]["ApprovalPolicyPage"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -4129,6 +4168,10 @@ export interface operations {
     listPendingApprovalRequests: {
         parameters: {
             query?: {
+                /** @description Maximum number of items to return (default 50, max 200). */
+                limit?: components["parameters"]["LimitParam"];
+                /** @description Number of items to skip from the start of the ordered set. */
+                offset?: components["parameters"]["OffsetParam"];
                 /** @description Only return pending requests for this conversation. */
                 conversation_id?: string;
             };
@@ -4144,7 +4187,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ApprovalRequest"][];
+                    "application/json": components["schemas"]["ApprovalRequestPage"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -4213,6 +4256,10 @@ export interface operations {
     listSafetyRules: {
         parameters: {
             query?: {
+                /** @description Maximum number of items to return (default 50, max 200). */
+                limit?: components["parameters"]["LimitParam"];
+                /** @description Number of items to skip from the start of the ordered set. */
+                offset?: components["parameters"]["OffsetParam"];
                 coworker_id?: string;
                 stage?: components["schemas"]["SafetyStage"];
                 enabled?: boolean;
@@ -4229,7 +4276,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["SafetyRule"][];
+                    "application/json": components["schemas"]["SafetyRulePage"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -4485,6 +4532,10 @@ export interface operations {
     schedulesList: {
         parameters: {
             query?: {
+                /** @description Maximum number of items to return (default 50, max 200). */
+                limit?: components["parameters"]["LimitParam"];
+                /** @description Number of items to skip from the start of the ordered set. */
+                offset?: components["parameters"]["OffsetParam"];
                 /** @description When set, only tasks bound to this coworker. */
                 coworker_id?: string;
             };
@@ -4500,7 +4551,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ScheduledTask"][];
+                    "application/json": components["schemas"]["ScheduledTaskPage"];
                 };
             };
             401: components["responses"]["Unauthorized"];
@@ -4769,7 +4820,12 @@ export interface operations {
     };
     listUsers: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Maximum number of items to return (default 50, max 200). */
+                limit?: components["parameters"]["LimitParam"];
+                /** @description Number of items to skip from the start of the ordered set. */
+                offset?: components["parameters"]["OffsetParam"];
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -4782,7 +4838,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["UserResponse"][];
+                    "application/json": components["schemas"]["UserPage"];
                 };
             };
             401: components["responses"]["Unauthorized"];

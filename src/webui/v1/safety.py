@@ -30,6 +30,7 @@ from rolemesh import db
 from rolemesh.auth.bootstrap_actor import resolve_actor_user_id
 from rolemesh.db import (
     count_safety_decisions,
+    count_safety_rules,
     create_safety_rule,
     delete_safety_rule,
     get_safety_decision,
@@ -54,6 +55,7 @@ from webui.schemas_v1 import (
     SafetyFinding,
     SafetyRule,
     SafetyRuleAuditEntry,
+    SafetyRulePage,
     SafetyStage,
     SafetyVerdictAction,
 )
@@ -398,14 +400,16 @@ async def _publish_rule_changed(action: str, rule: SafetyRuleDataclass) -> None:
 # ---------------------------------------------------------------------------
 
 
-@router.get("/rules", response_model=list[SafetyRule])
+@router.get("/rules", response_model=SafetyRulePage)
 async def list_rules(
     coworker_id: str | None = None,
     stage: SafetyStage | None = None,
     enabled: bool | None = None,
+    limit: LimitParam = DEFAULT_PAGE_LIMIT,
+    offset: OffsetParam = 0,
     user: AuthenticatedUser = Depends(require_action("safety.read")),
-) -> list[SafetyRule]:
-    """List safety rules for the caller's tenant.
+) -> SafetyRulePage:
+    """List safety rules for the caller's tenant (offset/limit paged).
 
     Returns the tenant's own rules PLUS the platform-owned rules that
     apply across all tenants. Platform rules are read-only
@@ -414,29 +418,43 @@ async def list_rules(
     enforce but are never shown. They honor the ``stage`` / ``enabled``
     filters. Like tenant-wide (``coworker_id IS NULL``) rules, platform
     rules are excluded when the caller filters by a specific
-    ``coworker_id`` — that filter is an exact-match narrowing, and
-    platform rules are not bound to any single coworker.
+    ``coworker_id``.
 
-    Tenant-rule filters mirror the admin endpoint exactly. Ordering
-    (``priority DESC, updated_at DESC``) lives in the helper; platform
-    rules are appended after, so the list groups tenant rules first.
+    Only the tenant rows are paginated at the DB. Platform rules are a
+    small read-only reference set, so they ride on the FIRST page only
+    (``offset == 0``), after the tenant slice; ``total`` counts them so
+    the SPA's pagination math stays correct.
     """
     rows = await list_safety_rules(
         user.tenant_id,
         coworker_id=coworker_id,
         stage=stage,
         enabled=enabled,
+        limit=limit,
+        offset=offset,
     )
-    out = [_rule_to_response(r) for r in rows]
+    items = [_rule_to_response(r) for r in rows]
+    total = await count_safety_rules(
+        user.tenant_id,
+        coworker_id=coworker_id,
+        stage=stage,
+        enabled=enabled,
+    )
 
     if coworker_id is None:
-        for prow in await list_visible_platform_rules(user.tenant_id):
-            if stage is not None and prow["stage"] != stage:
-                continue
-            if enabled is not None and bool(prow["enabled"]) != enabled:
-                continue
-            out.append(_platform_rule_to_response(prow))
-    return out
+        platform = [
+            _platform_rule_to_response(prow)
+            for prow in await list_visible_platform_rules(user.tenant_id)
+            if (stage is None or prow["stage"] == stage)
+            and (enabled is None or bool(prow["enabled"]) == enabled)
+        ]
+        total += len(platform)
+        if offset == 0:
+            items.extend(platform)
+
+    return SafetyRulePage(
+        items=items, total=total, limit=limit, offset=offset,
+    )
 
 
 @router.get("/rules/{rule_id}", response_model=SafetyRule)

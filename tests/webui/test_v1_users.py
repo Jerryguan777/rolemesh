@@ -71,7 +71,7 @@ async def test_list_users_owner_ok() -> None:
     async with _client(_build_app(user)) as ac:
         resp = await ac.get("/api/v1/users", headers=_HDRS)
     assert resp.status_code == 200, resp.text
-    ids = {u["id"] for u in resp.json()}
+    ids = {u["id"] for u in resp.json()["items"]}
     assert user.user_id in ids
 
 
@@ -80,6 +80,36 @@ async def test_list_users_admin_ok() -> None:
     async with _client(_build_app(user)) as ac:
         resp = await ac.get("/api/v1/users", headers=_HDRS)
     assert resp.status_code == 200, resp.text
+
+
+async def test_list_users_pagination_envelope_and_window() -> None:
+    # Seed enough users that a small limit forces two pages; assert the
+    # {items, total, limit, offset} envelope and that limit/offset slice
+    # without overlap and total reflects the full set (not the page).
+    owner = await _make_tenant_user("owner")
+    for _ in range(4):  # owner + 4 = 5 users in the tenant
+        await create_user(
+            tenant_id=owner.tenant_id, name="U",
+            email=f"u-{uuid.uuid4().hex[:6]}@x.com", role="member",
+        )
+    async with _client(_build_app(owner)) as ac:
+        p1 = (await ac.get("/api/v1/users?limit=2&offset=0", headers=_HDRS)).json()
+        p2 = (await ac.get("/api/v1/users?limit=2&offset=2", headers=_HDRS)).json()
+    assert p1["total"] == 5
+    assert p1["limit"] == 2 and p1["offset"] == 0
+    assert len(p1["items"]) == 2
+    assert p2["offset"] == 2 and len(p2["items"]) == 2
+    # No overlap between consecutive pages.
+    assert {u["id"] for u in p1["items"]}.isdisjoint(
+        {u["id"] for u in p2["items"]}
+    )
+
+
+async def test_list_users_limit_over_max_is_rejected() -> None:
+    owner = await _make_tenant_user("owner")
+    async with _client(_build_app(owner)) as ac:
+        resp = await ac.get("/api/v1/users?limit=999", headers=_HDRS)
+    assert resp.status_code == 422  # exceeds MAX_PAGE_LIMIT (200)
 
 
 async def test_list_users_member_forbidden() -> None:

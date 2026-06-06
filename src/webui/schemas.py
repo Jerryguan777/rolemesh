@@ -61,6 +61,22 @@ class UserDetailResponse(UserResponse):
     mechanism (access is governed by coworker visibility + ownership)."""
 
 
+class UserPage(BaseModel):
+    """Offset/limit page of users.
+
+    Defined here (next to ``UserResponse``) rather than in
+    ``schemas_v1`` because that module would otherwise have to import
+    ``UserResponse`` from here, and ``schemas`` already imports from
+    ``schemas_v1`` — keeping the page on this side avoids the cycle.
+    Same ``{items, total, limit, offset}`` shape as the v1 envelopes.
+    """
+
+    items: list[UserResponse]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
+
+
 # ---------------------------------------------------------------------------
 # Agent (Coworker)
 # ---------------------------------------------------------------------------

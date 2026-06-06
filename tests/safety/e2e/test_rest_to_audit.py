@@ -198,7 +198,7 @@ class TestRestCreateToAudit:
             # TestCrossTenantListing below.
             r = await client.get("/api/v1/safety/rules")
             assert r.status_code == 200
-            assert any(row["id"] == rule_id for row in r.json())
+            assert any(row["id"] == rule_id for row in r.json()["items"])
 
         # 2. Container side: loads snapshot exactly as
         #    container_executor would. If the REST layer quietly
@@ -401,7 +401,7 @@ class TestCrossTenantListing:
             # B's list must be empty.
             r = await c_b.get("/api/v1/safety/rules")
             assert r.status_code == 200
-            assert r.json() == []
+            assert r.json()["items"] == []
 
             # B's direct GET by id must 404 (not 403 — avoids
             # existence leakage).

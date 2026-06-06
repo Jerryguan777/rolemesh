@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "cancel_tasks_for_user",
+    "count_tasks",
     "create_task",
     "delete_task",
     "get_all_tasks",
@@ -107,22 +108,41 @@ async def get_task_by_id(task_id: str, *, tenant_id: str) -> ScheduledTask | Non
 
 
 async def get_tasks_for_coworker(
-    coworker_id: str, *, tenant_id: str
+    coworker_id: str, *, tenant_id: str, limit: int | None = None, offset: int = 0,
 ) -> list[ScheduledTask]:
-    """Get all tasks for a specific coworker."""
+    """Get tasks for a specific coworker (newest first), optionally paginated."""
+    sql = (
+        "SELECT * FROM scheduled_tasks "
+        "WHERE coworker_id = $1::uuid AND tenant_id = $2::uuid "
+        "ORDER BY created_at DESC"
+    )
+    params: list[object] = [coworker_id, tenant_id]
+    if limit is not None:
+        params.extend((limit, offset))
+        sql += f" LIMIT ${len(params) - 1} OFFSET ${len(params)}"
     async with tenant_conn(tenant_id) as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM scheduled_tasks "
-            "WHERE coworker_id = $1::uuid AND tenant_id = $2::uuid "
-            "ORDER BY created_at DESC",
-            coworker_id,
-            tenant_id,
-        )
+        rows = await conn.fetch(sql, *params)
     return [_record_to_scheduled_task(row) for row in rows]
 
 
-async def get_all_tasks(tenant_id: str | None = None) -> list[ScheduledTask]:
-    """Get all scheduled tasks, optionally filtered by tenant.
+async def count_tasks(
+    tenant_id: str, *, coworker_id: str | None = None,
+) -> int:
+    """Total scheduled-task count for a tenant (optionally one coworker)."""
+    sql = "SELECT COUNT(*) AS n FROM scheduled_tasks WHERE tenant_id = $1::uuid"
+    params: list[object] = [tenant_id]
+    if coworker_id is not None:
+        params.append(coworker_id)
+        sql += f" AND coworker_id = ${len(params)}::uuid"
+    async with tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow(sql, *params)
+    return int(row["n"]) if row else 0
+
+
+async def get_all_tasks(
+    tenant_id: str | None = None, *, limit: int | None = None, offset: int = 0,
+) -> list[ScheduledTask]:
+    """Get all scheduled tasks, optionally filtered by tenant and paginated.
 
     Treats both ``None`` and ``""`` as "no tenant scope" so callers
     that build the parameter from an admin REST query string don't
@@ -130,17 +150,24 @@ async def get_all_tasks(tenant_id: str | None = None) -> list[ScheduledTask]:
     fail-closed (current_tenant_id = NULL → RLS drops every row).
     """
     if tenant_id:
+        sql = (
+            "SELECT * FROM scheduled_tasks "
+            "WHERE tenant_id = $1::uuid ORDER BY created_at DESC"
+        )
+        params: list[object] = [tenant_id]
+        if limit is not None:
+            params.extend((limit, offset))
+            sql += f" LIMIT ${len(params) - 1} OFFSET ${len(params)}"
         async with tenant_conn(tenant_id) as conn:
-            rows = await conn.fetch(
-                "SELECT * FROM scheduled_tasks "
-                "WHERE tenant_id = $1::uuid ORDER BY created_at DESC",
-                tenant_id,
-            )
+            rows = await conn.fetch(sql, *params)
     else:
+        sql = "SELECT * FROM scheduled_tasks ORDER BY created_at DESC"
+        params = []
+        if limit is not None:
+            params.extend((limit, offset))
+            sql += " LIMIT $1 OFFSET $2"
         async with admin_conn() as conn:
-            rows = await conn.fetch(
-                "SELECT * FROM scheduled_tasks ORDER BY created_at DESC"
-            )
+            rows = await conn.fetch(sql, *params)
     return [_record_to_scheduled_task(row) for row in rows]
 
 

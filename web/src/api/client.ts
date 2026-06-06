@@ -415,12 +415,15 @@ export class ApiClient {
   // ------------------------------------------------------------------
 
   async listApprovalPolicies(): Promise<ApprovalPolicy[]> {
-    const resp = await fetch(`${this.baseUrl}/api/v1/approval-policies`, {
-      method: 'GET',
-      headers: this.headers(),
-    });
+    // Paged endpoint; request the max window and return the items so
+    // callers keep their array shape (page-through UI is a follow-up).
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/approval-policies?limit=200`,
+      { method: 'GET', headers: this.headers() },
+    );
     if (!resp.ok) throw await this.parseError(resp);
-    return (await resp.json()) as ApprovalPolicy[];
+    return ((await resp.json()) as components['schemas']['ApprovalPolicyPage'])
+      .items;
   }
 
   async createApprovalPolicy(
@@ -465,15 +468,15 @@ export class ApiClient {
   async listPendingApprovals(
     conversationId?: string,
   ): Promise<ApprovalRequest[]> {
-    const qs = conversationId
-      ? `?conversation_id=${encodeURIComponent(conversationId)}`
-      : '';
+    const qs = new URLSearchParams({ limit: '200' });
+    if (conversationId) qs.set('conversation_id', conversationId);
     const resp = await fetch(
-      `${this.baseUrl}/api/v1/approval-requests${qs}`,
+      `${this.baseUrl}/api/v1/approval-requests?${qs}`,
       { method: 'GET', headers: this.headers() },
     );
     if (!resp.ok) throw await this.parseError(resp);
-    return (await resp.json()) as ApprovalRequest[];
+    return ((await resp.json()) as components['schemas']['ApprovalRequestPage'])
+      .items;
   }
 
   /** A conversation's full HITL approval record — pending AND resolved,
@@ -629,10 +632,15 @@ export class ApiClient {
     if (filters?.enabled !== undefined && filters.enabled !== null) {
       qs.set('enabled', String(filters.enabled));
     }
-    const url = `${this.baseUrl}/api/v1/safety/rules${qs.size ? `?${qs}` : ''}`;
+    // List endpoints are paged; request the max window and return the
+    // items so existing callers keep their array shape. Real page-through
+    // UI is a follow-up (see the pagination rollout).
+    qs.set('limit', '200');
+    const url = `${this.baseUrl}/api/v1/safety/rules?${qs}`;
     const resp = await fetch(url, { method: 'GET', headers: this.headers() });
     if (!resp.ok) throw await this.parseError(resp);
-    return (await resp.json()) as SafetyRule[];
+    return ((await resp.json()) as components['schemas']['SafetyRulePage'])
+      .items;
   }
 
   async getSafetyRule(id: string): Promise<SafetyRule> {
