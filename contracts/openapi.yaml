@@ -3,10 +3,11 @@ info:
   title: RoleMesh API
   version: 1.1.0
   description: |
-    REST contract for the `/api/v1/*` surface introduced by the
-    webui-backend v1.1 design. Only `/api/v1/backends` is implemented
-    in Phase 0; the rest are listed as forward contracts so frontend
-    work can compile against typed types from day one.
+    REST contract for the `/api/v1/*` surface (webui-backend v1.1
+    design). This YAML is the hand-maintained source of truth; the
+    typed client `web/src/api/generated/types.ts` is generated from it
+    (`npm run openapi:gen`) and CI guards both directions against drift
+    (`test_openapi_codegen_freshness`, `test_openapi_contract`).
 
     The companion WebSocket endpoint `/api/v1/conversations/{id}/stream`
     is documented in design §4 (event-driven JSON protocol); OpenAPI 3
@@ -32,6 +33,10 @@ tags:
   - name: ApprovalPolicies
   - name: Users
   - name: Tenant
+  - name: Safety
+  - name: Schedules
+  - name: Admin
+  - name: Platform
 
 paths:
   # ===================================================================
@@ -318,7 +323,7 @@ paths:
       summary: Delete a coworker (cascades conversations / runs / messages)
       description: |
         Cascading delete — conversations, runs and messages owned by
-        this coworker are removed. Design §3 "DELETE 语义" table.
+        this coworker are removed. Design §3 "DELETE semantics" table.
       security: [ { bearerAuth: [] } ]
       responses:
         '204':
@@ -442,7 +447,7 @@ paths:
       operationId: deleteConversation
       summary: Delete a conversation (cascades messages and runs)
       description: |
-        Cascading delete — design §3 "DELETE 语义" treats
+        Cascading delete — design §3 "DELETE semantics" treats
         conversations as owned children of coworkers.
       security: [ { bearerAuth: [] } ]
       responses:
@@ -1427,7 +1432,7 @@ paths:
       description: |
         Clients reconnecting to a stream first GET the run snapshot
         to decide whether the run is already terminal — design §4
-        "重连" flow.
+        "reconnect" flow.
       security: [ { bearerAuth: [] } ]
       responses:
         '200':
