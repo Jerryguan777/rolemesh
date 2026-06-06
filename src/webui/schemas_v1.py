@@ -918,16 +918,18 @@ class SafetyDecision(BaseModel):
 class SafetyDecisionPage(BaseModel):
     """``GET /api/v1/safety/decisions`` response envelope.
 
-    Mirrors the admin shape ``{total, items}`` so the SPA renders
-    pagination without a second count call. The two-field envelope
-    is intentional even when ``total == len(items)`` — keeps the
-    list and count concerns coupled in one round-trip.
+    The standard offset/limit page shape shared across the v1 list
+    surface: ``items`` plus ``total`` (so the SPA renders pagination
+    without a second count call) and an echo of the effective
+    ``limit``/``offset`` (so the caller doesn't have to track them).
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    items: list[SafetyDecision]
     total: int = Field(ge=0)
-    items: list[SafetyDecision] = Field(default_factory=list)
+    limit: int = Field(ge=1)
+    offset: int = Field(ge=0)
 
 
 class SafetyRuleAuditEntry(BaseModel):

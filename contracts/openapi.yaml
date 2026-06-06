@@ -3341,14 +3341,20 @@ components:
 
     SafetyDecisionPage:
       type: object
-      required: [total]
+      required: [items, total, limit, offset]
       properties:
-        total:
-          type: integer
-          minimum: 0
         items:
           type: array
           items: { $ref: '#/components/schemas/SafetyDecision' }
+        total:
+          type: integer
+          minimum: 0
+        limit:
+          type: integer
+          minimum: 1
+        offset:
+          type: integer
+          minimum: 0
 
     SafetyRuleAuditEntry:
       type: object

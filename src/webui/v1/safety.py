@@ -57,6 +57,7 @@ from webui.schemas_v1 import (
     SafetyStage,
     SafetyVerdictAction,
 )
+from webui.v1._pagination import DEFAULT_PAGE_LIMIT, LimitParam, OffsetParam
 from webui.v1.errors import raise_error_response
 
 if TYPE_CHECKING:
@@ -546,8 +547,8 @@ async def list_decisions(
     rule_id: str | None = None,
     from_ts: str | None = None,
     to_ts: str | None = None,
-    limit: int = Query(default=50, ge=1, le=200),
-    offset: int = Query(default=0, ge=0),
+    limit: LimitParam = DEFAULT_PAGE_LIMIT,
+    offset: OffsetParam = 0,
     user: AuthenticatedUser = Depends(require_action("safety.read")),
 ) -> SafetyDecisionPage:
     """Paginated decisions list with a total-count envelope.
@@ -585,8 +586,10 @@ async def list_decisions(
         offset=offset,
     )
     return SafetyDecisionPage(
-        total=total,
         items=[_decision_row_to_response(r) for r in items],
+        total=total,
+        limit=limit,
+        offset=offset,
     )
 
 

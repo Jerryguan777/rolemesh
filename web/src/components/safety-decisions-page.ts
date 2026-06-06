@@ -66,7 +66,12 @@ export class SafetyDecisionsPage extends LitElement {
   // Cached so the admin CSV endpoint (not on v1) gets the tenant in its URL.
   // Decisions reads themselves derive tenant from auth.
   @state() private tenantId: string | null = null;
-  @state() private decisions: SafetyDecisionPage = { total: 0, items: [] };
+  @state() private decisions: SafetyDecisionPage = {
+    items: [],
+    total: 0,
+    limit: 0,
+    offset: 0,
+  };
   @state() private coworkers: CoworkerSummary[] = [];
   @state() private checks: SafetyCheck[] = [];
   // rule_id → check label, for the detail modal's "triggered rule" cell.

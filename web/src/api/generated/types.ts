@@ -2081,8 +2081,10 @@ export interface components {
             created_at: string;
         };
         SafetyDecisionPage: {
+            items: components["schemas"]["SafetyDecision"][];
             total: number;
-            items?: components["schemas"]["SafetyDecision"][];
+            limit: number;
+            offset: number;
         };
         SafetyRuleAuditEntry: {
             /** Format: uuid */
