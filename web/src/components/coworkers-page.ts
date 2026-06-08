@@ -19,18 +19,50 @@ import { customElement, query, state } from 'lit/decorators.js';
 
 import { ApiError, getApiClient } from '../api/client.js';
 import type { Coworker, ModelProvider } from '../api/client.js';
+import {
+  canManage,
+  hasCapability,
+  isOwnResource,
+} from '../auth/capabilities.js';
 import './coworker-wizard.js';
 import './credential-dialog.js';
 import './mcp-server-dialog.js';
 import './confirm-dialog.js';
 import type { CoworkerWizard } from './coworker-wizard.js';
-import { iconPencil, iconTrash } from './icons.js';
+import { iconPencil, iconTrash, iconUsers } from './icons.js';
+
+/** UX-only view filter over the already-server-filtered list. NOT a
+ *  security boundary — the backend already visibility-filtered the rows
+ *  (spec §7.3). These chips just re-narrow what's shown for the user's
+ *  workflow. PR5 (skills page) mirrors this exact classification. */
+export type CoworkerChip = 'all' | 'mine' | 'shared';
+
+/** Classify one row against a chip selection. Pure + reusable so the
+ *  skills page (PR5) can mirror it. Three-value safe: a row with a null
+ *  `created_by_user_id` is never "mine" (it falls through `isOwnResource`,
+ *  which returns false for null) and is only kept by the "shared" chip
+ *  when its visibility says so — never by ownership. */
+export function matchesChip(co: Coworker, chip: CoworkerChip): boolean {
+  if (chip === 'all') return true;
+  if (chip === 'mine') return isOwnResource(co);
+  // 'shared' — others' shared rows only (own rows belong under "Mine").
+  return co.visibility === 'shared' && !isOwnResource(co);
+}
 
 @customElement('rm-coworkers-page')
 export class CoworkersPage extends LitElement {
   @state() private rows: Coworker[] = [];
   @state() private loading = true;
   @state() private error: string | null = null;
+  /** Client-side view filter (spec §5.1 chips). Pure presentation — the
+   *  list is already server-side visibility-filtered; this re-narrows it. */
+  @state() private chip: CoworkerChip = 'all';
+  /** Per-row share/unshare error, keyed by coworker id. Cleared on the
+   *  next refresh, same lifecycle as `deleteError`. */
+  @state() private shareError: Record<string, string> = {};
+  /** Ids with a share/unshare POST in flight — disables that row's
+   *  toggle so a double-click can't fire two visibility flips. */
+  @state() private shareInFlight: Set<string> = new Set();
   @state() private wizardOpen = false;
   @state() private credDialogOpen = false;
   @state() private credDialogProvider: ModelProvider | null = null;
@@ -64,6 +96,7 @@ export class CoworkersPage extends LitElement {
     this.loading = true;
     this.error = null;
     this.deleteError = {};
+    this.shareError = {};
     try {
       this.rows = await this.api.listCoworkers();
     } catch (err) {
@@ -119,6 +152,36 @@ export class CoworkersPage extends LitElement {
     }
   }
 
+  /** Flip a coworker's visibility. `canManage` is the ONLY gate (spec
+   *  §7.4 — no separate `*.share` capability); the toggle only renders
+   *  where canManage is true, and the backend re-checks the ownership
+   *  escape. Optimistic: we patch the local row from the returned
+   *  coworker so the pill + tooltip flip without a full refresh. */
+  private async toggleShare(c: Coworker): Promise<void> {
+    if (this.shareInFlight.has(c.id)) return;
+    this.shareInFlight = new Set(this.shareInFlight).add(c.id);
+    this.shareError = { ...this.shareError, [c.id]: '' };
+    try {
+      const updated =
+        c.visibility === 'shared'
+          ? await this.api.unshareCoworker(c.id)
+          : await this.api.shareCoworker(c.id);
+      this.rows = this.rows.map((r) => (r.id === updated.id ? updated : r));
+    } catch (err) {
+      this.shareError = {
+        ...this.shareError,
+        [c.id]:
+          err instanceof ApiError
+            ? `${err.status} — ${err.body?.message ?? err.message}`
+            : (err as Error).message ?? 'visibility change failed',
+      };
+    } finally {
+      const next = new Set(this.shareInFlight);
+      next.delete(c.id);
+      this.shareInFlight = next;
+    }
+  }
+
   private startChat(coworker: Coworker): void {
     // chat-panel reads `agent_id` from the query string; setting it
     // before navigating to `#/` keeps the legacy URL contract intact.
@@ -130,34 +193,43 @@ export class CoworkersPage extends LitElement {
   }
 
   override render() {
+    const canCreate = hasCapability('coworker.create');
+    const visibleRows = this.rows.filter((c) => matchesChip(c, this.chip));
     return html`
       <div class="rm-spane">
         <div class="rm-ch">
           <h2>Coworkers</h2>
-          <button
-            type="button"
-            class="rm-add"
-            @click=${() => { this.wizardOpen = true; }}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-              stroke="currentColor" stroke-width="2" aria-hidden="true">
-              <path d="M12 5v14M5 12h14"/>
-            </svg>
-            New coworker
-          </button>
+          ${canCreate
+            ? html`<button
+                type="button"
+                class="rm-add"
+                data-testid="coworker-new"
+                @click=${() => { this.wizardOpen = true; }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2" aria-hidden="true">
+                  <path d="M12 5v14M5 12h14"/>
+                </svg>
+                New coworker
+              </button>`
+            : nothing}
         </div>
         <p class="rm-sub">
           Each coworker is assembled from an engine, a model, bound MCP
           servers and skills. Click one to chat or edit.
         </p>
 
+        ${this.loading || this.error || this.rows.length === 0
+          ? nothing
+          : this.renderChips()}
+
         ${this.loading
           ? html`<div class="rm-banner-loading">Loading…</div>`
           : this.error
             ? html`<div class="rm-banner-err">${this.error}</div>`
-            : this.rows.length === 0
+            : visibleRows.length === 0
               ? this.renderEmpty()
-              : this.renderList()}
+              : this.renderList(visibleRows)}
         <rm-coworker-wizard
           ?open=${this.wizardOpen}
           .editing=${this.editTarget}
@@ -221,11 +293,60 @@ export class CoworkersPage extends LitElement {
     `;
   }
 
-  private renderEmpty() {
+  private renderChips() {
+    const chips: Array<[CoworkerChip, string]> = [
+      ['all', 'All visible'],
+      ['mine', 'Mine'],
+      ['shared', 'Shared by others'],
+    ];
     return html`
-      <div class="rm-empty">
-        <span class="rm-empty-title">No coworkers yet</span>
-        Click <b>+ New coworker</b> above to start the 6-step setup.
+      <div class="rm-seg rm-chipbar" role="tablist" aria-label="Filter coworkers">
+        ${chips.map(
+          ([key, label]) => html`
+            <button
+              type="button"
+              role="tab"
+              class=${this.chip === key ? 'rm-seg--on' : ''}
+              aria-selected=${this.chip === key ? 'true' : 'false'}
+              data-testid="coworker-chip-${key}"
+              @click=${() => { this.chip = key; }}
+            >${label}</button>
+          `,
+        )}
+      </div>
+    `;
+  }
+
+  /** Empty-state copy varies by the active chip AND by whether the user
+   *  can manage coworkers tenant-wide vs is a plain member (spec §5.1).
+   *  Gated on a CAPABILITY (`coworker.manage`), never a role name — a
+   *  member's next action is "ask an admin to share / create your own",
+   *  an admin/owner's is "create the first one". */
+  private renderEmpty() {
+    const isManager = hasCapability('coworker.manage');
+    let title: string;
+    let body: unknown;
+    if (this.chip === 'mine') {
+      title = 'Nothing here yet';
+      body = html`You haven’t created any coworkers yet.`;
+    } else if (this.chip === 'shared') {
+      title = 'Nothing shared';
+      body = isManager
+        ? html`No coworkers shared by others.`
+        : html`No coworkers have been shared with you yet.`;
+    } else {
+      // 'all'
+      title = 'No coworkers yet';
+      body = isManager
+        ? html`No coworkers in this tenant yet. Click
+            <b>+ New coworker</b> above to create the first one.`
+        : html`No coworkers yet. Create one with
+            <b>+ New coworker</b>, or ask your admin to share theirs.`;
+    }
+    return html`
+      <div class="rm-empty" data-testid="coworker-empty">
+        <span class="rm-empty-title">${title}</span>
+        ${body}
       </div>
     `;
   }
@@ -237,9 +358,87 @@ export class CoworkersPage extends LitElement {
     return 'rm-pill rm-pill-off';
   }
 
-  private renderList() {
+  /** Ownership cue (spec §5.1). There is NO owner display-name on the
+   *  wire — only `created_by_user_id` — so own rows read "Created by
+   *  you" in accent; everything else is a neutral label (never an
+   *  invented person name). */
+  private renderOwnTag(c: Coworker) {
+    if (isOwnResource(c)) {
+      return html`<span
+        class="rm-own-tag rm-own-tag--mine"
+        data-testid="coworker-own-tag"
+      >Created by you</span>`;
+    }
+    return html`<span
+      class="rm-own-tag rm-own-tag--other"
+      data-testid="coworker-own-tag"
+    >Shared by another member</span>`;
+  }
+
+  /** Visibility pill — green "Shared" / gray "Private" from the wire
+   *  `visibility` (spec §7.4). */
+  private renderVisibilityPill(c: Coworker) {
+    const shared = c.visibility === 'shared';
+    return html`<span
+      class=${shared ? 'rm-pill rm-pill-on' : 'rm-pill rm-pill-off'}
+      data-testid="coworker-visibility"
+    >${shared ? 'Shared' : 'Private'}</span>`;
+  }
+
+  private renderRowActions(c: Coworker) {
+    // Single gate for ALL management affordances — the ownership escape
+    // (manage capability OR own the row), mirroring the backend. Members
+    // see a "view only" hint instead of dead Edit/Delete/Share buttons.
+    if (!canManage(c, 'coworker.manage')) {
+      return html`<span class="rm-viewonly" data-testid="coworker-viewonly"
+        >View only</span
+      >`;
+    }
+    const shared = c.visibility === 'shared';
+    const busy = this.shareInFlight.has(c.id);
     return html`
-      ${this.rows.map(
+      <span class="rm-row-acts">
+        <button
+          type="button"
+          class=${shared ? 'rm-iconbtn rm-iconbtn--on' : 'rm-iconbtn'}
+          title=${shared
+            ? 'Make private'
+            : `Share with everyone in ${c.tenant_id}`}
+          data-testid="coworker-share"
+          ?disabled=${busy}
+          aria-pressed=${shared ? 'true' : 'false'}
+          @click=${(e: Event) => {
+            e.stopPropagation();
+            void this.toggleShare(c);
+          }}
+        >${iconUsers(15)}</button>
+        <button
+          type="button"
+          class="rm-iconbtn"
+          title="Edit coworker"
+          data-testid="coworker-edit"
+          @click=${(e: Event) => {
+            e.stopPropagation();
+            this.openEdit(c);
+          }}
+        >${iconPencil(15)}</button>
+        <button
+          type="button"
+          class="rm-iconbtn rm-iconbtn--danger"
+          title="Delete coworker"
+          data-testid="coworker-delete"
+          @click=${(e: Event) => {
+            e.stopPropagation();
+            this.askDelete(c);
+          }}
+        >${iconTrash(15)}</button>
+      </span>
+    `;
+  }
+
+  private renderList(rows: Coworker[]) {
+    return html`
+      ${rows.map(
         (c) => html`
           <div
             class="rm-card"
@@ -252,33 +451,19 @@ export class CoworkersPage extends LitElement {
             <span class="rm-ic">${(c.name?.[0] ?? '?').toUpperCase()}</span>
             <span class="rm-mn">
               <b>${c.name}</b>
-              <span>${c.agent_backend} · ${c.id.slice(0, 8)}</span>
+              <span>
+                ${c.agent_backend} · ${c.id.slice(0, 8)} ·
+                ${this.renderOwnTag(c)}
+              </span>
             </span>
+            ${this.renderVisibilityPill(c)}
             <span class=${this.pillClass(c.status)}>${c.status}</span>
-            <span class="rm-row-acts">
-              <button
-                type="button"
-                class="rm-iconbtn"
-                title="Edit coworker"
-                data-testid="coworker-edit"
-                @click=${(e: Event) => {
-                  e.stopPropagation();
-                  this.openEdit(c);
-                }}
-              >${iconPencil(15)}</button>
-              <button
-                type="button"
-                class="rm-iconbtn rm-iconbtn--danger"
-                title="Delete coworker"
-                data-testid="coworker-delete"
-                @click=${(e: Event) => {
-                  e.stopPropagation();
-                  this.askDelete(c);
-                }}
-              >${iconTrash(15)}</button>
-            </span>
+            ${this.renderRowActions(c)}
             ${this.deleteError[c.id]
               ? html`<div class="rm-row-error">${this.deleteError[c.id]}</div>`
+              : nothing}
+            ${this.shareError[c.id]
+              ? html`<div class="rm-row-error">${this.shareError[c.id]}</div>`
               : nothing}
           </div>
         `,

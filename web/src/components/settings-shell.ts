@@ -29,6 +29,8 @@ import { LitElement, html, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { keyed } from 'lit/directives/keyed.js';
 
+import { currentMe, hasCapability } from '../auth/capabilities.js';
+
 import {
   iconBook,
   iconChevronDown,
@@ -60,6 +62,7 @@ import './appearance-page.js';
 import './coming-soon.js';
 import './skill-detail-page.js';
 import './connected-channels-page.js';
+import './access-denied-page.js';
 
 interface NavEntry {
   /** Sub-path under `#/manage/`. */
@@ -73,6 +76,14 @@ interface NavEntry {
   badge?: string;
   /** Renders the page body. */
   render: () => TemplateResult;
+  /** Capability required to see this entry (spec §3). `null` means any
+   *  authenticated user. At render time the shell hides entries whose
+   *  `requires` is set and not held by `currentMe()`. The strings here
+   *  must match the backend action names in `permissions.py` EXACTLY —
+   *  a typo silently hides the entry for everyone. The frontend keeps NO
+   *  role->capability matrix; it only names the capability each page
+   *  needs and reads `me.capabilities` from the wire. */
+  requires: string | null;
 }
 
 interface NavGroup {
@@ -83,13 +94,18 @@ interface NavGroup {
 }
 
 /**
- * The 11 settings pages. Order matches the v2-A prompt's grouping
+ * The 12 settings pages. Order matches the v2-A prompt's grouping
  * (Coworkers · Building blocks · Governance · Workspace · Account).
  *
  * Each entry just hands off to a v1.1 component — `coworkers-page`
  * et al — with the exception of `appearance-page` (new, shows
  * detected system theme) and the two `coming-soon` placeholders
  * (general + members; v3).
+ *
+ * Every entry carries a `requires` capability (spec §3); the shell
+ * filters the rail by it at render time. The strings are the only
+ * role-related constant here — and they name a *capability*, never a
+ * role. The role->capability mapping lives solely in the backend.
  */
 const NAV_GROUPS: NavGroup[] = [
   {
@@ -100,6 +116,7 @@ const NAV_GROUPS: NavGroup[] = [
         label: 'Coworkers',
         icon: () => iconUser(16),
         render: () => html`<rm-coworkers-page></rm-coworkers-page>`,
+        requires: null,
       },
     ],
   },
@@ -111,24 +128,28 @@ const NAV_GROUPS: NavGroup[] = [
         label: 'MCP servers',
         icon: () => iconServer(16),
         render: () => html`<rm-mcp-servers-page></rm-mcp-servers-page>`,
+        requires: 'mcp.configure',
       },
       {
         slug: 'skills',
         label: 'Skills',
         icon: () => iconBook(16),
         render: () => html`<rm-skills-page></rm-skills-page>`,
+        requires: null,
       },
       {
         slug: 'models',
         label: 'Models',
         icon: () => iconChip(16),
         render: () => html`<rm-models-page></rm-models-page>`,
+        requires: null,
       },
       {
         slug: 'credentials',
         label: 'Credentials',
         icon: () => iconKey(16),
         render: () => html`<rm-credentials-page></rm-credentials-page>`,
+        requires: 'credential.byok.manage',
       },
     ],
   },
@@ -141,18 +162,21 @@ const NAV_GROUPS: NavGroup[] = [
         icon: () => iconClipboardCheck(16),
         render: () =>
           html`<rm-approval-policies-page></rm-approval-policies-page>`,
+        requires: 'approval_policy.manage',
       },
       {
         slug: 'safety',
         label: 'Safety rules',
         icon: () => iconShield(16),
         render: () => html`<rm-safety-rules-page></rm-safety-rules-page>`,
+        requires: 'safety.read',
       },
       {
         slug: 'safety-log',
         label: 'Safety log',
         icon: () => iconFileText(16),
         render: () => html`<rm-safety-decisions-page></rm-safety-decisions-page>`,
+        requires: 'safety.read',
       },
     ],
   },
@@ -165,13 +189,17 @@ const NAV_GROUPS: NavGroup[] = [
         icon: () => iconHome(16),
         render: () =>
           html`<rm-coming-soon label="General" phase=${3}></rm-coming-soon>`,
+        requires: 'tenant.manage',
       },
       {
+        // D3 — Members stays a coming-soon stub in v3; this PR only adds
+        // the nav gate. No real members-page is built here.
         slug: 'members',
         label: 'Members',
         icon: () => iconUsers(16),
         render: () =>
           html`<rm-coming-soon label="Members" phase=${3}></rm-coming-soon>`,
+        requires: 'user.manage',
       },
     ],
   },
@@ -184,12 +212,14 @@ const NAV_GROUPS: NavGroup[] = [
         icon: () => iconLink(16),
         render: () =>
           html`<rm-connected-channels-page></rm-connected-channels-page>`,
+        requires: null,
       },
       {
         slug: 'appearance',
         label: 'Appearance',
         icon: () => iconSun(16),
         render: () => html`<rm-appearance-page></rm-appearance-page>`,
+        requires: null,
       },
     ],
   },
@@ -255,9 +285,44 @@ export class RmSettingsShell extends LitElement {
     location.hash = '#/';
   };
 
+  /**
+   * Whether `currentMe()` is allowed to see `entry`. An entry with a
+   * `null` requires is visible to any authenticated user; otherwise the
+   * user must hold the named capability. This is the single gate — the
+   * shell never inspects role names, only the wire `capabilities` list
+   * through `hasCapability`.
+   */
+  private canSee(entry: NavEntry): boolean {
+    return !entry.requires || hasCapability(entry.requires);
+  }
+
   override render(): TemplateResult {
+    // Defensive null-guard. PR1's bootstrap guarantees `me` is in cache
+    // before any shell mounts (app.ts holds authState at 'loading' until
+    // setMe() runs), so this branch should not be reached in practice.
+    const me = currentMe();
+    if (!me) {
+      return html`<div class="ss-loading" data-testid="settings-loading">
+        Loading…
+      </div>`;
+    }
+
+    // Filter to the groups (and entries) this user can see. A group with
+    // every entry hidden disappears entirely — heading included.
+    const visibleGroups = NAV_GROUPS.map((g) => ({
+      ...g,
+      entries: g.entries.filter((e) => this.canSee(e)),
+    })).filter((g) => g.entries.length > 0);
+
     const activeSlug = slugFromHash(this.hash);
     const active = ENTRY_BY_SLUG[activeSlug];
+    // URL-jump guard: the active slug resolved to a real entry, but one
+    // this user can't see. Keep the (filtered) rail visible and render
+    // the access-denied page in the pane — never silently redirect.
+    const denied = !!active && !this.canSee(active);
+
+    // First slug the user CAN see — the access-denied "back" target.
+    const firstVisible = visibleGroups[0]?.entries[0];
     return html`
       <style>
         rm-settings-shell {
@@ -400,19 +465,27 @@ export class RmSettingsShell extends LitElement {
             @click=${this.backToChat}
           >${iconClose(16)}</button>
         </div>
-        ${NAV_GROUPS.map((group) => this.renderGroup(group, activeSlug))}
+        ${visibleGroups.map((group) => this.renderGroup(group, activeSlug))}
       </aside>
       <div class="ss-main">
         <div class="ss-hd">
           <h2 data-testid="settings-active-title">
-            ${active?.label ?? 'Settings'}
+            ${denied ? 'Access denied' : active?.label ?? 'Settings'}
           </h2>
         </div>
         <div class="ss-body">
           <div class="ss-card" data-testid="settings-active-pane">
-            ${active
-              ? keyed(activeSlug, active.render())
-              : nothing}
+            ${denied
+              ? html`<rm-access-denied
+                  data-testid="access-denied"
+                  .capability=${active!.requires ?? ''}
+                  .pageLabel=${active!.label}
+                  .backSlug=${firstVisible?.slug ?? DEFAULT_SLUG}
+                  .backLabel=${firstVisible?.label ?? 'Coworkers'}
+                ></rm-access-denied>`
+              : active
+                ? keyed(activeSlug, active.render())
+                : nothing}
           </div>
         </div>
       </div>

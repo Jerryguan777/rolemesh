@@ -76,6 +76,10 @@ export type ApprovalPolicyUpdate =
 export type ApprovalRequest =
   components['schemas']['ApprovalRequest'];
 export type ConditionExpr = components['schemas']['ConditionExpr'];
+export type PlatformTenantResponse =
+  components['schemas']['PlatformTenantResponse'];
+export type PlatformTenantProvision =
+  components['schemas']['PlatformTenantProvision'];
 
 export type ErrorResponseBody =
   paths['/api/v1/runs/{id}/cancel']['post']['responses']['409']['content']['application/json'];
@@ -258,6 +262,32 @@ export class ApiClient {
       { method: 'DELETE', headers: this.headers() },
     );
     if (!resp.ok) throw await this.parseError(resp);
+  }
+
+  /** Flip a coworker's visibility to `shared` (tenant-wide). The route
+   *  is gated server-side by the low `coworker.use` capability, but real
+   *  authorization is the ownership escape (a member may share only what
+   *  they created; owner/admin/platform_admin may share any). Idempotent;
+   *  returns the updated coworker (feat/roles, RBAC UI PR4). */
+  async shareCoworker(id: string): Promise<Coworker> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(id)}/share`,
+      { method: 'POST', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Coworker;
+  }
+
+  /** Flip a coworker's visibility back to `private`. Same own-or-manage
+   *  authorization as `shareCoworker`. Idempotent; returns the updated
+   *  coworker (feat/roles, RBAC UI PR4). */
+  async unshareCoworker(id: string): Promise<Coworker> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(id)}/unshare`,
+      { method: 'POST', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Coworker;
   }
 
   async listCoworkerConversations(coworkerId: string): Promise<Conversation[]> {
@@ -563,6 +593,34 @@ export class ApiClient {
     if (!resp.ok) throw await this.parseError(resp);
   }
 
+  /** Flip a skill's visibility to `shared` (tenant-wide). Mirrors
+   *  `shareCoworker`: the route is gated server-side by the low
+   *  `skill.use` capability, but real authorization is the ownership
+   *  escape (a member may share only what they created; owner/admin/
+   *  platform_admin may share any). Idempotent; returns the FULL Skill
+   *  (not the SkillSummary the list page holds — the caller patches the
+   *  row's `visibility`/`created_by_user_id` from it). RBAC UI PR5. */
+  async shareSkill(id: string): Promise<Skill> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/skills/${encodeURIComponent(id)}/share`,
+      { method: 'POST', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Skill;
+  }
+
+  /** Flip a skill's visibility back to `private`. Same own-or-manage
+   *  authorization as `shareSkill`. Idempotent; returns the updated
+   *  Skill. RBAC UI PR5. */
+  async unshareSkill(id: string): Promise<Skill> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/skills/${encodeURIComponent(id)}/unshare`,
+      { method: 'POST', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Skill;
+  }
+
   /** Path segments are NOT URL-encoded — the server's
    *  ``{path:path}`` matcher accepts slashes, and an encoded ``%2F``
    *  would render the wrong path. Callers must validate path shape
@@ -733,6 +791,60 @@ export class ApiClient {
     if (resp.status === 409) return { ok: false, alreadyTerminal: true };
     if (!resp.ok) throw await this.parseError(resp);
     return { ok: true, alreadyTerminal: false };
+  }
+
+  // ------------------------------------------------------------------
+  // Platform-plane tenants (RBAC UI PR3, D1). Gated server-side by
+  // `platform.tenant.manage`; only a `platform_admin` reaches these.
+  // The list endpoint returns a bare array (NOT a paged envelope),
+  // unlike the tenant-plane list methods above — confirmed against
+  // `generated/types.ts:listPlatformTenants`.
+  // ------------------------------------------------------------------
+
+  async listTenants(): Promise<PlatformTenantResponse[]> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/platform/tenants`, {
+      method: 'GET',
+      headers: this.headers(),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as PlatformTenantResponse[];
+  }
+
+  /** Provision a new tenant. Body is `{ name, slug? }` only — the
+   *  server fills `plan` / `max_concurrent_containers` / `status`.
+   *  Returns the created row (201). */
+  async provisionTenant(
+    body: PlatformTenantProvision,
+  ): Promise<PlatformTenantResponse> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/platform/tenants`, {
+      method: 'POST',
+      headers: this.headers({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as PlatformTenantResponse;
+  }
+
+  /** Suspend a tenant (status → `suspended`). The `__platform__`
+   *  sentinel tenant cannot be suspended — the server answers 403 and
+   *  the caller surfaces that error, not a client-side special case. */
+  async suspendTenant(id: string): Promise<PlatformTenantResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/platform/tenants/${encodeURIComponent(id)}/suspend`,
+      { method: 'POST', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as PlatformTenantResponse;
+  }
+
+  /** Resume a suspended tenant (status → `active`). */
+  async resumeTenant(id: string): Promise<PlatformTenantResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/platform/tenants/${encodeURIComponent(id)}/resume`,
+      { method: 'POST', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as PlatformTenantResponse;
   }
 }
 

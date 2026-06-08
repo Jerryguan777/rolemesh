@@ -264,6 +264,11 @@
   background: var(--rm-bad-subtle);
   color: var(--rm-bad);
 }
+/* Active "shared" state on the share toggle — green to match the
+ * "Shared" visibility pill, so the icon reads as "currently shared". */
+.rm-iconbtn.rm-iconbtn--on { color: var(--rm-good); }
+.rm-iconbtn.rm-iconbtn--on:hover { background: var(--rm-good-subtle); color: var(--rm-good); }
+.rm-iconbtn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* Provider group (Models page) — heading row + nested cards. */
 .rm-provgrp { margin-bottom: 18px; }
@@ -1006,3 +1011,32 @@ summary.list-none::marker { content: ''; }
 .rm-saf-audit-row .rm-saf-actor { font-size: 11.5px; color: var(--rm-ink-3); }
 .rm-saf-audit-row .rm-saf-ats { font-size: 11px; color: var(--rm-ink-3); margin-left: auto; font-variant-numeric: tabular-nums; }
 .rm-saf-audit-row .rm-saf-achange { font-size: 11.5px; color: var(--rm-ink-2); margin-top: 5px; padding-left: 8px; border-left: 2px solid var(--rm-border-2); }
+
+/* ---- role-aware coworkers / skills page (RBAC UI PR4, spec §5.1) ---- */
+
+/* Filter chips bar — UX re-classification of the already-server-filtered
+ * list (All visible / Mine / Shared by others). Reuses the .rm-seg
+ * segmented-control idiom; spaced under the page subtitle. */
+.rm-chipbar { margin: 2px 0 14px; }
+
+/* Ownership cue — "Created by you" (accent) vs neutral "Shared by
+ * another member" / system. Sits in the card's meta column. The accent
+ * variant is the scannable signal that a row is actionable by a member
+ * (spec §5.1 "why highlighted in accent"). */
+.rm-own-tag {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.rm-own-tag.rm-own-tag--mine { color: var(--rm-accent); }
+.rm-own-tag.rm-own-tag--other { color: var(--rm-ink-3); }
+
+/* "View only" hint shown in the action slot for rows a member can't
+ * manage — replaces the Edit/Delete/Share controls (not an empty gap). */
+.rm-viewonly {
+  font-size: 11px;
+  color: var(--rm-ink-3);
+  font-style: italic;
+  flex-shrink: 0;
+  padding-right: var(--rm-space-1);
+}
