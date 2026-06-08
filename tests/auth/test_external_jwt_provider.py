@@ -60,13 +60,31 @@ async def test_rejects_token_missing_user_claim(
     assert await provider.authenticate(token) is None
 
 
-async def test_accepts_token_with_user_and_tenant(
+async def test_accepts_token_with_uuid_user_and_tenant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = _provider(monkeypatch)
-    token = _token(sub="user-1", tid="tenant-9", role="owner")
+    uid = "11111111-1111-1111-1111-111111111111"
+    token = _token(sub=uid, tid="tenant-9", role="owner")
     user = await provider.authenticate(token)
     assert user is not None
-    assert user.user_id == "user-1"
+    assert user.user_id == uid
     assert user.tenant_id == "tenant-9"
     assert user.role == "owner"
+
+
+async def test_rejects_token_with_non_uuid_user_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invariant: AuthenticatedUser.user_id is always a real UUID.
+
+    A non-UUID user-id claim (integer id, ``user_12345``, an email,
+    ...) is rejected at the provider boundary rather than carried
+    downstream, where it would FK-violate the audit / ``created_by``
+    columns as a 500. ``tenant_id`` shape is intentionally not
+    validated here.
+    """
+    provider = _provider(monkeypatch)
+    for bad in ("user-1", "12345", "alice@example.com"):
+        token = _token(sub=bad, tid="tenant-9", role="member")
+        assert await provider.authenticate(token) is None, bad
