@@ -128,6 +128,7 @@ def _skill_to_summary(s: SkillDataclass, bound_count: int) -> SkillSummary:
         visibility=s.visibility,  # type: ignore[arg-type]
         created_at=s.created_at,
         updated_at=s.updated_at,
+        created_by_user_id=s.created_by_user_id,
     )
 
 

@@ -181,6 +181,30 @@ async def test_list_skills_returns_summary_with_zero_bound_count() -> None:
     assert any(s["name"] == "a" and s["bound_coworker_count"] == 0 for s in rows)
 
 
+async def test_list_skills_summary_carries_created_by_user_id() -> None:
+    """The list projection must expose ``created_by_user_id`` (the
+    creator) so the role-aware skills page can drive ownership-escape
+    affordances — own-row Edit/Delete and the "Mine" filter — without an
+    N+1 fetch of each full skill.
+
+    Regression: ``SkillSummary`` previously dropped this field while the
+    full ``Skill`` carried it, so the frontend list view classified every
+    row as unowned and members lost the Edit/Delete shortcut on their own
+    skills.
+    """
+    user, _cw = await _make_user_and_coworker("owns")
+    async with _client(_build_app(user)) as ac:
+        await ac.post(
+            "/api/v1/skills",
+            json={"name": "mine", "files": {"SKILL.md": _skill_md("mine")}},
+            headers=_HDRS,
+        )
+        resp = await ac.get("/api/v1/skills", headers=_HDRS)
+    assert resp.status_code == 200
+    row = next(s for s in resp.json()["items"] if s["name"] == "mine")
+    assert str(row["created_by_user_id"]) == str(user.user_id)
+
+
 async def test_patch_skill_enables_and_publishes_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

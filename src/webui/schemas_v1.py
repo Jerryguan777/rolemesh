@@ -745,6 +745,12 @@ class SkillSummary(BaseModel):
     visibility: Visibility
     created_at: str
     updated_at: str
+    # Owner of the skill (the user who created it), or ``None`` for
+    # platform-default rows. Surfaced on the list projection — not just
+    # the full ``Skill`` — so the role-aware skills page can drive the
+    # ownership-escape affordances (own-row Edit/Delete, "Mine" filter)
+    # without an N+1 fetch of each full skill.
+    created_by_user_id: str | None = None
 
 
 class SkillCreate(BaseModel):

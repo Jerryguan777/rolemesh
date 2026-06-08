@@ -2151,6 +2151,14 @@ export interface components {
             created_at: string;
             /** Format: date-time */
             updated_at: string;
+            /**
+             * Format: uuid
+             * @description Owner of the skill, or null for platform-default rows.
+             *     Surfaced on the list projection so the role-aware skills
+             *     page can drive ownership-escape affordances without an
+             *     N+1 fetch of each full skill.
+             */
+            created_by_user_id?: string | null;
         };
         SkillCreate: {
             /**
