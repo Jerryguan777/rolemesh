@@ -682,3 +682,85 @@ async def test_get_decision_findings_round_trip() -> None:
     assert codes == {"PII.SSN", "TOOL.SLOW"}
     pii = next(f for f in body["findings"] if f["code"] == "PII.SSN")
     assert pii["metadata"] == {"position": 42}
+
+
+# ---------------------------------------------------------------------------
+# Decisions time-range filter (from_ts / to_ts)
+#
+# asyncpg binds a timestamptz parameter from a datetime, not a str. The
+# endpoint took the filter as a raw ISO string and handed it to a
+# ``$N::timestamptz`` query param, so ANY value (even a valid date) raised
+# DataError -> unhandled 500. It stayed hidden because no test passed these
+# params. These tests pass real values.
+# ---------------------------------------------------------------------------
+
+
+async def test_list_decisions_from_ts_filters_without_500() -> None:
+    """A valid ISO ``from_ts`` must filter, not 500.
+
+    Regression: a far-past ``from_ts`` should still include a just-created
+    decision (created_at >= from_ts); a far-future ``from_ts`` excludes it.
+    """
+    user, _ = await _make_user("fts")
+    rid = await _seed_decision(user.tenant_id, summary="recent")
+
+    async with _client(_build_app(user)) as ac:
+        past = await ac.get(
+            "/api/v1/safety/decisions?from_ts=2000-01-01T00:00:00Z",
+            headers=_HDRS,
+        )
+        future = await ac.get(
+            "/api/v1/safety/decisions?from_ts=2999-01-01T00:00:00Z",
+            headers=_HDRS,
+        )
+    assert past.status_code == 200, past.text
+    assert rid in {it["id"] for it in past.json()["items"]}
+    assert past.json()["total"] == 1
+    assert future.status_code == 200, future.text
+    assert future.json()["items"] == []
+    assert future.json()["total"] == 0
+
+
+async def test_list_decisions_to_ts_filters_without_500() -> None:
+    user, _ = await _make_user("tts")
+    rid = await _seed_decision(user.tenant_id, summary="recent")
+
+    async with _client(_build_app(user)) as ac:
+        future = await ac.get(
+            "/api/v1/safety/decisions?to_ts=2999-01-01T00:00:00Z",
+            headers=_HDRS,
+        )
+        past = await ac.get(
+            "/api/v1/safety/decisions?to_ts=2000-01-01T00:00:00Z",
+            headers=_HDRS,
+        )
+    assert future.status_code == 200, future.text
+    assert rid in {it["id"] for it in future.json()["items"]}
+    assert past.status_code == 200, past.text
+    assert past.json()["items"] == []
+
+
+async def test_list_decisions_malformed_ts_is_422_not_500() -> None:
+    """A garbage timestamp is a client error (422), never an unhandled 500."""
+    user, _ = await _make_user("bts")
+    await _seed_decision(user.tenant_id, summary="x")
+
+    async with _client(_build_app(user)) as ac:
+        resp = await ac.get(
+            "/api/v1/safety/decisions?from_ts=not-a-date", headers=_HDRS,
+        )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_export_decisions_csv_from_ts_without_500() -> None:
+    """CSV export shares the same str->timestamptz path via stream_*."""
+    user, _ = await _make_user("csv")
+    await _seed_decision(user.tenant_id, summary="exported")
+
+    async with _client(_build_app(user)) as ac:
+        resp = await ac.get(
+            "/api/v1/safety/decisions.csv?from_ts=2000-01-01T00:00:00Z",
+            headers=_HDRS,
+        )
+    assert resp.status_code == 200, resp.text
+    assert "exported" in resp.text

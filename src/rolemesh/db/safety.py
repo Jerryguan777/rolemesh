@@ -9,6 +9,7 @@ from rolemesh.db._pool import tenant_conn
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+    from datetime import datetime
 
     import asyncpg
 
@@ -467,8 +468,8 @@ async def insert_safety_decision(
 async def stream_safety_decisions(
     tenant_id: str,
     *,
-    from_ts: str | None = None,
-    to_ts: str | None = None,
+    from_ts: datetime | None = None,
+    to_ts: datetime | None = None,
     verdict_action: str | None = None,
     coworker_id: str | None = None,
     stage: str | None = None,
@@ -481,11 +482,10 @@ async def stream_safety_decisions(
     flat list of dicts with the same shape as ``list_safety_decisions``
     (caller picks which fields to put on the CSV row).
 
-    ``from_ts`` / ``to_ts`` are ISO-8601 strings coerced to
-    ``timestamptz`` inside the query so operators can write
-    ``"2026-04-01"`` or ``"2026-04-01T00:00:00+00:00"`` interchangeably.
-    Malformed timestamps raise at query time (psycopg surface) which
-    the REST layer turns into 422.
+    ``from_ts`` / ``to_ts`` are ``datetime`` bounds on ``created_at``.
+    They must be ``datetime``, not str: asyncpg binds a timestamptz
+    parameter from a datetime, so the REST layer parses the ISO-8601
+    query string (and 422s a malformed value) before calling here.
     """
     clauses = ["tenant_id = $1::uuid"]
     params: list[Any] = [tenant_id]
@@ -599,8 +599,8 @@ def _safety_decision_where_clauses(
     verdict_action: str | None,
     coworker_id: str | None,
     stage: str | None,
-    from_ts: str | None,
-    to_ts: str | None,
+    from_ts: datetime | None,
+    to_ts: datetime | None,
     check_id: str | None = None,
     rule_id: str | None = None,
 ) -> tuple[str, list[Any]]:
@@ -656,8 +656,8 @@ async def count_safety_decisions(
     verdict_action: str | None = None,
     coworker_id: str | None = None,
     stage: str | None = None,
-    from_ts: str | None = None,
-    to_ts: str | None = None,
+    from_ts: datetime | None = None,
+    to_ts: datetime | None = None,
     check_id: str | None = None,
     rule_id: str | None = None,
 ) -> int:
@@ -692,8 +692,8 @@ async def list_safety_decisions(
     verdict_action: str | None = None,
     coworker_id: str | None = None,
     stage: str | None = None,
-    from_ts: str | None = None,
-    to_ts: str | None = None,
+    from_ts: datetime | None = None,
+    to_ts: datetime | None = None,
     check_id: str | None = None,
     rule_id: str | None = None,
     limit: int = 200,
