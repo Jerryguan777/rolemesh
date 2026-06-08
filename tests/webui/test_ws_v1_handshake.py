@@ -100,6 +100,16 @@ def stub_get_conversation(
         )
 
     monkeypatch.setattr(ws_stream, "get_conversation", _fake)
+
+    # The handshake now also reads tenant lifecycle status (suspended ->
+    # close 4005). Stub it for the same reason ``get_conversation`` is
+    # stubbed — keep the real asyncpg pool out of the sync TestClient path.
+    # Suspended-tenant rejection is exercised in
+    # ``test_v1_tenant_suspend_enforcement`` against the real DB.
+    async def _fake_status(_tenant_id: str) -> str:
+        return "active"
+
+    monkeypatch.setattr(ws_stream, "get_tenant_status", _fake_status)
     return control
 
 

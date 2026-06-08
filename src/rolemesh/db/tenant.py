@@ -16,6 +16,8 @@ __all__ = [
     "get_all_tenants",
     "get_tenant",
     "get_tenant_by_slug",
+    "get_tenant_status",
+    "set_tenant_status",
     "update_tenant",
     "update_tenant_message_cursor",
 ]
@@ -38,7 +40,8 @@ async def create_tenant(
             """
             INSERT INTO tenants (slug, name, plan, max_concurrent_containers)
             VALUES ($1, $2, $3, $4)
-            RETURNING id, slug, name, plan, max_concurrent_containers, last_message_cursor, created_at
+            RETURNING id, slug, name, plan, max_concurrent_containers,
+                      last_message_cursor, created_at, status
             """,
             slug,
             name,
@@ -59,6 +62,7 @@ def _record_to_tenant(row: asyncpg.Record) -> Tenant:
         max_concurrent_containers=row["max_concurrent_containers"],
         last_message_cursor=lmc.isoformat() if lmc else None,
         created_at=row["created_at"].isoformat() if row["created_at"] else "",
+        status=row["status"],
     )
 
 
@@ -109,6 +113,45 @@ async def get_tenant_by_slug(slug: str) -> Tenant | None:
     """Get a tenant by slug."""
     async with admin_conn() as conn:
         row = await conn.fetchrow("SELECT * FROM tenants WHERE slug = $1", slug)
+    if row is None:
+        return None
+    return _record_to_tenant(row)
+
+
+async def get_tenant_status(tenant_id: str) -> str | None:
+    """Return a tenant's lifecycle status, or None if unknown.
+
+    A focused single-column read for the authentication chokepoint, which
+    runs on every authenticated request (see ``webui.dependencies``). A
+    non-UUID id (the dev bootstrap path may carry the literal ``"default"``
+    when no default tenant exists) returns None rather than raising, so the
+    caller treats it as "not suspended" instead of 500-ing.
+    """
+    import uuid as _uuid
+
+    try:
+        _uuid.UUID(tenant_id)
+    except (ValueError, AttributeError, TypeError):
+        return None
+    async with admin_conn() as conn:
+        row = await conn.fetchrow("SELECT status FROM tenants WHERE id = $1::uuid", tenant_id)
+    return row["status"] if row is not None else None
+
+
+async def set_tenant_status(tenant_id: str, status: str) -> Tenant | None:
+    """Set a tenant's lifecycle status ('active' | 'suspended').
+
+    Platform-plane only (provision/suspend/resume). Returns the updated
+    tenant, or None if no such tenant. The DB CHECK constraint rejects any
+    value outside the allowed set, so a bad ``status`` fails loud rather
+    than silently writing garbage.
+    """
+    async with admin_conn() as conn:
+        row = await conn.fetchrow(
+            "UPDATE tenants SET status = $1 WHERE id = $2::uuid RETURNING *",
+            status,
+            tenant_id,
+        )
     if row is None:
         return None
     return _record_to_tenant(row)

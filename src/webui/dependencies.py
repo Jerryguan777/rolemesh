@@ -7,7 +7,9 @@ from typing import TYPE_CHECKING
 from fastapi import Depends, HTTPException, Request
 
 from rolemesh.auth.permissions import user_can
+from rolemesh.db import get_tenant_status
 from webui import auth
+from webui.v1.errors import raise_error_response
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -16,7 +18,19 @@ if TYPE_CHECKING:
 
 
 async def get_current_user(request: Request) -> AuthenticatedUser:
-    """Extract Bearer token and authenticate via AuthProvider or bootstrap token."""
+    """Extract Bearer token and authenticate via AuthProvider or bootstrap token.
+
+    This is the single authentication chokepoint for the whole ``/api/v1``
+    REST surface, so it is also where a *suspended* tenant is enforced: once
+    a user resolves, a suspended ``tenant.status`` rejects the request with a
+    403 ``TENANT_SUSPENDED`` envelope — covering every gated endpoint at once
+    rather than scattering the check across handlers. The OIDC JIT path may
+    re-provision a user row on re-login, but it never resets ``status`` (see
+    ``rolemesh.auth.oidc.provider._provision_tenant``), so a re-login into a
+    suspended tenant still lands here and is denied. (WebSocket connections do
+    not pass through this dependency; they enforce the same check at the ticket
+    handshake — see ``webui.v1.ws_stream``.)
+    """
     header = request.headers.get("Authorization", "")
     if not header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
@@ -25,6 +39,13 @@ async def get_current_user(request: Request) -> AuthenticatedUser:
     user = await auth.authenticate_ws(token)
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    if await get_tenant_status(user.tenant_id) == "suspended":
+        raise_error_response(
+            "TENANT_SUSPENDED",
+            "This tenant is suspended.",
+            status_code=403,
+        )
     return user
 
 

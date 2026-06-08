@@ -185,6 +185,15 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     await conn.execute(
         "ALTER TABLE tenants DROP COLUMN IF EXISTS approval_default_mode"
     )
+    # Tenant lifecycle status (platform-plane provision/suspend). Idempotent
+    # ADD so existing rows default to 'active' — behaviour unchanged for any
+    # tenant that predates this column. The CHECK pins the only two legal
+    # states; a suspended tenant's users fail authentication and its
+    # scheduled tasks are skipped (not failed) until resumed.
+    await conn.execute(
+        "ALTER TABLE tenants ADD COLUMN IF NOT EXISTS status TEXT NOT NULL "
+        "DEFAULT 'active' CHECK (status IN ('active','suspended'))"
+    )
 
     # ----- Platform model catalog (v1.1 §2.1) -----------------------------
     # Tenant-agnostic; no RLS. ``is_platform`` is reserved for the v2

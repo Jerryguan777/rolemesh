@@ -512,6 +512,105 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/platform/tenants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List all tenants (platform lifecycle)
+         * @description Platform-plane only (`platform.tenant.manage`, granted to
+         *     `platform_admin`). Returns every tenant, including suspended ones
+         *     and the reserved `__platform__` sentinel, with lifecycle `status`.
+         */
+        get: operations["listPlatformTenants"];
+        put?: never;
+        /**
+         * Provision a new tenant
+         * @description Platform-plane only (`platform.tenant.manage`). Creates a tenant in
+         *     the `active` state. The reserved `__platform__` slug is rejected
+         *     (`403`); a slug already in use returns `409`.
+         */
+        post: operations["provisionPlatformTenant"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/platform/tenants/{tenant_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * Fetch one tenant (platform lifecycle)
+         * @description Platform-plane only (`platform.tenant.manage`).
+         */
+        get: operations["getPlatformTenant"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/platform/tenants/{tenant_id}/suspend": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Suspend a tenant
+         * @description Platform-plane only (`platform.tenant.manage`). Sets `status` to
+         *     `suspended`: the tenant's users can no longer authenticate and its
+         *     scheduled tasks pause (they are not failed/deleted). Idempotent. The
+         *     reserved `__platform__` sentinel cannot be suspended (`403`).
+         */
+        post: operations["suspendPlatformTenant"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/platform/tenants/{tenant_id}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resume a suspended tenant
+         * @description Platform-plane only (`platform.tenant.manage`). Sets `status` back to
+         *     `active` (suspend is reversible). Idempotent. The reserved
+         *     `__platform__` sentinel is refused (`403`).
+         */
+        post: operations["resumePlatformTenant"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/coworkers/{id}/mcp-servers": {
         parameters: {
             query?: never;
@@ -1601,6 +1700,29 @@ export interface components {
             created_at: string;
             /** Format: date-time */
             updated_at: string;
+        };
+        /**
+         * @description Platform tenant lifecycle state. `suspended` tenants cannot
+         *     authenticate and their scheduled tasks pause until resumed.
+         * @enum {string}
+         */
+        TenantStatus: "active" | "suspended";
+        /**
+         * @description A tenant on the platform lifecycle plane (carries `status`).
+         *     Distinct from `TenantResponse` (owner self-service settings).
+         */
+        PlatformTenantResponse: {
+            id: string;
+            name: string;
+            slug?: string | null;
+            plan?: string | null;
+            max_concurrent_containers: number;
+            status: components["schemas"]["TenantStatus"];
+            created_at: string;
+        };
+        PlatformTenantProvision: {
+            name: string;
+            slug?: string | null;
         };
         CredentialUpsert: {
             /**
@@ -3451,6 +3573,131 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listPlatformTenants: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformTenantResponse"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    provisionPlatformTenant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PlatformTenantProvision"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformTenantResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+        };
+    };
+    getPlatformTenant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformTenantResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    suspendPlatformTenant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformTenantResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    resumePlatformTenant: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tenant_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformTenantResponse"];
+                };
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];

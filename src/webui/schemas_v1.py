@@ -30,6 +30,8 @@ CoworkerStatus = Literal["active", "paused", "disabled"]
 Visibility = Literal["private", "shared"]
 AuthMode = Literal["external", "oidc", "builtin", "bootstrap"]
 UserRole = Literal["owner", "admin", "member"]
+# Platform tenant lifecycle state (mirrors the tenants.status CHECK).
+TenantStatus = Literal["active", "suspended"]
 
 
 class ErrorResponse(BaseModel):
@@ -319,6 +321,41 @@ class PlatformCredentialResponse(BaseModel):
     provider: ModelProvider
     created_at: str
     updated_at: str
+
+
+class PlatformTenantResponse(BaseModel):
+    """A tenant as seen on the platform lifecycle plane.
+
+    Distinct from the tenant-plane ``TenantResponse`` (owner self-service
+    settings, :mod:`webui.schemas`): this carries ``status`` and is surfaced
+    only to platform_admin via ``/api/v1/platform/tenants``. Kept separate so
+    the lifecycle ``status`` field never leaks onto the owner-facing settings
+    contract.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    name: str
+    slug: str | None = None
+    plan: str | None = None
+    max_concurrent_containers: int
+    status: TenantStatus
+    created_at: str
+
+
+class PlatformTenantProvision(BaseModel):
+    """``POST /api/v1/platform/tenants`` body — provision a new tenant.
+
+    A provisioned tenant always starts ``active``; ``status`` is therefore
+    not an accepted input (suspend/resume are separate verbs). ``slug`` is
+    optional — omit it for an auto/unset slug, matching ``create_tenant``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+    slug: str | None = Field(default=None, max_length=60)
 
 
 class CredentialUpsert(BaseModel):
