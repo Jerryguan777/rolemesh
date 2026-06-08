@@ -61,7 +61,11 @@ class ExternalJwtProvider:
 
             user_id = str(payload.get(self._claim_user_id, ""))
             tenant_id = str(payload.get(self._claim_tenant_id, ""))
-            if not user_id:
+            # Require BOTH a user and a tenant. A missing/empty tenant claim
+            # used to fall through as tenant_id="" — which tenant-scoped reads
+            # could (mis)read as "no tenant scope", leaking across tenants.
+            # Reject under-specified tokens here, the auth entry point.
+            if not user_id or not tenant_id:
                 return None
 
             role = str(payload.get(self._claim_role, "member"))

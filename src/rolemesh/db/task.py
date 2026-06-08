@@ -140,34 +140,30 @@ async def count_tasks(
 
 
 async def get_all_tasks(
-    tenant_id: str | None = None, *, limit: int | None = None, offset: int = 0,
+    tenant_id: str, *, limit: int | None = None, offset: int = 0,
 ) -> list[ScheduledTask]:
-    """Get all scheduled tasks, optionally filtered by tenant and paginated.
+    """Get a tenant's scheduled tasks (newest first), optionally paginated.
 
-    Treats both ``None`` and ``""`` as "no tenant scope" so callers
-    that build the parameter from an admin REST query string don't
-    accidentally pass an empty value into ``tenant_conn`` and trigger
-    fail-closed (current_tenant_id = NULL → RLS drops every row).
+    ``tenant_id`` is required: every row is filtered by ``WHERE tenant_id = ...``
+    over an RLS-bound connection. There is deliberately NO cross-tenant/admin
+    path here — an earlier branch that treated an empty ``tenant_id`` as "list
+    every tenant" (over ``admin_conn``) was a cross-tenant leak, reachable from
+    ``GET /api/v1/tasks`` whenever auth left the tenant claim blank. A caller
+    that genuinely needs a cross-tenant view must say so with its own
+    admin-gated query rather than passing an empty scope here.
     """
-    if tenant_id:
-        sql = (
-            "SELECT * FROM scheduled_tasks "
-            "WHERE tenant_id = $1::uuid ORDER BY created_at DESC"
-        )
-        params: list[object] = [tenant_id]
-        if limit is not None:
-            params.extend((limit, offset))
-            sql += f" LIMIT ${len(params) - 1} OFFSET ${len(params)}"
-        async with tenant_conn(tenant_id) as conn:
-            rows = await conn.fetch(sql, *params)
-    else:
-        sql = "SELECT * FROM scheduled_tasks ORDER BY created_at DESC"
-        params = []
-        if limit is not None:
-            params.extend((limit, offset))
-            sql += " LIMIT $1 OFFSET $2"
-        async with admin_conn() as conn:
-            rows = await conn.fetch(sql, *params)
+    if not tenant_id:
+        raise ValueError("get_all_tasks requires a non-empty tenant_id")
+    sql = (
+        "SELECT * FROM scheduled_tasks "
+        "WHERE tenant_id = $1::uuid ORDER BY created_at DESC"
+    )
+    params: list[object] = [tenant_id]
+    if limit is not None:
+        params.extend((limit, offset))
+        sql += f" LIMIT ${len(params) - 1} OFFSET ${len(params)}"
+    async with tenant_conn(tenant_id) as conn:
+        rows = await conn.fetch(sql, *params)
     return [_record_to_scheduled_task(row) for row in rows]
 
 

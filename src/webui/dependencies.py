@@ -40,6 +40,13 @@ async def get_current_user(request: Request) -> AuthenticatedUser:
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
+    # Defense in depth: every authenticated principal must be bound to a
+    # tenant. No /api/v1 surface serves a tenant-less identity, and an empty
+    # tenant_id reaching a tenant-scoped query is a cross-tenant leak, so deny
+    # it at this single chokepoint rather than trusting each handler.
+    if not user.tenant_id:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
     if await get_tenant_status(user.tenant_id) == "suspended":
         raise_error_response(
             "TENANT_SUSPENDED",
