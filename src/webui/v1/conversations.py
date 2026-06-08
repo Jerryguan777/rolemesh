@@ -271,10 +271,19 @@ async def list_conversation_messages(
                 "Malformed pagination cursor.",
                 status_code=400,
             )
-        # messages.id is TEXT (client-supplied ids), so the cursor tiebreak
-        # compares it as text — no ::uuid cast.
+        # Keyset seek on (timestamp, id), newest-first. Written as an
+        # explicit OR rather than a row-constructor comparison
+        # ``(timestamp, id) < ($3, $4)`` so BOTH bound params carry an
+        # explicit cast ($3 timestamptz, $4 text — messages.id is TEXT). A
+        # bare param inside a row constructor left Postgres unable to resolve
+        # its type, which surfaced as a query error on the second page (the
+        # only path that binds the cursor) — a page's own next_cursor came
+        # back looking "invalid".
         params.extend((cur_ts, cur_id))
-        where += " AND (timestamp, id) < ($3::timestamptz, $4)"
+        where += (
+            " AND (timestamp < $3::timestamptz"
+            " OR (timestamp = $3::timestamptz AND id < $4::text))"
+        )
     params.append(limit + 1)  # over-fetch one to detect has_more
     sql = (
         "SELECT id, content, timestamp, is_from_me, is_bot_message, "
@@ -286,7 +295,8 @@ async def list_conversation_messages(
         async with tenant_conn(user.tenant_id) as conn:
             rows_desc = await conn.fetch(sql, *params)
     except asyncpg.DataError:
-        # A cursor that decodes but carries a non-UUID / bad timestamp.
+        # A cursor that base64-decodes but carries a bad timestamp (the
+        # ``$3::timestamptz`` cast then fails) — still a malformed cursor.
         raise_error_response(
             "INVALID_CURSOR",
             "Malformed pagination cursor.",
