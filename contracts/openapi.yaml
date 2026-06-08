@@ -2679,8 +2679,8 @@ components:
 
             Safety rules: `INVALID_RULE`, `SEEDED_RULE_IMMUTABLE`.
 
-            Pagination / channel links / WS ticket: `INVALID_CURSOR`,
-            `ACTOR_NOT_LINKABLE`, `WS_TICKET_SECRET_UNSET`.
+            Pagination / WS ticket: `INVALID_CURSOR`,
+            `WS_TICKET_SECRET_UNSET`.
 
             (This is the HTTP error vocabulary; safety-check *finding*
             codes live on `SafetyFinding`, not here.)

@@ -297,7 +297,7 @@ All authorization happens at exactly four places. Business logic is clean.
 
 ### 1. WebUI / HTTP Middleware
 
-`src/webui/auth.py` validates request tokens via `AuthProvider.authenticate()` for every REST and WebSocket handler. The `ADMIN_BOOTSTRAP_TOKEN` shortcut and the OIDC PKCE flow hook in here. Surface details (which paths, refresh handling, `?token=` query param semantics) live in [`5-webui-architecture.md`](5-webui-architecture.md).
+`src/webui/auth.py` validates request tokens via `AuthProvider.authenticate()` for every REST and WebSocket handler. The dev/test `BOOTSTRAP_USERS` fast-path and the OIDC PKCE flow hook in here. Every path yields an `AuthenticatedUser` whose `user_id` is a real UUID — the external JWT provider enforces this at the boundary (a non-UUID `user-id` claim is rejected), so audit / `created_by` FK writes never need to coerce a pseudo-user. Surface details (which paths, refresh handling, `?token=` query param semantics) live in [`5-webui-architecture.md`](5-webui-architecture.md).
 
 ### 2. IPC Task Handler
 
@@ -366,7 +366,7 @@ Schema mechanics (default-tenant creation, idempotent `_create_schema()` shape) 
 
 ## Admin API
 
-`src/webui/admin.py` exposes RESTful endpoints under `/api/admin/` for tenant, user, agent, binding, conversation, and task management — protected by `ADMIN_BOOTSTRAP_TOKEN` or user-role checks. The full surface (which endpoints exist, which module owns each one) is documented in the "Beyond chat: Admin surface" section of [`5-webui-architecture.md`](5-webui-architecture.md).
+`src/webui/admin.py` exposes RESTful endpoints under `/api/admin/` for tenant, user, agent, binding, conversation, and task management — protected by user-role checks. The full surface (which endpoints exist, which module owns each one) is documented in the "Beyond chat: Admin surface" section of [`5-webui-architecture.md`](5-webui-architecture.md).
 
 ## File Map
 
