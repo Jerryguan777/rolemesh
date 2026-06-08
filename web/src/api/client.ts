@@ -593,6 +593,34 @@ export class ApiClient {
     if (!resp.ok) throw await this.parseError(resp);
   }
 
+  /** Flip a skill's visibility to `shared` (tenant-wide). Mirrors
+   *  `shareCoworker`: the route is gated server-side by the low
+   *  `skill.use` capability, but real authorization is the ownership
+   *  escape (a member may share only what they created; owner/admin/
+   *  platform_admin may share any). Idempotent; returns the FULL Skill
+   *  (not the SkillSummary the list page holds — the caller patches the
+   *  row's `visibility`/`created_by_user_id` from it). RBAC UI PR5. */
+  async shareSkill(id: string): Promise<Skill> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/skills/${encodeURIComponent(id)}/share`,
+      { method: 'POST', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Skill;
+  }
+
+  /** Flip a skill's visibility back to `private`. Same own-or-manage
+   *  authorization as `shareSkill`. Idempotent; returns the updated
+   *  Skill. RBAC UI PR5. */
+  async unshareSkill(id: string): Promise<Skill> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/skills/${encodeURIComponent(id)}/unshare`,
+      { method: 'POST', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Skill;
+  }
+
   /** Path segments are NOT URL-encoded — the server's
    *  ``{path:path}`` matcher accepts slashes, and an encoded ``%2F``
    *  would render the wrong path. Callers must validate path shape
