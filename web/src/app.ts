@@ -36,6 +36,7 @@ import {
   handleCallback,
   isTokenExpired,
   scheduleRefresh,
+  storeToken,
 } from './services/oidc-auth.js';
 
 // Rewrite any v1.1 flat hash (`#/coworkers`, …) to its v2 nested
@@ -145,6 +146,15 @@ export class RmApp extends LitElement {
     // and must not schedule a refresh (no token to refresh). It flips
     // straight to authenticated via the single sink at the end of phase 3.
     if (outcome.kind === 'token') {
+      // Apply the resolved bearer to the shared client BEFORE getMe and
+      // persist it for the session. The URL (`?token=`, SaaS-passed) and
+      // OIDC-callback branches otherwise leave the token only in a local
+      // var: getApiClient() seeds from sessionStorage, so without this the
+      // very first getMe() goes out with no Authorization header → 401 →
+      // fail-closed to login. (The stored-token branch already has it in
+      // storage; setToken there is a harmless no-op-equivalent.)
+      storeToken(outcome.token);
+      getApiClient().setToken(outcome.token);
       this.startRefreshScheduler(outcome.token);
 
       // Phase 2: with authState still 'loading', populate the Me cache

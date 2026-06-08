@@ -30,28 +30,45 @@ import type { Me } from './api/client.js';
 const getMeSpy = vi.fn();
 const scheduleRefreshSpy = vi.fn();
 
-// Permissive client stub: the spied getMe plus no-op list/get methods so a
-// slotted shell that incidentally mounts doesn't throw on unmocked calls.
+// Mirror the real ApiClient's token state so getMe can 401 when no bearer
+// has been applied. This is what makes the token→client wiring load-bearing
+// in tests: the url/oidc-callback branches resolve a token into a local var,
+// and getApiClient() seeds its token from sessionStorage — so resolveAuth
+// MUST setToken() before the first getMe() or it 401s → fail-closed to login.
+// (Regression guard: a fresh-stub-per-call mock that hardwired getMe to
+// succeed previously hid this — getMe was decoupled from the token entirely.)
+let clientToken: string | null = null;
+const setTokenSpy = vi.fn((t: string | null) => {
+  clientToken = t;
+});
+
+// Stable client stub (single identity, so setToken state persists across the
+// many getApiClient() calls in one test): the gated getMe plus no-op list/get
+// methods so a slotted shell that incidentally mounts doesn't throw.
 vi.mock('./api/client.js', async () => {
   const actual = await vi.importActual<typeof import('./api/client.js')>(
     './api/client.js',
   );
   const empty = vi.fn().mockResolvedValue([]);
   const single = vi.fn().mockResolvedValue(null);
+  const client = {
+    getMe: (...a: unknown[]) =>
+      clientToken === null
+        ? Promise.reject(new Error('401: no Authorization header'))
+        : getMeSpy(...a),
+    listCoworkers: empty,
+    listModels: empty,
+    listCredentials: empty,
+    listSkills: empty,
+    listMCPServers: empty,
+    listSafetyRules: empty,
+    listSafetyDecisions: single,
+    listTelegramLinks: empty,
+    setToken: (...a: unknown[]) => setTokenSpy(...(a as [string | null])),
+  };
   return {
     ...actual,
-    getApiClient: () => ({
-      getMe: getMeSpy,
-      listCoworkers: empty,
-      listModels: empty,
-      listCredentials: empty,
-      listSkills: empty,
-      listMCPServers: empty,
-      listSafetyRules: empty,
-      listSafetyDecisions: single,
-      listTelegramLinks: empty,
-      setToken: vi.fn(),
-    }),
+    getApiClient: () => client,
   };
 });
 
@@ -118,6 +135,8 @@ function anyShell(el: RmApp): boolean {
 
 beforeEach(() => {
   setMe(null); // reset the real cache between tests
+  clientToken = null; // no bearer applied to the client until a token branch runs
+  setTokenSpy.mockClear(); // keep the impl (sets clientToken), drop call history
   getMeSpy.mockReset();
   scheduleRefreshSpy.mockReset();
   fetchAuthConfigSpy.mockReset().mockResolvedValue(null);
@@ -188,6 +207,27 @@ describe('<rm-app> atomic auth+me bootstrap (§7.2)', () => {
     expect(currentMe()).toEqual(ME);
     expect(el.querySelector('rm-settings-shell')).not.toBeNull();
     // cleanup the search string so it doesn't bleed into later tests
+    history.replaceState(null, '', '/');
+  });
+
+  it('applies the resolved bearer to the api client BEFORE the first getMe (url ?token= branch)', async () => {
+    // Regression: the `?token=` (SaaS-passed) bearer lives only in a local
+    // var; getApiClient() seeds its token from sessionStorage. Without an
+    // explicit setToken(), the first getMe() goes out with no Authorization
+    // header → 401 → the SPA fail-closes to the login page. The gated getMe
+    // stub above 401s unless setToken ran, so this test fails without the fix.
+    history.replaceState(null, '', '/?token=saas-tok#/manage/coworkers');
+    getMeSpy.mockResolvedValue(ME);
+
+    const el = mount('#/manage/coworkers');
+    await settle(el);
+
+    expect(setTokenSpy).toHaveBeenCalledWith('saas-tok');
+    // and because the bearer was applied, getMe succeeded → authenticated:
+    expect(el.querySelector('rm-settings-shell')).not.toBeNull();
+    expect(el.querySelector('rm-login-page')).toBeNull();
+    expect(currentMe()).toEqual(ME);
+
     history.replaceState(null, '', '/');
   });
 });
