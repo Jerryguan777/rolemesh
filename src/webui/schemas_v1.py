@@ -29,7 +29,11 @@ CoworkerStatus = Literal["active", "paused", "disabled"]
 # only; 'shared' = whole tenant.
 Visibility = Literal["private", "shared"]
 AuthMode = Literal["external", "oidc", "builtin", "bootstrap"]
-UserRole = Literal["owner", "admin", "member"]
+# Includes ``platform_admin`` (the platform-plane superset role): a seeded
+# platform_admin authenticates and hits ``/me`` like anyone else, so the wire
+# role must be able to represent it.
+UserRole = Literal["platform_admin", "owner", "admin", "member"]
+Plane = Literal["tenant", "platform"]
 # Platform tenant lifecycle state (mirrors the tenants.status CHECK).
 TenantStatus = Literal["active", "suspended"]
 
@@ -110,7 +114,16 @@ class WsTicket(BaseModel):
 
 
 class Me(BaseModel):
-    """Identity surfacing for the SPA's user-menu."""
+    """Identity surfacing for the SPA's user-menu.
+
+    ``capabilities`` is the caller's action set, populated server-side from
+    the role->action matrix (``rolemesh.auth.permissions``). The SPA renders
+    affordances from ``capabilities.includes(...)`` and never keeps its own
+    copy of the matrix; the backend stays the single source of truth and the
+    real enforcement still happens in ``require_action`` /
+    ``require_manage_or_owner``. ``plane`` is ``"platform"`` only for the
+    platform-superset role, else ``"tenant"``.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -119,6 +132,8 @@ class Me(BaseModel):
     name: str | None = None
     email: str | None = None
     role: UserRole
+    plane: Plane
+    capabilities: list[str]
 
 
 # ---------------------------------------------------------------------------

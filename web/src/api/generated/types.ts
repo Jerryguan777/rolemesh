@@ -1655,7 +1655,21 @@ export interface components {
             name?: string;
             email?: string | null;
             /** @enum {string} */
-            role: "owner" | "admin" | "member";
+            role: "platform_admin" | "owner" | "admin" | "member";
+            /**
+             * @description `platform` only for the platform-superset role
+             *     (`platform_admin`); otherwise `tenant`.
+             * @enum {string}
+             */
+            plane: "tenant" | "platform";
+            /**
+             * @description The caller's capability actions (e.g. `coworker.manage`),
+             *     populated server-side from the role->action matrix. The SPA
+             *     renders affordances from this list and keeps no copy of the
+             *     matrix; the server still enforces every action via
+             *     `require_action` / ownership checks.
+             */
+            capabilities: string[];
         };
         /**
          * @description Backend runtime identifier. Mirrors

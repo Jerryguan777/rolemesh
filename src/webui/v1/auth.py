@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 import asyncpg
 from fastapi import APIRouter, Depends, Response
 
+from rolemesh.auth.permissions import role_capabilities
 from rolemesh.auth.ws_ticket import WsTicketError, issue_ws_ticket
 from rolemesh.db import get_conversation
 from webui.dependencies import get_current_user
@@ -151,6 +152,10 @@ def _user_to_me(user: AuthenticatedUser) -> Me:
         name=user.name,
         email=user.email,
         role=user.role,  # type: ignore[arg-type]
+        plane="platform" if user.role == "platform_admin" else "tenant",
+        # Single source of truth: the role->action matrix. The SPA renders
+        # from this list; the server still enforces via require_action.
+        capabilities=role_capabilities(user.role),  # type: ignore[arg-type]
     )
 
 

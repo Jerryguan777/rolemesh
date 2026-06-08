@@ -124,6 +124,19 @@ def user_can(role: UserRole, action: str) -> bool:
     return action in _USER_ROLE_ACTIONS.get(role, set())
 
 
+def role_capabilities(role: UserRole) -> list[str]:
+    """Sorted capability actions a role holds.
+
+    The single source of truth is ``_USER_ROLE_ACTIONS`` — this is what the
+    SPA reads (via ``Me.capabilities``) to show/hide affordances, so the
+    client never keeps its own copy of the matrix. This is NOT an
+    enforcement path: ``require_action`` / ``require_manage_or_owner`` do the
+    real, fail-closed checks server-side. An unknown role yields an empty
+    list (fail-closed).
+    """
+    return sorted(_USER_ROLE_ACTIONS.get(role, set()))
+
+
 # ---------------------------------------------------------------------------
 # Agent permissions
 # ---------------------------------------------------------------------------

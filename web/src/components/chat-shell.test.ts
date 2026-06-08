@@ -87,6 +87,8 @@ const ME: Me = {
   name: 'Jerry Guan',
   email: 'j@example.com',
   role: 'owner',
+  plane: 'tenant',
+  capabilities: [],
 };
 
 function conv(id: string, name: string, when: Date): Conversation {
