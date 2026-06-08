@@ -26,9 +26,10 @@ import './components/coming-soon.js';
 import './components/chat-shell.js';
 import './components/settings-shell.js';
 import './components/activity-shell.js';
+import './components/platform-shell.js';
 import { installLegacyRedirects, topLevelShell } from './router.js';
 import { getApiClient } from './api/client.js';
-import { setMe } from './auth/capabilities.js';
+import { currentMe, setMe } from './auth/capabilities.js';
 import {
   fetchAuthConfig,
   getStoredToken,
@@ -182,6 +183,13 @@ export class RmApp extends LitElement {
     }
     if (this.authState === 'login') {
       return html`<rm-login-page></rm-login-page>`;
+    }
+    // Platform-plane users get their own shell (spec §2 — two shells).
+    // This is a PLANE check, not a role-name check: the only role-ish
+    // sentinel the SPA is allowed to dispatch on. Tenant-plane users fall
+    // through to the existing chat/manage/activity switch unchanged.
+    if (currentMe()?.plane === 'platform') {
+      return html`<rm-platform-shell></rm-platform-shell>`;
     }
     switch (this.shell) {
       case 'manage':

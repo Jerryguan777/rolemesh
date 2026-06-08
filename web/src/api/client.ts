@@ -76,6 +76,10 @@ export type ApprovalPolicyUpdate =
 export type ApprovalRequest =
   components['schemas']['ApprovalRequest'];
 export type ConditionExpr = components['schemas']['ConditionExpr'];
+export type PlatformTenantResponse =
+  components['schemas']['PlatformTenantResponse'];
+export type PlatformTenantProvision =
+  components['schemas']['PlatformTenantProvision'];
 
 export type ErrorResponseBody =
   paths['/api/v1/runs/{id}/cancel']['post']['responses']['409']['content']['application/json'];
@@ -733,6 +737,60 @@ export class ApiClient {
     if (resp.status === 409) return { ok: false, alreadyTerminal: true };
     if (!resp.ok) throw await this.parseError(resp);
     return { ok: true, alreadyTerminal: false };
+  }
+
+  // ------------------------------------------------------------------
+  // Platform-plane tenants (RBAC UI PR3, D1). Gated server-side by
+  // `platform.tenant.manage`; only a `platform_admin` reaches these.
+  // The list endpoint returns a bare array (NOT a paged envelope),
+  // unlike the tenant-plane list methods above — confirmed against
+  // `generated/types.ts:listPlatformTenants`.
+  // ------------------------------------------------------------------
+
+  async listTenants(): Promise<PlatformTenantResponse[]> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/platform/tenants`, {
+      method: 'GET',
+      headers: this.headers(),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as PlatformTenantResponse[];
+  }
+
+  /** Provision a new tenant. Body is `{ name, slug? }` only — the
+   *  server fills `plan` / `max_concurrent_containers` / `status`.
+   *  Returns the created row (201). */
+  async provisionTenant(
+    body: PlatformTenantProvision,
+  ): Promise<PlatformTenantResponse> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/platform/tenants`, {
+      method: 'POST',
+      headers: this.headers({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as PlatformTenantResponse;
+  }
+
+  /** Suspend a tenant (status → `suspended`). The `__platform__`
+   *  sentinel tenant cannot be suspended — the server answers 403 and
+   *  the caller surfaces that error, not a client-side special case. */
+  async suspendTenant(id: string): Promise<PlatformTenantResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/platform/tenants/${encodeURIComponent(id)}/suspend`,
+      { method: 'POST', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as PlatformTenantResponse;
+  }
+
+  /** Resume a suspended tenant (status → `active`). */
+  async resumeTenant(id: string): Promise<PlatformTenantResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/platform/tenants/${encodeURIComponent(id)}/resume`,
+      { method: 'POST', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as PlatformTenantResponse;
   }
 }
 
