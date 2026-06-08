@@ -187,6 +187,11 @@ async def test_me_returns_caller_identity() -> None:
     assert body["tenant_id"] == tid
     assert body["role"] == "owner"
     assert body["name"] == "Alice"
+    # Capabilities + plane are surfaced from the role->action matrix so the
+    # SPA renders affordances without copying the matrix client-side.
+    assert body["plane"] == "tenant"
+    assert "coworker.manage" in body["capabilities"]
+    assert "credential.pool.manage" not in body["capabilities"]  # platform-only
 
 
 # ---------------------------------------------------------------------------
