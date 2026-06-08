@@ -89,7 +89,7 @@ async def test_create_then_list_then_get_round_trip() -> None:
             "/api/v1/mcp-servers", headers={"Authorization": "Bearer x"},
         )
         assert listing.status_code == 200
-        names = [r["name"] for r in listing.json()]
+        names = [r["name"] for r in listing.json()["items"]]
         assert "primary" in names
 
         detail = await ac.get(
@@ -388,4 +388,4 @@ async def test_mcp_servers_isolated_per_tenant() -> None:
             "/api/v1/mcp-servers", headers={"Authorization": "Bearer x"},
         )
     assert listing.status_code == 200
-    assert listing.json() == []
+    assert listing.json()["items"] == []

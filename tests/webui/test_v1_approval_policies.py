@@ -229,7 +229,7 @@ async def test_list_does_not_leak_other_tenant_policies() -> None:
     async with _client(_build_app(a)) as ac:
         listing = await ac.get("/api/v1/approvals/policies", headers=_AUTH)
     assert listing.status_code == 200
-    assert listing.json() == []
+    assert listing.json()["items"] == []
 
 
 async def test_patch_cross_tenant_policy_is_404_and_leaves_victim_intact() -> None:
@@ -342,4 +342,4 @@ async def test_pending_requests_conversation_filter_cannot_cross_tenant() -> Non
             headers=_AUTH,
         )
     assert resp.status_code == 200
-    assert resp.json() == []
+    assert resp.json()["items"] == []
