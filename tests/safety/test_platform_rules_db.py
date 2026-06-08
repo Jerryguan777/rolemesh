@@ -22,14 +22,21 @@ import pytest
 from rolemesh.db import (
     admin_conn,
     create_coworker,
+    create_platform_rule,
     create_safety_rule,
     create_tenant,
+    delete_platform_rule,
     fetch_platform_rule_snapshots,
+    get_platform_rule,
     insert_safety_decision,
+    list_all_platform_rules,
     list_safety_decisions,
     list_visible_platform_rules,
+    set_platform_rule_enabled,
+    update_platform_rule,
 )
 from rolemesh.db.platform_safety import VISIBLE_TIERS
+from rolemesh.db.schema import _seed_platform_safety_rules
 from rolemesh.safety import loader
 
 pytestmark = pytest.mark.usefixtures("test_db")
@@ -52,7 +59,7 @@ async def _tenant_and_coworker(slug: str) -> tuple[str, str]:
 
 
 async def _insert_floor_rule() -> None:
-    """Seed one floor-tier rule directly (no write helper this phase)."""
+    """Insert one floor-tier rule directly (bypassing the write API)."""
     async with admin_conn() as conn:
         await conn.execute(
             "INSERT INTO platform_safety_rules (tier, stage, check_id) "
@@ -171,3 +178,80 @@ class TestDecisionSource:
         rows = await list_safety_decisions(tid)
         row = next(r for r in rows if r["id"] == decision_id)
         assert row["source"] == "tenant"
+
+
+class TestWriteHelpers:
+    @pytest.mark.asyncio
+    async def test_create_sets_is_seeded_false_and_full_crud(self) -> None:
+        await _tenant_and_coworker("crud")
+        created = await create_platform_rule(
+            tier="transparent_floor",
+            stage="model_output",
+            check_id="pii.regex",
+            config={"patterns": {"EMAIL": True}},
+            priority=200,
+            description="pa rule",
+        )
+        assert created["is_seeded"] is False
+        rid = created["id"]
+
+        fetched = await get_platform_rule(rid)
+        assert fetched is not None
+        assert fetched["check_id"] == "pii.regex"
+
+        updated = await update_platform_rule(
+            rid, priority=5, enabled=False, description="edited",
+        )
+        assert updated is not None
+        assert updated["priority"] == 5
+        assert updated["enabled"] is False
+        assert updated["description"] == "edited"
+
+        toggled = await set_platform_rule_enabled(rid, enabled=True)
+        assert toggled is not None and toggled["enabled"] is True
+
+        assert await delete_platform_rule(rid) is True
+        assert await get_platform_rule(rid) is None
+        # Deleting a now-absent id is a no-op (False).
+        assert await delete_platform_rule(rid) is False
+
+    @pytest.mark.asyncio
+    async def test_list_all_returns_floor_tier(self) -> None:
+        await _tenant_and_coworker("listall")
+        await _insert_floor_rule()
+        rows = await list_all_platform_rules()
+        # Unlike list_visible_platform_rules, floor IS surfaced here.
+        assert any(r["tier"] == "floor" for r in rows)
+        # The 5 seeded defaults are present and flagged.
+        seeded = {r["check_id"] for r in rows if r["is_seeded"]}
+        assert seeded >= _EXPECTED_DEFAULT_CHECKS
+
+
+class TestSeedSurvival:
+    @pytest.mark.asyncio
+    async def test_seed_does_not_overwrite_pa_edits(self) -> None:
+        """A re-seed (fresh-DB rebuild) must not clobber a PA's edits.
+
+        The seed is ON CONFLICT DO UPDATE that touches ONLY is_seeded, so a
+        disabled / re-configured factory default keeps the operator's state
+        across the next seed run.
+        """
+        await _tenant_and_coworker("survive")
+        rows = await list_all_platform_rules()
+        seeded = next(r for r in rows if r["is_seeded"])
+        rid = seeded["id"]
+
+        await update_platform_rule(
+            rid, config={"sentinel": True}, enabled=False, priority=42,
+        )
+
+        # Re-run the build-time seed (simulates a fresh-DB rebuild / reseed).
+        async with admin_conn() as conn:
+            await _seed_platform_safety_rules(conn)
+
+        after = await get_platform_rule(rid)
+        assert after is not None
+        assert after["enabled"] is False  # disable survives
+        assert after["config"] == {"sentinel": True}  # config edit survives
+        assert after["priority"] == 42  # priority edit survives
+        assert after["is_seeded"] is True  # still a managed default

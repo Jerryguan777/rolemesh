@@ -611,6 +611,120 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/platform/safety/rules": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List all platform safety rules (every tier, incl. floor)
+         * @description Platform-plane only (`safety.platform.manage`, granted to
+         *     `platform_admin`). Unlike the tenant-facing `/api/v1/safety/rules`
+         *     read — which surfaces only the visible tiers — this returns ALL
+         *     tiers including `floor`, plus the `is_seeded` flag.
+         */
+        get: operations["listPlatformSafetyRules"];
+        put?: never;
+        /**
+         * Create a platform safety rule
+         * @description Platform-plane only (`safety.platform.manage`). The body is
+         *     validated against the safety check registry — an unknown
+         *     `check_id`, an unsupported `stage`, or an invalid `action_override`
+         *     returns `400 INVALID_RULE`. A duplicate `(tier, check_id, stage)`
+         *     identity returns `409`. Created rules carry `is_seeded=false` and
+         *     allow full CRUD.
+         */
+        post: operations["createPlatformSafetyRule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/platform/safety/rules/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Get one platform safety rule (any tier)
+         * @description Platform-plane only (`safety.platform.manage`).
+         */
+        get: operations["getPlatformSafetyRule"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete a platform safety rule
+         * @description Platform-plane only (`safety.platform.manage`). A seeded factory
+         *     default (`is_seeded=true`) cannot be hard-deleted (`409`
+         *     `SEEDED_RULE_IMMUTABLE`) — the next build-time seed would recreate
+         *     it; disable it instead. Unknown id → 404.
+         */
+        delete: operations["deletePlatformSafetyRule"];
+        options?: never;
+        head?: never;
+        /**
+         * Update a platform safety rule
+         * @description Platform-plane only (`safety.platform.manage`). Patches the mutable
+         *     fields — `config` / `priority` / `description` / `enabled`. The
+         *     identity (`tier` / `stage` / `check_id`) is immutable. A changed
+         *     `config` is re-validated (`400 INVALID_RULE`) when the check is in
+         *     the orchestrator registry. Seeded defaults are editable here.
+         */
+        patch: operations["updatePlatformSafetyRule"];
+        trace?: never;
+    };
+    "/api/v1/platform/safety/rules/{id}/enable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Enable a platform safety rule
+         * @description Platform-plane only (`safety.platform.manage`).
+         */
+        post: operations["enablePlatformSafetyRule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/platform/safety/rules/{id}/disable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Disable a platform safety rule
+         * @description Platform-plane only (`safety.platform.manage`). Also the sanctioned
+         *     way to suppress a seeded factory default (which cannot be deleted).
+         */
+        post: operations["disablePlatformSafetyRule"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/coworkers/{id}/mcp-servers": {
         parameters: {
             query?: never;
@@ -2768,6 +2882,52 @@ export interface components {
             enabled?: boolean;
             description?: string;
         };
+        /** @enum {string} */
+        PlatformSafetyTier: "floor" | "transparent_floor" | "default";
+        PlatformSafetyRule: {
+            /** Format: uuid */
+            id: string;
+            tier: components["schemas"]["PlatformSafetyTier"];
+            stage: components["schemas"]["SafetyStage"];
+            check_id: string;
+            config?: {
+                [key: string]: unknown;
+            };
+            priority: number;
+            enabled: boolean;
+            description: string;
+            /**
+             * @description True for the shipped factory defaults (seeded at build time).
+             *     These are managed disable-only: editable and disablable, but a
+             *     hard DELETE is refused (`409`) since the next seed would
+             *     recreate them. Platform-admin-created rules carry `false`.
+             */
+            is_seeded: boolean;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        PlatformSafetyRuleCreate: {
+            tier: components["schemas"]["PlatformSafetyTier"];
+            stage: components["schemas"]["SafetyStage"];
+            check_id: string;
+            config?: {
+                [key: string]: unknown;
+            };
+            /** @default 1000 */
+            priority: number;
+            /** @default  */
+            description: string;
+        };
+        PlatformSafetyRuleUpdate: {
+            config?: {
+                [key: string]: unknown;
+            };
+            priority?: number;
+            description?: string;
+            enabled?: boolean;
+        };
     };
     responses: {
         /** @description Malformed request. */
@@ -3697,6 +3857,187 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PlatformTenantResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listPlatformSafetyRules: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformSafetyRule"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    createPlatformSafetyRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PlatformSafetyRuleCreate"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformSafetyRule"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["Unprocessable"];
+        };
+    };
+    getPlatformSafetyRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformSafetyRule"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deletePlatformSafetyRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    updatePlatformSafetyRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PlatformSafetyRuleUpdate"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformSafetyRule"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["Unprocessable"];
+        };
+    };
+    enablePlatformSafetyRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformSafetyRule"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    disablePlatformSafetyRule: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: components["parameters"]["IdInPath"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformSafetyRule"];
                 };
             };
             401: components["responses"]["Unauthorized"];
