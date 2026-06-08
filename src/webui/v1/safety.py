@@ -27,7 +27,6 @@ from fastapi import APIRouter, Depends, Query, Response
 from fastapi.responses import StreamingResponse
 
 from rolemesh import db
-from rolemesh.auth.bootstrap_actor import resolve_actor_user_id
 from rolemesh.db import (
     count_safety_decisions,
     count_safety_rules,
@@ -700,7 +699,7 @@ async def create_rule(
         tenant_id=user.tenant_id,
         coworker_id=body.coworker_id,
     )
-    actor = await resolve_actor_user_id(user.tenant_id, user.user_id)
+    actor = user.user_id
     rule = await create_safety_rule(
         tenant_id=user.tenant_id,
         coworker_id=body.coworker_id,
@@ -746,7 +745,7 @@ async def update_rule(
             coworker_id=existing.coworker_id,
         )
 
-    actor = await resolve_actor_user_id(user.tenant_id, user.user_id)
+    actor = user.user_id
     updated = await update_safety_rule(
         rule_id,
         tenant_id=user.tenant_id,
@@ -776,7 +775,7 @@ async def delete_rule(
 ) -> Response:
     """Delete a tenant safety rule (cross-tenant / unknown id → 404)."""
     existing = await _get_rule_or_404(rule_id, tenant_id=user.tenant_id)
-    actor = await resolve_actor_user_id(user.tenant_id, user.user_id)
+    actor = user.user_id
     await delete_safety_rule(
         rule_id, tenant_id=user.tenant_id, actor_user_id=actor,
     )

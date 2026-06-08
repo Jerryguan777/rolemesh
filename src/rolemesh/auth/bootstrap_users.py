@@ -1,10 +1,10 @@
 """Multi-user bootstrap map for token → (tenant, role) without an IdP.
 
-Design ref: §5.2.1 (alternative A). The single ``ADMIN_BOOTSTRAP_TOKEN``
-path stays untouched for backward compat; this module adds a second
+Design ref: §5.2.1 (alternative A). This module provides a dev/test
 fast-path triggered by ``BOOTSTRAP_USERS`` (a JSON-encoded list of
 specs) so workflows that need multiple distinct identities don't
-have to stand up an IdP.
+have to stand up an IdP. Each spec is upserted to a real ``users``
+row, so the returned ``user_id`` is always a persisted UUID.
 
 Spec shape (one element per token):
 
@@ -25,9 +25,9 @@ errors at request time would either silently fail open (bad) or
 intermittently fail closed (also bad), so we fail loud at the only
 predictable moment.
 
-INV-4 ties in: the upsert means the returned ``user_id`` is a real
-UUID, so ``resolve_actor_user_id`` returns it verbatim and the
-bootstrap pseudo-user fallback is not hit.
+The upsert means the returned ``user_id`` is a real UUID, upholding
+the system-wide invariant that ``AuthenticatedUser.user_id`` is always
+a persisted UUID (audit / ``created_by`` FK columns rely on it).
 """
 
 from __future__ import annotations

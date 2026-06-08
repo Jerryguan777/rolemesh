@@ -327,7 +327,7 @@ async def create_skill_endpoint(
             frontmatter_backend=backend,
             files=files,
             enabled=body.enabled,
-            created_by_user_id=_uuid_or_none(user.user_id),
+            created_by_user_id=user.user_id,
         )
     except asyncpg.UniqueViolationError as exc:
         raise ErrorResponseException(
@@ -343,23 +343,6 @@ async def create_skill_endpoint(
             message=str(exc),
         ) from exc
     return _skill_to_response(skill)
-
-
-def _uuid_or_none(user_id: str | None) -> str | None:
-    """Coerce ``user_id`` to a UUID string or ``None``.
-
-    Bootstrap admin uses ``"bootstrap"`` as the user id which is not
-    a valid UUID; storing NULL beats letting asyncpg raise. Anything
-    that already looks like a UUID is forwarded unchanged.
-    """
-    if not user_id:
-        return None
-    import uuid
-
-    try:
-        return str(uuid.UUID(user_id))
-    except (ValueError, AttributeError, TypeError):
-        return None
 
 
 @skills_router.get("/{skill_id}", response_model=Skill)

@@ -3,8 +3,9 @@
 ``create-admin`` seeds the first ``platform_admin`` on a fresh deploy —
 the one privileged account that nobody can create through the UI yet
 (zero users, no one to log in). This is the canonical production path
-for seeding the initial admin, replacing the static
-``ADMIN_BOOTSTRAP_TOKEN`` backdoor.
+for seeding the initial admin: an explicit, auditable operator action
+bound to whoever already holds host + DB access, with no
+network-reachable secret.
 
 Every other privileged account already has a creator and does NOT need
 this tool: further platform_admins are made by the first one in the UI;

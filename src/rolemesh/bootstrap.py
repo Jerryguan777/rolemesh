@@ -23,10 +23,10 @@ Pre-fix, RoleMesh had two parallel configuration sources: some modules
 called ``read_env_file()`` (reads ``.env`` for a hard-coded key
 whitelist) and some called ``os.environ.get()`` directly. Operators
 who wrote secrets into ``.env`` expected them to apply everywhere;
-they didn't, and the boundary was invisible. The observed symptom was
-WebSocket handshakes rejecting valid bootstrap tokens because
-``ADMIN_BOOTSTRAP_TOKEN`` was only read from the process environment
-and the user had never ``source .env``'d their shell.
+they didn't, and the boundary was invisible. A typical symptom was an
+env-sourced credential (e.g. ``WS_TICKET_SECRET``) only being read from
+the process environment, so a value the user had written into ``.env``
+but never ``source``'d into their shell came through as "".
 
 The fix picks one source of truth — ``os.environ`` — and hooks
 ``.env`` into it at process start via ``python-dotenv``. Every

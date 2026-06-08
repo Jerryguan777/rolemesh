@@ -8,10 +8,10 @@ Why this is a provisioning tool and not an auth path: seeding the first
 ``platform_admin`` is a provisioning problem, not an authentication one.
 The write goes through the BYPASSRLS admin pool (no request/auth
 context, and it may touch a tenant the caller holds no session for) and
-is idempotent so re-runs are safe. This replaces the static
-``ADMIN_BOOTSTRAP_TOKEN`` — a permanent, network-reachable owner
-backdoor — with an explicit, auditable operator action bound to whoever
-already holds host + DB access.
+is idempotent so re-runs are safe. It is the seeding path for the first
+admin: an explicit, auditable operator action bound to whoever already
+holds host + DB access, introducing no permanent network-reachable
+secret.
 
 Role-model dependency: the four-role / platform-vs-tenant *scope*
 model is now wired (``rolemesh.auth.permissions`` recognizes

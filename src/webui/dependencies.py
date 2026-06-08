@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 
 async def get_current_user(request: Request) -> AuthenticatedUser:
-    """Extract Bearer token and authenticate via AuthProvider or bootstrap token.
+    """Extract Bearer token and authenticate via AuthProvider or BOOTSTRAP_USERS.
 
     This is the single authentication chokepoint for the whole ``/api/v1``
     REST surface, so it is also where a *suspended* tenant is enforced: once
