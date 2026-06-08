@@ -16,6 +16,15 @@ info:
     Error responses use the shape declared in design §13:
     `{code, message, details?}`.
 
+    List endpoints follow one pagination convention (enforced by
+    `tests/webui/test_v1_list_pagination_shape.py`): a growable collection
+    returns a named `*Page` envelope — `{items, total, limit, offset}` for
+    offset/limit, or `{items, has_more, next_cursor}` for append-only
+    cursor paging (conversation messages). A collection that is
+    intrinsically bounded (a fixed enum, a static registry, or a small
+    per-parent set) may return a bare array; the test holds the reviewed
+    allowlist of those.
+
 servers:
   - url: /
     description: Same-origin (FastAPI serves both the SPA and the API).
