@@ -27,6 +27,8 @@ import './components/chat-shell.js';
 import './components/settings-shell.js';
 import './components/activity-shell.js';
 import { installLegacyRedirects, topLevelShell } from './router.js';
+import { getApiClient } from './api/client.js';
+import { setMe } from './auth/capabilities.js';
 import {
   fetchAuthConfig,
   getStoredToken,
@@ -82,43 +84,85 @@ export class RmApp extends LitElement {
     this.shell = topLevelShell(location.hash);
   };
 
-  private async resolveAuth() {
+  // Outcome of phase 1 of resolveAuth. No `@state` is touched while a
+  // TokenOutcome is being computed — the state machine stays 'loading'
+  // until resolveAuth itself commits a transition. Three shapes:
+  //   - 'token'  → a real bearer; do getMe → setMe before authenticating.
+  //   - 'legacy' → no auth provider configured; authenticate WITHOUT a
+  //                token, WITHOUT getMe, WITHOUT a refresh scheduler (D2 —
+  //                chat-only deployments must not regress into a getMe 401).
+  //   - 'login'  → cannot authenticate; render the login page.
+  private async resolveToken(): Promise<
+    | { kind: 'token'; token: string }
+    | { kind: 'legacy' }
+    | { kind: 'login' }
+  > {
     const params = new URLSearchParams(location.search);
 
     // 1. Token in URL query params (backward compat / SaaS-passed)
     const urlToken = params.get('token');
     if (urlToken && !isTokenExpired(urlToken)) {
-      this.authState = 'authenticated';
-      this.startRefreshScheduler(urlToken);
-      return;
+      return { kind: 'token', token: urlToken };
     }
 
     // 2. OIDC callback: code stored by /oauth2/callback page
     if (sessionStorage.getItem('oidc_code')) {
       const exchanged = await handleCallback();
       if (exchanged) {
-        this.authState = 'authenticated';
-        this.startRefreshScheduler(exchanged.id_token);
-        return;
+        return { kind: 'token', token: exchanged.id_token };
       }
     }
 
     // 3. Stored token from previous session
     const stored = getStoredToken();
     if (stored && !isTokenExpired(stored)) {
-      this.authState = 'authenticated';
-      this.startRefreshScheduler(stored);
-      return;
+      return { kind: 'token', token: stored };
     }
 
     // 4. OIDC configured but no token → show login page
     const config = await fetchAuthConfig();
     if (config) {
+      return { kind: 'login' };
+    }
+
+    // 5. Legacy / no auth provider configured → chat-only deployment.
+    return { kind: 'legacy' };
+  }
+
+  private async resolveAuth() {
+    // Phase 1: resolve a token outcome WITHOUT touching @state. authState
+    // stays 'loading' (render shows "Loading...") so no sub-shell mounts.
+    const outcome = await this.resolveToken();
+
+    if (outcome.kind === 'login') {
       this.authState = 'login';
       return;
     }
 
-    // 5. Fall back to chat panel (legacy / no auth provider configured)
+    // D2: the legacy / no-auth branch authenticates a chat-only deployment
+    // WITHOUT a token. It must not call getMe (would 401 → dead-end login)
+    // and must not schedule a refresh (no token to refresh). It flips
+    // straight to authenticated via the single sink at the end of phase 3.
+    if (outcome.kind === 'token') {
+      this.startRefreshScheduler(outcome.token);
+
+      // Phase 2: with authState still 'loading', populate the Me cache
+      // before any shell mounts. setMe() writes a plain module variable —
+      // invisible to Lit reactivity — so the state flip below MUST come
+      // after this resolves (spec §7.2 atomic bootstrap).
+      try {
+        const me = await getApiClient().getMe();
+        setMe(me);
+      } catch (err) {
+        console.error('failed to load /me', err);
+        this.authState = 'login'; // fail closed; leave the cache unset
+        return;
+      }
+    }
+
+    // Phase 3: the ONLY authenticated transition. By now either the Me
+    // cache is populated (token branch) or this is the legacy branch that
+    // intentionally has no Me. The next render picks the right shell.
     this.authState = 'authenticated';
   }
 
