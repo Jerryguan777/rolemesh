@@ -32,10 +32,54 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 __all__ = [
+    "KNOWN_ERROR_CODES",
     "ErrorResponseException",
     "install_error_handler",
     "raise_error_response",
 ]
+
+
+# Authoritative catalog of every ``code`` that can appear in an
+# ``ErrorResponse`` on the ``/api/v1`` surface. This is the HTTP error
+# vocabulary ONLY — safety-check *finding* codes (JAILBREAK, TOXICITY,
+# PROMPT_INJECTION, DOMAIN_NOT_ALLOWED, …) are a separate vocabulary that
+# lives on the ``SafetyFinding`` model, not on ``ErrorResponse.code``, and
+# is intentionally not listed here.
+#
+# A drift guard (``tests/webui/test_v1_error_codes.py``) keeps this honest:
+# every ``code`` literal raised under ``src/webui`` must be in this set, the
+# set must have no dead entries, and the OpenAPI ``ErrorResponse`` doc must
+# mention each one. When you introduce a new error code: add it here, raise
+# it, and list it in ``contracts/openapi.yaml``'s ``ErrorResponse`` schema.
+KNOWN_ERROR_CODES: frozenset[str] = frozenset({
+    # Generic transport / CRUD.
+    "NOT_FOUND",
+    "FORBIDDEN",
+    "CONFLICT",
+    "INVALID_REQUEST",
+    "RESOURCE_IN_USE",
+    "RESOURCE_NOT_AVAILABLE",
+    "ALREADY_TERMINAL",
+    "TENANT_SUSPENDED",
+    # Coworker / model / credential validation.
+    "MODEL_NOT_FOUND",
+    "MISSING_CREDENTIAL",
+    "BACKEND_INCOMPAT",  # raised via BackendCompatError.code (non-literal)
+    # Skills.
+    "INVALID_NAME",
+    "INVALID_PATH",
+    "INVALID_PAYLOAD",
+    "INVALID_MANIFEST",
+    "SKILL_MANIFEST_REQUIRED",
+    "SKILL_MANIFEST_PROTECTED",
+    # Safety rules (tenant + platform).
+    "INVALID_RULE",
+    "SEEDED_RULE_IMMUTABLE",
+    # Pagination / channel links / WS ticket.
+    "INVALID_CURSOR",
+    "ACTOR_NOT_LINKABLE",
+    "WS_TICKET_SECRET_UNSET",  # raised via WsTicketError.code (non-literal)
+})
 
 
 class ErrorResponseException(HTTPException):

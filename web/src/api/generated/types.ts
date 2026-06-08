@@ -1600,11 +1600,28 @@ export interface components {
     schemas: {
         ErrorResponse: {
             /**
-             * @description Stable, machine-readable code. Known values include
-             *     `RESOURCE_IN_USE`, `BACKEND_INCOMPAT`, `MISSING_CREDENTIAL`,
-             *     `BOOTSTRAP_NEEDS_TENANT_OWNER`, `NEEDS_USER_PRESENCE`,
-             *     `WS_TICKET_EXPIRED`, `SKILL_MANIFEST_PROTECTED`,
-             *     `REAUTH_REQUIRED` (design §13).
+             * @description Stable, machine-readable error code (design §13). The catalog is
+             *     kept in sync with the backend by a drift guard
+             *     (`tests/webui/test_v1_error_codes.py`); the complete set is:
+             *
+             *     Transport / CRUD: `NOT_FOUND`, `FORBIDDEN`, `CONFLICT`,
+             *     `INVALID_REQUEST`, `RESOURCE_IN_USE`, `RESOURCE_NOT_AVAILABLE`,
+             *     `ALREADY_TERMINAL`, `TENANT_SUSPENDED`.
+             *
+             *     Coworker / model / credential: `MODEL_NOT_FOUND`,
+             *     `MISSING_CREDENTIAL`, `BACKEND_INCOMPAT`.
+             *
+             *     Skills: `INVALID_NAME`, `INVALID_PATH`, `INVALID_PAYLOAD`,
+             *     `INVALID_MANIFEST`, `SKILL_MANIFEST_REQUIRED`,
+             *     `SKILL_MANIFEST_PROTECTED`.
+             *
+             *     Safety rules: `INVALID_RULE`, `SEEDED_RULE_IMMUTABLE`.
+             *
+             *     Pagination / channel links / WS ticket: `INVALID_CURSOR`,
+             *     `ACTOR_NOT_LINKABLE`, `WS_TICKET_SECRET_UNSET`.
+             *
+             *     (This is the HTTP error vocabulary; safety-check *finding*
+             *     codes live on `SafetyFinding`, not here.)
              */
             code: string;
             message: string;
