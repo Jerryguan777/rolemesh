@@ -571,6 +571,25 @@ async def list_checks(
     return out
 
 
+def _parse_decision_ts(raw: str | None, field: str) -> datetime | None:
+    """Parse an ISO-8601 ``from_ts`` / ``to_ts`` query value to a datetime.
+
+    asyncpg binds a timestamptz parameter from a datetime, not a str, so the
+    range filter is parsed here at the edge. A malformed value is a 422
+    rather than a query-time DataError (which surfaced as an unhandled 500).
+    """
+    if raw is None:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        raise_error_response(
+            "INVALID_REQUEST",
+            f"Query parameter '{field}' must be an ISO-8601 timestamp.",
+            status_code=422,
+        )
+
+
 @router.get("/decisions", response_model=SafetyDecisionPage)
 async def list_decisions(
     verdict_action: SafetyVerdictAction | None = None,
@@ -596,13 +615,15 @@ async def list_decisions(
     catalogs) and tests for array overlap; ``rule_id`` tests array
     containment against ``triggered_rule_ids``.
     """
+    from_dt = _parse_decision_ts(from_ts, "from_ts")
+    to_dt = _parse_decision_ts(to_ts, "to_ts")
     total = await count_safety_decisions(
         user.tenant_id,
         verdict_action=verdict_action,
         coworker_id=coworker_id,
         stage=stage,
-        from_ts=from_ts,
-        to_ts=to_ts,
+        from_ts=from_dt,
+        to_ts=to_dt,
         check_id=check_id,
         rule_id=rule_id,
     )
@@ -611,8 +632,8 @@ async def list_decisions(
         verdict_action=verdict_action,
         coworker_id=coworker_id,
         stage=stage,
-        from_ts=from_ts,
-        to_ts=to_ts,
+        from_ts=from_dt,
+        to_ts=to_dt,
         check_id=check_id,
         rule_id=rule_id,
         limit=limit,
@@ -852,13 +873,15 @@ async def export_decisions_csv(
     ``GET /safety/decisions/{id}``.
     """
     tid = user.tenant_id
+    from_dt = _parse_decision_ts(from_ts, "from_ts")
+    to_dt = _parse_decision_ts(to_ts, "to_ts")
 
     async def _generate() -> AsyncIterator[bytes]:
         yield (",".join(_CSV_COLUMNS) + "\n").encode("utf-8")
         async for chunk in db.stream_safety_decisions(
             tid,
-            from_ts=from_ts,
-            to_ts=to_ts,
+            from_ts=from_dt,
+            to_ts=to_dt,
             verdict_action=verdict_action,
             coworker_id=coworker_id,
             stage=stage,
