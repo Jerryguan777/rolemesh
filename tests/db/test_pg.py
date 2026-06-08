@@ -377,3 +377,37 @@ async def test_log_task_run() -> None:
             status="success",
         )
     )
+
+
+async def test_get_all_tasks_rejects_empty_tenant_scope() -> None:
+    """An empty tenant scope must never enumerate other tenants' tasks.
+
+    Regression: ``get_all_tasks('')`` used to fall through to an ``admin_conn``
+    branch that listed EVERY tenant's rows. That path was reachable from
+    ``GET /api/v1/tasks`` whenever an auth provider left the tenant claim blank
+    (``AuthenticatedUser.tenant_id == ''``) — a cross-tenant leak. The helper
+    must now fail closed instead of widening to all tenants.
+    """
+    t_a, cw_a, _, _ = await _create_chain()
+    t_b, cw_b, _, _ = await _create_chain()
+    for tid_, cwid_, prompt_ in ((t_a, cw_a, "a-task"), (t_b, cw_b, "b-task")):
+        await create_task(
+            ScheduledTask(
+                id=str(uuid.uuid4()),
+                tenant_id=tid_,
+                coworker_id=cwid_,
+                prompt=prompt_,
+                schedule_type="cron",
+                schedule_value="0 9 * * *",
+                context_mode="group",
+                next_run="2024-01-02T09:00:00+00:00",
+                status="active",
+            )
+        )
+
+    # Normal path still works and stays isolated: tenant A sees only its task.
+    assert len(await get_all_tasks(t_a)) == 1
+
+    # An empty / missing scope must NOT list across tenants — fail closed.
+    with pytest.raises(ValueError):
+        await get_all_tasks("")
