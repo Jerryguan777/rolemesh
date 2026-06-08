@@ -68,6 +68,8 @@ async def create_coworker(
     model_id: str | None = None,
     created_by_user_id: str | None = None,
     visibility: str = "private",
+    is_frontdesk: bool = False,
+    routing_description: str | None = None,
 ) -> Coworker:
     """Create a new coworker row.
 
@@ -106,9 +108,10 @@ async def create_coworker(
             """
             INSERT INTO coworkers (tenant_id, name, folder, agent_backend, system_prompt,
                 container_config, max_concurrent, permissions,
-                model_id, created_by_user_id, visibility)
+                model_id, created_by_user_id, visibility,
+                is_frontdesk, routing_description)
             VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb,
-                $9::uuid, $10::uuid, $11)
+                $9::uuid, $10::uuid, $11, $12, $13)
             RETURNING *
             """,
             tenant_id,
@@ -122,6 +125,8 @@ async def create_coworker(
             model_id,
             created_by_user_id,
             visibility,
+            is_frontdesk,
+            routing_description,
         )
     assert row is not None
     return _record_to_coworker(row)
@@ -157,6 +162,8 @@ def _record_to_coworker(row: asyncpg.Record) -> Coworker:
         visibility=(
             row.get("visibility") if hasattr(row, "get") else None
         ) or "private",
+        is_frontdesk=bool(row.get("is_frontdesk")),
+        routing_description=row.get("routing_description"),
     )
 
 
@@ -302,6 +309,8 @@ async def update_coworker(
     status: str | None = None,
     permissions: AgentPermissions | None = None,
     model_id: str | None | Any = _MODEL_ID_UNSET,
+    is_frontdesk: bool | None = None,
+    routing_description: str | None = None,
 ) -> Coworker | None:
     """Update selected fields on a coworker, scoped to ``tenant_id``.
 
@@ -343,6 +352,14 @@ async def update_coworker(
     if model_id is not _MODEL_ID_UNSET:
         fields.append(f"model_id = ${param_idx}::uuid")
         values.append(model_id)
+        param_idx += 1
+    if is_frontdesk is not None:
+        fields.append(f"is_frontdesk = ${param_idx}")
+        values.append(is_frontdesk)
+        param_idx += 1
+    if routing_description is not None:
+        fields.append(f"routing_description = ${param_idx}")
+        values.append(routing_description)
         param_idx += 1
 
     if not fields:

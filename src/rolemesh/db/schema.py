@@ -894,6 +894,68 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id)"
     )
 
+    # Frontdesk v1.2: parent_conversation_id links a delegation child
+    # conversation to its parent user-facing conversation. NULL means
+    # "top-level user conversation"; non-NULL means "delegation child".
+    # ON DELETE CASCADE so deleting a parent removes its child sub-convs.
+    # The partial index keeps the common case (NULL) out of the index.
+    await conn.execute(
+        "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS "
+        "parent_conversation_id UUID NULL "
+        "REFERENCES conversations(id) ON DELETE CASCADE"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS conversations_by_parent "
+        "ON conversations(parent_conversation_id) "
+        "WHERE parent_conversation_id IS NOT NULL"
+    )
+
+    # Frontdesk v1.2: is_frontdesk marks a super_agent coworker as the
+    # single user-facing entry point. routing_description is a
+    # capability card written by domain agents, read by the frontdesk
+    # LLM for routing. No CHECK constraint on is_frontdesk vs
+    # agent_role — the admin UI enforces "is_frontdesk=TRUE requires
+    # super_agent" so the DB stays flexible.
+    await conn.execute(
+        "ALTER TABLE coworkers ADD COLUMN IF NOT EXISTS "
+        "is_frontdesk BOOLEAN DEFAULT FALSE"
+    )
+    await conn.execute(
+        "ALTER TABLE coworkers ADD COLUMN IF NOT EXISTS routing_description TEXT"
+    )
+
+    # Frontdesk v1.2: per-delegation audit row. One row per
+    # `delegate_to_agent` invocation. status is updated conditionally
+    # (WHERE status='running') so a late event cannot overwrite a
+    # terminal state. prompt_sha256 is audit-dedup only — it is NOT a
+    # PII shield (short prompts SHA-256 to ~identifiable hashes).
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS delegations (
+            id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            tenant_id                UUID NOT NULL REFERENCES tenants(id),
+            parent_conversation_id   UUID NOT NULL REFERENCES conversations(id),
+            child_conversation_id    UUID NOT NULL REFERENCES conversations(id),
+            from_coworker_id         UUID NOT NULL REFERENCES coworkers(id),
+            target_coworker_id       UUID NOT NULL REFERENCES coworkers(id),
+            user_id                  UUID,
+            prompt_sha256            TEXT NOT NULL,
+            context_mode             TEXT NOT NULL,
+            status                   TEXT NOT NULL,
+            error_message            TEXT,
+            duration_ms              INT,
+            started_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+            ended_at                 TIMESTAMPTZ
+        )
+    """)
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS delegations_by_tenant_time "
+        "ON delegations(tenant_id, started_at DESC)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS delegations_by_parent_conv "
+        "ON delegations(parent_conversation_id, started_at DESC)"
+    )
+
     # Runs (v1.1 §2.1). One row per agent invocation; WS streaming +
     # cancel + scheduled paths all UPDATE ``status / completed_at /
     # usage`` (INV-6, covered by 01b). ``error`` carries structured
@@ -1682,6 +1744,7 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     await _enable_rls_on(conn, "skills")               # skills feature: standard tenant_id scope
     await _enable_rls_on_transitive_skill_files(conn)
     await _enable_rls_on(conn, "eval_runs")            # eval framework
+    await _enable_rls_on(conn, "delegations")          # frontdesk v1.2
 
     # ----- v1.1 §2.1 RLS additions ---------------------------------------
     # New tenant-scoped tables get the standard four-policy treatment.

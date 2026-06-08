@@ -74,6 +74,38 @@ The good news: the **feature core lives in new files that do not conflict**
     describe the pre-refactor `admin.py` / `ws.py` structure. Only the
     user-facing architecture doc is ported (updated to v1.5).
 
+### Decisions log
+
+* **D1 — role mapping (agent_role removed on main).** The branch gated
+  delegation on `coworkers.agent_role` (`'super_agent'` = frontdesk/router,
+  `'agent'` = delegation target). `main`'s Roles & Visibility refactor
+  **deleted `agent_role` entirely** (no column, no dataclass field, no
+  reader); the role axis is now `AgentPermissions` (`agent_delegate`,
+  `task_schedule`, `task_manage_others`) + `visibility`. Chosen mapping
+  (user-approved):
+  * **frontdesk** = `is_frontdesk=True`; validation requires
+    `permissions.agent_delegate=True` (a frontdesk must be able to delegate).
+  * **delegation target** = `is_frontdesk=False`.
+  * Phase 2: `catalog.py` / `delegation.py` filters `agent_role == "agent"` →
+    `not c.is_frontdesk`; target check `agent_role != "agent"` → `c.is_frontdesk`.
+  * Phase 4: validation `is_frontdesk=True requires super_agent` →
+    `requires permissions.agent_delegate=True`.
+  * Tests: every `create_coworker(agent_role="super_agent")` →
+    `is_frontdesk=True, permissions=AgentPermissions(agent_delegate=True)`;
+    `agent_role="agent"` → `is_frontdesk=False` (default).
+* **D2 — `requires_trigger` removed on main.** The branch kept child convs out
+  of the message loop via `conversations.requires_trigger=False`; `main` dropped
+  that column. The child-exclusion invariant is now carried solely by the
+  `parent_conversation_id IS NULL` filter in the conversation list helpers
+  (`include_children=False` default). `db.delegation.create_child_conversation`
+  was adapted to drop the column; the obsolete
+  `test_child_conv_is_created_with_requires_trigger_false` test is dropped
+  (the invariant is guarded from the other side by
+  `tests/core/test_loader_excludes_children.py`).
+* **D3 — `test_coworker_from_state_full_copy.py` moves to Phase 2.** It exercises
+  `_coworker_from_state` (a `rolemesh/main.py` function changed in Phase 2), so it
+  cannot pass under Phase 1 alone.
+
 ## 3. Phases
 
 Each phase = one commit. "Gate" must be green before committing.

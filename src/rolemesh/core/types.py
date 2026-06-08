@@ -160,6 +160,13 @@ class Coworker:
     # layer; legacy rows were backfilled to 'shared'. Kept last with a
     # default so admin-side constructors that omit it stay valid.
     visibility: str = "private"
+    # Frontdesk v1.2: is_frontdesk marks the single user-facing super_agent
+    # for a tenant. Only valid when agent_role='super_agent' — UI enforces.
+    # routing_description is a domain-agent capability card consumed by the
+    # frontdesk LLM for delegation routing. Frontdesks themselves leave it
+    # blank.
+    is_frontdesk: bool = False
+    routing_description: str | None = None
 
     def __post_init__(self) -> None:
         if self.permissions is None:
@@ -249,6 +256,11 @@ class Conversation:
     last_agent_invocation: str | None = None
     created_at: str = ""
     user_id: str | None = None  # owner user (set for web conversations)
+    # Frontdesk v1.2: non-NULL means this is a delegation child conversation
+    # whose target runs in isolation from the parent's session. Children
+    # never enter _state.coworkers[*].conversations — see handbook §6
+    # Step 2.5 audit. NULL means top-level user conversation.
+    parent_conversation_id: str | None = None
 
 
 # ---------------------------------------------------------------------------
