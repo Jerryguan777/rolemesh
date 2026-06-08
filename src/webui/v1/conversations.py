@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import uuid
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 import asyncpg
@@ -265,21 +266,19 @@ async def list_conversation_messages(
     if before is not None:
         try:
             cur_ts, cur_id = _decode_message_cursor(before)
+            # Bind the cursor timestamp as a datetime: asyncpg rejects a
+            # plain str for a timestamptz parameter (DataError), which 400'd
+            # a page's own valid next_cursor when walking older on page 2.
+            cur_dt = datetime.fromisoformat(cur_ts)
         except ValueError:
             raise_error_response(
                 "INVALID_CURSOR",
                 "Malformed pagination cursor.",
                 status_code=400,
             )
-        # Keyset seek on (timestamp, id), newest-first. Written as an
-        # explicit OR rather than a row-constructor comparison
-        # ``(timestamp, id) < ($3, $4)`` so BOTH bound params carry an
-        # explicit cast ($3 timestamptz, $4 text — messages.id is TEXT). A
-        # bare param inside a row constructor left Postgres unable to resolve
-        # its type, which surfaced as a query error on the second page (the
-        # only path that binds the cursor) — a page's own next_cursor came
-        # back looking "invalid".
-        params.extend((cur_ts, cur_id))
+        # Keyset seek on (timestamp, id), newest-first: rows strictly older
+        # than the cursor, with id as the tiebreak at an equal timestamp.
+        params.extend((cur_dt, cur_id))
         where += (
             " AND (timestamp < $3::timestamptz"
             " OR (timestamp = $3::timestamptz AND id < $4::text))"
@@ -295,8 +294,9 @@ async def list_conversation_messages(
         async with tenant_conn(user.tenant_id) as conn:
             rows_desc = await conn.fetch(sql, *params)
     except asyncpg.DataError:
-        # A cursor that base64-decodes but carries a bad timestamp (the
-        # ``$3::timestamptz`` cast then fails) — still a malformed cursor.
+        # Defensive belt: a malformed cursor is normally rejected above when
+        # its timestamp fails to parse; this keeps any residual bad-data query
+        # error a 400 rather than a 500.
         raise_error_response(
             "INVALID_CURSOR",
             "Malformed pagination cursor.",
