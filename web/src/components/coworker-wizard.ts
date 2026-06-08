@@ -37,6 +37,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import './wizard.js';
 import { ApiError, getApiClient } from '../api/client.js';
+import { hasCapability } from '../auth/capabilities.js';
 import type {
   Backend,
   Coworker,
@@ -936,6 +937,15 @@ export class CoworkerWizard extends LitElement {
   }
 
   private renderTools() {
+    // A member (no `mcp.configure`) can still SELECT pre-configured MCP
+    // servers via `coworker.use` (spec §5.3, §7.5) — only the inline
+    // "add a new server" affordance is gated. When such a member has no
+    // servers to pick at all, the empty state points them at their admin
+    // instead of the (hidden) connect button.
+    const canConfigureMcp = hasCapability('mcp.configure');
+    const emptyCopy = canConfigureMcp
+      ? 'No MCP servers yet — connect one to bind.'
+      : 'No MCP servers configured. Ask your admin to add one.';
     return html`
       <h3 class="text-[15px] font-semibold mb-1">Tools</h3>
       <p class="text-[13px] text-ink-3 dark:text-d-ink-3 mb-4">
@@ -944,18 +954,20 @@ export class CoworkerWizard extends LitElement {
       </p>
       ${this.mcpServers.length === 0
         ? html`<div class="text-[13px] text-ink-3 dark:text-d-ink-3">
-            No MCP servers yet — connect one to bind.
+            ${emptyCopy}
           </div>`
         : html`<div class="border border-surface-3 dark:border-d-surface-3 rounded-lg overflow-hidden">
             ${this.mcpServers.map((s) => this.renderToolRow(s))}
           </div>`}
-      <button
-        type="button"
-        class="mt-3 text-[12.5px] px-3 py-1.5 rounded-md border border-surface-3
-          dark:border-d-surface-3 text-ink-2 dark:text-d-ink-2
-          hover:bg-surface-2 dark:hover:bg-d-surface-2 cursor-pointer"
-        @click=${() => this.requestAddMCPServer()}
-      >+ Connect a new server</button>
+      ${canConfigureMcp
+        ? html`<button
+            type="button"
+            class="mt-3 text-[12.5px] px-3 py-1.5 rounded-md border border-surface-3
+              dark:border-d-surface-3 text-ink-2 dark:text-d-ink-2
+              hover:bg-surface-2 dark:hover:bg-d-surface-2 cursor-pointer"
+            @click=${() => this.requestAddMCPServer()}
+          >+ Connect a new server</button>`
+        : nothing}
     `;
   }
 

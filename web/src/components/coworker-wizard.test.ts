@@ -21,7 +21,8 @@ import {
   slugify,
   type CoworkerWizard,
 } from './coworker-wizard.js';
-import type { Backend, Coworker, CredentialResponse, Model } from '../api/client.js';
+import { setMe } from '../auth/capabilities.js';
+import type { Backend, Coworker, CredentialResponse, Me, Model } from '../api/client.js';
 
 const pageOf = <T,>(items: T[]) => ({ items, total: items.length, limit: 200, offset: 0 });
 
@@ -794,5 +795,133 @@ describe('<rm-coworker-wizard>', () => {
     const scrollContainer = tools.querySelector('div.max-h-44');
     expect(scrollContainer, 'scrollable container must exist').toBeTruthy();
     expect(scrollContainer!.className).toContain('overflow-y-auto');
+  });
+});
+
+// ---------------------------------------------------------------------
+// PR6: capability-gating the Tools step's "+ Connect a new server" action.
+//
+// Contract (spec §5.3 / §7.5): the inline add-server button is an
+// `mcp.configure` affordance — admins+ see it, members do NOT. A member
+// can still SELECT pre-configured servers (that's `coworker.use`), so the
+// existing-server list and its checkboxes must stay rendered for members;
+// only the add button and the empty-state copy change. These tests drive
+// the wizard to the Tools step (currentStep === 3) and read the rendered
+// light DOM, gating ONLY via the real `capabilities.ts` setMe — no role
+// name, no internal mocks.
+// ---------------------------------------------------------------------
+
+describe('<rm-coworker-wizard> — Tools step MCP add-server gating (PR6)', () => {
+  let fetchStub: { restore: () => void } | null = null;
+
+  /** Real Me shapes — only `capabilities` differs between them. We do NOT
+   *  branch on `role` anywhere; the wizard reads `hasCapability` off this. */
+  const memberMe = (): Me => ({
+    user_id: 'uuuuuuuu-0000-0000-0000-000000000001',
+    tenant_id: 'tttttttt-0000-0000-0000-000000000001',
+    name: 'Mia Member',
+    email: 'mia@example.com',
+    role: 'member',
+    plane: 'tenant',
+    // Member matrix per permissions.py: create/use but NOT mcp.configure.
+    capabilities: ['coworker.create', 'coworker.use', 'skill.create'],
+  });
+  const adminMe = (): Me => ({
+    user_id: 'uuuuuuuu-0000-0000-0000-000000000002',
+    tenant_id: 'tttttttt-0000-0000-0000-000000000001',
+    name: 'Ada Admin',
+    email: 'ada@example.com',
+    role: 'admin',
+    plane: 'tenant',
+    capabilities: ['coworker.create', 'coworker.use', 'mcp.configure'],
+  });
+
+  function installToolsFetch(mcpItems: unknown[]): { restore: () => void } {
+    return installFetch([
+      { match: (u) => u.endsWith('/api/v1/backends'), respond: () => jsonResp(BACKENDS) },
+      { match: (u) => u.startsWith('/api/v1/models'), respond: () => jsonResp(MODELS) },
+      { match: (u) => u === '/api/v1/credentials', respond: () => jsonResp(CREDS_ANT) },
+      {
+        match: (u) => u.split('?')[0] === '/api/v1/mcp-servers',
+        respond: () => jsonResp(pageOf(mcpItems)),
+      },
+      { match: (u) => u.split('?')[0] === '/api/v1/skills', respond: () => jsonResp(pageOf([])) },
+    ]);
+  }
+
+  /** Open the wizard, settle catalogues, jump to the Tools step (index 3). */
+  async function atToolsStep(): Promise<CoworkerWizard> {
+    const el = mount();
+    el.open = true;
+    await settle(el);
+    (el as unknown as { currentStep: number }).currentStep = 3;
+    await settle(el);
+    return el;
+  }
+
+  const addBtn = (el: CoworkerWizard): HTMLButtonElement | undefined =>
+    [...el.querySelectorAll<HTMLButtonElement>('button')].find((b) =>
+      b.textContent?.includes('Connect a new server'),
+    );
+
+  afterEach(() => {
+    fetchStub?.restore();
+    fetchStub = null;
+    setMe(null);
+    document.body.innerHTML = '';
+  });
+
+  it('member without mcp.configure: no "+ Connect a new server" button and shows the ask-your-admin hint when no servers exist', async () => {
+    setMe(memberMe());
+    fetchStub = installToolsFetch([]);
+    const el = await atToolsStep();
+
+    // The add affordance is gated off.
+    expect(addBtn(el)).toBeUndefined();
+    // Empty + no capability → the spec §7.5 copy (exact).
+    expect(el.textContent).toContain(
+      'No MCP servers configured. Ask your admin to add one.',
+    );
+    // The old/admin empty-state copy must NOT leak to members.
+    expect(el.textContent).not.toContain('connect one to bind');
+  });
+
+  it('member without mcp.configure: existing servers stay selectable (only the add button is hidden)', async () => {
+    setMe(memberMe());
+    fetchStub = installToolsFetch([
+      {
+        id: 'mmmmmmmm-0000-0000-0000-000000000001',
+        tenant_id: 't',
+        name: 'shared-github-mcp',
+        type: 'http',
+        url: 'http://x',
+        auth_mode: 'none',
+        created_at: '2026-05-20T00:00:00Z',
+        updated_at: '2026-05-20T00:00:00Z',
+      },
+    ]);
+    const el = await atToolsStep();
+
+    // Add button still hidden for the member...
+    expect(addBtn(el)).toBeUndefined();
+    // ...but the pre-configured server (and its select checkbox) render,
+    // because selecting is `coworker.use`, not `mcp.configure`.
+    expect(el.textContent).toContain('shared-github-mcp');
+    expect(el.querySelector('input.rm-checkbox')).toBeTruthy();
+    // The "ask your admin" empty-state hint is NOT shown when servers exist.
+    expect(el.textContent).not.toContain('Ask your admin to add one');
+  });
+
+  it('admin with mcp.configure: the "+ Connect a new server" button IS present', async () => {
+    setMe(adminMe());
+    fetchStub = installToolsFetch([]);
+    const el = await atToolsStep();
+
+    const btn = addBtn(el);
+    expect(btn).toBeTruthy();
+    expect(btn!.textContent?.trim()).toBe('+ Connect a new server');
+    // Admin keeps the original empty-state copy, not the member variant.
+    expect(el.textContent).toContain('connect one to bind');
+    expect(el.textContent).not.toContain('Ask your admin to add one');
   });
 });
