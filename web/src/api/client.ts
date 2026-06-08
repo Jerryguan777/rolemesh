@@ -264,6 +264,32 @@ export class ApiClient {
     if (!resp.ok) throw await this.parseError(resp);
   }
 
+  /** Flip a coworker's visibility to `shared` (tenant-wide). The route
+   *  is gated server-side by the low `coworker.use` capability, but real
+   *  authorization is the ownership escape (a member may share only what
+   *  they created; owner/admin/platform_admin may share any). Idempotent;
+   *  returns the updated coworker (feat/roles, RBAC UI PR4). */
+  async shareCoworker(id: string): Promise<Coworker> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(id)}/share`,
+      { method: 'POST', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Coworker;
+  }
+
+  /** Flip a coworker's visibility back to `private`. Same own-or-manage
+   *  authorization as `shareCoworker`. Idempotent; returns the updated
+   *  coworker (feat/roles, RBAC UI PR4). */
+  async unshareCoworker(id: string): Promise<Coworker> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(id)}/unshare`,
+      { method: 'POST', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Coworker;
+  }
+
   async listCoworkerConversations(coworkerId: string): Promise<Conversation[]> {
     // Paged endpoint; request the max window and return items (array shape
     // preserved for callers; full page-through UI is a follow-up).
