@@ -58,6 +58,8 @@ vi.mock('../services/safety-admin-client.ts', () => ({
 }));
 
 import { RmSettingsShell, slugFromHash } from './settings-shell.js';
+import { setMe } from '../auth/capabilities.js';
+import type { Me } from '../api/client.js';
 
 interface LocationStub {
   hashAssignments: string[];
@@ -101,6 +103,57 @@ async function mount(): Promise<RmSettingsShell> {
   return el;
 }
 
+// Capability sets per role, transcribed from the backend matrix
+// (`src/rolemesh/auth/permissions.py:_TENANT_ROLE_ACTIONS`). These are
+// TEST INPUTS ONLY — the production code keeps NO role->capability map;
+// it reads `me.capabilities` off the wire. We feed the shell the exact
+// list each role would receive from `GET /api/v1/me` and assert which
+// nav slugs survive the capability gate.
+const MEMBER_CAPS = ['coworker.create', 'coworker.use', 'skill.create'];
+const ADMIN_CAPS = [
+  'coworker.create',
+  'coworker.manage',
+  'coworker.use',
+  'skill.create',
+  'skill.manage',
+  'mcp.configure',
+  'approval_policy.manage',
+  'safety.read',
+  'safety.rule.manage',
+  'user.manage',
+  'task.manage',
+];
+const OWNER_CAPS = [...ADMIN_CAPS, 'credential.byok.manage', 'tenant.manage'];
+
+function makeMe(
+  role: Me['role'],
+  capabilities: string[],
+): Me {
+  return {
+    user_id: 'u-1',
+    tenant_id: 't-1',
+    name: 'Test User',
+    email: 'test@example.com',
+    role,
+    plane: 'tenant',
+    capabilities,
+  };
+}
+
+/** Read the visible nav slugs off a mounted shell, in rail order. */
+function visibleSlugs(el: RmSettingsShell): string[] {
+  return Array.from(
+    el.querySelectorAll('[data-testid="settings-nav-entry"]'),
+  ).map((b) => b.getAttribute('data-slug') ?? '');
+}
+
+/** Read the visible group headings (uppercase, the `.ng` rows). */
+function visibleHeadings(el: RmSettingsShell): string[] {
+  return Array.from(el.querySelectorAll('.ss-nav .ng')).map(
+    (n) => n.textContent?.trim() ?? '',
+  );
+}
+
 describe('slugFromHash', () => {
   it('returns the slug from a v2 manage hash', () => {
     expect(slugFromHash('#/manage/coworkers')).toBe('coworkers');
@@ -124,11 +177,16 @@ describe('<rm-settings-shell>', () => {
 
   beforeEach(() => {
     loc = stubHash('#/manage/coworkers');
+    // These slot-map tests assert the FULL 12-entry rail, so seed an
+    // owner (all capabilities) — the gate must not hide anything for
+    // them. The capability-gating tests below override per role.
+    setMe(makeMe('owner', OWNER_CAPS));
   });
 
   afterEach(() => {
     document.querySelectorAll('rm-settings-shell').forEach((el) => el.remove());
     loc.restore();
+    setMe(null);
     vi.clearAllMocks();
   });
 
@@ -271,5 +329,136 @@ describe('<rm-settings-shell>', () => {
       '[data-testid="settings-back"]',
     )!.click();
     expect(loc.hashAssignments).toContain('#/');
+  });
+});
+
+// PR2 — capability gating of the nav rail (spec §3). We seed the REAL
+// `setMe(me)` from capabilities.ts (no mock) with each role's actual
+// wire capability set, render, and snapshot the surviving slugs. The
+// expected slug sets come from applying the §3 `requires` gates to those
+// capabilities — NOT from a role->slug table baked into production code.
+describe('<rm-settings-shell> capability gating', () => {
+  let loc: LocationStub;
+
+  beforeEach(() => {
+    loc = stubHash('#/manage/coworkers');
+  });
+
+  afterEach(() => {
+    document.querySelectorAll('rm-settings-shell').forEach((el) => el.remove());
+    loc.restore();
+    setMe(null);
+    vi.clearAllMocks();
+  });
+
+  it('member sees exactly the 5 ungated slugs (no governance/workspace)', async () => {
+    setMe(makeMe('member', MEMBER_CAPS));
+    const el = await mount();
+    const slugs = visibleSlugs(el);
+    // SNAPSHOT of the member rail — exact set + order per §3.
+    expect(slugs).toEqual([
+      'coworkers',
+      'skills',
+      'models',
+      'connected-channels',
+      'appearance',
+    ]);
+    expect(slugs).toHaveLength(5);
+  });
+
+  it('member render hides the GOVERNANCE and WORKSPACE group headings (empty-group hiding)', async () => {
+    setMe(makeMe('member', MEMBER_CAPS));
+    const el = await mount();
+    const headings = visibleHeadings(el);
+    // All Governance + Workspace entries are gated away, so the whole
+    // group (heading included) must vanish — only Building blocks +
+    // Account survive (Coworkers is the headingless root group). The
+    // uppercase is CSS-only; textContent keeps the source casing.
+    expect(headings).toEqual(['Building blocks', 'Account']);
+    expect(headings).not.toContain('Governance');
+    expect(headings).not.toContain('Workspace');
+  });
+
+  it('admin sees exactly 10 slugs (no credentials, no general)', async () => {
+    setMe(makeMe('admin', ADMIN_CAPS));
+    const el = await mount();
+    const slugs = visibleSlugs(el);
+    // SNAPSHOT of the admin rail — exact set + order per §3.
+    expect(slugs).toEqual([
+      'coworkers',
+      'mcp-servers',
+      'skills',
+      'models',
+      'approval-policies',
+      'safety',
+      'safety-log',
+      'members',
+      'connected-channels',
+      'appearance',
+    ]);
+    expect(slugs).toHaveLength(10);
+    // The two owner-only slugs are absent.
+    expect(slugs).not.toContain('credentials');
+    expect(slugs).not.toContain('general');
+  });
+
+  it('owner sees all 12 slugs', async () => {
+    setMe(makeMe('owner', OWNER_CAPS));
+    const el = await mount();
+    const slugs = visibleSlugs(el);
+    // SNAPSHOT of the owner rail — the canonical full nav per §3.
+    expect(slugs).toEqual([
+      'coworkers',
+      'mcp-servers',
+      'skills',
+      'models',
+      'credentials',
+      'approval-policies',
+      'safety',
+      'safety-log',
+      'general',
+      'members',
+      'connected-channels',
+      'appearance',
+    ]);
+    expect(slugs).toHaveLength(12);
+  });
+
+  it('renders <rm-access-denied> in the pane (rail still visible) when a member URL-jumps to a gated slug', async () => {
+    setMe(makeMe('member', MEMBER_CAPS));
+    loc.restore();
+    loc = stubHash('#/manage/safety');
+    const el = await mount();
+
+    // 403 page is shown in the main pane...
+    const pane = el.querySelector('[data-testid="settings-active-pane"]');
+    const denied = pane?.querySelector('rm-access-denied');
+    expect(denied, 'access-denied should render in the pane').not.toBeNull();
+    // ...naming the capability the page required.
+    expect((denied as { capability?: string } | null)?.capability).toBe(
+      'safety.read',
+    );
+    // ...the gated page component must NOT have mounted.
+    expect(pane?.querySelector('rm-safety-rules-page')).toBeNull();
+
+    // ...and the (filtered) nav rail is STILL present — no redirect.
+    const slugs = visibleSlugs(el);
+    expect(slugs).toHaveLength(5);
+    expect(slugs).toContain('coworkers');
+    // The header reflects the denied state, not a stale page title.
+    const title = el.querySelector('[data-testid="settings-active-title"]');
+    expect(title?.textContent?.trim()).toBe('Access denied');
+  });
+
+  it('renders a loading fallback (no rail, no pane) when me is not yet cached', async () => {
+    // Defensive null-guard branch. setMe(null) is the default here.
+    const el = await mount();
+    expect(
+      el.querySelector('[data-testid="settings-loading"]'),
+      'loading fallback should render when currentMe() is null',
+    ).not.toBeNull();
+    expect(el.querySelectorAll('[data-testid="settings-nav-entry"]')).toHaveLength(
+      0,
+    );
   });
 });
