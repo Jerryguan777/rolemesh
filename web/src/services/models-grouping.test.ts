@@ -34,6 +34,7 @@ function model(
 function cred(provider: ModelProvider, updatedAt = '2026-05-20T00:00:00Z'): CredentialResponse {
   return {
     provider,
+    mode: 'byok',
     created_at: updatedAt,
     updated_at: updatedAt,
   };
