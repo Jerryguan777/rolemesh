@@ -69,6 +69,7 @@ async def test_schedule_task_tool_publishes_user_id_from_ctx() -> None:
 
     ctx = ToolContext(
         js=_JsStub(),  # type: ignore[arg-type]
+        nc=None,  # type: ignore[arg-type]  # schedule_task uses js.publish, never nc.request
         job_id="job-1",
         chat_jid="chat",
         group_folder="folder",
@@ -115,6 +116,7 @@ async def test_schedule_task_tool_publishes_empty_user_id_for_bootstrap() -> Non
 
     ctx = ToolContext(
         js=_JsStub(),  # type: ignore[arg-type]
+        nc=None,  # type: ignore[arg-type]  # schedule_task uses js.publish, never nc.request
         job_id="job-1",
         chat_jid="chat",
         group_folder="folder",
