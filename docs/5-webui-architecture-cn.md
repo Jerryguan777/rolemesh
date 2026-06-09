@@ -186,8 +186,8 @@ else:
 
 浏览器以 `?agent_id=<uuid>&token=<jwt-or-bootstrap>` 打开。FastAPI 的 `authenticate_ws(token)` 处理器会按以下方式解析：
 
-1. **Bootstrap 管理员快捷通路**——若 `token == ADMIN_BOOTSTRAP_TOKEN`（环境变量），请求会被作为 `default` 租户的所有者接受。这是开发 / 首次运行 / 冒烟测试路径。
-2. **已配置的 `AuthProvider`**——否则该 token 由当前激活的 provider 校验（External JWT 校验 SaaS 签发的 JWT；Builtin 检查 RoleMesh 签发的凭证；OIDC 校验 IdP 签发的 `id_token`）。
+1. **`BOOTSTRAP_USERS` 快捷通路**（dev/test）——若 token 命中某条已配置的 spec，则映射到该 spec 所属租户中一行持久化的用户（真实 UUID）。在 `ROLEMESH_ENV=production` 下会中止启动。
+2. **已配置的 `AuthProvider`**——否则该 token 由当前激活的 provider 校验（External JWT 校验 SaaS 签发的 JWT，并要求 `user-id` claim 为合法 UUID；Builtin 检查 RoleMesh 签发的凭证；OIDC 校验 IdP 签发的 `id_token`）。
 
 该 token 会被放入 agent 的 `AgentInitData` 中转发给 orchestrator，使 MCP 工具调用可以把用户身份带到下游——参见 [`auth-architecture.md`](auth-architecture.md) 和 [`external-mcp-architecture.md`](external-mcp-architecture.md)。
 

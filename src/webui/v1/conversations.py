@@ -174,9 +174,7 @@ async def create_coworker_conversation(
         channel_binding_id=binding_id,
         channel_chat_id=chat_id,
         name=body.name,
-        user_id=(
-            user.user_id if _looks_like_uuid(user.user_id) else None
-        ),
+        user_id=user.user_id,
     )
     return _conversation_to_response(conv)
 
@@ -350,11 +348,3 @@ async def list_conversation_approval_requests(
     return [_request_to_response(r) for r in rows]
 
 
-def _looks_like_uuid(value: str) -> bool:
-    """Duplicate of the guard in :mod:`webui.v1.coworkers` (same purpose)."""
-    if len(value) != 36:
-        return False
-    parts = value.split("-")
-    return len(parts) == 5 and all(
-        all(c in "0123456789abcdefABCDEF" for c in p) for p in parts
-    )

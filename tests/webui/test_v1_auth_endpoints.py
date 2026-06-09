@@ -122,11 +122,13 @@ async def _make_tenant_and_user(slug_prefix: str = "v1auth") -> tuple[str, str]:
 
 
 @pytest.mark.asyncio
-async def test_auth_config_reports_bootstrap_when_admin_token_set(
+async def test_auth_config_reports_bootstrap_when_bootstrap_users_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("ADMIN_BOOTSTRAP_TOKEN", "tok")
-    monkeypatch.delenv("BOOTSTRAP_USERS", raising=False)
+    monkeypatch.setenv(
+        "BOOTSTRAP_USERS",
+        '[{"token":"tok-a","user_id":"a","tenant":"default","role":"owner"}]',
+    )
     monkeypatch.delenv("AUTH_MODE", raising=False)
     app = _build_app(None)
     async with _client(app) as c:
@@ -140,7 +142,6 @@ async def test_auth_config_reports_bootstrap_when_admin_token_set(
 async def test_auth_config_reports_oidc_with_login_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("ADMIN_BOOTSTRAP_TOKEN", raising=False)
     monkeypatch.delenv("BOOTSTRAP_USERS", raising=False)
     monkeypatch.setenv("AUTH_MODE", "oidc")
     monkeypatch.setenv("OIDC_REDIRECT_URI", "https://idp.example/redirect")
@@ -162,7 +163,11 @@ async def test_auth_config_does_not_leak_token_values(
     The endpoint is public; leaking a token here defeats every other
     layer.
     """
-    monkeypatch.setenv("ADMIN_BOOTSTRAP_TOKEN", "very-secret-token-value")
+    monkeypatch.setenv(
+        "BOOTSTRAP_USERS",
+        '[{"token":"very-secret-token-value","user_id":"a",'
+        '"tenant":"default","role":"owner"}]',
+    )
     app = _build_app(None)
     async with _client(app) as c:
         resp = await c.get("/api/v1/auth/config")
@@ -275,19 +280,15 @@ async def test_ws_ticket_rejects_bad_uuid_with_404() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ws_ticket_uses_dedicated_secret_not_bootstrap_token(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Tokens minted under WS_TICKET_SECRET must not verify under
-    ADMIN_BOOTSTRAP_TOKEN — confirms the secrets are truly distinct.
+async def test_ws_ticket_signed_with_dedicated_secret() -> None:
+    """Tickets are signed with WS_TICKET_SECRET and verify under it
+    alone — an unrelated key must not validate the signature.
 
-    This is the regression that justifies a separate config knob:
-    if a future refactor accidentally shared the secret, an
-    attacker who learned either key could forge across schemes.
+    Pins that the ticket scheme uses its own dedicated key (there is
+    no fallback to any other secret).
     """
     tid, uid = await _make_tenant_and_user()
     conv_id = await _seed_conv(tid)
-    monkeypatch.setenv("ADMIN_BOOTSTRAP_TOKEN", "some-bootstrap-different-key")
     app = _build_app(_authed(tid, uid))
     async with _client(app) as c:
         resp = await c.post(
@@ -296,10 +297,15 @@ async def test_ws_ticket_uses_dedicated_secret_not_bootstrap_token(
         )
     assert resp.status_code == 200
     body = resp.json()
+    # Verifies under the dedicated secret.
+    jwt.decode(
+        body["ticket"], _TEST_SECRET, algorithms=["HS256"], audience="rolemesh-ws"
+    )
+    # ...but not under some unrelated key.
     with pytest.raises(jwt.InvalidSignatureError):
         jwt.decode(
             body["ticket"],
-            "some-bootstrap-different-key",  # NOT the ticket secret
+            "some-unrelated-key",
             algorithms=["HS256"],
             audience="rolemesh-ws",
         )
@@ -314,11 +320,10 @@ async def test_ws_ticket_uses_dedicated_secret_not_bootstrap_token(
 async def test_bootstrap_multi_user_ticket_carries_real_alice_uuid() -> None:
     """Bootstrap spec for alice -> ticket sub is alice's stable UUID.
 
-    The legacy single-token bootstrap leaves user_id="bootstrap"
-    (literal); the multi-user spec promotes alice/bob to real
-    UUID rows via ``ensure_bootstrap_user_row``. The ticket must
-    carry that real UUID so the WS handshake can attribute traffic
-    to a real principal.
+    The multi-user spec promotes alice/bob to real UUID rows via
+    ``ensure_bootstrap_user_row``. The ticket must carry that real
+    UUID so the WS handshake can attribute traffic to a real
+    principal.
     """
     tid, _ = await _make_tenant_and_user("auth-mu")
     conv_id = await _seed_conv(tid)

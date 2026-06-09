@@ -168,7 +168,8 @@ channel with its bot tokens.
 | `CONTAINER_NETWORK_NAME`     | Set to enable EC-2 (Internal=true) agent bridge with egress gateway.     |
 | `ROLEMESH_ENV`               | `development` (default) or `production`. See note below.                 |
 | `ROLEMESH_SEED_ADMIN_EMAIL`  | If set, the WebUI seeds a `platform_admin` with this email at startup.   |
-| `ADMIN_BOOTSTRAP_TOKEN`      | DEPRECATED dev-only owner token; disabled when `ROLEMESH_ENV=production`.|
+| `WS_TICKET_SECRET`           | **Required.** Dedicated signing key for WebSocket handshake tickets.     |
+| `BOOTSTRAP_USERS`            | Dev/test only: JSON token→user map for multi-identity without an IdP. Aborts startup under `ROLEMESH_ENV=production`. |
 | `ROLEMESH_AGENT_BACKEND`     | `claude` (default) or `pi`.                                              |
 
 ### Seeding the first administrator
@@ -194,10 +195,12 @@ WebUI seeds the same `platform_admin` at startup. Further admins and
 tenant owners are created from the platform_admin UI/API (or OIDC JIT) —
 the CLI is only for platform genesis and emergency recovery.
 
-> **Production hardening.** When `ROLEMESH_ENV=production`, the legacy
-> `ADMIN_BOOTSTRAP_TOKEN` stops authorizing (it is a permanent,
-> network-reachable owner backdoor) and a populated `BOOTSTRAP_USERS`
-> aborts startup. Both remain available in `development` for local use.
+> **Production hardening.** When `ROLEMESH_ENV=production`, a populated
+> `BOOTSTRAP_USERS` aborts startup; it remains available in `development`
+> for local multi-identity testing. There is no static owner token — the
+> first admin is seeded out-of-band (above). In `external` auth mode the
+> JWT `user-id` claim must be a valid UUID (non-UUID claims are rejected
+> at the auth boundary), and `WS_TICKET_SECRET` must be set explicitly.
 
 See `docs/auth-architecture.md` for the full auth model.
 

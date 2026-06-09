@@ -15,10 +15,19 @@ Configuration via environment variables:
 from __future__ import annotations
 
 import os
+import uuid
 
 import jwt
 
 from rolemesh.auth.provider import AuthenticatedUser
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        return False
+    return True
 
 
 class ExternalJwtProvider:
@@ -66,6 +75,16 @@ class ExternalJwtProvider:
             # could (mis)read as "no tenant scope", leaking across tenants.
             # Reject under-specified tokens here, the auth entry point.
             if not user_id or not tenant_id:
+                return None
+            # Invariant: AuthenticatedUser.user_id is always a real UUID.
+            # The OIDC and BOOTSTRAP_USERS paths guarantee this (they persist
+            # a users row keyed by a UUID); external JWT claims are arbitrary
+            # strings, so we enforce the same shape here at the boundary. A
+            # non-UUID user-id claim is rejected (401) rather than carried
+            # downstream where it would FK-violate the audit / created_by
+            # columns as a 500. (tenant_id shape is a separate pre-existing
+            # concern and is left unchanged.)
+            if not _is_uuid(user_id):
                 return None
 
             role = str(payload.get(self._claim_role, "member"))

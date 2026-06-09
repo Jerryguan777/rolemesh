@@ -12,10 +12,9 @@ Two design constraints are load-bearing:
 * **Dedicated signing secret**, separate from the AuthProvider's
   JWT secret. A leaked ticket secret would let an attacker forge
   ws tickets but not API session tokens, and vice versa. This
-  module reads ``WS_TICKET_SECRET`` from the environment and falls
-  back to ``ADMIN_BOOTSTRAP_TOKEN`` (dev-only); the fallback logs
-  a warning so production deployments don't accidentally share
-  the bootstrap key with the ticket scheme.
+  module reads ``WS_TICKET_SECRET`` from the environment; it is
+  required (issuance/verification fail closed when it is unset)
+  so the ticket scheme always has its own dedicated key.
 * **Exp ≤ 60s**. The ticket is a one-shot handshake credential,
   not a session — once the WS is up it's authenticated by the
   long-lived API token that issued the ticket. Bounding exp at
@@ -29,15 +28,12 @@ conversation" not happen.
 
 from __future__ import annotations
 
-import logging
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Final
 
 import jwt
-
-logger = logging.getLogger(__name__)
 
 _ALGORITHM: Final[str] = "HS256"
 _DEFAULT_TTL_S: Final[int] = 60
@@ -74,29 +70,13 @@ class WsTicketPayload:
 def _get_secret() -> str:
     """Resolve the signing key.
 
-    Production: ``WS_TICKET_SECRET`` must be set explicitly. Dev:
-    fall back to ``ADMIN_BOOTSTRAP_TOKEN`` (a long random token the
-    operator already manages) with a one-shot warning. The
-    fall-back is gated behind 'ADMIN_BOOTSTRAP_TOKEN is set' so an
-    empty env in production fails closed.
+    ``WS_TICKET_SECRET`` must be set explicitly in every environment;
+    there is no fallback, so an empty env fails closed rather than
+    silently borrowing some other key.
     """
     secret = os.environ.get("WS_TICKET_SECRET", "").strip()
     if secret:
         return secret
-    bootstrap = os.environ.get("ADMIN_BOOTSTRAP_TOKEN", "").strip()
-    if bootstrap:
-        # Quietly reuse the bootstrap token in dev; loud in prod
-        # would be even louder if AUTH_MODE were not external, but
-        # this module doesn't know the deployment posture so the
-        # warning is one-shot regardless.
-        if not getattr(_get_secret, "_warned", False):  # type: ignore[attr-defined]
-            logger.warning(
-                "WS_TICKET_SECRET unset; falling back to "
-                "ADMIN_BOOTSTRAP_TOKEN. Set WS_TICKET_SECRET in "
-                "production so the ticket scheme has its own key."
-            )
-            _get_secret._warned = True  # type: ignore[attr-defined]
-        return bootstrap
     raise WsTicketError(
         "WS_TICKET_SECRET is not configured; cannot issue tickets.",
         code="WS_TICKET_SECRET_UNSET",

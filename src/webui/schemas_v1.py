@@ -78,10 +78,10 @@ class AuthConfig(BaseModel):
     """Public boot-time hint the SPA uses to decide how to log in.
 
     ``mode == "bootstrap"`` is what the dev fast-path advertises so
-    the SPA knows it can drop the ``ADMIN_BOOTSTRAP_TOKEN`` it
-    received out-of-band into ``Authorization`` without an IdP
-    round-trip. ``login_url`` is non-null only when the SPA needs to
-    redirect (OIDC PKCE).
+    the SPA knows it can drop a ``BOOTSTRAP_USERS`` token it received
+    out-of-band into ``Authorization`` without an IdP round-trip.
+    ``login_url`` is non-null only when the SPA needs to redirect
+    (OIDC PKCE).
     """
 
     model_config = ConfigDict(extra="forbid")

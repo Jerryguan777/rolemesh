@@ -10,9 +10,8 @@ The handler suite covers three concerns:
 
 * **AuthConfig** — boot-time hint the SPA reads before sending the
   first authenticated request. Today it reports ``mode="bootstrap"``
-  whenever ``ADMIN_BOOTSTRAP_TOKEN`` or ``BOOTSTRAP_USERS`` is
-  configured (live-smoke posture) and the configured AuthProvider
-  mode otherwise.
+  whenever ``BOOTSTRAP_USERS`` is configured (live-smoke posture)
+  and the configured AuthProvider mode otherwise.
 * **WsTicket** — short-lived bound JWT. Conversation membership
   is verified server-side at issue time, so the WS handshake can
   trust the ticket payload without an extra DB hop.
@@ -48,10 +47,10 @@ def _detect_auth_mode() -> tuple[str, str | None]:
     """Return ``(mode, login_url)`` for ``/api/v1/auth/config``.
 
     Live smoke runs everything through the bootstrap fast-path, so
-    when either bootstrap config knob is set we advertise that to
-    the SPA — its UI then knows to use the token it was handed
-    instead of redirecting through an IdP. Production with OIDC
-    sets ``AUTH_MODE=oidc`` and the SPA picks up the login URL.
+    when ``BOOTSTRAP_USERS`` is set we advertise that to the SPA —
+    its UI then knows to use the token it was handed instead of
+    redirecting through an IdP. Production with OIDC sets
+    ``AUTH_MODE=oidc`` and the SPA picks up the login URL.
 
     The hint is *informational*: the actual rejection happens in
     :mod:`webui.auth.authenticate_ws`. A wrong mode here only
@@ -59,9 +58,7 @@ def _detect_auth_mode() -> tuple[str, str | None]:
     """
     import os
 
-    if os.environ.get("ADMIN_BOOTSTRAP_TOKEN") or os.environ.get(
-        "BOOTSTRAP_USERS"
-    ):
+    if os.environ.get("BOOTSTRAP_USERS"):
         return "bootstrap", None
     mode = os.environ.get("AUTH_MODE", "external")
     if mode == "oidc":

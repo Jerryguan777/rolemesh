@@ -6,10 +6,10 @@
 from __future__ import annotations
 
 # Side-effect import: runs load_env() so ``.env`` lands in os.environ
-# BEFORE webui/config (ADMIN_BOOTSTRAP_TOKEN, DATABASE_URL, NATS_URL,
-# WEB_UI_PORT, ...) captures module-level values. The previous
-# smoke test rejected every valid bootstrap token because this load
-# wasn't happening and ADMIN_BOOTSTRAP_TOKEN came through as "".
+# BEFORE webui/config (DATABASE_URL, NATS_URL, WEB_UI_PORT, WS_TICKET_SECRET,
+# ...) captures module-level values. Without this load, env-sourced config
+# would come through as defaults/"" for any operator who wrote them into
+# ``.env`` rather than exporting them in the process environment.
 import rolemesh.bootstrap  # noqa: F401
 
 import os
@@ -23,7 +23,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from nats.js.api import StreamConfig
-from rolemesh.auth.bootstrap_actor import BootstrapActorError
 from rolemesh.auth.bootstrap_users import init_bootstrap_users
 from rolemesh.db import (
     _get_pool,
@@ -162,24 +161,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(lifespan=lifespan)
 
-
-@app.exception_handler(BootstrapActorError)
-async def _bootstrap_actor_error_handler(
-    request: object, exc: BootstrapActorError
-) -> JSONResponse:
-    """INV-4: surface a deterministic 503 + error code when an audit
-    write needs a real actor but the bootstrap pseudo-user is in use
-    and the tenant has no owner. The frontend distinguishes this from
-    a generic failure via the ``code`` field.
-    """
-    return JSONResponse(
-        status_code=exc.status,
-        content={
-            "code": exc.code,
-            "message": str(exc),
-            "details": {"tenant_id": exc.tenant_id},
-        },
-    )
 
 # CORS for embedded SaaS scenarios where the browser sends credentials
 # (httpOnly refresh cookie) cross-origin. Only enabled when CORS_ORIGINS is set.
