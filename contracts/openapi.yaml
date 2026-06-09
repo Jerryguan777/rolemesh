@@ -4354,6 +4354,91 @@ components:
             the coworker's container withdrew the call (Stop / hook
             exception), distinct from `expired` (no decision in time).
 
+    # Frontdesk v1.5 delegation child-chip events. A specialist running
+    # in a delegation child conversation surfaces its progress to the
+    # PARENT conversation's stream as an indented sub-chip. These ride
+    # the existing web.stream.* carrier (kind="child_chip") and the v1
+    # ws_stream projects them into the four typed frames below — see
+    # WsServerEventDelegation* and ws_stream._build_child_chip_frame_or_none.
+    # child_conv_id is the chip key; concurrent delegations render as
+    # separate chips. run_id anchors the chip to the parent's active run
+    # so the SPA can drop orphaned chips on event.run.completed.
+    WsServerEventDelegationStarted:
+      type: object
+      required: [type, run_id, child_conv_id, delegation_id, target_folder, target_name]
+      properties:
+        type: { type: string, enum: [event.delegation.started] }
+        run_id: { type: string, format: uuid }
+        child_conv_id:
+          type: string
+          format: uuid
+          description: |
+            Child (internal) conversation id; the SPA keys each sub-chip
+            by this. Mounted on started, unmounted on completed.
+        delegation_id: { type: string, format: uuid }
+        target_folder: { type: string }
+        target_name: { type: string }
+        context_mode:
+          type: string
+          nullable: true
+          description: "'isolated' | 'sticky' — delegation context carry-over."
+        initial_status: { type: string, nullable: true }
+
+    WsServerEventDelegationProgress:
+      type: object
+      required: [type, run_id, child_conv_id, delegation_id, target_folder, target_name, status]
+      properties:
+        type: { type: string, enum: [event.delegation.progress] }
+        run_id: { type: string, format: uuid }
+        child_conv_id: { type: string, format: uuid }
+        delegation_id: { type: string, format: uuid }
+        target_folder: { type: string }
+        target_name: { type: string }
+        status:
+          type: string
+          description: |
+            Specialist container phase: running / queued / container_starting.
+            Open string (mirrors event.run.progress.status) so a new
+            orchestrator kind renders via fallback rather than failing
+            validation.
+
+    WsServerEventDelegationToolUse:
+      type: object
+      required: [type, run_id, child_conv_id, delegation_id, target_folder, target_name, tool_name]
+      properties:
+        type: { type: string, enum: [event.delegation.tool_use] }
+        run_id: { type: string, format: uuid }
+        child_conv_id: { type: string, format: uuid }
+        delegation_id: { type: string, format: uuid }
+        target_folder: { type: string }
+        target_name: { type: string }
+        tool_name:
+          type: string
+          nullable: true
+          description: Tool the specialist is invoking; null if unknown.
+        tool_input_preview:
+          type: string
+          nullable: true
+          description: |
+            Truncated preview of the specialist's tool input (orchestrator
+            truncates server-side; the name carries the semantic, same as
+            event.run.progress.input_preview).
+
+    WsServerEventDelegationCompleted:
+      type: object
+      required: [type, run_id, child_conv_id, delegation_id, target_folder, target_name, final_status]
+      properties:
+        type: { type: string, enum: [event.delegation.completed] }
+        run_id: { type: string, format: uuid }
+        child_conv_id: { type: string, format: uuid }
+        delegation_id: { type: string, format: uuid }
+        target_folder: { type: string }
+        target_name: { type: string }
+        final_status:
+          type: string
+          description: "success | error | cancelled | timeout — delegation terminal state."
+        duration_ms: { type: integer, nullable: true }
+
     # Server → client. Discriminated on `type`; clients can pattern
     # match on the literal and TS narrows to the matching member.
     WsServerEvent:
@@ -4366,6 +4451,10 @@ components:
         - $ref: '#/components/schemas/WsServerEventMessageAppended'
         - $ref: '#/components/schemas/WsServerEventApprovalRequested'
         - $ref: '#/components/schemas/WsServerEventApprovalResolved'
+        - $ref: '#/components/schemas/WsServerEventDelegationStarted'
+        - $ref: '#/components/schemas/WsServerEventDelegationProgress'
+        - $ref: '#/components/schemas/WsServerEventDelegationToolUse'
+        - $ref: '#/components/schemas/WsServerEventDelegationCompleted'
       discriminator:
         propertyName: type
         mapping:
@@ -4377,6 +4466,10 @@ components:
           event.message.appended: '#/components/schemas/WsServerEventMessageAppended'
           event.approval.requested: '#/components/schemas/WsServerEventApprovalRequested'
           event.approval.resolved: '#/components/schemas/WsServerEventApprovalResolved'
+          event.delegation.started: '#/components/schemas/WsServerEventDelegationStarted'
+          event.delegation.progress: '#/components/schemas/WsServerEventDelegationProgress'
+          event.delegation.tool_use: '#/components/schemas/WsServerEventDelegationToolUse'
+          event.delegation.completed: '#/components/schemas/WsServerEventDelegationCompleted'
 
     WsClientFrameRequestRun:
       type: object

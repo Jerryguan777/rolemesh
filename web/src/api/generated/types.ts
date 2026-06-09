@@ -2776,7 +2776,92 @@ export interface components {
              */
             outcome: "approved" | "rejected" | "expired" | "cancelled";
         };
-        WsServerEvent: components["schemas"]["WsServerEventRunStarted"] | components["schemas"]["WsServerEventRunToken"] | components["schemas"]["WsServerEventRunCompleted"] | components["schemas"]["WsServerEventRunError"] | components["schemas"]["WsServerEventRunProgress"] | components["schemas"]["WsServerEventMessageAppended"] | components["schemas"]["WsServerEventApprovalRequested"] | components["schemas"]["WsServerEventApprovalResolved"];
+        WsServerEventDelegationStarted: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "event.delegation.started";
+            /** Format: uuid */
+            run_id: string;
+            /**
+             * Format: uuid
+             * @description Child (internal) conversation id; the SPA keys each sub-chip
+             *     by this. Mounted on started, unmounted on completed.
+             */
+            child_conv_id: string;
+            /** Format: uuid */
+            delegation_id: string;
+            target_folder: string;
+            target_name: string;
+            /** @description 'isolated' | 'sticky' — delegation context carry-over. */
+            context_mode?: string | null;
+            initial_status?: string | null;
+        };
+        WsServerEventDelegationProgress: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "event.delegation.progress";
+            /** Format: uuid */
+            run_id: string;
+            /** Format: uuid */
+            child_conv_id: string;
+            /** Format: uuid */
+            delegation_id: string;
+            target_folder: string;
+            target_name: string;
+            /**
+             * @description Specialist container phase: running / queued / container_starting.
+             *     Open string (mirrors event.run.progress.status) so a new
+             *     orchestrator kind renders via fallback rather than failing
+             *     validation.
+             */
+            status: string;
+        };
+        WsServerEventDelegationToolUse: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "event.delegation.tool_use";
+            /** Format: uuid */
+            run_id: string;
+            /** Format: uuid */
+            child_conv_id: string;
+            /** Format: uuid */
+            delegation_id: string;
+            target_folder: string;
+            target_name: string;
+            /** @description Tool the specialist is invoking; null if unknown. */
+            tool_name: string | null;
+            /**
+             * @description Truncated preview of the specialist's tool input (orchestrator
+             *     truncates server-side; the name carries the semantic, same as
+             *     event.run.progress.input_preview).
+             */
+            tool_input_preview?: string | null;
+        };
+        WsServerEventDelegationCompleted: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "event.delegation.completed";
+            /** Format: uuid */
+            run_id: string;
+            /** Format: uuid */
+            child_conv_id: string;
+            /** Format: uuid */
+            delegation_id: string;
+            target_folder: string;
+            target_name: string;
+            /** @description success | error | cancelled | timeout — delegation terminal state. */
+            final_status: string;
+            duration_ms?: number | null;
+        };
+        WsServerEvent: components["schemas"]["WsServerEventRunStarted"] | components["schemas"]["WsServerEventRunToken"] | components["schemas"]["WsServerEventRunCompleted"] | components["schemas"]["WsServerEventRunError"] | components["schemas"]["WsServerEventRunProgress"] | components["schemas"]["WsServerEventMessageAppended"] | components["schemas"]["WsServerEventApprovalRequested"] | components["schemas"]["WsServerEventApprovalResolved"] | components["schemas"]["WsServerEventDelegationStarted"] | components["schemas"]["WsServerEventDelegationProgress"] | components["schemas"]["WsServerEventDelegationToolUse"] | components["schemas"]["WsServerEventDelegationCompleted"];
         WsClientFrameRequestRun: {
             /**
              * @description discriminator enum property added by openapi-typescript

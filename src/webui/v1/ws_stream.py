@@ -222,6 +222,63 @@ def _build_progress_frame_or_none(
     return frame
 
 
+def _build_child_chip_frame_or_none(
+    run_id: str, inner: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Project an orchestrator child-chip status payload (frontdesk v1.5)
+    to an ``event.delegation.*`` frame.
+
+    Delegation child-progress rides the PARENT conversation's
+    ``web.stream.*`` carrier as a ``kind="status"`` chunk tagged
+    ``kind="child_chip"`` (see rolemesh.main._emit_child_chip_event_safe).
+    We split it off the per-turn progress projection and map the four
+    lifecycle phases to distinct typed frames, mirroring event.run.*.
+    Field whitelisting matches the progress/approval posture so a future
+    orchestrator-side key can't leak to the browser. Unknown phases drop.
+    """
+    common: dict[str, Any] = {"run_id": run_id}
+    for key in ("child_conv_id", "delegation_id", "target_folder", "target_name"):
+        v = inner.get(key)
+        if not isinstance(v, str) or not v:
+            return None  # all four identity fields are required
+        common[key] = v
+
+    phase = inner.get("phase")
+    if phase == "open":
+        frame = {"type": "event.delegation.started", **common}
+        for key in ("context_mode", "initial_status"):
+            v = inner.get(key)
+            if isinstance(v, str):
+                frame[key] = v
+        return frame
+    if phase == "status":
+        status = inner.get("status")
+        if not isinstance(status, str) or not status:
+            return None
+        return {"type": "event.delegation.progress", **common, "status": status}
+    if phase == "tool_use":
+        tn = inner.get("tool_name")
+        frame = {
+            "type": "event.delegation.tool_use",
+            **common,
+            "tool_name": tn if isinstance(tn, str) else None,
+        }
+        ti = inner.get("tool_input")  # renamed at the boundary
+        if isinstance(ti, str) and ti:
+            frame["tool_input_preview"] = ti
+        return frame
+    if phase == "close":
+        fs = inner.get("final_status")
+        if not isinstance(fs, str) or not fs:
+            return None
+        frame = {"type": "event.delegation.completed", **common, "final_status": fs}
+        dms = inner.get("duration_ms")
+        if isinstance(dms, int):
+            frame["duration_ms"] = dms
+        return frame
+    return None  # unknown phase degrades gracefully
+
+
 def _build_approval_frame_or_none(
     payload: dict[str, Any],
 ) -> dict[str, Any] | None:
@@ -508,9 +565,20 @@ async def stream(
                     # contract — None is returned when no run is
                     # active OR the payload lacks a ``status`` field.
                     inner = json.loads(data.get("content", "{}"))
-                    progress = _build_progress_frame_or_none(run_id, inner)
-                    if progress is not None:
-                        await _send_event(ws, progress)
+                    if inner.get("kind") == "child_chip":
+                        # Frontdesk v1.5: a specialist's child-chip event
+                        # rides this same status carrier (kind="child_chip");
+                        # project it to an event.delegation.* frame instead of
+                        # run progress, BEFORE the progress branch — a
+                        # phase="status" chip carries a ``status`` field that
+                        # would otherwise be mis-projected as event.run.progress.
+                        chip = _build_child_chip_frame_or_none(run_id, inner)
+                        if chip is not None:
+                            await _send_event(ws, chip)
+                    else:
+                        progress = _build_progress_frame_or_none(run_id, inner)
+                        if progress is not None:
+                            await _send_event(ws, progress)
                 elif kind == "safety_blocked":
                     inner = json.loads(data.get("content", "{}"))
                     # Same ordering rationale as ``done`` above.

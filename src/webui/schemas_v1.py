@@ -1129,6 +1129,69 @@ class WsServerEventApprovalResolved(BaseModel):
     outcome: Literal["approved", "rejected", "expired", "cancelled"]
 
 
+class WsServerEventDelegationStarted(BaseModel):
+    """Frontdesk v1.5: a delegation child container started (chip mount).
+
+    ``child_conv_id`` keys the sub-chip; concurrent delegations render as
+    separate chips. ``run_id`` anchors the chip to the parent's active run.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.delegation.started"]
+    run_id: str
+    child_conv_id: str
+    delegation_id: str
+    target_folder: str
+    target_name: str
+    context_mode: str | None = None
+    initial_status: str | None = None
+
+
+class WsServerEventDelegationProgress(BaseModel):
+    """Frontdesk v1.5: specialist container phase update (chip status line)."""
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.delegation.progress"]
+    run_id: str
+    child_conv_id: str
+    delegation_id: str
+    target_folder: str
+    target_name: str
+    status: str
+
+
+class WsServerEventDelegationToolUse(BaseModel):
+    """Frontdesk v1.5: specialist invoked a tool (chip tool line).
+
+    ``tool_input_preview`` is the orchestrator-truncated preview; the name
+    carries the truncation semantic, mirroring event.run.progress.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.delegation.tool_use"]
+    run_id: str
+    child_conv_id: str
+    delegation_id: str
+    target_folder: str
+    target_name: str
+    tool_name: str | None
+    tool_input_preview: str | None = None
+
+
+class WsServerEventDelegationCompleted(BaseModel):
+    """Frontdesk v1.5: delegation reached a terminal state (chip unmount)."""
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.delegation.completed"]
+    run_id: str
+    child_conv_id: str
+    delegation_id: str
+    target_folder: str
+    target_name: str
+    final_status: str
+    duration_ms: int | None = None
+
+
 # Tagged union over ``type``. Pydantic v2's Field discriminator picks
 # the right member based on the literal value, giving validation
 # errors that name the offending field (rather than the generic
@@ -1142,6 +1205,10 @@ WsServerEventModel = (
     | WsServerEventMessageAppended
     | WsServerEventApprovalRequested
     | WsServerEventApprovalResolved
+    | WsServerEventDelegationStarted
+    | WsServerEventDelegationProgress
+    | WsServerEventDelegationToolUse
+    | WsServerEventDelegationCompleted
 )
 
 

@@ -563,6 +563,11 @@ _EXPECTED_SERVER_EVENTS: dict[str, str] = {
     # HITL tool approval (docs/21-hitl-approval-plan.md §10 S4).
     "event.approval.requested": "WsServerEventApprovalRequested",
     "event.approval.resolved": "WsServerEventApprovalResolved",
+    # Frontdesk v1.5 delegation child-chip lifecycle.
+    "event.delegation.started": "WsServerEventDelegationStarted",
+    "event.delegation.progress": "WsServerEventDelegationProgress",
+    "event.delegation.tool_use": "WsServerEventDelegationToolUse",
+    "event.delegation.completed": "WsServerEventDelegationCompleted",
 }
 
 _EXPECTED_CLIENT_FRAMES: dict[str, str] = {
