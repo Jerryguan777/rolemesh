@@ -21,17 +21,39 @@ def create_rolemesh_mcp_server(
     ctx: ToolContext,
     *,
     register_send_message: bool = False,
+    register_delegation: bool = False,
+    register_task_management: bool = False,
 ) -> Any:
     """Create an in-process MCP server with all RoleMesh tools for Claude SDK.
 
-    ``register_send_message``: only register the ``send_message`` tool
-    when True. Per the nanoclaw-derived design intent, send_message is
-    a scheduled-task notification output — it should be unavailable to
-    interactive turns. Conditional registration removes it from
-    Claude's tool choice set entirely on interactive containers, so
-    Claude cannot misuse it to deliver replies (which would cause the
-    reply to be dropped by the orchestrator's _handle_agent_message_ipc).
-    Pass True only when ``init.is_scheduled_task`` is True.
+    Tools are filtered at registration so Claude never sees options it
+    cannot legitimately exercise — saving context, preventing wasted
+    tool-use turns, and keeping the v1.5 sub-chip display honest.
+    Runtime permission checks in ``rolemesh_tools`` remain as
+    defence-in-depth.
+
+    Flag → permission mapping (read by callers from ``init.permissions``):
+
+      - ``register_send_message``: ``init.is_scheduled_task``. Per the
+        nanoclaw-derived design intent, send_message is a
+        scheduled-task notification output — it should be unavailable
+        to interactive turns. Conditional registration removes it from
+        Claude's tool choice set entirely on interactive containers,
+        so Claude cannot misuse it to deliver replies (which would
+        cause the reply to be dropped by the orchestrator's
+        _handle_agent_message_ipc). Pass True only when
+        ``init.is_scheduled_task`` is True.
+      - ``register_delegation``: ``agent_delegate``. Gates
+        ``delegate_to_agent`` and ``list_agents`` — both are
+        frontdesk-only routing tools. The orchestrator-side handler in
+        ``rolemesh.orchestration.delegation`` enforces the same gate as
+        a second layer.
+      - ``register_task_management``: ``task_schedule OR
+        task_manage_others``. Gates the six task lifecycle tools
+        (schedule / list / pause / resume / cancel / update). Either
+        permission alone is enough — ``task_schedule`` covers managing
+        the agent's own tasks, ``task_manage_others`` covers managing
+        someone else's.
     """
 
     @tool(
@@ -100,15 +122,56 @@ def create_rolemesh_mcp_server(
     async def update_task(args: dict[str, Any]) -> dict[str, Any]:
         return await rt.update_task(args, ctx)
 
-    tool_list: list[Any] = [
-        schedule_task,
-        list_tasks,
-        pause_task,
-        resume_task,
-        cancel_task,
-        update_task,
-    ]
+    @tool(
+        "list_agents",
+        # Description must stay in sync with rolemesh_tools.TOOL_DEFINITIONS.
+        "List the domain specialist agents available in this tenant. "
+        "Returns each specialist's name, id, and short description. "
+        "Use when unsure which specialist matches the user's request, "
+        "or to refresh your view of available agents (the catalog you "
+        "received at spawn may be stale if specialists changed since).",
+        {},
+    )
+    async def list_agents(args: dict[str, Any]) -> dict[str, Any]:
+        return await rt.list_agents(args, ctx)
+
+    @tool(
+        "delegate_to_agent",
+        # Description must stay in sync with rolemesh_tools.TOOL_DEFINITIONS.
+        "Delegate the user's request to a domain specialist and return "
+        "their answer.\n\n"
+        "RULES:\n"
+        "- Identify target by its agent id (e.g. 'trading'). Not a path.\n"
+        "- Write a self-contained prompt; the target cannot see this "
+        "conversation.\n"
+        "- Use 'isolated' for one-shot questions; 'sticky' for a "
+        "multi-turn workflow with the same specialist.\n"
+        "- You may call this multiple times per turn, including in "
+        "parallel.\n"
+        "- If isError=true, your reply MUST quote the literal reason. "
+        "See system prompt.",
+        {"target": str, "prompt": str, "context_mode": str},
+    )
+    async def delegate_to_agent(args: dict[str, Any]) -> dict[str, Any]:
+        return await rt.delegate_to_agent(args, ctx)
+
+    # Build the tool list by category so the gating is auditable at a
+    # glance. The pi adapter iterates ``TOOL_DEFINITIONS`` and applies
+    # the same three flags + ``send_message`` rule there; both adapters
+    # must stay in sync.
+    tool_list: list[Any] = []
     if register_send_message:
-        tool_list.insert(0, send_message)
+        tool_list.append(send_message)
+    if register_task_management:
+        tool_list.extend([
+            schedule_task,
+            list_tasks,
+            pause_task,
+            resume_task,
+            cancel_task,
+            update_task,
+        ])
+    if register_delegation:
+        tool_list.extend([list_agents, delegate_to_agent])
 
     return create_sdk_mcp_server("rolemesh", tools=tool_list)

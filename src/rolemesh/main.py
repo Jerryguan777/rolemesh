@@ -81,6 +81,7 @@ from rolemesh.db import (
     close_database,
     create_conversation,
     create_tenant,
+    cleanup_running_delegations,
     get_all_channel_bindings,
     get_all_conversations,
     get_all_coworkers,
@@ -102,6 +103,11 @@ from rolemesh.db import (
 )
 from rolemesh.ipc.nats_transport import NatsTransport
 from rolemesh.ipc.task_handler import process_task_ipc
+from rolemesh.orchestration.catalog import (
+    handle_list_agents_request,
+    render_agent_catalog,
+)
+from rolemesh.orchestration.delegation import handle_delegate_request
 from rolemesh.orchestration.remote_control import (
     restore_remote_control,
 )
@@ -197,30 +203,16 @@ def _extract_usage(metadata: dict[str, object] | None) -> _UsageFields:
 
 
 def _coworker_from_state(cw_state: CoworkerState) -> Coworker:
-    """Build a full Coworker dataclass from runtime CoworkerState.
+    """Return the full Coworker dataclass carried on runtime CoworkerState.
 
-    Must carry every field downstream consumers depend on. The
-    executor's PR30 model-resolution path reads ``model_id`` to look
-    up the coworker's model row and override PI_MODEL_ID at spawn
-    time — dropping it here silently routed back to the host .env
-    default, which is the bug Adam-on-gpt-4o-mini surfaced.
+    ``cw_state.config`` IS the Coworker loaded at state-load time, with
+    every field intact. Returning it directly avoids the field-by-field
+    reconstruction that silently dropped columns — the ``model_id`` drop
+    was the Adam-on-gpt-4o-mini bug, and frontdesk v1.2 would likewise
+    lose ``is_frontdesk`` / ``routing_description`` (and ``visibility``)
+    were they reconstructed by hand here.
     """
-    c = cw_state.config
-    return Coworker(
-        id=c.id,
-        tenant_id=c.tenant_id,
-        name=c.name,
-        folder=c.folder,
-        agent_backend=c.agent_backend,
-        system_prompt=c.system_prompt,
-        container_config=c.container_config,
-        max_concurrent=c.max_concurrent,
-        status=c.status,
-        created_at=c.created_at,
-        permissions=c.permissions,
-        model_id=c.model_id,
-        created_by_user_id=c.created_by_user_id,
-    )
+    return cw_state.config
 
 
 def _mcp_configs_from_state(coworker_id: str) -> list:
@@ -776,6 +768,63 @@ async def _emit_status_for_conversation(conversation_id: str, payload: dict[str,
             await gw.send_status(binding.id, conv.channel_chat_id, payload)
         except (OSError, RuntimeError):
             logger.debug("send_status failed", conversation_id=conversation_id, exc_info=True)
+
+
+async def _emit_child_chip_event_safe(
+    *,
+    parent_conv_id: str,
+    child_conv_id: str,
+    delegation_id: str,
+    target_folder: str,
+    target_name: str,
+    phase: str,
+    payload: dict[str, object],
+) -> None:
+    """Route a delegation child-chip progress event to the parent conv's web binding.
+
+    Frontdesk v1.5: surfaces the target container's progress as a
+    sub-chip rendered beneath the parent agent's status chip. Routed
+    by the PARENT conversation's web binding (not the child's
+    internal binding) because the WebUI only subscribes to web
+    bindings — the internal binding has no WS listener.
+
+    Silently no-op when:
+      - the parent conv is unknown (not in state),
+      - the parent conv's channel is not web (telegram/slack/internal),
+      - the publish fails (NATS hiccup; chip events are best-effort).
+
+    The audit path (delegations table, messages table) is the
+    authoritative record; chip events are a UX layer on top.
+    """
+    found = _state.get_conversation(parent_conv_id)
+    if not found:
+        return
+    cw_state, conv_state = found
+    conv = conv_state.conversation
+    channel_type = _get_channel_type_for_conv(cw_state, conv)
+    binding = cw_state.channel_bindings.get(channel_type)
+    gw = _gateways.get(channel_type) if binding else None
+    if not (binding and isinstance(gw, WebNatsGateway)):
+        return
+    body: dict[str, object] = {
+        "kind": "child_chip",
+        "phase": phase,
+        "child_conv_id": child_conv_id,
+        "delegation_id": delegation_id,
+        "target_folder": target_folder,
+        "target_name": target_name,
+        **payload,
+    }
+    try:
+        await gw.send_status(binding.id, conv.channel_chat_id, body)
+    except (OSError, RuntimeError):
+        logger.debug(
+            "child_chip emit failed",
+            parent_conv_id=parent_conv_id,
+            child_conv_id=child_conv_id,
+            phase=phase,
+            exc_info=True,
+        )
 
 
 async def _emit_queued_status(conversation_id: str) -> None:
@@ -1726,6 +1775,15 @@ async def main() -> None:
     await _ensure_container_system_running()
     await init_database()
     logger.info("Database initialized")
+    # Frontdesk v1.2: sweep stale 'running' delegation audit rows left by a
+    # prior crash, before state load and before any delegate subscription
+    # accepts new work (handbook §6 Step 5.4).
+    cleaned = await cleanup_running_delegations()
+    if cleaned:
+        logger.info(
+            "delegations: cleaned up stale running rows on startup",
+            count=cleaned,
+        )
     await _load_state()
     restore_remote_control()
 
@@ -1746,11 +1804,16 @@ async def main() -> None:
         cw = _state.coworkers.get(coworker_id)
         return _coworker_from_state(cw) if cw else None
 
+    def _render_catalog_for_executor(tenant_id: str, exclude_id: str) -> str:
+        # Frontdesk v1.2: the executor injects this for is_frontdesk spawns.
+        return render_agent_catalog(_state, tenant_id, exclude=exclude_id)
+
     # Build one executor per backend.
     for cfg in (CLAUDE_CODE_BACKEND, PI_BACKEND):
         _executors[cfg.name] = ContainerAgentExecutor(
             cfg, _runtime, _transport, _get_coworker,
             get_mcp_configs=_mcp_configs_from_state,
+            render_catalog=_render_catalog_for_executor,
         )
 
     if AGENT_BACKEND_DEFAULT not in _executors:
@@ -1870,6 +1933,40 @@ async def main() -> None:
     # re-fetch a snapshot that's missing the edit.
     mcp_sub = await subscribe_mcp_changes(_transport.nc)
     egress_responder_subs.append(mcp_sub)
+
+    # Frontdesk v1.2: core NATS responder for the ``list_agents`` tool.
+    # Request-reply (not JetStream) — the calling frontdesk's turn blocks
+    # synchronously on the RPC; reuses the existing connection.
+    async def _list_agents_cb(msg: object) -> None:
+        await handle_list_agents_request(msg, state=_state)
+
+    list_agents_sub = await _transport.nc.subscribe(
+        "agent.*.list_agents.request", cb=_list_agents_cb,
+    )
+    egress_responder_subs.append(list_agents_sub)
+
+    # Frontdesk v1.2: core NATS responder for the ``delegate_to_agent``
+    # tool. Request-reply (not JetStream) because the calling frontdesk's
+    # turn is blocked synchronously on the RPC — the business deadline is
+    # enforced inside the handler. Registered AFTER
+    # ``cleanup_running_delegations()`` + ``_load_state()`` so in-flight
+    # stale audit rows from a prior crash are sealed off before we start
+    # producing new ones (handbook §6 Step 5.4).
+    def _get_executor_for_backend(backend: str) -> object:
+        return _executors.get(backend) if _executors else None
+
+    async def _delegate_cb(msg: object) -> None:
+        assert _queue is not None
+        await handle_delegate_request(
+            msg, state=_state, queue=_queue,
+            get_executor=_get_executor_for_backend,
+            emit_chip_event=_emit_child_chip_event_safe,
+        )
+
+    delegate_sub = await _transport.nc.subscribe(
+        "agent.*.delegate.request", cb=_delegate_cb,
+    )
+    egress_responder_subs.append(delegate_sub)
 
     # Token vault RPC: gateway's RemoteTokenVault forwards each
     # user-mode MCP request here so we can decrypt + refresh tokens

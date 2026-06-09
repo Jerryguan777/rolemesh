@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from typing import Any
+from unittest.mock import AsyncMock
 
 from agent_runner.tools.context import ToolContext
 from agent_runner.tools.rolemesh_tools import (
@@ -58,6 +59,7 @@ def _make_ctx(
         permissions["task_manage_others"] = True
     ctx = ToolContext(
         js=fake_js,  # type: ignore[arg-type]
+        nc=AsyncMock(),  # type: ignore[arg-type]
         job_id="job-123",
         chat_jid="chat-abc",
         group_folder="test-group",

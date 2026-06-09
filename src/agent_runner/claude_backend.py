@@ -343,13 +343,19 @@ class ClaudeBackend:
         self._init = init
         self._session_id = init.session_id
         self._assistant_name = init.assistant_name
-        # Conditionally register send_message: only scheduled-task
-        # containers get it. See create_rolemesh_mcp_server docstring
-        # for rationale (avoids Claude misusing it as the reply channel
-        # in interactive turns).
+        # Register tools by permission so Claude never sees options it
+        # cannot legitimately exercise. Defence-in-depth: the tool
+        # functions themselves still check permissions at execution time.
+        # See create_rolemesh_mcp_server docstring for the
+        # flag→permission mapping.
+        perms = init.permissions
         self._mcp_server = create_rolemesh_mcp_server(
             tool_ctx,
             register_send_message=init.is_scheduled_task,
+            register_delegation=bool(perms.get("agent_delegate")),
+            register_task_management=bool(
+                perms.get("task_schedule") or perms.get("task_manage_others")
+            ),
         )
         self._hooks = hooks if hooks is not None else HookRegistry()
         self._sdk_hooks = _build_hook_callbacks(
