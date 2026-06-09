@@ -105,6 +105,16 @@ The good news: the **feature core lives in new files that do not conflict**
 * **D3 — `test_coworker_from_state_full_copy.py` moves to Phase 2.** It exercises
   `_coworker_from_state` (a `rolemesh/main.py` function changed in Phase 2), so it
   cannot pass under Phase 1 alone.
+* **D4 — v1 exposes the full `permissions` object (Phase 4).** D1's validation
+  (`is_frontdesk=True` requires `agent_delegate=True`) needs the permission to be
+  settable, but `main`'s v1 coworker surface deliberately omitted `permissions`
+  entirely — so a v1-created coworker had no way to gain `agent_delegate`, making
+  a usable frontdesk impossible via v1. Resolution (user-approved): add a
+  `permissions` object (`agent_delegate` / `task_schedule` / `task_manage_others`)
+  to `CoworkerCreate` / `CoworkerUpdate` / the `Coworker` response, and keep the
+  D1 cross-field validation on the EFFECTIVE post-write values. This reverses the
+  v1 "narrow surface" choice for coworkers; it is the deliberate cost of making
+  frontdesk creatable in one call.
 
 ## 3. Phases
 

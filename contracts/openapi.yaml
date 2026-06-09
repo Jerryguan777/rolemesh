@@ -2801,6 +2801,17 @@ components:
         New resources default to `private`; legacy rows were backfilled
         to `shared`.
 
+    # The agent capability bits (rolemesh.auth.permissions.AgentPermissions).
+    # Frontdesk v1.2 (migration D4) brought this onto the v1 surface: a
+    # frontdesk needs agent_delegate=True to use delegate_to_agent, and the
+    # is_frontdesk role gate validates it. All bits default false.
+    CoworkerPermissions:
+      type: object
+      properties:
+        agent_delegate: { type: boolean, default: false }
+        task_schedule: { type: boolean, default: false }
+        task_manage_others: { type: boolean, default: false }
+
     Coworker:
       type: object
       required:
@@ -2812,6 +2823,7 @@ components:
         - status
         - max_concurrent
         - visibility
+        - permissions
         - created_at
       properties:
         id: { type: string, format: uuid }
@@ -2835,6 +2847,12 @@ components:
           format: uuid
           nullable: true
         visibility: { $ref: '#/components/schemas/Visibility' }
+        permissions: { $ref: '#/components/schemas/CoworkerPermissions' }
+        is_frontdesk: { type: boolean, default: false }
+        routing_description:
+          type: string
+          nullable: true
+          maxLength: 500
         created_at: { type: string, format: date-time }
 
     CoworkerCreate:
@@ -2863,6 +2881,12 @@ components:
           minimum: 1
           maximum: 20
           default: 2
+        permissions: { $ref: '#/components/schemas/CoworkerPermissions' }
+        is_frontdesk: { type: boolean, default: false }
+        routing_description:
+          type: string
+          nullable: true
+          maxLength: 500
 
     CoworkerUpdate:
       type: object
@@ -2883,6 +2907,15 @@ components:
           type: integer
           minimum: 1
           maximum: 20
+        permissions:
+          oneOf:
+            - $ref: '#/components/schemas/CoworkerPermissions'
+            - type: 'null'
+        is_frontdesk: { type: boolean, nullable: true }
+        routing_description:
+          type: string
+          nullable: true
+          maxLength: 500
 
     ChannelType:
       type: string

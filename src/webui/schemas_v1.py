@@ -141,14 +141,30 @@ class Me(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class CoworkerPermissions(BaseModel):
+    """The agent capability bits (``rolemesh.auth.permissions.AgentPermissions``).
+
+    Frontdesk v1.2 (migration D4) brought this onto the v1 surface: a frontdesk
+    needs ``agent_delegate=True`` to use ``delegate_to_agent``, and the
+    ``is_frontdesk`` validation checks it. All bits default False so an omitted
+    object on create yields a no-capabilities coworker.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_delegate: bool = False
+    task_schedule: bool = False
+    task_manage_others: bool = False
+
+
 class Coworker(BaseModel):
     """Wire-side projection of the ``coworkers`` row.
 
     Kept narrow on purpose — Phase 1 deliberately leaves the admin
-    sub-resources (``tools`` JSONB, ``permissions``) off the
-    ``/api/v1`` surface so we can drop them without a contract
-    bump (see design §9.3 three-stage retirement). Add them back
-    only when an admin UI need is explicit.
+    sub-resources (``tools`` JSONB) off the ``/api/v1`` surface so we
+    can drop them without a contract bump (see design §9.3 three-stage
+    retirement). ``permissions`` was added back in frontdesk v1.2 (D4)
+    because the frontdesk role gate needs ``agent_delegate``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -167,6 +183,12 @@ class Coworker(BaseModel):
     # a REQUIRED response field — keep it without a default so the yaml
     # ``required`` list and the model agree (test_openapi_contract).
     visibility: Visibility
+    # Frontdesk v1.2: is_frontdesk marks the tenant's user-facing router;
+    # routing_description is the specialist's capability card the frontdesk
+    # LLM reads when routing. permissions carries the capability bits.
+    permissions: CoworkerPermissions
+    is_frontdesk: bool = False
+    routing_description: str | None = None
     created_at: str
 
 
@@ -189,6 +211,13 @@ class CoworkerCreate(BaseModel):
     model_id: str | None = None
     system_prompt: str | None = None
     max_concurrent: int = Field(default=2, ge=1, le=20)
+    # Frontdesk v1.2 (D4). permissions defaults to no-capabilities; set
+    # agent_delegate=True alongside is_frontdesk=True to build a working
+    # frontdesk in one call. routing_description is length-capped to keep the
+    # injected catalog block tractable (long docs belong in system_prompt).
+    permissions: CoworkerPermissions = Field(default_factory=CoworkerPermissions)
+    is_frontdesk: bool = False
+    routing_description: str | None = Field(default=None, max_length=500)
 
 
 class CoworkerUpdate(BaseModel):
@@ -207,6 +236,11 @@ class CoworkerUpdate(BaseModel):
     model_id: str | None = None
     status: CoworkerStatus | None = None
     max_concurrent: int | None = Field(default=None, ge=1, le=20)
+    # Frontdesk v1.2 (D4). Absent = leave alone (handler resolves to current
+    # values before the is_frontdesk role-gate validation).
+    permissions: CoworkerPermissions | None = None
+    is_frontdesk: bool | None = None
+    routing_description: str | None = Field(default=None, max_length=500)
 
 
 # ---------------------------------------------------------------------------

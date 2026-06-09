@@ -1702,6 +1702,14 @@ export interface components {
          * @enum {string}
          */
         Visibility: "private" | "shared";
+        CoworkerPermissions: {
+            /** @default false */
+            agent_delegate: boolean;
+            /** @default false */
+            task_schedule: boolean;
+            /** @default false */
+            task_manage_others: boolean;
+        };
         Coworker: {
             /** Format: uuid */
             id: string;
@@ -1718,6 +1726,10 @@ export interface components {
             /** Format: uuid */
             created_by_user_id?: string | null;
             visibility: components["schemas"]["Visibility"];
+            permissions: components["schemas"]["CoworkerPermissions"];
+            /** @default false */
+            is_frontdesk: boolean;
+            routing_description?: string | null;
             /** Format: date-time */
             created_at: string;
         };
@@ -1730,6 +1742,10 @@ export interface components {
             system_prompt?: string | null;
             /** @default 2 */
             max_concurrent: number;
+            permissions?: components["schemas"]["CoworkerPermissions"];
+            /** @default false */
+            is_frontdesk: boolean;
+            routing_description?: string | null;
         };
         CoworkerUpdate: {
             name?: string;
@@ -1738,6 +1754,9 @@ export interface components {
             model_id?: string | null;
             status?: components["schemas"]["CoworkerStatus"];
             max_concurrent?: number;
+            permissions?: components["schemas"]["CoworkerPermissions"] | null;
+            is_frontdesk?: boolean | null;
+            routing_description?: string | null;
         };
         /** @enum {string} */
         ChannelType: "web" | "telegram" | "slack";
