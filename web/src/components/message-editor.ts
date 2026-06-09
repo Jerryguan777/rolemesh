@@ -1,9 +1,9 @@
 // <rm-message-editor> — composer for the chat-panel.
 //
 // History: shipped in v1.1 as a textarea + send button. v2-C grows the
-// toolbar to match `docs/webui-ui-redesign-v2-prototype.html` (lines
-// 449-466): an attach affordance on the left, a coworker selector in
-// the middle, and the send button on the right. The selector is a
+// toolbar to match the v2 redesign: an attach affordance on the left,
+// a coworker selector in the middle, and the send button on the right.
+// The selector is a
 // second access path to the same switch chat-shell offers in its
 // sidebar — useful when the user wants to address THIS message to a
 // different coworker without leaving the conversation.

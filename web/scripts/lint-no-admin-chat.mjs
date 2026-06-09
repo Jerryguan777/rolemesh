@@ -26,8 +26,8 @@ const ROOT = resolve(__dirname, '..', 'src');
 // loophole.
 //
 // Safety writes (create/update/delete rules) and the CSV export
-// stay on `/api/admin/*` by design (`docs/webui-backend-v1.1-design.md`
-// §3 Phase 4 — v1 surface is GET-only for safety). The 04 session's
+// stay on `/api/admin/*` by design (the v1 surface is GET-only for
+// safety). The 04 session's
 // frontend migration switched safety READS to the typed v1 ApiClient
 // but writes intentionally remain admin-only, so this allowlist
 // stays permanently rather than being a temporary Phase 4 staging

@@ -347,7 +347,7 @@ class ContainerAgentExecutor:
             if specs:
                 slow_check_specs = specs
 
-        # HITL approval policy snapshot (docs/21-hitl-approval-plan.md §S2/§S3).
+        # HITL approval policy snapshot (docs/12-hitl-approval-architecture.md §4).
         # Ship the tenant's enabled policies so the container's approval hook can
         # match a gated MCP call locally without a DB round-trip. None when the
         # tenant has no enabled policies, so the hook stays off the chain

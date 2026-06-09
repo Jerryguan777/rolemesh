@@ -1,7 +1,7 @@
 // <rm-settings-shell> — v2 settings chrome.
 //
-// Layout (per docs/webui-ui-redesign-v2-prototype.html `.settings`
-// surface, full-page variant):
+// Layout (per the v2 redesign's `.settings` surface, full-page
+// variant):
 //
 //   ┌──────────────┬──────────────────────────────────────────┐
 //   │ Settings  ×  │ Page title                               │
@@ -69,8 +69,7 @@ interface NavEntry {
   slug: string;
   label: string;
   /** Small SVG that sits left of the label in the rail. Matches the
-   *  prototype `.ni > svg` pattern (docs/webui-ui-redesign-v2-prototype.html
-   *  lines 489-502). */
+   *  prototype's `.ni > svg` pattern. */
   icon: () => SVGTemplateResult;
   /** Optional badge text shown right-aligned in the nav row. */
   badge?: string;

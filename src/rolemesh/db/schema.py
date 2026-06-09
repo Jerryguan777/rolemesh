@@ -1500,7 +1500,7 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         "ON eval_runs (tenant_id, coworker_config_sha256)"
     )
 
-    # ----- HITL approval (docs/21-hitl-approval-plan.md §4) ---------------
+    # ----- HITL approval (docs/12-hitl-approval-architecture.md §4) ---------------
     # Tenant-scoped policy: which (mcp_server, tool) calls require a human
     # approval, gated by a structured ``condition_expr`` (see §7 / the pure
     # matcher in ``agent_runner.approval.policy``). ``tool_name = '*'`` is a
@@ -1573,7 +1573,7 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     await conn.execute(
         "ALTER TABLE approval_requests ADD COLUMN IF NOT EXISTS rationale TEXT"
     )
-    # Safety->approval provenance (docs/21-hitl-approval-plan.md §3.10 / §11.4):
+    # Safety->approval provenance (docs/12-hitl-approval-architecture.md §11.4):
     # a JSON {kind, rule_id, check_id, stage} object set when the safety pipeline
     # raises a require_approval verdict at PRE_TOOL_CALL and the hook bridge turns
     # it into a HITL ticket; null for a business-policy approval. Like

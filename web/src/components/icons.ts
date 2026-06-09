@@ -209,8 +209,8 @@ export function iconCopy(size = 15): SVGTemplateResult {
   `;
 }
 
-/** Settings-nav icons (per docs/webui-ui-redesign-v2-prototype.html
- *  lines 489-502). Sized 16×16 to fit the .ni rail; stroke-width 1.8
+/** Settings-nav icons (per the v2 redesign). Sized 16×16 to fit the
+ *  .ni rail; stroke-width 1.8
  *  matches the prototype's quiet line weight. */
 
 /** Coworker — head + shoulders silhouette. */

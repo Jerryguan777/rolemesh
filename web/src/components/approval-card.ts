@@ -1,4 +1,4 @@
-// HITL approval card (.hitl-ui/spec.md §3; docs/21-hitl-approval-plan.md §10 S5).
+// HITL approval card (.hitl-ui/spec.md §3; docs/12-hitl-approval-architecture.md §10 S5).
 // Renders one tool-approval request inside the chat stream as a rich decision
 // surface: tool identity, the raw params the decision turns on, the agent's
 // optional rationale, a live countdown, and a Reject-with-note / Approve action

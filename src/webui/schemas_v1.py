@@ -456,7 +456,7 @@ class MCPServerUpdate(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# HITL tool-approval policies (docs/21-hitl-approval-plan.md §4 / §7 / §10 S5)
+# HITL tool-approval policies (docs/12-hitl-approval-architecture.md §4 / §7 / §10 S5)
 # ---------------------------------------------------------------------------
 
 
@@ -1082,7 +1082,7 @@ class WsServerEventMessageAppended(BaseModel):
 
 
 class WsServerEventApprovalRequested(BaseModel):
-    """HITL approval card push (docs/21-hitl-approval-plan.md §10 S4).
+    """HITL approval card push (docs/12-hitl-approval-architecture.md §10 S4).
 
     Out-of-band, like ``event.message.appended``: an agent's blocked MCP tool
     call needs a human ✅/❌, so the orchestrator pushes this independent of any

@@ -2714,7 +2714,7 @@ export interface components {
              * Format: uuid
              * @description The approval the SPA echoes back in a
              *     request.approval_decision frame. HITL tool approval
-             *     (docs/21-hitl-approval-plan.md §10 S4). Carried out-of-band
+             *     (docs/12-hitl-approval-architecture.md §10 S4). Carried out-of-band
              *     like event.message.appended — an approval can outlive the
              *     run that triggered it, and scheduled-task approvals have no
              *     run at all.

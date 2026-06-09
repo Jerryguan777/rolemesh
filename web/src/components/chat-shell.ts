@@ -1,6 +1,6 @@
 // <rm-chat-shell> — v2 outer chrome for the chat experience.
 //
-// Layout (per docs/webui-ui-redesign-v2-prototype.html):
+// Layout (per the v2 redesign):
 //
 //   ┌──────────────┬──────────────────────────────────────────┐
 //   │ brand        │ topbar: 3 icons + tenant pill            │

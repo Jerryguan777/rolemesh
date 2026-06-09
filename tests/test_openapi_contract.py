@@ -560,7 +560,7 @@ _EXPECTED_SERVER_EVENTS: dict[str, str] = {
     "event.run.error": "WsServerEventRunError",
     "event.run.progress": "WsServerEventRunProgress",
     "event.message.appended": "WsServerEventMessageAppended",
-    # HITL tool approval (docs/21-hitl-approval-plan.md §10 S4).
+    # HITL tool approval (docs/12-hitl-approval-architecture.md §10 S4).
     "event.approval.requested": "WsServerEventApprovalRequested",
     "event.approval.resolved": "WsServerEventApprovalResolved",
 }
@@ -569,7 +569,7 @@ _EXPECTED_CLIENT_FRAMES: dict[str, str] = {
     "request.run": "WsClientFrameRequestRun",
     "request.cancel": "WsClientFrameRequestCancel",
     "request.stop": "WsClientFrameRequestStop",
-    # HITL tool approval decision (docs/21-hitl-approval-plan.md §10 S4).
+    # HITL tool approval decision (docs/12-hitl-approval-architecture.md §10 S4).
     "request.approval_decision": "WsClientFrameApprovalDecision",
 }
 

@@ -8,7 +8,6 @@
 //
 // Anti-mirror: tests are written from the wizard's externally
 // observable behaviour. They were drafted from the v2-B spec
-// (`docs/webui-ui-redesign-v2-sessions/v2-B-coworker-wizard-and-credentials.md`)
 // before reading the implementation, and a couple of them
 // (slug-edge-cases, partial-commit) intentionally probe scenarios the
 // happy-path code would skip.

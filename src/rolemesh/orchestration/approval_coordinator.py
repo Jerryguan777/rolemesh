@@ -1,4 +1,4 @@
-"""Orchestrator-side HITL approval coordinator (docs/21-hitl-approval-plan.md §8).
+"""Orchestrator-side HITL approval coordinator (docs/12-hitl-approval-architecture.md §8).
 
 The container blocks an MCP tool call in place and publishes
 ``agent.{job_id}.approval_request``; the orchestrator must, for the lifetime
