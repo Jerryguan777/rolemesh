@@ -451,7 +451,7 @@ export class ApiClient {
   }
 
   // ------------------------------------------------------------------
-  // HITL tool-approval policies (docs/21-hitl-approval-plan.md §10 S5)
+  // HITL tool-approval policies (docs/12-hitl-approval-architecture.md §10 S5)
   // ------------------------------------------------------------------
 
   async listApprovalPolicies(): Promise<ApprovalPolicy[]> {

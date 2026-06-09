@@ -147,7 +147,7 @@ def test_timezone_falls_back_to_utc_when_nothing_valid() -> None:
     assert cfg(TZ=_DELETE, no_system_tz=True)["TIMEZONE"] == "UTC"
 
 
-# --- HITL approval (docs/21-hitl-approval-plan.md §5) ------------------------
+# --- HITL approval (docs/12-hitl-approval-architecture.md §5) ------------------------
 
 
 def test_approval_timeout_default_is_5_min() -> None:

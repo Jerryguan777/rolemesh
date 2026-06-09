@@ -1,7 +1,7 @@
 """Container-side blocking approval hook (HITL S2).
 
 This is the ``block-and-await`` half of the HITL tool-approval feature
-(docs/21-hitl-approval-plan.md §6 / §9 R1). It is a unified
+(docs/12-hitl-approval-architecture.md §6 / §9 R1). It is a unified
 ``HookHandler`` registered on the container's ``HookRegistry``; its
 ``on_pre_tool_use`` runs inside the agent's own ReAct loop:
 

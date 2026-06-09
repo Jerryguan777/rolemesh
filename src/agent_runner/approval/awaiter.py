@@ -14,7 +14,7 @@ coroutine ``(subject, payload) -> None`` and drive resolution via
 :meth:`ApprovalAwaiter.resolve_decision`. That keeps it unit-testable against a
 stub broker with no real broker and no Postgres.
 
-Concurrency (docs/21-hitl-approval-plan.md §6): a single turn can dispatch
+Concurrency (docs/12-hitl-approval-architecture.md §6): a single turn can dispatch
 multiple tool calls concurrently, so :meth:`await_decision` can be re-entered on
 the same awaiter. Each call owns a fresh ``request_id`` and its own ``Future`` in
 ``_pending``; decisions route back by ``request_id`` so concurrent approvals

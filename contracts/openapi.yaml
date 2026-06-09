@@ -1620,7 +1620,7 @@ paths:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
 
   # ===================================================================
-  # HITL tool approval (docs/21-hitl-approval-plan.md §10 S5)
+  # HITL tool approval (docs/12-hitl-approval-architecture.md §10 S5)
   # ===================================================================
   /api/v1/approvals/policies:
     get:
@@ -3196,7 +3196,7 @@ components:
           nullable: true
 
     # -----------------------------------------------------------------
-    # HITL tool-approval policies (docs/21-hitl-approval-plan.md §4/§7/§10 S5)
+    # HITL tool-approval policies (docs/12-hitl-approval-architecture.md §4/§7/§10 S5)
     # -----------------------------------------------------------------
 
     ConditionExpr:
@@ -4282,7 +4282,7 @@ components:
           description: |
             The approval the SPA echoes back in a
             request.approval_decision frame. HITL tool approval
-            (docs/21-hitl-approval-plan.md §10 S4). Carried out-of-band
+            (docs/12-hitl-approval-architecture.md §10 S4). Carried out-of-band
             like event.message.appended — an approval can outlive the
             run that triggered it, and scheduled-task approvals have no
             run at all.

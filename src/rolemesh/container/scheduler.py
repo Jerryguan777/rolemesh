@@ -54,7 +54,7 @@ class _GroupState:
     retry_count: int = 0
     tenant_id: str = ""
     coworker_id: str = ""
-    # HITL approval (docs/21-hitl-approval-plan.md §8). ``idle_handle`` is the
+    # HITL approval (docs/12-hitl-approval-architecture.md §8). ``idle_handle`` is the
     # reaping-path-A timer, owned here (not in a main.py closure) so the
     # approval suspend path can cancel/re-arm it from a NATS handler.
     # ``awaiting_approval`` holds every request_id currently blocking the
@@ -286,7 +286,7 @@ class GroupQueue:
         if state.pending_tasks:
             self.request_shutdown(group_jid)
 
-    # -- HITL approval: idle suspend / resume (docs/21-hitl-approval-plan.md §8)
+    # -- HITL approval: idle suspend / resume (docs/12-hitl-approval-architecture.md §8)
 
     def arm_idle_timer(self, group_jid: str) -> None:
         """(Re)arm the per-group idle reaping timer (reaping path A).

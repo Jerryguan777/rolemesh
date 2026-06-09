@@ -255,7 +255,7 @@ _safety_engine: SafetyEngine | None = None
 _safety_rpc_server: object | None = None
 _safety_thread_pool: object | None = None
 
-# HITL approval coordinator (docs/21-hitl-approval-plan.md §8). Created when the
+# HITL approval coordinator (docs/12-hitl-approval-architecture.md §8). Created when the
 # NATS subscriptions start; owns the orchestrator-side idle suspend/resume,
 # expiry sweep, and restart recovery. None until startup so importing this
 # module without full startup stays cheap.
@@ -519,7 +519,7 @@ async def _apply_model_output_safety(
             block=("[Response blocked by safety policy]", None)
         )
     if verdict.action in ("block", "require_approval"):
-        # R4 (docs/21-hitl-approval-plan.md §11.4): the safety->approval bridge
+        # R4 (docs/12-hitl-approval-architecture.md §11.4): the safety->approval bridge
         # is scoped to PRE_TOOL_CALL — the one stage with an awaiting container
         # and an approval surface. MODEL_OUTPUT runs orchestrator-side with no
         # container to block, so a ``require_approval`` verdict stays a HARD
@@ -1364,7 +1364,7 @@ async def _start_nats_ipc_subscriptions(transport: NatsTransport, deps: _IpcDeps
 
     tasks.append(asyncio.create_task(_handle_safety_events()))
 
-    # HITL approval (docs/21-hitl-approval-plan.md §8). The container publishes
+    # HITL approval (docs/12-hitl-approval-architecture.md §8). The container publishes
     # ``approval_request`` when it blocks a gated MCP tool call and
     # ``approval_cancel`` from its finally; the orchestrator suspends idle
     # reaping for the bounded wait, persists the request, relays decisions on

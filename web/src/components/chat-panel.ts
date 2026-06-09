@@ -101,7 +101,7 @@ export class ChatPanel extends LitElement {
   @state() runTerminal = false;
   // In-flight HITL approval cards for the active conversation. Driven by
   // `event.approval.requested` / `event.approval.resolved` and refreshed
-  // from REST on (re)connect (docs/21-hitl-approval-plan.md §10 S5).
+  // from REST on (re)connect (docs/12-hitl-approval-architecture.md §10 S5).
   @state() private approvals: ApprovalCard[] = [];
   // request_ids whose decision was just sent and is awaiting the resolved
   // echo — disables the card buttons so a double-tap can't fire twice.

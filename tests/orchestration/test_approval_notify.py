@@ -1,4 +1,4 @@
-"""ApprovalNotifier delivery layer (docs/21-hitl-approval-plan.md §10 S4).
+"""ApprovalNotifier delivery layer (docs/12-hitl-approval-architecture.md §10 S4).
 
 Drives the card lifecycle — target resolution, Telegram vs web delivery, and
 the deterministic terminal edit — against fakes at the *outermost* boundaries

@@ -1,4 +1,4 @@
-"""v1 WS HITL approval frames (docs/21-hitl-approval-plan.md §10 S4).
+"""v1 WS HITL approval frames (docs/12-hitl-approval-architecture.md §10 S4).
 
 Covers the new client decision frame and server card events at the schema
 level, the field-whitelisting projection from the orchestrator carrier, and the

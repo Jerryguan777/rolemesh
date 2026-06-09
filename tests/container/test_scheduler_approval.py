@@ -1,4 +1,4 @@
-"""GroupQueue idle suspend/resume for HITL approval (docs/21-hitl-approval-plan.md §8).
+"""GroupQueue idle suspend/resume for HITL approval (docs/12-hitl-approval-architecture.md §8).
 
 Timer-lifecycle focused: these prove the suspend closes all three reaping paths,
 that resume re-arms idle exactly once (and only when the last pending approval

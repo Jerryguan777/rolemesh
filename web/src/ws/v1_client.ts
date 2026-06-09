@@ -64,7 +64,7 @@ export type RunErrorEvent =
   components['schemas']['WsServerEventRunError'];
 
 /** HITL tool-approval card push + its deterministic resolution
- *  (docs/21-hitl-approval-plan.md §10 S4). The card UI subscribes to
+ *  (docs/12-hitl-approval-architecture.md §10 S4). The card UI subscribes to
  *  these via {@link V1WsClient.onEvent}. */
 export type ApprovalRequestedEvent =
   components['schemas']['WsServerEventApprovalRequested'];

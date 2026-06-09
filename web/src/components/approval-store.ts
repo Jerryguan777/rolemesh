@@ -1,4 +1,4 @@
-// Pure state helpers for the HITL approval cards (docs/21-hitl-approval-plan.md
+// Pure state helpers for the HITL approval cards (docs/12-hitl-approval-architecture.md
 // §10 S5; rich-card contract in .hitl-ui/spec.md §3 + Appendix C.5). Kept out of
 // `chat-panel.ts` so the event→state transitions are unit-testable in isolation,
 // without mounting the whole chat surface.
