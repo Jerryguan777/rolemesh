@@ -404,6 +404,10 @@ export class CoworkerWizard extends LitElement {
           // max_concurrent intentionally not surfaced
           // (locked decision #10 — backend default applies).
           max_concurrent: 2,
+          // Frontdesk v1.2: the wizard creates ordinary specialists; a
+          // frontdesk is flagged via the coworker API / a future admin
+          // toggle, not this create form. Always false here.
+          is_frontdesk: false,
         };
         coworker = await this.api.createCoworker(body);
       } catch (err) {

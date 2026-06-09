@@ -80,6 +80,8 @@ function mkCoworker(over: Partial<Coworker>): Coworker {
     max_concurrent: 2,
     created_by_user_id: null,
     visibility: 'private',
+    permissions: { agent_delegate: false, task_schedule: false, task_manage_others: false },
+    is_frontdesk: false,
     created_at: '',
     ...over,
   };
