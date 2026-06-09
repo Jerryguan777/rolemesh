@@ -253,6 +253,7 @@ describe('<rm-skill-dialog>', () => {
       frontmatter_backend: {},
       files: {
         'SKILL.md': {
+          path: 'SKILL.md',
           content:
             '---\nname: legacy-skill\ndescription: fresh from file\n---\n# Body\n',
           mime_type: 'text/markdown',
@@ -261,6 +262,7 @@ describe('<rm-skill-dialog>', () => {
       },
       created_at: '',
       updated_at: '',
+      visibility: 'private',
     } as Skill;
     const el = mount();
     el.editing = existing;

@@ -69,8 +69,11 @@ const COWORKER_A: Coworker = {
   name: 'Ops coworker',
   folder: 'ops',
   agent_backend: 'claude',
-  status: 'idle',
+  status: 'active',
   max_concurrent: 1,
+  visibility: 'private',
+  permissions: { agent_delegate: false, task_schedule: false, task_manage_others: false },
+  is_frontdesk: false,
   created_at: '2025-01-01T00:00:00Z',
 };
 

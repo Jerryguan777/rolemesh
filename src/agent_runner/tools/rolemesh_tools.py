@@ -124,6 +124,47 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "required": ["task_id"],
         },
     },
+    {
+        "name": "delegate_to_agent",
+        "description": (
+            "Delegate the user's request to a domain specialist and return "
+            "their answer.\n\n"
+            "RULES:\n"
+            "- Identify target by its agent id (e.g. 'trading'). Not a path.\n"
+            "- Write a self-contained prompt; the target cannot see this "
+            "conversation.\n"
+            "- Use 'isolated' for one-shot questions; 'sticky' for a "
+            "multi-turn workflow with the same specialist.\n"
+            "- You may call this multiple times per turn, including in "
+            "parallel.\n"
+            "- If isError=true, your reply MUST quote the literal reason. "
+            "See system prompt."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string"},
+                "prompt": {"type": "string"},
+                "context_mode": {
+                    "type": "string",
+                    "enum": ["isolated", "sticky"],
+                    "default": "isolated",
+                },
+            },
+            "required": ["target", "prompt"],
+        },
+    },
+    {
+        "name": "list_agents",
+        "description": (
+            "List the domain specialist agents available in this tenant. "
+            "Returns each specialist's name, id, and short description. "
+            "Use when unsure which specialist matches the user's request, "
+            "or to refresh your view of available agents (the catalog you "
+            "received at spawn may be stale if specialists changed since)."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
 ]
 
 
@@ -141,6 +182,18 @@ def _text_result(text: str, *, is_error: bool = False) -> ToolResult:
 
 
 async def send_message(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    # Frontdesk v1.2: forbid send_message from inside a delegated call.
+    # A delegate runs in a child conversation on an ``internal`` channel
+    # binding; routing a fresh outbound message to that chat would either
+    # be silently dropped (WebUI gateway doesn't subscribe to internal
+    # bindings) or pollute parent UX. The delegate's reply path is the RPC
+    # response, not this tool.
+    if ctx.role_config.get("is_delegated_call"):
+        return _text_result(
+            "send_message is not allowed inside a delegated call. "
+            "Your reply travels back to the frontdesk as the tool result.",
+            is_error=True,
+        )
     data: dict[str, Any] = {
         "type": "message",
         "chatJid": ctx.chat_jid,
@@ -338,6 +391,111 @@ async def update_task(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     return _text_result(f"Task {task_id} update requested.")
 
 
+MAX_DELEGATE_PROMPT_CHARS = 16_000
+
+
+async def delegate_to_agent(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    """Synchronously hand the user's request to a domain specialist.
+
+    Performs the agent-side validation that doesn't need orchestrator
+    state (permission gate, prompt length, context_mode shape) before
+    making the core NATS RPC. The 320s timeout matches the business
+    deadline (300s) + a small buffer; tests that exercise the slow-LLM
+    path mock the orchestrator's side rather than waiting here.
+    """
+    if not ctx.permissions.get("agent_delegate"):
+        return _text_result(
+            "Permission denied: agent_delegate is not enabled.",
+            is_error=True,
+        )
+    target = str(args.get("target") or "").strip()
+    prompt = str(args.get("prompt") or "")
+    context_mode = args.get("context_mode") or "isolated"
+    if not target or not prompt:
+        return _text_result(
+            "target and prompt are required.", is_error=True
+        )
+    if len(prompt) > MAX_DELEGATE_PROMPT_CHARS:
+        return _text_result(
+            f"prompt exceeds {MAX_DELEGATE_PROMPT_CHARS} chars "
+            f"({len(prompt)} given). Self-contained prompts must fit in "
+            "one tool call — split the task into smaller delegations "
+            "(e.g. one call per question or per document section), or "
+            "ask the user to upload long content via file tools that "
+            "the specialist can read directly. Do NOT retry with the "
+            "same oversized prompt.",
+            is_error=True,
+        )
+    if context_mode not in ("isolated", "sticky"):
+        return _text_result(
+            "context_mode must be 'isolated' or 'sticky'.",
+            is_error=True,
+        )
+
+    # Server enforces MAX_DELEGATION_DEPTH (handbook §6 Step 5.3); this
+    # value is just what the caller knows about itself. role_config is
+    # typed ``dict[str, object]`` so we narrow defensively — a malformed
+    # value falls back to 0 rather than crashing the tool call.
+    raw_depth = ctx.role_config.get("delegation_depth")
+    depth = raw_depth if isinstance(raw_depth, int) else 0
+
+    payload = {
+        "type": "delegate_to_agent",
+        "tenantId": ctx.tenant_id,
+        "fromCoworkerId": ctx.coworker_id,
+        "fromConversationId": ctx.conversation_id,
+        "userId": ctx.user_id or None,
+        "target": target,
+        "prompt": prompt,
+        "contextMode": context_mode,
+        "depth": depth,
+    }
+    try:
+        resp = await ctx.request(
+            f"agent.{ctx.job_id}.delegate.request",
+            payload,
+            timeout=320.0,
+        )
+    except TimeoutError:
+        return _text_result(
+            f"Delegation to {target!r} timed out at the RPC layer.",
+            is_error=True,
+        )
+    return _text_result(
+        str(resp.get("text", "")),
+        is_error=bool(resp.get("isError", False)),
+    )
+
+
+async def list_agents(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    """Refresh the domain-specialist roster mid-turn (Frontdesk v1.2).
+
+    The spawn-time catalog injected into the system prompt may be stale
+    when specialists were added or removed since the frontdesk
+    container started. This tool hits the orchestrator's core NATS RPC
+    responder for a fresh roster. Always returns either the catalog
+    text or an explicit error string — never raises out of the tool.
+    """
+    payload = {
+        "tenantId": ctx.tenant_id,
+        "fromCoworkerId": ctx.coworker_id,
+    }
+    try:
+        resp = await ctx.request(
+            f"agent.{ctx.job_id}.list_agents.request",
+            payload,
+            timeout=10.0,
+        )
+    except TimeoutError:
+        return _text_result("list_agents timed out.", is_error=True)
+    text = str(resp.get("text", ""))
+    if resp.get("error"):
+        return _text_result(
+            f"list_agents failed: {resp['error']}", is_error=True
+        )
+    return _text_result(text)
+
+
 # Map tool names to their implementation functions.
 TOOL_FUNCTIONS: dict[str, Any] = {
     "send_message": send_message,
@@ -347,4 +505,6 @@ TOOL_FUNCTIONS: dict[str, Any] = {
     "resume_task": resume_task,
     "cancel_task": cancel_task,
     "update_task": update_task,
+    "list_agents": list_agents,
+    "delegate_to_agent": delegate_to_agent,
 }

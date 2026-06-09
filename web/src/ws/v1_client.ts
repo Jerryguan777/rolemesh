@@ -71,6 +71,21 @@ export type ApprovalRequestedEvent =
 export type ApprovalResolvedEvent =
   components['schemas']['WsServerEventApprovalResolved'];
 
+/** Frontdesk v1.5 delegation sub-chip stream (docs §1.5). The four
+ *  frames drive the ephemeral `<rm-child-agent-chip>` elements the
+ *  chat-panel mounts under the parent agent's status bar: started
+ *  mounts a chip (keyed by `child_conv_id`), progress/tool_use update
+ *  its status line, completed unmounts it. `run_id` ties the chip to
+ *  the parent's active run so a stale redelivery can be ignored. */
+export type DelegationStartedEvent =
+  components['schemas']['WsServerEventDelegationStarted'];
+export type DelegationProgressEvent =
+  components['schemas']['WsServerEventDelegationProgress'];
+export type DelegationToolUseEvent =
+  components['schemas']['WsServerEventDelegationToolUse'];
+export type DelegationCompletedEvent =
+  components['schemas']['WsServerEventDelegationCompleted'];
+
 export type ConnectionStatus = WsConnectionStatus;
 
 export type EventHandler = (event: ServerEvent) => void;

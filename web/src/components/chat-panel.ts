@@ -28,8 +28,14 @@ import {
   type ConnectionStatus,
   type ApprovalRequestedEvent,
   type ApprovalResolvedEvent,
+  type DelegationStartedEvent,
+  type DelegationProgressEvent,
+  type DelegationToolUseEvent,
+  type DelegationCompletedEvent,
 } from '../ws/v1_client.js';
+import { beautifyToolName } from '../utils/tool-name.js';
 import './approval-card.js';
+import './child-agent-chip.js';
 import type { ApprovalDecisionDetail } from './approval-card.js';
 import {
   type ApprovalCard,
@@ -47,12 +53,41 @@ interface AgentStatusState {
   label: string;
 }
 
+/** Frontdesk v1.5 delegation sub-chip state (docs §1.5).
+ *
+ *  Keyed by `child_conv_id` from the orchestrator so two concurrent
+ *  delegations render as two distinct chips. The whole map is cleared
+ *  whenever the parent run lands terminal (completed / error / stop /
+ *  cancel) — defensive: a dropped `event.delegation.completed` frame
+ *  must not strand a chip on screen forever.
+ *
+ *  `startedAt` is per-chip (epoch ms) so the elapsed-seconds tail in
+ *  the rendered line ticks independently for each delegation. */
+interface ChildChipState {
+  delegationId: string;
+  targetName: string;
+  targetFolder: string;
+  contextMode: string;
+  /** Status / tool line WITHOUT the elapsed tail; the renderer appends
+   *  the `(Ns)` suffix from `startedAt` so the 1Hz ticker advances it
+   *  without rewriting state. */
+  baseLine: string;
+  startedAt: number;
+}
+
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'safety';
   content: string;
   streaming?: boolean;
   safetyStage?: string;
   safetyRuleId?: string;
+  /** Frontdesk v1.2: when the orchestrator fans a delegation child's
+   *  reply up to the parent conversation it prepends `[via <target>] `
+   *  so the user knows the message came from a specialist they don't
+   *  normally see. `extractViaPrefix` splits the marker off the body so
+   *  the renderer can show it as a small badge next to "Assistant"
+   *  rather than as literal text in the bubble. */
+  viaTargetName?: string;
   /** Ordering key (epoch ms) for chronological interleave with approval cards.
    *  Stamped with the wall clock when the bubble first gets *content* (live), or
    *  parsed from the server `timestamp` on reload. An empty streaming
@@ -64,6 +99,25 @@ export interface ChatMessage {
 }
 
 type RunState = 'idle' | 'running' | 'stopping' | 'cancelling';
+
+/** Match a leading `[via Trading Desk] body...` marker — captures the
+ *  target name and the body separately. The name allows letters,
+ *  digits, spaces, dashes, underscores, dots and slashes (typical
+ *  `coworker.name` characters), bounded to 80 chars; the closing
+ *  bracket terminates it. Anchored at start-of-string so it only fires
+ *  on the leading marker, never on bracketed text mid-body. */
+const VIA_PREFIX_RE = /^\[via ([^\]]{1,80})\]\s+/;
+
+/** Split a leading `[via <name>] ` marker off an assistant message.
+ *  Returns the parsed `viaTargetName` (when present) plus the body with
+ *  the marker stripped. Exported for the unit test. */
+export function extractViaPrefix(
+  text: string,
+): { viaTargetName?: string; content: string } {
+  const m = text.match(VIA_PREFIX_RE);
+  if (!m) return { content: text };
+  return { viaTargetName: m[1], content: text.slice(m[0].length) };
+}
 
 @customElement('rm-chat-panel')
 export class ChatPanel extends LitElement {
@@ -103,6 +157,15 @@ export class ChatPanel extends LitElement {
   // `event.approval.requested` / `event.approval.resolved` and refreshed
   // from REST on (re)connect (docs/12-hitl-approval-architecture.md §10 S5).
   @state() private approvals: ApprovalCard[] = [];
+  // Frontdesk v1.5: live delegation sub-chips, keyed by child_conv_id.
+  // Mounted on event.delegation.started, updated on progress/tool_use,
+  // unmounted on completed — and cleared wholesale when the parent run
+  // lands terminal so a dropped completed frame can't strand a chip.
+  @state() private activeChildChips: Map<string, ChildChipState> = new Map();
+  // 1Hz ticker that re-renders the chips so their elapsed-seconds tail
+  // advances. Started when the first chip mounts; cleared when the last
+  // one unmounts (or on any terminal run transition).
+  private durationTickTimer: ReturnType<typeof setInterval> | null = null;
   // request_ids whose decision was just sent and is awaiting the resolved
   // echo — disables the card buttons so a double-tap can't fire twice.
   private approvalInflight = new Set<string>();
@@ -149,6 +212,8 @@ export class ChatPanel extends LitElement {
     this.clearStoppingTimer();
     this.clearCancellingTimer();
     this.clearRunningWatchdog();
+    this.clearDurationTick();
+    this.activeChildChips = new Map();
     this.teardownV1();
     if (this.tokenRefreshHandler) {
       window.removeEventListener('rm-token-refreshed', this.tokenRefreshHandler);
@@ -203,15 +268,25 @@ export class ChatPanel extends LitElement {
       const msgs: Message[] = await this.api.listMessages(conversationId);
       this.messages = msgs
         .filter((m) => m.content.trim())
-        .map((m) => ({
-          role: m.role === 'assistant' ? 'assistant' : 'user',
-          content: m.content,
-          // Server timestamp is the ordering key on reload so persisted
-          // messages interleave correctly with the conversation's resolved
-          // approval cards (both server-clock). Falls back to 0 for the rare
-          // row with no timestamp, which keeps it at the very top.
-          timestamp: m.timestamp ? Date.parse(m.timestamp) : 0,
-        }));
+        .map((m) => {
+          const isAssistant = m.role === 'assistant';
+          // Only assistant rows carry the `[via <name>]` delegation
+          // marker; a user message that happens to start with `[via …]`
+          // is the user's own text and must render verbatim.
+          const { viaTargetName, content } = isAssistant
+            ? extractViaPrefix(m.content)
+            : { viaTargetName: undefined, content: m.content };
+          return {
+            role: isAssistant ? ('assistant' as const) : ('user' as const),
+            content,
+            viaTargetName,
+            // Server timestamp is the ordering key on reload so persisted
+            // messages interleave correctly with the conversation's resolved
+            // approval cards (both server-clock). Falls back to 0 for the rare
+            // row with no timestamp, which keeps it at the very top.
+            timestamp: m.timestamp ? Date.parse(m.timestamp) : 0,
+          };
+        });
     } catch (err) {
       console.warn('listMessages failed', err);
       this.messages = [];
@@ -225,6 +300,9 @@ export class ChatPanel extends LitElement {
     this.runState = 'idle';
     this.runTerminal = false;
     this.activeRunId = null;
+    // Delegation chips are run-scoped; a conversation switch invalidates them.
+    this.clearDurationTick();
+    this.activeChildChips = new Map();
     // Approval cards are conversation-scoped; drop the previous chat's.
     this.approvals = [];
     this.approvalInflight.clear();
@@ -379,6 +457,7 @@ export class ChatPanel extends LitElement {
         this.clearStoppingTimer();
         this.clearCancellingTimer();
         this.clearRunningWatchdog();
+        this.clearChildChips();
         if (this.activeCoworkerId) {
           void this.refreshConversations(this.activeCoworkerId);
         }
@@ -423,9 +502,12 @@ export class ChatPanel extends LitElement {
             ? Date.parse(appendedAt)
             : Date.now();
         if (content) {
+          // Strip a leading `[via <target>]` delegation marker into a
+          // badge rather than rendering it as literal text.
+          const { viaTargetName, content: body } = extractViaPrefix(content);
           this.messages = [
             ...this.messages,
-            { role: 'assistant', content, timestamp: ts },
+            { role: 'assistant', content: body, viaTargetName, timestamp: ts },
           ];
         }
         break;
@@ -500,8 +582,15 @@ export class ChatPanel extends LitElement {
         this.clearStoppingTimer();
         this.clearCancellingTimer();
         this.clearRunningWatchdog();
+        this.clearChildChips();
         break;
       }
+      case 'event.delegation.started':
+      case 'event.delegation.progress':
+      case 'event.delegation.tool_use':
+      case 'event.delegation.completed':
+        this.handleDelegationEvent(e);
+        break;
       default:
         // PR23 removed the `event.run.requires_reauth` case — the
         // backend never emitted it (the user-mode MCP path that would
@@ -540,6 +629,144 @@ export class ChatPanel extends LitElement {
     }
   }
 
+  // --- Frontdesk v1.5 delegation sub-chips ---------------------------------
+
+  /** Apply one `event.delegation.*` frame to the chip map. Narrowed on
+   *  `e.type` so each branch sees its fully-typed member shape — no
+   *  `any`, the generated union is the source of truth for field names.
+   *
+   *  - started: mount a chip keyed by child_conv_id (idempotent — a
+   *    redelivered started keeps the original startedAt so the elapsed
+   *    tail doesn't reset).
+   *  - progress: replace the status line (ignored if no chip — a frame
+   *    racing ahead of started shouldn't conjure a phantom chip).
+   *  - tool_use: replace the line with the beautified tool name + a
+   *    truncated input preview.
+   *  - completed: unmount the chip. */
+  private handleDelegationEvent(
+    e:
+      | DelegationStartedEvent
+      | DelegationProgressEvent
+      | DelegationToolUseEvent
+      | DelegationCompletedEvent,
+  ): void {
+    // A redelivered frame from a previous run must not resurrect a chip
+    // for the turn the user already moved past. Once we have an active
+    // run, scope chip mutations to it. (Before the first run.started —
+    // a delegation can't legitimately precede its parent run — we let
+    // it through so tests / edge orderings still mount.)
+    if (this.activeRunId && e.run_id !== this.activeRunId) return;
+
+    switch (e.type) {
+      case 'event.delegation.started': {
+        const existing = this.activeChildChips.get(e.child_conv_id);
+        const next = new Map(this.activeChildChips);
+        next.set(e.child_conv_id, {
+          delegationId: e.delegation_id,
+          targetName: e.target_name,
+          targetFolder: e.target_folder,
+          contextMode: e.context_mode ?? '',
+          baseLine: this.mapDelegationStatus(e.initial_status ?? 'queued'),
+          // Preserve the original startedAt across a duplicate started so
+          // the elapsed counter is monotonic for the delegation's life.
+          startedAt: existing?.startedAt ?? Date.now(),
+        });
+        this.activeChildChips = next;
+        this.ensureDurationTick();
+        break;
+      }
+      case 'event.delegation.progress': {
+        const existing = this.activeChildChips.get(e.child_conv_id);
+        if (!existing) break;
+        const next = new Map(this.activeChildChips);
+        next.set(e.child_conv_id, {
+          ...existing,
+          baseLine: this.mapDelegationStatus(e.status),
+        });
+        this.activeChildChips = next;
+        break;
+      }
+      case 'event.delegation.tool_use': {
+        const existing = this.activeChildChips.get(e.child_conv_id);
+        if (!existing) break;
+        const pretty = beautifyToolName(e.tool_name) || 'Using tool…';
+        const preview = e.tool_input_preview ?? '';
+        const next = new Map(this.activeChildChips);
+        next.set(e.child_conv_id, {
+          ...existing,
+          baseLine: preview ? `${pretty} · ${preview}` : pretty,
+        });
+        this.activeChildChips = next;
+        break;
+      }
+      case 'event.delegation.completed': {
+        if (!this.activeChildChips.has(e.child_conv_id)) break;
+        const next = new Map(this.activeChildChips);
+        next.delete(e.child_conv_id);
+        this.activeChildChips = next;
+        if (next.size === 0) this.clearDurationTick();
+        break;
+      }
+    }
+  }
+
+  /** Map a delegation phase string to a human-readable line. Mirrors the
+   *  parent run's `formatProgressLabel`; an unknown phase falls back to
+   *  the raw string (it carries some signal) rather than a bland
+   *  "Working…" so a new orchestrator kind is still legible. */
+  private mapDelegationStatus(status: string): string {
+    switch (status) {
+      case 'queued':
+        return 'Queued…';
+      case 'container_starting':
+        return 'Starting…';
+      case 'running':
+        return 'Thinking…';
+      case 'tool_use':
+        // Normally arrives via the tool_use frame with details; this is
+        // the defensive fallback when only a generic status lands.
+        return 'Using tool…';
+      default:
+        return status;
+    }
+  }
+
+  /** Render a chip's line with the elapsed-seconds tail. Suppressed for
+   *  the first 2s so a fast delegation doesn't flash "(0s)". */
+  private childChipLine(chip: ChildChipState): string {
+    const elapsedSec = Math.floor((Date.now() - chip.startedAt) / 1000);
+    return elapsedSec >= 2 ? `${chip.baseLine} (${elapsedSec}s)` : chip.baseLine;
+  }
+
+  /** Drop every chip and stop the ticker — called on any terminal run
+   *  transition so a missed `completed` frame can't strand a chip. */
+  private clearChildChips(): void {
+    this.clearDurationTick();
+    if (this.activeChildChips.size > 0) this.activeChildChips = new Map();
+  }
+
+  /** Start the 1Hz re-render ticker if it isn't already running. The
+   *  ticker mutates no state — it calls `requestUpdate()` so the render
+   *  reads `Date.now()` fresh and the elapsed tail advances. Stops
+   *  itself once no chips remain. */
+  private ensureDurationTick(): void {
+    if (this.durationTickTimer !== null) return;
+    this.durationTickTimer = setInterval(() => {
+      if (this.activeChildChips.size > 0) {
+        this.requestUpdate();
+      } else {
+        this.clearDurationTick();
+      }
+    }, 1000);
+  }
+
+  private clearDurationTick(): void {
+    if (this.durationTickTimer !== null) {
+      clearInterval(this.durationTickTimer);
+      this.durationTickTimer = null;
+    }
+  }
+
   private finalizeStreamingBubble(): void {
     const last = this.messages[this.messages.length - 1];
     if (last?.role === 'assistant' && last.streaming) {
@@ -555,6 +782,7 @@ export class ChatPanel extends LitElement {
         this.runTerminal = true;
         this.agentStatus = null;
         this.finalizeStreamingBubble();
+        this.clearChildChips();
       }
       this.runningWatchdogTimer = null;
     }, ChatPanel.RUNNING_WATCHDOG_MS);
@@ -601,6 +829,7 @@ export class ChatPanel extends LitElement {
         this.runTerminal = true;
         this.agentStatus = null;
         this.finalizeStreamingBubble();
+        this.clearChildChips();
       }
       this.stoppingTimer = null;
     }, 10_000);
@@ -622,6 +851,7 @@ export class ChatPanel extends LitElement {
         this.runTerminal = true;
         this.agentStatus = null;
         this.finalizeStreamingBubble();
+        this.clearChildChips();
       }
       this.cancellingTimer = null;
     }, 15_000);
@@ -636,6 +866,7 @@ export class ChatPanel extends LitElement {
         this.runTerminal = true;
         this.agentStatus = null;
         this.finalizeStreamingBubble();
+        this.clearChildChips();
         this.clearCancellingTimer();
       }
     } catch (err) {
@@ -717,6 +948,7 @@ export class ChatPanel extends LitElement {
     this.agentStatus = null;
     this.clearStoppingTimer();
     this.clearCancellingTimer();
+    this.clearChildChips();
     this.updateUrl(conversationId);
     await this.openConversation(conversationId);
   }
@@ -732,6 +964,7 @@ export class ChatPanel extends LitElement {
     this.activeRunId = null;
     this.clearStoppingTimer();
     this.clearCancellingTimer();
+    this.clearChildChips();
     this.updateUrl(null);
   }
 
@@ -850,6 +1083,29 @@ export class ChatPanel extends LitElement {
               <div class="max-w-[720px] mx-auto w-full flex items-center gap-2 py-1.5 text-[12px] text-ink-3 dark:text-d-ink-3">
                 <span class="w-1.5 h-1.5 rounded-full bg-brand animate-pulse"></span>
                 <span class="truncate">${this.agentStatus.label}</span>
+              </div>
+            </div>
+          ` : ''}
+
+          <!-- Frontdesk v1.5 delegation sub-chips: one per active
+               delegation, nested under the parent agent's status bar.
+               Ephemeral — unmount on event.delegation.completed (or any
+               terminal run transition). Renders nothing when idle. -->
+          ${this.activeChildChips.size > 0 ? html`
+            <div class="shrink-0 px-4">
+              <div class="max-w-[720px] mx-auto w-full">
+                ${Array.from(this.activeChildChips.entries()).map(
+                  ([id, chip]) => html`
+                    <rm-child-agent-chip
+                      .childConversationId=${id}
+                      .delegationId=${chip.delegationId}
+                      .targetName=${chip.targetName}
+                      .targetFolder=${chip.targetFolder}
+                      .contextMode=${chip.contextMode}
+                      .currentLine=${this.childChipLine(chip)}
+                    ></rm-child-agent-chip>
+                  `,
+                )}
               </div>
             </div>
           ` : ''}

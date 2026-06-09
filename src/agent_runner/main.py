@@ -270,6 +270,7 @@ async def run_query_loop(
 
     tool_ctx = ToolContext(
         js=js,
+        nc=nc,
         job_id=job_id,
         chat_jid=init.chat_jid,
         group_folder=init.group_folder,
@@ -280,6 +281,11 @@ async def run_query_loop(
         user_id=init.user_id,
         is_scheduled_task=init.is_scheduled_task,
         mcp_tool_reversibility=mcp_tool_reversibility,
+        # AgentInitData.role_config may be None on the wire; normalise
+        # here so downstream tool code never has to None-check. ``dict(...)``
+        # also makes a shallow copy — defensive against a tool mutating
+        # init.role_config and bleeding back into IPC state.
+        role_config=dict(init.role_config or {}),
     )
 
     # Create and initialize backend

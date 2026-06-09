@@ -38,6 +38,21 @@ class ToolTraceSpec:
 
 
 @dataclass(frozen=True)
+class RoutingSpec:
+    """Frontdesk v1.2 routing expectation for one sample.
+
+    ``expected_target`` is the agent id (folder slug) the frontdesk
+    should hand off to via ``delegate_to_agent``. ``None`` encodes a
+    "no-match" case where the frontdesk SHOULD answer itself
+    (greeting, meta question) — the scorer treats a delegate call in
+    that case as wrong, and a missing delegate call when one was
+    expected as also wrong.
+    """
+
+    expected_target: str | None = None
+
+
+@dataclass(frozen=True)
 class Sample:
     """One row of the dataset."""
 
@@ -45,6 +60,7 @@ class Sample:
     input: str
     final_answer: FinalAnswerSpec
     tool_trace: ToolTraceSpec | None = None
+    routing: RoutingSpec | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -119,6 +135,33 @@ def _parse_tool_trace(raw: Any, sample_id: str) -> ToolTraceSpec | None:
     )
 
 
+def _parse_routing(raw: Any, sample_id: str) -> RoutingSpec | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        msg = f"sample {sample_id!r}: scoring.routing must be a dict or null"
+        raise ValueError(msg)
+    if "expected_target" not in raw:
+        msg = (
+            f"sample {sample_id!r}: scoring.routing.expected_target is "
+            f"required when scoring.routing is present (use null for a "
+            f"no-match case)"
+        )
+        raise ValueError(msg)
+    target = raw["expected_target"]
+    # Explicit null is the "frontdesk should answer itself" case; any
+    # other value must be a non-empty string (the target's agent id).
+    if target is not None and (
+        not isinstance(target, str) or not target.strip()
+    ):
+        msg = (
+            f"sample {sample_id!r}: scoring.routing.expected_target "
+            f"must be null or a non-empty string"
+        )
+        raise ValueError(msg)
+    return RoutingSpec(expected_target=target)
+
+
 def _parse_sample(line_no: int, raw: dict[str, Any]) -> Sample:
     sample_id = raw.get("id")
     if not isinstance(sample_id, str) or not sample_id.strip():
@@ -134,6 +177,7 @@ def _parse_sample(line_no: int, raw: dict[str, Any]) -> Sample:
         raise ValueError(msg)
     final_answer = _parse_final_answer(scoring.get("final_answer"), sample_id)
     tool_trace = _parse_tool_trace(scoring.get("tool_trace"), sample_id)
+    routing = _parse_routing(scoring.get("routing"), sample_id)
     metadata = raw.get("metadata") or {}
     if not isinstance(metadata, dict):
         msg = f"sample {sample_id!r}: 'metadata' must be a dict if provided"
@@ -143,6 +187,7 @@ def _parse_sample(line_no: int, raw: dict[str, Any]) -> Sample:
         input=inp,
         final_answer=final_answer,
         tool_trace=tool_trace,
+        routing=routing,
         metadata=metadata,
     )
 

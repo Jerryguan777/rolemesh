@@ -67,6 +67,12 @@ class SampleExecution:
     error: str | None = None
     result_event_count: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Parallel to observed_tool_calls — each entry is the short
+    # ``input_preview`` for that tool call (see backend.tool_input_preview).
+    # Empty list when no tool calls; empty string per slot when the tool
+    # had no preview. Consumed by the routing-accuracy scorer to match
+    # ``delegate_to_agent(target=...)`` against ``expected_target``.
+    observed_tool_inputs: list[str] = field(default_factory=list)
 
 
 def _backend_for_coworker(coworker: Coworker) -> AgentBackendConfig:
@@ -186,6 +192,12 @@ class EvalRunner:
         )
 
         observed_tool_calls: list[str] = []
+        # Parallel list of input previews (one per entry in
+        # observed_tool_calls). Empty string when the tool emits no
+        # preview. The routing-accuracy scorer (frontdesk v1.2) reads
+        # this list aligned with observed_tool_calls to match the
+        # ``delegate_to_agent`` target against ``expected_target``.
+        observed_tool_inputs: list[str] = []
         last_usage: dict[str, Any] | None = None
         last_result_text: str | None = None
         result_event_count = 0
@@ -262,6 +274,10 @@ class EvalRunner:
                 tool_name = meta.get("tool")
                 if isinstance(tool_name, str) and tool_name:
                     observed_tool_calls.append(tool_name)
+                    tool_input = meta.get("input", "")
+                    observed_tool_inputs.append(
+                        tool_input if isinstance(tool_input, str) else "",
+                    )
                 return
             if out.status == "safety_blocked":
                 meta = out.metadata or {}
@@ -363,6 +379,7 @@ class EvalRunner:
             return SampleExecution(
                 output_text="",
                 observed_tool_calls=observed_tool_calls,
+                observed_tool_inputs=observed_tool_inputs,
                 usage=last_usage,
                 latency_ms=latency_ms,
                 status="error",
@@ -378,6 +395,7 @@ class EvalRunner:
             return SampleExecution(
                 output_text="",
                 observed_tool_calls=observed_tool_calls,
+                observed_tool_inputs=observed_tool_inputs,
                 usage=last_usage,
                 latency_ms=latency_ms,
                 status="error",
@@ -401,6 +419,7 @@ class EvalRunner:
         return SampleExecution(
             output_text=last_result_text or "",
             observed_tool_calls=observed_tool_calls,
+            observed_tool_inputs=observed_tool_inputs,
             usage=last_usage,
             latency_ms=latency_ms,
             status=status,

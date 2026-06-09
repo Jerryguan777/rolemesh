@@ -354,6 +354,17 @@ class ApprovalNotifier:
                 conv = max(convs, key=_conv_recency_key)
         if conv is None:
             return None
+        # Frontdesk v1.2 parent-walk: an approval submitted by a specialist
+        # running in a delegation child conversation is attributed to that
+        # child, whose binding is the 'internal' channel — no card surface and
+        # no WS listener. Walk up to the parent user-facing conversation so the
+        # card reaches the channel the user is actually watching; the cached
+        # _CardRef then edits land there too on resolve. Top-level convs
+        # (parent_conversation_id is None) are unaffected.
+        if conv.parent_conversation_id:
+            parent = await self._get_conversation(conv.parent_conversation_id)
+            if parent is not None:
+                conv = parent
         binding = await self._get_binding(conv.channel_binding_id)
         if binding is None:
             logger.warning(

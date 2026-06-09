@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from nats.aio.client import Client as NATSClient
     from nats.js.client import JetStreamContext
 
 
@@ -26,6 +27,11 @@ class ToolContext:
     """Shared runtime context for all RoleMesh IPC tools."""
 
     js: JetStreamContext
+    # Frontdesk v1.2: raw NATS client for core request-reply. JetStream
+    # (``js`` above) is fire-and-forget; delegate_to_agent / list_agents
+    # need a synchronous reply, which only core NATS request-reply
+    # provides without a new JetStream consumer. Same connection reused.
+    nc: NATSClient
     job_id: str
     chat_jid: str
     group_folder: str
@@ -59,6 +65,12 @@ class ToolContext:
     mcp_tool_reversibility: dict[str, dict[str, bool]] = field(
         default_factory=dict
     )
+    # Frontdesk v1.2: per-turn IPC hint mirroring
+    # ``AgentInitData.role_config`` but normalised to ``{}`` at the
+    # construction site so downstream tool code never None-checks. Read
+    # by ``delegate_to_agent`` for ``delegation_depth`` and by
+    # ``send_message`` to refuse delegated-call cross-talk.
+    role_config: dict[str, object] = field(default_factory=dict)
 
     # Internal: background tasks for fire-and-forget publishes
     _bg_tasks: set[asyncio.Task[None]] | None = None
@@ -74,6 +86,33 @@ class ToolContext:
         tasks.add(task)
         task.add_done_callback(tasks.discard)
         task.add_done_callback(_publish_done)
+
+    async def request(
+        self,
+        subject: str,
+        data: dict[str, Any],
+        timeout: float = 320.0,
+    ) -> dict[str, Any]:
+        """Core NATS request-reply, returning the JSON-decoded reply.
+
+        ``timeout=320s`` matches the delegation business deadline plus
+        a small buffer; callers (``list_agents`` etc.) override with a
+        shorter value where appropriate. Raises ``asyncio.TimeoutError``
+        on the underlying ``NATSClient.request`` timeout — the caller
+        catches and converts to a tool-level error reply.
+        """
+        msg = await self.nc.request(
+            subject,
+            json.dumps(data).encode(),
+            timeout=timeout,
+        )
+        decoded: Any = json.loads(msg.data.decode())
+        if not isinstance(decoded, dict):
+            raise ValueError(
+                f"NATS reply on {subject!r} must be a JSON object, "
+                f"got {type(decoded).__name__}"
+            )
+        return decoded
 
     @property
     def can_manage_others(self) -> bool:

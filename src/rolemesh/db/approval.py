@@ -408,12 +408,25 @@ def _pending_requests_filter_sql(
 
     The optional ``conversation_id`` is pushed into SQL (not filtered in
     process) so pagination counts and slices the same scoped set.
+
+    Frontdesk v1.2 parent-walk: the ``conversation_id`` filter matches
+    approvals attributed either to the given conversation OR to any of
+    its delegation child convs (``parent_conversation_id = $cid``). A
+    user viewing their parent conversation thus sees approvals the
+    delegate submitted while running in a child conv they never see in
+    their conversation list. For a childless conversation the subquery
+    is empty, so the filter degrades to the previous exact match.
     """
     sql = "tenant_id = $1::uuid AND status = 'pending'"
     params: list[object] = [tenant_id]
     if conversation_id is not None:
         params.append(conversation_id)
-        sql += f" AND conversation_id = ${len(params)}::uuid"
+        idx = len(params)
+        sql += (
+            f" AND (conversation_id = ${idx}::uuid OR conversation_id IN "
+            f"(SELECT id FROM conversations "
+            f"WHERE parent_conversation_id = ${idx}::uuid))"
+        )
     return sql, params
 
 

@@ -69,27 +69,62 @@ class RoleMeshAgentTool(AgentTool):
         )
 
 
+_DELEGATION_TOOLS = frozenset({"delegate_to_agent", "list_agents"})
+_TASK_MANAGEMENT_TOOLS = frozenset({
+    "schedule_task",
+    "list_tasks",
+    "pause_task",
+    "resume_task",
+    "cancel_task",
+    "update_task",
+})
+
+
 def create_rolemesh_tools(
     ctx: ToolContext,
     *,
     register_send_message: bool = False,
+    register_delegation: bool = False,
+    register_task_management: bool = False,
 ) -> list[AgentTool]:
     """Create all RoleMesh IPC tools as Pi AgentTool instances.
 
-    ``register_send_message`` mirrors the Claude adapter's flag: the
-    send_message tool is for scheduled-task notifications only, so it
-    is excluded from interactive containers' tool list. See
-    ``claude_adapter.create_rolemesh_mcp_server`` for the full rationale.
-    Pass True only when ``init.is_scheduled_task`` is True.
+    Tools are filtered at registration so the LLM never sees options it
+    cannot legitimately exercise — saving context, preventing wasted
+    tool-use turns, and keeping the v1.5 sub-chip display honest.
+    Runtime permission checks in ``rolemesh_tools`` remain as
+    defence-in-depth.
+
+    Flag → permission mapping (read by callers from ``init.permissions``):
+
+      - ``register_send_message``: ``init.is_scheduled_task``. Reserved
+        for background notifications; interactive turns deliver replies
+        via natural assistant text.
+      - ``register_delegation``: ``agent_delegate``. Gates
+        ``delegate_to_agent`` and ``list_agents`` — both are
+        frontdesk-only routing tools. The orchestrator-side handler in
+        ``rolemesh.orchestration.delegation`` enforces the same gate as
+        a second layer.
+      - ``register_task_management``: ``task_schedule OR
+        task_manage_others``. Gates the six task lifecycle tools
+        (schedule / list / pause / resume / cancel / update). The
+        permissions split exists so an agent can manage its own tasks
+        (``task_schedule``) or another agent's (``task_manage_others``)
+        — either alone is enough to legitimately call these tools.
     """
     tools: list[AgentTool] = []
     for defn in rt.TOOL_DEFINITIONS:
-        if defn["name"] == "send_message" and not register_send_message:
+        name = defn["name"]
+        if name == "send_message" and not register_send_message:
             continue
-        fn = rt.TOOL_FUNCTIONS[defn["name"]]
+        if name in _DELEGATION_TOOLS and not register_delegation:
+            continue
+        if name in _TASK_MANAGEMENT_TOOLS and not register_task_management:
+            continue
+        fn = rt.TOOL_FUNCTIONS[name]
         tools.append(
             RoleMeshAgentTool(
-                tool_name=defn["name"],
+                tool_name=name,
                 tool_description=defn["description"],
                 tool_parameters=defn["parameters"],
                 fn=fn,

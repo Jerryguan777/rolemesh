@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Response
 
-from rolemesh.auth.permissions import user_can
+from rolemesh.auth.permissions import AgentPermissions, user_can
 from rolemesh.core.backend_capabilities import BackendCompatError, validate_combo
 from rolemesh.db import (
     count_coworkers_for_tenant,
@@ -46,7 +46,13 @@ from webui.dependencies import (
     require_manage_or_owner,
     user_can_see_resource,
 )
-from webui.schemas_v1 import Coworker, CoworkerCreate, CoworkerPage, CoworkerUpdate
+from webui.schemas_v1 import (
+    Coworker,
+    CoworkerCreate,
+    CoworkerPage,
+    CoworkerPermissions,
+    CoworkerUpdate,
+)
 from webui.v1 import coworker_events
 from webui.v1._pagination import DEFAULT_PAGE_LIMIT, LimitParam, OffsetParam
 from webui.v1.errors import ErrorResponseException, raise_error_response
@@ -79,8 +85,34 @@ def _coworker_to_response(cw: object) -> Coworker:
         max_concurrent=cw.max_concurrent,
         created_by_user_id=cw.created_by_user_id,
         visibility=cw.visibility,  # type: ignore[attr-defined]
+        permissions=CoworkerPermissions(
+            agent_delegate=cw.permissions.agent_delegate,
+            task_schedule=cw.permissions.task_schedule,
+            task_manage_others=cw.permissions.task_manage_others,
+        ),
+        is_frontdesk=cw.is_frontdesk,  # type: ignore[attr-defined]
+        routing_description=cw.routing_description,  # type: ignore[attr-defined]
         created_at=cw.created_at,
     )
+
+
+def _validate_frontdesk_role(*, is_frontdesk: bool, agent_delegate: bool) -> None:
+    """Reject ``is_frontdesk=True`` unless the coworker can delegate (D1/D4).
+
+    Called from create + patch with the EFFECTIVE post-write values (the
+    patch handler resolves absent fields to the current row). Only fires
+    when ``is_frontdesk`` ends up True; clearing it is always allowed. The
+    ``agent_delegate`` permission is what actually gates the
+    ``delegate_to_agent`` tool (Phase 2), so a frontdesk without it would
+    be a router that cannot route — we reject that nonsensical state at
+    the write boundary rather than letting it fail silently at run time.
+    """
+    if is_frontdesk and not agent_delegate:
+        raise_error_response(
+            "INVALID_REQUEST",
+            "is_frontdesk=True requires permissions.agent_delegate=True.",
+            status_code=400,
+        )
 
 
 async def _validate_model_and_credential(
@@ -176,6 +208,10 @@ async def create_coworker_endpoint(
             model_id=body.model_id,
             backend_name=body.agent_backend,
         )
+    _validate_frontdesk_role(
+        is_frontdesk=body.is_frontdesk,
+        agent_delegate=body.permissions.agent_delegate,
+    )
     try:
         cw = await create_coworker(
             tenant_id=user.tenant_id,
@@ -186,6 +222,13 @@ async def create_coworker_endpoint(
             max_concurrent=body.max_concurrent,
             model_id=body.model_id,
             created_by_user_id=user.user_id,
+            permissions=AgentPermissions(
+                agent_delegate=body.permissions.agent_delegate,
+                task_schedule=body.permissions.task_schedule,
+                task_manage_others=body.permissions.task_manage_others,
+            ),
+            is_frontdesk=body.is_frontdesk,
+            routing_description=body.routing_description,
         )
     except asyncpg.UniqueViolationError as exc:
         # ``coworkers`` has UNIQUE (tenant_id, folder); ``name`` is
@@ -299,6 +342,24 @@ async def patch_coworker_endpoint(
     )
     model_changed = body.model_id is not None and body.model_id != cw.model_id
 
+    # Frontdesk v1.2 (D4): validate the role gate against the EFFECTIVE
+    # post-update values. A PATCH that only flips is_frontdesk=True on a
+    # coworker that already has agent_delegate=True is accepted; flipping it
+    # on a coworker without that permission (and without granting it in the
+    # same call) is rejected. Absent fields resolve to the current row.
+    effective_is_frontdesk = (
+        cw.is_frontdesk if body.is_frontdesk is None else body.is_frontdesk
+    )
+    effective_agent_delegate = (
+        cw.permissions.agent_delegate
+        if body.permissions is None
+        else body.permissions.agent_delegate
+    )
+    _validate_frontdesk_role(
+        is_frontdesk=effective_is_frontdesk,
+        agent_delegate=effective_agent_delegate,
+    )
+
     if body.model_id is not None:
         # Validate against the *target* backend — either the new one
         # if the caller passed it (the v1 surface doesn't support
@@ -322,6 +383,16 @@ async def patch_coworker_endpoint(
         kwargs["max_concurrent"] = body.max_concurrent
     if body.model_id is not None:
         kwargs["model_id"] = body.model_id
+    if body.permissions is not None:
+        kwargs["permissions"] = AgentPermissions(
+            agent_delegate=body.permissions.agent_delegate,
+            task_schedule=body.permissions.task_schedule,
+            task_manage_others=body.permissions.task_manage_others,
+        )
+    if body.is_frontdesk is not None:
+        kwargs["is_frontdesk"] = body.is_frontdesk
+    if body.routing_description is not None:
+        kwargs["routing_description"] = body.routing_description
 
     try:
         updated = await update_coworker(

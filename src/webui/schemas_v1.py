@@ -141,14 +141,30 @@ class Me(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class CoworkerPermissions(BaseModel):
+    """The agent capability bits (``rolemesh.auth.permissions.AgentPermissions``).
+
+    Frontdesk v1.2 (migration D4) brought this onto the v1 surface: a frontdesk
+    needs ``agent_delegate=True`` to use ``delegate_to_agent``, and the
+    ``is_frontdesk`` validation checks it. All bits default False so an omitted
+    object on create yields a no-capabilities coworker.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent_delegate: bool = False
+    task_schedule: bool = False
+    task_manage_others: bool = False
+
+
 class Coworker(BaseModel):
     """Wire-side projection of the ``coworkers`` row.
 
     Kept narrow on purpose — Phase 1 deliberately leaves the admin
-    sub-resources (``tools`` JSONB, ``permissions``) off the
-    ``/api/v1`` surface so we can drop them without a contract
-    bump (see design §9.3 three-stage retirement). Add them back
-    only when an admin UI need is explicit.
+    sub-resources (``tools`` JSONB) off the ``/api/v1`` surface so we
+    can drop them without a contract bump (see design §9.3 three-stage
+    retirement). ``permissions`` was added back in frontdesk v1.2 (D4)
+    because the frontdesk role gate needs ``agent_delegate``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -167,6 +183,12 @@ class Coworker(BaseModel):
     # a REQUIRED response field — keep it without a default so the yaml
     # ``required`` list and the model agree (test_openapi_contract).
     visibility: Visibility
+    # Frontdesk v1.2: is_frontdesk marks the tenant's user-facing router;
+    # routing_description is the specialist's capability card the frontdesk
+    # LLM reads when routing. permissions carries the capability bits.
+    permissions: CoworkerPermissions
+    is_frontdesk: bool = False
+    routing_description: str | None = None
     created_at: str
 
 
@@ -189,6 +211,13 @@ class CoworkerCreate(BaseModel):
     model_id: str | None = None
     system_prompt: str | None = None
     max_concurrent: int = Field(default=2, ge=1, le=20)
+    # Frontdesk v1.2 (D4). permissions defaults to no-capabilities; set
+    # agent_delegate=True alongside is_frontdesk=True to build a working
+    # frontdesk in one call. routing_description is length-capped to keep the
+    # injected catalog block tractable (long docs belong in system_prompt).
+    permissions: CoworkerPermissions = Field(default_factory=CoworkerPermissions)
+    is_frontdesk: bool = False
+    routing_description: str | None = Field(default=None, max_length=500)
 
 
 class CoworkerUpdate(BaseModel):
@@ -207,6 +236,11 @@ class CoworkerUpdate(BaseModel):
     model_id: str | None = None
     status: CoworkerStatus | None = None
     max_concurrent: int | None = Field(default=None, ge=1, le=20)
+    # Frontdesk v1.2 (D4). Absent = leave alone (handler resolves to current
+    # values before the is_frontdesk role-gate validation).
+    permissions: CoworkerPermissions | None = None
+    is_frontdesk: bool | None = None
+    routing_description: str | None = Field(default=None, max_length=500)
 
 
 # ---------------------------------------------------------------------------
@@ -1129,6 +1163,69 @@ class WsServerEventApprovalResolved(BaseModel):
     outcome: Literal["approved", "rejected", "expired", "cancelled"]
 
 
+class WsServerEventDelegationStarted(BaseModel):
+    """Frontdesk v1.5: a delegation child container started (chip mount).
+
+    ``child_conv_id`` keys the sub-chip; concurrent delegations render as
+    separate chips. ``run_id`` anchors the chip to the parent's active run.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.delegation.started"]
+    run_id: str
+    child_conv_id: str
+    delegation_id: str
+    target_folder: str
+    target_name: str
+    context_mode: str | None = None
+    initial_status: str | None = None
+
+
+class WsServerEventDelegationProgress(BaseModel):
+    """Frontdesk v1.5: specialist container phase update (chip status line)."""
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.delegation.progress"]
+    run_id: str
+    child_conv_id: str
+    delegation_id: str
+    target_folder: str
+    target_name: str
+    status: str
+
+
+class WsServerEventDelegationToolUse(BaseModel):
+    """Frontdesk v1.5: specialist invoked a tool (chip tool line).
+
+    ``tool_input_preview`` is the orchestrator-truncated preview; the name
+    carries the truncation semantic, mirroring event.run.progress.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.delegation.tool_use"]
+    run_id: str
+    child_conv_id: str
+    delegation_id: str
+    target_folder: str
+    target_name: str
+    tool_name: str | None
+    tool_input_preview: str | None = None
+
+
+class WsServerEventDelegationCompleted(BaseModel):
+    """Frontdesk v1.5: delegation reached a terminal state (chip unmount)."""
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.delegation.completed"]
+    run_id: str
+    child_conv_id: str
+    delegation_id: str
+    target_folder: str
+    target_name: str
+    final_status: str
+    duration_ms: int | None = None
+
+
 # Tagged union over ``type``. Pydantic v2's Field discriminator picks
 # the right member based on the literal value, giving validation
 # errors that name the offending field (rather than the generic
@@ -1142,6 +1239,10 @@ WsServerEventModel = (
     | WsServerEventMessageAppended
     | WsServerEventApprovalRequested
     | WsServerEventApprovalResolved
+    | WsServerEventDelegationStarted
+    | WsServerEventDelegationProgress
+    | WsServerEventDelegationToolUse
+    | WsServerEventDelegationCompleted
 )
 
 
