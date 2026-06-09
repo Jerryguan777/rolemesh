@@ -1,5 +1,5 @@
 // Pure helpers for the approval-policy condition builder
-// (docs/21-hitl-approval-plan.md §7 / §10 S5). Kept separate from the page
+// (docs/12-hitl-approval-architecture.md §7 / §10 S5). Kept separate from the page
 // component so the (lossy, structured) form ⇄ condition_expr mapping is
 // unit-testable on its own.
 //

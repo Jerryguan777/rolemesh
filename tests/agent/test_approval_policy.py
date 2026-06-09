@@ -2,7 +2,7 @@
 
 These target the two things that make this gate dangerous if wrong:
 
-1. **Fail-closed** — the contract (docs/21-hitl-approval-plan.md §7) says a
+1. **Fail-closed** — the contract (docs/12-hitl-approval-architecture.md §7) says a
    gate that cannot evaluate must require approval. Every malformed /
    ambiguous input below must therefore return ``True`` (approval required).
    A regression that lets one of these slip to ``False`` silently lets a

@@ -1,4 +1,4 @@
-"""Human-facing delivery for HITL approvals (docs/21-hitl-approval-plan.md §10 S4).
+"""Human-facing delivery for HITL approvals (docs/12-hitl-approval-architecture.md §10 S4).
 
 The :class:`ApprovalCoordinator` (S3) drives the state machine but owns no
 channel I/O — it calls two hooks the moment an approval becomes pending or goes

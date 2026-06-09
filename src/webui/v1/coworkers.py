@@ -221,9 +221,7 @@ async def create_coworker_endpoint(
             system_prompt=body.system_prompt,
             max_concurrent=body.max_concurrent,
             model_id=body.model_id,
-            created_by_user_id=(
-                user.user_id if _looks_like_uuid(user.user_id) else None
-            ),
+            created_by_user_id=user.user_id,
             permissions=AgentPermissions(
                 agent_delegate=body.permissions.agent_delegate,
                 task_schedule=body.permissions.task_schedule,
@@ -264,24 +262,6 @@ async def create_coworker_endpoint(
         # truth, the next process boot picks it up.
         pass
     return _coworker_to_response(cw)
-
-
-def _looks_like_uuid(value: str) -> bool:
-    """Return True when ``value`` is a 36-char UUID-ish string.
-
-    The bootstrap fast-path (single-token mode) sets ``user_id`` to
-    the literal ``"bootstrap"`` — not a UUID — and that value would
-    fail the FK on ``coworkers.created_by_user_id``. The
-    multi-user bootstrap path upserts a real ``users`` row so its
-    UUID is safe to attribute. This guard lets the v1 endpoint
-    accept both auth modes without paying the FK violation cost.
-    """
-    if len(value) != 36:
-        return False
-    parts = value.split("-")
-    return len(parts) == 5 and all(
-        all(c in "0123456789abcdefABCDEF" for c in p) for p in parts
-    )
 
 
 async def _get_coworker_or_404(

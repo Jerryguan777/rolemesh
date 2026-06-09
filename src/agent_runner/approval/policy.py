@@ -1,7 +1,7 @@
 """Pure, fail-closed policy matching for HITL tool approval.
 
 Zero external dependencies (stdlib only) — imported by both the
-container approval hook and the orchestrator (docs/21-hitl-approval-plan.md
+container approval hook and the orchestrator (docs/12-hitl-approval-architecture.md
 §7). Two entry points:
 
 * ``evaluate_condition(expr, params)`` — does this structured condition

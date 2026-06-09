@@ -14,22 +14,16 @@ WEB_UI_PORT: int = int(os.environ.get("WEB_UI_PORT", "8080"))
 WEB_UI_HOST: str = os.environ.get("WEB_UI_HOST", "0.0.0.0")
 WEB_UI_DIST: Path = Path(os.environ.get("WEB_UI_DIST", "web/dist"))
 
-# Deployment-environment gate. "production" hardens the legacy bootstrap
-# paths; "development" (the default) keeps them for local/dev/test so
-# existing flows and the test suite are unaffected. The two hardened
-# behaviours:
-#   - ADMIN_BOOTSTRAP_TOKEN stops authorizing (see webui.auth) — it is a
-#     permanent, network-reachable owner backdoor.
-#   - BOOTSTRAP_USERS aborts startup (see rolemesh.auth.bootstrap_users).
-# Seed the first admin with ``rolemesh-admin create-admin`` (or set
-# ROLEMESH_SEED_ADMIN_EMAIL) instead.
+# Deployment-environment gate. "production" hardens the BOOTSTRAP_USERS
+# fast-path; "development" (the default) keeps it for local/dev/test.
+# When ROLEMESH_ENV=production, BOOTSTRAP_USERS aborts startup (see
+# rolemesh.auth.bootstrap_users, which reads ROLEMESH_ENV directly from the
+# environment). Seed the first admin with ``rolemesh-admin create-admin``
+# (or set ROLEMESH_SEED_ADMIN_EMAIL) instead.
+#
+# Re-exported here as the single documented config key even though the
+# bootstrap_users gate reads os.environ itself.
 ROLEMESH_ENV: str = os.environ.get("ROLEMESH_ENV", "development")
-IS_PRODUCTION: bool = ROLEMESH_ENV == "production"
-
-# DEPRECATED: static single-user owner fast-path. Disabled when
-# ROLEMESH_ENV=production (fail-closed in webui.auth). Kept for
-# dev/test; full removal is tracked separately.
-ADMIN_BOOTSTRAP_TOKEN: str = os.environ.get("ADMIN_BOOTSTRAP_TOKEN", "")
 
 # Signing key for /api/v1/auth/ws-ticket. Separate from the API
 # session JWT so a leak of one doesn't compromise the other. The

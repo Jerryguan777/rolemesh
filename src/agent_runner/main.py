@@ -313,7 +313,7 @@ async def run_query_loop(
     hook_registry = HookRegistry()
     hook_registry.register(TranscriptArchiveHandler(assistant_name=init.assistant_name))
 
-    # HITL approval plumbing (docs/21-hitl-approval-plan.md §6 / §11.4). Both the
+    # HITL approval plumbing (docs/12-hitl-approval-architecture.md §6 / §11.4). Both the
     # business-policy approval hook and the safety-pipeline require_approval
     # bridge publish agent.{job_id}.approval_request and block on a decision
     # relayed over agent.{job_id}.approval_decision (subscribed below).

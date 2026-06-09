@@ -186,8 +186,8 @@ There are three valid auth paths into the WebUI, in order of priority:
 
 The browser opens with `?agent_id=<uuid>&token=<jwt-or-bootstrap>` in the URL. FastAPI's `authenticate_ws(token)` handler resolves it through:
 
-1. **Bootstrap admin shortcut** — if `token == ADMIN_BOOTSTRAP_TOKEN` (env var), the request is accepted as the `default` tenant's owner. This is the dev / first-run / smoke-test path.
-2. **Configured `AuthProvider`** — otherwise the token is verified by the active provider (External JWT validates a SaaS-issued JWT; Builtin checks a RoleMesh-issued credential; OIDC validates the IdP-issued `id_token`).
+1. **`BOOTSTRAP_USERS` fast-path** (dev/test) — if the token matches a configured spec, it maps to a persisted user row (real UUID) in the spec's tenant. Aborts startup under `ROLEMESH_ENV=production`.
+2. **Configured `AuthProvider`** — otherwise the token is verified by the active provider (External JWT validates a SaaS-issued JWT and requires the `user-id` claim to be a UUID; Builtin checks a RoleMesh-issued credential; OIDC validates the IdP-issued `id_token`).
 
 The token is forwarded to the orchestrator inside the agent's `AgentInitData` so MCP tool calls can carry the user's identity downstream — see [`auth-architecture.md`](auth-architecture.md) and [`external-mcp-architecture.md`](external-mcp-architecture.md).
 

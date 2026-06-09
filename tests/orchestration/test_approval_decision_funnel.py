@@ -1,4 +1,4 @@
-"""End-to-end HITL decision funnel (docs/21-hitl-approval-plan.md §10 S4).
+"""End-to-end HITL decision funnel (docs/12-hitl-approval-architecture.md §10 S4).
 
 Wires a *real* ApprovalCoordinator + ApprovalNotifier and drives the main.py
 Telegram / web decision funnels, mocking only the outermost boundaries (the

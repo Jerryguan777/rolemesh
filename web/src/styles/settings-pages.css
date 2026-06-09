@@ -1,6 +1,6 @@
 /* Shared settings-page visual language.
  *
- * Source: docs/webui-ui-redesign-v2-prototype.html lines 220-243.
+ * Source: the v2 redesign prototype (settings card-list idiom).
  * The prototype's settings pages share one card-list idiom across
  * Coworkers / MCP servers / Skills / Models / Credentials. Putting
  * the rules in a single file (rather than inline <style> in each

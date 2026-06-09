@@ -7,6 +7,7 @@ import uuid
 
 import pytest
 
+from rolemesh.auth.permissions import AgentPermissions
 from rolemesh.db import (
     cleanup_running_delegations,
     create_channel_binding,
@@ -20,7 +21,6 @@ from rolemesh.db import (
     update_delegation_terminal,
 )
 from rolemesh.db._pool import admin_conn
-from rolemesh.auth.permissions import AgentPermissions
 
 pytestmark = pytest.mark.usefixtures("test_db")
 

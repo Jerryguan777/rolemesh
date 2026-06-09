@@ -53,9 +53,9 @@ class BackendCompatError(ValueError):
     """Raised when a (backend, provider, family) triple is unsupported.
 
     REST handler maps this to HTTP 400 with ``code="BACKEND_INCOMPAT"``.
-    The choice of 400 over 422 is recorded in 00a-inv-foundations.md
-    open questions — "combination not implemented" is closer to a
-    bad request than a schema validation failure.
+    The choice of 400 over 422 is deliberate — "combination not
+    implemented" is closer to a bad request than a schema validation
+    failure.
     """
 
     code: Final[str] = "BACKEND_INCOMPAT"

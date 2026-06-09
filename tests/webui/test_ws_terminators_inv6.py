@@ -19,8 +19,7 @@ loops with the asyncpg pool (same issue ``test_ws_v1_handshake``
 sidesteps by stubbing ``get_conversation``). The helper-level
 tests cover the lifecycle gap the smoke caught; the end-to-end
 wiring of the helpers into ``_forward_stream`` is verified by
-live smoke (see ``docs/webui-backend-v1.1-sessions/01c-frontend-chat.md``
-Findings).
+live smoke.
 
 Anti-mirror: assertions read the ``runs`` table directly and
 check ``status`` + ``error`` JSONB values, not which Python

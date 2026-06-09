@@ -42,7 +42,7 @@ CONTAINER_MAX_OUTPUT_SIZE: int = int(os.environ.get("CONTAINER_MAX_OUTPUT_SIZE",
 CREDENTIAL_PROXY_PORT: int = int(os.environ.get("CREDENTIAL_PROXY_PORT", "3001"))
 IDLE_TIMEOUT: int = int(os.environ.get("IDLE_TIMEOUT", "1800000"))  # 30 min
 
-# HITL tool approval (docs/21-hitl-approval-plan.md §5). The container's
+# HITL tool approval (docs/12-hitl-approval-architecture.md §5). The container's
 # approval-decision await and the DB row's ``expires_at`` share this single
 # bound. Default 5 min: the approver is the task creator (self-approval), so
 # decisions resolve in seconds-to-minutes, and a short hold keeps the

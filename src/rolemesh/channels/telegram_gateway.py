@@ -159,7 +159,7 @@ async def _send_telegram_message(bot: Bot, chat_id: str | int, text: str) -> Non
 
 
 # ---------------------------------------------------------------------------
-# HITL approval card (docs/21-hitl-approval-plan.md §10 S4)
+# HITL approval card (docs/12-hitl-approval-architecture.md §10 S4)
 # ---------------------------------------------------------------------------
 #
 # callback_data is "apr:{request_id}" / "rej:{request_id}". A UUID request_id

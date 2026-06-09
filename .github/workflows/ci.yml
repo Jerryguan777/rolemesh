@@ -37,16 +37,13 @@ jobs:
         with:
           enable-cache: true
 
-      # Pin Python 3.12. Project requires >=3.12 (see pyproject.toml) and
-      # llm-guard's torch<2.6 has no Python 3.13 wheels — using 3.13 here
-      # would silently break the [safety-ml] extra. Lock to 3.12 so CI
-      # mirrors the documented dev environment.
+      # Pin Python 3.12 to the project's minimum (pyproject.toml requires
+      # >=3.12) so CI mirrors the documented dev environment.
       - name: Set up Python 3.12
         run: uv python install 3.12
 
-      # Cache the project venv keyed by uv.lock + Python version. First
-      # run installs ~50 packages including torch (~1GB); cached runs
-      # restore in seconds.
+      # Cache the project venv keyed by uv.lock + Python version. Cached
+      # runs restore in seconds.
       - name: Cache venv
         uses: actions/cache@v4
         with:
@@ -55,22 +52,14 @@ jobs:
           restore-keys: |
             venv-${{ runner.os }}-py3.12-
 
-      - name: Install dependencies (dev + pi + safety-ml)
-        run: uv sync --python 3.12 --extra dev --extra pi --extra safety-ml
-
-      # spaCy en_core_web_sm is required by the safety-ml presidio.pii
-      # check. Cached separately because it's a one-time download (~13MB)
-      # bound to the spaCy version in the venv, not to uv.lock.
-      - name: Cache spaCy model
-        uses: actions/cache@v4
-        id: spacy-cache
-        with:
-          path: .venv/lib/python3.12/site-packages/en_core_web_sm
-          key: spacy-en-core-web-sm-${{ hashFiles('uv.lock') }}
-
-      - name: Download spaCy en_core_web_sm
-        if: steps.spacy-cache.outputs.cache-hit != 'true'
-        run: uv run python -m spacy download en_core_web_sm
+      # safety-ml is intentionally excluded: torch + the llm-guard /
+      # presidio transformer models load a copy per pytest-xdist worker,
+      # which dominates the job's memory. The ML safety tests guard with
+      # pytest.importorskip, so they SKIP (not fail) without the extra —
+      # the trade-off is no CI regression coverage on those checks. Run
+      # them locally with ``uv sync --extra safety-ml``.
+      - name: Install dependencies (dev + pi)
+        run: uv sync --python 3.12 --extra dev --extra pi
 
       # Ruff is a hard gate. The baseline was cleaned to zero (592 -> 0:
       # safe autofixes, FastAPI/unicode config, vendored src/pi excluded,

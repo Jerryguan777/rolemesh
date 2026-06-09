@@ -1,4 +1,4 @@
-"""ApprovalCoordinator state machine (docs/21-hitl-approval-plan.md §8).
+"""ApprovalCoordinator state machine (docs/12-hitl-approval-architecture.md §8).
 
 Exercises the orchestrator-side suspend/resume, expiry sweep, decision-race
 idempotency, and restart recovery against a *real* GroupQueue plus an in-memory

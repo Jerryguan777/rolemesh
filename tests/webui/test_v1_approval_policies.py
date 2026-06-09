@@ -8,7 +8,7 @@ it: that the handlers scope strictly by the *authenticated* tenant
 user wielding a tenant-B resource id gets a flat 404 — no read, no write, no
 existence oracle.
 
-Cross-tenant isolation is the S5 exit criterion (docs/21-hitl-approval-plan.md
+Cross-tenant isolation is the S5 exit criterion (docs/12-hitl-approval-architecture.md
 §10 S5), so it is the bulk of this file and is written adversarially: each test
 sets up a real victim resource in tenant B and then attacks it as tenant A.
 """

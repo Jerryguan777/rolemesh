@@ -1,16 +1,14 @@
-"""PR5 pinned test: BOOTSTRAP_USERS multi-user map.
+"""Pinned test: BOOTSTRAP_USERS multi-user map.
 
-Covers the five scenarios spelled out in session 00a:
-  1. Single-token legacy path (ADMIN_BOOTSTRAP_TOKEN) is unchanged.
-  2. tok-alice → user row inserted, returned UUID is the stable
+Covers:
+  1. tok-alice → user row inserted, returned UUID is the stable
      ``uuid5`` of the slug.
-  3. tok-bob → second row inserted; a repeat call for tok-alice does
+  2. tok-bob → second row inserted; a repeat call for tok-alice does
      NOT re-INSERT (ON CONFLICT DO NOTHING + the in-process upsert
      cache).
-  4. Malformed BOOTSTRAP_USERS spec → init_bootstrap_users raises.
-  5. Token not in the map and not equal to ADMIN_BOOTSTRAP_TOKEN
-     falls through to the provider (we exercise this by setting the
-     provider to a stub that records the call).
+  3. Malformed BOOTSTRAP_USERS spec → init_bootstrap_users raises.
+  4. Token not in the map falls through to the provider (we exercise
+     this by setting the provider to a stub that records the call).
 
 Anti-mirror: the test imports the parse/init API on top, but the
 behaviour assertions (returned UUID matches uuid5, DB row count is
@@ -126,8 +124,6 @@ async def test_multi_user_first_hit_inserts_row_and_returns_stable_uuid(
     )
     monkeypatch.setenv("BOOTSTRAP_USERS", env)
     init_bootstrap_users(env)
-    # Make sure no legacy ADMIN_BOOTSTRAP_TOKEN interferes.
-    monkeypatch.setattr("webui.config.ADMIN_BOOTSTRAP_TOKEN", "")
 
     from webui import auth as webui_auth
 
@@ -152,7 +148,6 @@ async def test_multi_user_two_users_each_get_their_own_row(
         ]
     )
     init_bootstrap_users(env)
-    monkeypatch.setattr("webui.config.ADMIN_BOOTSTRAP_TOKEN", "")
 
     from webui import auth as webui_auth
 
@@ -167,24 +162,6 @@ async def test_multi_user_two_users_each_get_their_own_row(
     assert await _user_count_for_tenant(tenant_id) == 2
 
 
-async def test_legacy_admin_bootstrap_token_path_unchanged(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    await _ensure_default_tenant()
-    # Disable multi-user; keep the legacy token.
-    init_bootstrap_users("")
-    monkeypatch.setattr("webui.config.ADMIN_BOOTSTRAP_TOKEN", "legacy-tok")
-
-    from webui import auth as webui_auth
-
-    user = await webui_auth.authenticate_ws("legacy-tok")
-    assert user is not None
-    # The legacy path still returns the literal "bootstrap" — that's
-    # what makes the resolve_actor_user_id helper from PR4 necessary.
-    assert user.user_id == "bootstrap"
-    assert user.role == "owner"
-
-
 async def test_unknown_token_falls_through_to_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -193,7 +170,6 @@ async def test_unknown_token_falls_through_to_provider(
         [{"token": "tok-alice", "user_id": "alice", "tenant": "default", "role": "owner"}]
     )
     init_bootstrap_users(env)
-    monkeypatch.setattr("webui.config.ADMIN_BOOTSTRAP_TOKEN", "")
 
     from webui import auth as webui_auth
 
@@ -222,7 +198,6 @@ async def test_multi_user_spec_pointing_at_missing_tenant_fails_closed(
         ]
     )
     init_bootstrap_users(env)
-    monkeypatch.setattr("webui.config.ADMIN_BOOTSTRAP_TOKEN", "")
 
     from webui import auth as webui_auth
 

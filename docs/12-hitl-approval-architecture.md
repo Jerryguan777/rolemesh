@@ -171,6 +171,127 @@ Rejected as the *only* channel. The LLM may forget, may phrase the outcome unrec
 
 ---
 
+## Reference: Frozen Contract
+
+> The normative interface the implementation cites by section. Distilled from the original implementation plan; the section numbers (§3–§11) are preserved so the `(docs/12-hitl-approval-architecture.md §N)` pointers throughout the code resolve here. The narrative above is the *why*; this is the *exact shape*.
+
+### §3 IPC contract — NATS subjects
+
+All approval traffic is relayed through the orchestrator; the container never talks to the user directly. Three subjects. Unknown fields MUST be dropped on receive (forward-compat for rolling upgrades).
+
+**§3.1 `agent.{job_id}.approval_request` — container → orchestrator**
+```json
+{
+  "request_id": "uuid",
+  "tenant_id": "uuid",
+  "coworker_id": "uuid",
+  "conversation_id": "uuid | null",
+  "user_id": "uuid | null",          // approver = creator; null => fail-closed block
+  "job_id": "string",
+  "policy_id": "uuid | null",        // null for a safety-rule bridge (provenance rides triggered_by, §11.4)
+  "mcp_server_name": "string",
+  "tool_name": "string",
+  "params": { },                      // the tool call arguments
+  "action_summary": "string",         // short human-readable summary for the card
+  "requested_at": "iso8601",
+  "expires_at": "iso8601"             // requested_at + APPROVAL_TIMEOUT
+}
+```
+**§3.2 `agent.{job_id}.approval_decision` — orchestrator → container**
+```json
+{ "request_id": "uuid", "decision": "approve | reject", "decided_by": "uuid", "note": "string | null" }
+```
+**§3.3 `agent.{job_id}.approval_cancel` — container → orchestrator**
+```json
+{ "request_id": "uuid" }
+```
+Emitted from the container's `finally` (idempotent): reject / timeout / user Stop (CancelledError) / exception — every path where the container knows "this round is over".
+
+### §4 DB schema
+
+Single-predicate RLS (`tenant_id = current_tenant_id()`) on all four DML ops, roles `rolemesh_app` (NOBYPASSRLS) / `rolemesh_system` (BYPASSRLS). The **DB is authoritative**; the in-memory suspend state is only a cache (see §8 restart recovery). The *policy snapshot* loaded into a container at init is this table's `enabled` rows for the tenant.
+
+**§4.1 `approval_policies`**
+```
+id   uuid PK            tenant_id uuid NOT NULL
+mcp_server_name text    tool_name text         -- exact name or "*"
+condition_expr  jsonb   -- see §7
+enabled bool DEFAULT true   priority int DEFAULT 0
+created_at / updated_at timestamptz
+-- indexes: (tenant_id, enabled), (tenant_id, mcp_server_name, tool_name)
+-- RLS: tenant_id = current_tenant_id()
+```
+**§4.2 `approval_requests`**
+```
+id uuid PK   tenant_id uuid NOT NULL   coworker_id uuid NOT NULL
+conversation_id uuid NULL   policy_id uuid NULL
+user_id uuid NULL          -- approver = creator; null => fail-closed
+job_id text NOT NULL
+mcp_server_name text   action jsonb        -- { tool_name, params }
+action_summary text
+status text            -- pending|approved|rejected|expired|cancelled
+decided_by uuid NULL   note text NULL
+requested_at timestamptz   expires_at timestamptz NOT NULL   decided_at timestamptz NULL
+-- indexes: partial on (status) WHERE status='pending'; (job_id)
+-- RLS: tenant_id = current_tenant_id()
+```
+No `approval_audit_log` table, no `resolved_approver_user_ids` (self-approval ⇒ approver is `user_id`), no `action_hashes` (no replay).
+
+### §5 Config & invariants
+```
+APPROVAL_TIMEOUT   core/config.py   300_000 ms (5 min)   container await + DB expires_at share this
+startup assertion  core/config.py   APPROVAL_TIMEOUT < IDLE_TIMEOUT + 30_000   else refuse to start
+```
+With `IDLE_TIMEOUT = 1_800_000 ms` and the container watchdog floor `max(config_timeout, IDLE_TIMEOUT + 30_000)`, the assertion guarantees the approval await always fires before the container watchdog — so the watchdog can never pre-empt an approval.
+
+**Queue key rule** (reuse, do not reinvent): `conversation_id or coworker_id`. The container and its approval suspend state MUST land on the same `_GroupState` entry, so use this exact rule.
+
+### §6 Concurrency model
+
+- `HookRegistry.emit_pre_tool_use` iterates handlers serially; a single approval handler is registered.
+- BUT multiple `ToolUseBlock`s in one turn are dispatched **concurrently** by both backends (Claude parallel tool calls; Pi `asyncio.gather` over the batch). So **multiple approvals can be pending at once in one turn** → the suspend state MUST be a `set[request_id]`, never a bool.
+
+### §7 Policy condition language (pure function, fail-closed)
+
+`evaluate_condition(expr, params) -> bool` in `agent_runner/approval/policy.py` — zero external deps, shared by the container hook and the orchestrator.
+```
+{"always": true}
+{"field": "amount", "op": ">", "value": 100}
+{"and": [ ... ]}    {"or": [ ... ]}
+```
+Ops: `== != > >= < <= in not_in contains`. **Fail-closed**: missing field / type mismatch / malformed expr / any exception ⇒ approval IS required. Matching (`find_matching_policy`): the tenant's `enabled` policies; server match AND (`tool_name == "*"` OR exact) AND condition true; ties broken by highest `priority`, then newest `updated_at`. The strict write-time companion `validate_condition_expr` rejects a malformed `condition_expr` at the API (422).
+
+### §8 Idle suspend / resume / restart recovery
+
+A bounded ≤5-min approval wait must **explicitly suspend** idle reaping, not fake liveness (status heartbeats don't reset the idle timer). Three reaping paths exist; suspend must close all three.
+
+- **Suspend** (on `approval_request`): persist `pending` + `expires_at`; cancel the idle handle; force `idle_waiting = False` (+assert); `awaiting_approval[key].add(request_id)` — a **set**, not a bool; send one "⏳ waiting for approval" status. While suspended, no path (including a new follow-up message) may re-arm idle.
+- **Resume** (on `approval_decision` or `approval_cancel`): `discard(request_id)`; **iff the set is now empty**, re-arm one full `IDLE_TIMEOUT` from now; if a decision, forward it to the container.
+- **Expiry watcher**: container-SIGKILL fallback — the orchestrator expires the row at `expires_at` and fires the hard-channel notification.
+- **Restart recovery**: `_groups` is in-memory and lost on restart, but an approval-held container survives. On startup, scan `approval_requests WHERE status='pending'`; for each — **not expired** → rebuild `_GroupState`, replay the suspend actions, re-establish `approval_decision` routing (subject derived from `job_id`), re-arm the expiry watcher (a reload-only recovery gets the container reaped immediately); **expired** → mark `expired` + hard notify. The pass is idempotent.
+- **Three-layer cleanup**: (1) normal `approval_decision`; (2) container-end deterministic `approval_cancel` from `finally`; (3) container-SIGKILL → orchestrator expiry watcher + restart recovery.
+- **Decision race / idempotency**: the container Future is first-wins; the orchestrator row-level `status` transition is idempotent; both sides converge.
+
+### §9 Known risks & the post-approval survival finding (R1)
+
+**R1 — does the gated tool call survive the block? Yes, in-process.** The block is cooperative (the hook `await`s an `asyncio.Future`; the event loop never freezes, so MCP keepalives, NATS decision delivery, and the idle/interrupt pollers keep ticking). MCP connections are container/turn-scoped, not per-call, and nothing in our code closes one during a block. No container-held credential ages out — LLM creds are injected per-request by the credential proxy (the container holds only `ANTHROPIC_BASE_URL`), and external MCP auth uses the static per-request `X-RoleMesh-User-Id` header. Residual (not unit-testable): a *remote* MCP server may drop an idle HTTP/SSE session during the wait; the 5-min bound keeps the window short, and transparent reconnect or a lower timeout mitigates if it surfaces. "Tool failed after approval" has no separate hard channel — it surfaces through the **normal tool-error path** (Claude `PostToolUseFailure`; Pi `tool_result` with `is_error`); a retry that re-hits the hook produces a **new** approval request.
+
+**Operational**: each pending approval holds one container ≤ `APPROVAL_TIMEOUT`; `MAX_CONCURRENT_CONTAINERS` / `GLOBAL_MAX_CONTAINERS` must keep headroom (accepted trade-off; logged if a cap is hit).
+
+### §10 Delivery, policy CRUD & SPA surface
+
+**(S4) Delivery & dual-channel notification.** Target resolution: `conversation_id → channel_bindings → channel_chat_id`; a scheduled task with no active conversation falls back to the most recent. **Telegram**: an inline ✅/❌ card + `CallbackQueryHandler`, `callback_data` `apr:{request_id}` / `rej:{request_id}`; **IDOR guard** — the approver identity is resolved from the auth handshake (ticket + DB), never trusted from the client payload. **Web**: a v1 WS client frame (a pydantic member + `WsClientFrameModel` union + `ws_stream` receive branch + NATS publish + OpenAPI regen + ts client) pushes the approval event. **Dual-channel result**: soft (block `reason` → agent context, for natural phrasing) + hard (the orchestrator deterministically edits the card to "❌ rejected" / "⏰ expired", no LLM) — the hard channel is the delivery guarantee.
+
+**(S5) Policy CRUD & pending read.** REST: `GET/POST /api/v1/approval-policies`, `GET/PATCH/DELETE /api/v1/approval-policies/{id}`, strictly tenant-scoped (RLS + explicit `WHERE tenant_id`); a malformed `condition_expr` → 422 via `validate_condition_expr`. `GET /api/v1/approval-requests` (optional `conversation_id`) returns only pending rows for the caller's tenant, exposing the tool name + summary, never raw params. **SPA**: `rm-approval-card` renders `event.approval.requested`, relays a tap via `V1WsClient.sendApprovalDecision` (a `request.approval_decision` frame, identity stamped server-side), and updates in place on `event.approval.resolved`; on (re)connect the chat panel re-renders in-flight cards from the REST read. Policy CRUD UI: `rm-approval-policies-page` (Settings → Governance) with a structured §7 condition builder; a stored expression too complex for the flat builder opens read-only.
+
+### §11 Implementation outcomes
+
+**§11.1 block-and-await vs the deleted block-and-replay.** The core difference is captured in "The Architectural Fork" above: the deleted v6.1 returned `block=True` immediately and an out-of-band worker re-POSTed the action later; this redesign `await`s the decision in place and the **same container, same turn** runs the approved call, so the agent receives the real result in its ReAct loop. The cost — holding a container ≤ `APPROVAL_TIMEOUT` — is what the §8 machinery makes safe.
+
+**§11.4 Safety→approval bridge (PRE_TOOL_CALL).** The safety pipeline and HITL approval connect at the one stage where it is meaningful — **PRE_TOOL_CALL** — where an agent is already blocked on a tool call inside its own container. There, `pipeline_core` stamps the firing rule's provenance (`firing_rule_id` / `firing_check_id`) onto the verdict; on a `require_approval` verdict the container handler builds `triggered_by = {kind: "safety_rule", rule_id, check_id, stage}` and publishes `approval_request` through the **shared `ApprovalAwaiter`** — the same block-and-await primitive the business hook uses (`policy_id` is null; the provenance rides `triggered_by`) — blocking on the same `APPROVAL_TIMEOUT`. The orchestrator persists `triggered_by` and forwards it on the `event.approval.requested` WS push and the REST projection, so the SPA renders the amber "paused by a safety rule" banner. Approve → the tool runs in-band, same turn; reject / timeout / cancel → a block verdict reaches the model. Other stages keep the hard-block alias (INPUT_PROMPT / POST_TOOL_RESULT have no clean approve-then-continue; MODEL_OUTPUT runs orchestrator-side with no awaiting container). The SPA tells the two gate types apart by the presence of `triggered_by`.
+
+---
+
 ## Related Documentation
 
 - [`9-hooks-architecture.md`](9-hooks-architecture.md) — the unified `PreToolUse` gate approval is built on, and the Claude/Pi bridge parity it inherits

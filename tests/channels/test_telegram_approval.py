@@ -1,4 +1,4 @@
-"""Telegram HITL approval card + callback (docs/21-hitl-approval-plan.md §10 S4).
+"""Telegram HITL approval card + callback (docs/12-hitl-approval-architecture.md §10 S4).
 
 Exercises the module-level parse/dispatch helpers with a stub ``Update`` — no
 live ``Application``. The IDOR-relevant property under test: the callback never

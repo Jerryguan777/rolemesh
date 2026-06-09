@@ -115,7 +115,7 @@ class NatsTransport:
                 # subjects because its retention profile matches (short
                 # buffer, consumer-driven drain).
                 "agent.*.safety_events",
-                # HITL approval IPC (docs/21-hitl-approval-plan.md §3). All
+                # HITL approval IPC (docs/12-hitl-approval-architecture.md §3). All
                 # three subjects ride JetStream: the container publishes
                 # approval_request / approval_cancel and js-subscribes the
                 # decision; the orchestrator js-subscribes request/cancel and

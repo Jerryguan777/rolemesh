@@ -77,7 +77,6 @@ KNOWN_ERROR_CODES: frozenset[str] = frozenset({
     "SEEDED_RULE_IMMUTABLE",
     # Pagination / channel links / WS ticket.
     "INVALID_CURSOR",
-    "ACTOR_NOT_LINKABLE",
     "WS_TICKET_SECRET_UNSET",  # raised via WsTicketError.code (non-literal)
 })
 

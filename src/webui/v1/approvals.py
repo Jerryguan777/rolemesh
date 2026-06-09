@@ -1,6 +1,6 @@
 """``/api/v1/approval-policies`` + ``/api/v1/approval-requests`` REST surface.
 
-The HITL tool-approval policy CRUD (docs/21-hitl-approval-plan.md §10 S5) plus a
+The HITL tool-approval policy CRUD (docs/12-hitl-approval-architecture.md §10 S5) plus a
 small read of in-flight pending requests for web-reconnect re-render (§S4 notes
 follow-up: the ``approval_requests`` row is the authoritative source for a card,
 so a browser that dropped its socket re-renders from here).

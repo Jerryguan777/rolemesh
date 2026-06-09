@@ -3,7 +3,7 @@
 Tenant-scoped reads/writes go through ``tenant_conn`` (RLS-bound); the
 two genuinely cross-tenant maintenance reads used by the orchestrator's
 expiry watcher and restart recovery go through ``admin_conn`` and say so
-in their docstrings (docs/21-hitl-approval-plan.md §4 / §8).
+in their docstrings (docs/12-hitl-approval-architecture.md §4 / §8).
 
 The persistence shape is the frozen contract in §4. The DB is
 authoritative — the orchestrator's in-memory suspend state is a cache

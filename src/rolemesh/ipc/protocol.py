@@ -67,7 +67,7 @@ class AgentInitData:
     # check behaviour). Each spec carries {check_id, version, stages,
     # cost_class, supported_codes, default_timeout_ms}.
     slow_check_specs: list[dict[str, object]] | None = None
-    # HITL approval policy snapshot (docs/21-hitl-approval-plan.md §S2). Each
+    # HITL approval policy snapshot (docs/12-hitl-approval-architecture.md §4). Each
     # item is the dict form of an ``ApprovalPolicy``: {id, tenant_id,
     # mcp_server_name, tool_name, condition_expr, enabled, priority,
     # updated_at(iso8601)}. None / empty means "no approval gating this run" —

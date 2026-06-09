@@ -101,7 +101,7 @@ router.include_router(platform_tenants_router)
 # v6.1 §P1.4 — Telegram IM linking surfaces (POST/GET telegram +
 # DELETE by identity).
 router.include_router(channel_links_router)
-# HITL tool approval (docs/21-hitl-approval-plan.md §10 S5): policy CRUD +
+# HITL tool approval (docs/12-hitl-approval-architecture.md §10 S5): policy CRUD +
 # pending-request read for web-reconnect card re-render.
 router.include_router(approval_policies_router)
 router.include_router(approval_requests_router)

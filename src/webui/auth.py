@@ -47,27 +47,22 @@ async def authenticate_request(token: str) -> AuthenticatedUser | None:
     return None
 
 
-BOOTSTRAP_USER_ID = "bootstrap"
-
-
 async def authenticate_ws(token: str) -> AuthenticatedUser | None:
-    """Authenticate a token (JWT, BOOTSTRAP_USERS, or single bootstrap).
+    """Authenticate a token (BOOTSTRAP_USERS or configured provider).
 
     Returns None on failure. Used by both WebSocket and REST endpoints.
 
     Resolution order:
       1. ``BOOTSTRAP_USERS`` multi-user map (if any token matches);
-      2. ``ADMIN_BOOTSTRAP_TOKEN`` legacy single-user fast-path;
-      3. configured AuthProvider (external JWT / OIDC / builtin).
+      2. configured AuthProvider (external JWT / OIDC / builtin).
 
-    The multi-user map sits ahead of the legacy single-user path so a
-    dev who configures both gets the richer identity. A request whose
-    token matches neither bootstrap source falls through to the
-    provider — never short-circuited.
+    A request whose token matches no BOOTSTRAP_USERS spec falls through
+    to the provider — never short-circuited. Every path returns a
+    user whose ``user_id`` is a real UUID (BOOTSTRAP_USERS upserts a
+    row; the external/OIDC providers enforce the same invariant).
     """
     from rolemesh.auth.provider import AuthenticatedUser as AuthUser
     from rolemesh.db import get_tenant_by_slug
-    from webui.config import ADMIN_BOOTSTRAP_TOKEN, IS_PRODUCTION
 
     spec = get_spec_for_token(token)
     if spec is not None:
@@ -84,21 +79,6 @@ async def authenticate_ws(token: str) -> AuthenticatedUser | None:
             name=spec.user_id_slug,
         )
 
-    if ADMIN_BOOTSTRAP_TOKEN and token == ADMIN_BOOTSTRAP_TOKEN:
-        if IS_PRODUCTION:
-            # Fail closed: the static bootstrap token is a permanent,
-            # network-reachable owner backdoor and is disabled in
-            # production. Seed the first admin with
-            # ``rolemesh-admin create-admin`` instead.
-            return None
-        tenant = await get_tenant_by_slug("default")
-        tenant_id = tenant.id if tenant else "default"
-        return AuthUser(
-            user_id=BOOTSTRAP_USER_ID,
-            tenant_id=tenant_id,
-            role="owner",
-            name="Bootstrap Admin",
-        )
     return await authenticate_request(token)
 
 
