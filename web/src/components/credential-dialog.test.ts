@@ -5,9 +5,10 @@
 //   - Provider-locked mode: only the relevant fields render.
 //   - Provider-pick mode (provider = null): user can change provider
 //     and field set updates.
-//   - Bedrock specifically renders 4 fields (per locked decision):
-//     access key id (api_key slot), secret, region (default us-west-2),
-//     and optional session token.
+//   - Bedrock renders 2 fields: the Bedrock long-term API key
+//     (api_key slot) and region (default us-east-1). The proxy
+//     authenticates with the key as a Bearer token, so no AWS
+//     secret/session-token fields are collected.
 //   - Save → PUT /credentials/{provider} with the right body
 //     shape `{api_key, extras: {...}}` (or `extras: null` when no
 //     extras are needed).
@@ -117,21 +118,21 @@ describe('<rm-credential-dialog>', () => {
     expect(inputs[0]!.getAttribute('type')).toBe('password');
   });
 
-  it('bedrock locked mode renders 4 fields with us-west-2 default region', async () => {
+  it('bedrock locked mode renders 2 fields with us-east-1 default region', async () => {
     const el = mount();
     el.provider = 'bedrock';
     el.open = true;
     await settle(el);
     const inputs = el.querySelectorAll('input');
-    expect(inputs.length).toBe(4);
+    expect(inputs.length).toBe(2);
     // Region field: find label whose text matches "Region".
     const labels = [...el.querySelectorAll('label')].map((l) => l.textContent?.trim());
     expect(labels).toContain('Region');
     // Default region pre-filled.
     const regionInput = [...inputs].find(
-      (i) => i.getAttribute('placeholder') === 'us-west-2',
+      (i) => i.getAttribute('placeholder') === 'us-east-1',
     )!;
-    expect(regionInput.value).toBe('us-west-2');
+    expect(regionInput.value).toBe('us-east-1');
   });
 
   it('provider picker renders when provider=null and updates field set on change', async () => {
@@ -145,7 +146,7 @@ describe('<rm-credential-dialog>', () => {
     select.value = 'bedrock';
     select.dispatchEvent(new Event('change', { bubbles: true }));
     await settle(el);
-    expect(el.querySelectorAll('input').length).toBe(4); // bedrock fields
+    expect(el.querySelectorAll('input').length).toBe(2); // bedrock fields
   });
 
   it('PUT body matches the per-provider shape for openai with api_base override', async () => {
@@ -194,15 +195,17 @@ describe('<rm-credential-dialog>', () => {
     expect(stub!.calls[0]!.body).toEqual({ api_key: 'sk-fake', extras: null });
   });
 
-  it('blocks save when a required extra is empty (bedrock without secret)', async () => {
+  it('blocks save when a required extra is empty (bedrock without region)', async () => {
     const el = mount();
     el.provider = 'bedrock';
     el.open = true;
     await settle(el);
     const inputs = el.querySelectorAll<HTMLInputElement>('input');
-    // Fill access key id only — leave secret empty.
-    inputs[0]!.value = 'AKIAFAKE';
+    // Fill the Bedrock API key, then clear the pre-filled region.
+    inputs[0]!.value = 'ABSKFAKE';
     inputs[0]!.dispatchEvent(new Event('input', { bubbles: true }));
+    inputs[1]!.value = '';
+    inputs[1]!.dispatchEvent(new Event('input', { bubbles: true }));
     await settle(el);
     const saveBtn = [...el.querySelectorAll<HTMLButtonElement>('button')].find(
       (b) => b.textContent?.includes('Save'),
@@ -210,7 +213,7 @@ describe('<rm-credential-dialog>', () => {
     saveBtn.click();
     await settle(el);
     expect(stub!.calls).toHaveLength(0);
-    expect(el.textContent).toContain('AWS secret access key');
+    expect(el.textContent).toContain('Region is required');
   });
 
   it('emits credential-saved and clears the form on success', async () => {
