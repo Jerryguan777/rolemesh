@@ -2,7 +2,7 @@
 //
 // Wraps <rm-dialog> (v2-A primitive). Knows which provider the user
 // is configuring; renders the right set of fields (anthropic = one
-// API key, bedrock = AWS quartet, etc.) and writes via PUT
+// API key, bedrock = API key + region, etc.) and writes via PUT
 // /api/v1/credentials/{provider} with the open-shape
 // `extras: { ... }` map per OpenAPI.
 //
@@ -95,33 +95,22 @@ export const PROVIDER_SCHEMAS: ProviderSchema[] = [
     provider: 'bedrock',
     label: 'AWS Bedrock',
     blurb:
-      'AWS access key + region. The credential proxy uses these to sign Bedrock InvokeModel calls.',
+      'Bedrock long-term API key + region. The credential proxy authenticates to Bedrock with this key as a Bearer token.',
     apiKey: {
-      label: 'AWS access key ID',
-      placeholder: 'AKIA…',
+      label: 'Bedrock API key',
+      placeholder: 'ABSK…',
       helperText:
-        'Stored as the credential\'s primary key; the secret + region land in extras.',
+        'Console → Bedrock → API keys → Generate long-term API key. Stored as the credential\'s primary key; the region lands in extras.',
     },
     requiredExtras: [
       {
-        key: 'aws_secret_access_key',
-        label: 'AWS secret access key',
-        placeholder: '…',
-      },
-      {
         key: 'region',
         label: 'Region',
-        placeholder: 'us-west-2',
-        defaultValue: 'us-west-2',
+        placeholder: 'us-east-1',
+        defaultValue: 'us-east-1',
       },
     ],
-    optionalExtras: [
-      {
-        key: 'aws_session_token',
-        label: 'AWS session token (optional)',
-        placeholder: 'For temporary credentials.',
-      },
-    ],
+    optionalExtras: [],
   },
 ];
 
