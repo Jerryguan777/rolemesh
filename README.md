@@ -112,7 +112,11 @@ uv sync --extra pi --extra dev
 # Add the eval extra to use rolemesh-eval (Inspect AI based, manual)
 uv sync --extra pi --extra dev --extra eval
 
-# Bring up Postgres + NATS
+# Bring up Postgres + NATS (also creates the EC-2 agent bridge and
+# attaches NATS to it). Run this BEFORE the orchestrator: compose owns
+# the rolemesh-agent-net network in dev and the orchestrator reuses it.
+# If the orchestrator starts first it creates the network itself and a
+# later `compose up` fails on a label mismatch.
 docker compose -f docker-compose.dev.yml up -d
 
 # Build the agent and egress-gateway container images
@@ -169,7 +173,7 @@ channel with its bot tokens.
 | Key                          | Purpose                                                                  |
 |------------------------------|--------------------------------------------------------------------------|
 | `ASSISTANT_NAME`             | Display name for your AI coworker.                                       |
-| `CONTAINER_NETWORK_NAME`     | Set to enable EC-2 (Internal=true) agent bridge with egress gateway.     |
+| `CONTAINER_NETWORK_NAME`     | EC-2 agent bridge (Internal=true) + egress gateway. Defaults to `rolemesh-agent-net` (EC **on**); set to `""` to roll back to the plain Docker bridge. |
 | `ROLEMESH_ENV`               | `development` (default) or `production`. See note below.                 |
 | `ROLEMESH_SEED_ADMIN_EMAIL`  | If set, the WebUI seeds a `platform_admin` with this email at startup.   |
 | `WS_TICKET_SECRET`           | **Required.** Dedicated signing key for WebSocket handshake tickets.     |

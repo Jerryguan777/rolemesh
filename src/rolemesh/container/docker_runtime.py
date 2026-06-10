@@ -344,6 +344,19 @@ class DockerRuntime:
             reverse_proxy_port,
         )
 
+    async def verify_nats_reachable(
+        self,
+        network_name: str,
+        nats_url: str,
+    ) -> None:
+        from rolemesh.container.network import verify_nats_reachable
+
+        await verify_nats_reachable(
+            self._ensure_client(),
+            network_name,
+            nats_url,
+        )
+
     @staticmethod
     def _spec_to_config(spec: ContainerSpec) -> dict[str, Any]:
         """Convert a ContainerSpec to a Docker API config dict."""

@@ -35,6 +35,7 @@ import asyncio
 import contextlib
 import uuid
 from typing import Any
+from urllib.parse import urlparse
 
 import aiodocker
 import aiodocker.exceptions
@@ -74,6 +75,25 @@ _EGRESS_NETWORK_OPTIONS: dict[str, str] = {
 # intentionally tiny; alpine is already present in most dev environments
 # and pulls in under ~5MB.
 _PROBE_IMAGE: str = "alpine:3.19"
+
+
+def agent_facing_nats_url(nats_url: str) -> str:
+    """Rewrite a loopback NATS URL to the ``nats`` service name that
+    resolves on the internal agent bridge.
+
+    Agent containers sit on an ``Internal=true`` bridge with no route to
+    the host, so the orchestrator's own ``nats://localhost:4222`` is
+    meaningless to them. They reach NATS by a ``nats`` alias attached to
+    the bridge (dev: docker-compose attaches the nats container to
+    agent-net; prod: the operator wires NATS onto the bridge). This is
+    the single source of truth shared by ``runner`` — which injects the
+    rewritten URL into each agent container's env — and the startup
+    reachability probe below, so the probe always targets exactly what
+    the agents will dial.
+    """
+    return nats_url.replace("://localhost:", "://nats:").replace(
+        "://127.0.0.1:", "://nats:"
+    )
 
 
 async def ensure_agent_network(
@@ -220,6 +240,85 @@ async def ensure_egress_network(
     logger.info("Created egress network", network=network_name, options=_EGRESS_NETWORK_OPTIONS)
 
 
+async def _run_bridge_probe(
+    client: aiodocker.Docker,
+    network_name: str,
+    probe_cmd: list[str],
+    *,
+    timeout_s: float,
+    label: str,
+    detail: str = "",
+) -> None:
+    """Run a one-shot probe container on ``network_name`` and assert it
+    exits 0. Shared by the egress-gateway and NATS reachability checks.
+
+    ``label`` must end in the word "probe" — both the timeout and
+    non-zero-exit messages read ``f"{label} failed/timed out ..."``, and
+    callers / tests grep for the adjacent ``"probe failed"`` phrase.
+    ``detail`` carries probe-specific context (network, target) appended
+    to those messages.
+
+    Skips (returns without raising) only when the probe image can't be
+    pulled — in that degraded case a missing alpine image shouldn't block
+    startup. Any other failure (timeout, non-zero exit) raises
+    RuntimeError so the caller can fail closed.
+    """
+    probe_name = f"rolemesh-probe-{uuid.uuid4().hex[:8]}"
+    config: dict[str, Any] = {
+        "Image": _PROBE_IMAGE,
+        "Cmd": probe_cmd,
+        "HostConfig": {
+            "NetworkMode": network_name,
+            "AutoRemove": False,
+            # No ExtraHosts: targets are resolved by service name via
+            # Docker embedded DNS on the agent bridge. Keeping this
+            # empty is a soft assertion that we no longer depend on the
+            # host-gateway escape hatch.
+        },
+        "AttachStdout": True,
+        "AttachStderr": True,
+    }
+
+    try:
+        await client.images.inspect(_PROBE_IMAGE)
+    except aiodocker.exceptions.DockerError:
+        logger.info("Pulling probe image", image=_PROBE_IMAGE)
+        try:
+            await client.images.pull(_PROBE_IMAGE)
+        except aiodocker.exceptions.DockerError as exc:
+            logger.warning(
+                "Could not pull probe image — skipping connectivity check; "
+                "real agents may still fail to reach the target",
+                image=_PROBE_IMAGE,
+                error=str(exc),
+            )
+            return
+
+    with contextlib.suppress(aiodocker.exceptions.DockerError):
+        stale = client.containers.container(probe_name)
+        await stale.delete(force=True)
+
+    container = await client.containers.create_or_replace(name=probe_name, config=config)
+    try:
+        await container.start()
+        try:
+            result = await asyncio.wait_for(container.wait(), timeout=timeout_s)
+        except TimeoutError as exc:
+            msg = f"{label} timed out after {timeout_s}s. {detail}".rstrip()
+            raise RuntimeError(msg) from exc
+        exit_code = int(result.get("StatusCode", -1))
+        if exit_code != 0:
+            logs = await container.log(stdout=True, stderr=True)
+            msg = (
+                f"{label} failed (exit={exit_code}). {detail} "
+                f"Probe output: {''.join(logs)[:500]}"
+            ).strip()
+            raise RuntimeError(msg)
+    finally:
+        with contextlib.suppress(aiodocker.exceptions.DockerError):
+            await container.delete(force=True)
+
+
 async def verify_egress_gateway_reachable(
     client: aiodocker.Docker,
     network_name: str,
@@ -238,11 +337,7 @@ async def verify_egress_gateway_reachable(
 
     Probe semantics:
         * DNS: ``<gateway_service_name>`` must resolve on the internal
-          bridge. Docker's embedded DNS binds the container name to its
-          bridge IP; EC-1 agents won't have their DNS pointed at the
-          gateway's resolver yet (EC-2 turns that on), so we still use
-          127.0.0.11 here. Once EC-2 lands and the container DNS is
-          pinned to the gateway, this same probe continues to work.
+          bridge via Docker's embedded DNS (127.0.0.11).
         * HTTP: ``GET /healthz`` must return 200. Unlike the pre-EC-1
           probe this path is our own — we expect a specific status, so
           the old "any HTTP response means success" logic doesn't apply.
@@ -253,7 +348,6 @@ async def verify_egress_gateway_reachable(
         logger.info("Skipping gateway reachability probe — no custom network configured")
         return
 
-    probe_name = f"rolemesh-egress-probe-{uuid.uuid4().hex[:8]}"
     wget_timeout = max(1, int(timeout_s) - 2)
     # Expect HTTP/200 specifically; /healthz is under our control so any
     # other code is a real problem.
@@ -266,71 +360,84 @@ async def verify_egress_gateway_reachable(
             "2>&1 | grep -q 'HTTP/1.[01] 200'"
         ),
     ]
+    await _run_bridge_probe(
+        client,
+        network_name,
+        probe_cmd,
+        timeout_s=timeout_s,
+        label="Egress-gateway connectivity probe",
+        detail=(
+            f"(network={network_name}, "
+            f"service={gateway_service_name}:{reverse_proxy_port}). "
+            "Is the gateway container running and attached to both networks?"
+        ),
+    )
+    logger.info(
+        "Egress gateway reachable from agent network",
+        network=network_name,
+        service=gateway_service_name,
+    )
 
-    config: dict[str, Any] = {
-        "Image": _PROBE_IMAGE,
-        "Cmd": probe_cmd,
-        "HostConfig": {
-            "NetworkMode": network_name,
-            "AutoRemove": False,
-            # No ExtraHosts: the gateway is resolved by service name via
-            # Docker embedded DNS on the agent bridge. Keeping this
-            # empty is a soft assertion that we no longer depend on the
-            # host-gateway escape hatch.
-        },
-        "AttachStdout": True,
-        "AttachStderr": True,
-    }
 
-    try:
-        await client.images.inspect(_PROBE_IMAGE)
-    except aiodocker.exceptions.DockerError:
-        logger.info("Pulling probe image", image=_PROBE_IMAGE)
-        try:
-            await client.images.pull(_PROBE_IMAGE)
-        except aiodocker.exceptions.DockerError as exc:
-            logger.warning(
-                "Could not pull probe image — skipping connectivity check; "
-                "real agents may still fail to reach the egress gateway",
-                image=_PROBE_IMAGE,
-                error=str(exc),
-            )
-            return
+async def verify_nats_reachable(
+    client: aiodocker.Docker,
+    network_name: str,
+    nats_url: str,
+    *,
+    timeout_s: float = 10.0,
+) -> None:
+    """Prove that containers on the internal agent bridge can reach NATS
+    at the address agents actually dial (EC-2).
 
-    with contextlib.suppress(aiodocker.exceptions.DockerError):
-        stale = client.containers.container(probe_name)
-        await stale.delete(force=True)
+    Mirrors ``verify_egress_gateway_reachable`` and closes the same class
+    of gap: an agent on the ``Internal=true`` bridge whose ``NATS_URL``
+    resolves to a ``nats`` alias that isn't attached to the bridge boots
+    fine and only fails on its first NATS round-trip mid-turn (the
+    dev-compose omission this guards against). Fail closed at startup.
 
-    container = await client.containers.create_or_replace(name=probe_name, config=config)
-    try:
-        await container.start()
-        try:
-            result = await asyncio.wait_for(container.wait(), timeout=timeout_s)
-        except TimeoutError as exc:
-            msg = (
-                f"Egress-gateway connectivity probe timed out after "
-                f"{timeout_s}s (network={network_name}, "
-                f"service={gateway_service_name}:{reverse_proxy_port}). "
-                "Agents on this network will not reach the gateway — "
-                "refusing to continue. Is the gateway container running "
-                "and attached to both networks?"
-            )
-            raise RuntimeError(msg) from exc
-        exit_code = int(result.get("StatusCode", -1))
-        if exit_code != 0:
-            logs = await container.log(stdout=True, stderr=True)
-            msg = (
-                f"Egress-gateway connectivity probe failed "
-                f"(exit={exit_code}, network={network_name}, "
-                f"service={gateway_service_name}:{reverse_proxy_port}). "
-                f"Probe output: {''.join(logs)[:500]}"
-            )
-            raise RuntimeError(msg)
-        logger.info(
-            "Egress gateway reachable from agent network",
-            network=network_name,
-            service=gateway_service_name,
-        )
-    finally:
-        with contextlib.suppress(aiodocker.exceptions.DockerError):
-            await container.delete(force=True)
+    The probe opens a TCP connection to ``<host>:<port>`` derived from
+    ``agent_facing_nats_url`` — the exact address injected into agent
+    containers — and checks for NATS's server-first ``INFO`` protocol
+    banner. A bare port-open check would pass spuriously against an open
+    port with nothing (or the wrong thing) behind it; requiring ``INFO``
+    confirms it is really NATS.
+
+    Raises RuntimeError on failure — caller treats startup as aborted.
+    """
+    if not network_name:
+        logger.info("Skipping NATS reachability probe — no custom network configured")
+        return
+
+    target = agent_facing_nats_url(nats_url)
+    parsed = urlparse(target)
+    host = parsed.hostname or "nats"
+    port = parsed.port or 4222
+    nc_timeout = max(1, int(timeout_s) - 2)
+    # busybox nc: connect, let NATS speak first (it sends ``INFO`` on
+    # connect), then match the banner. ``head -c`` caps the read so a
+    # chatty server can't hold the pipe open past the probe window.
+    probe_cmd = [
+        "sh",
+        "-c",
+        (
+            f"nc -w {nc_timeout} {host} {port} </dev/null 2>/dev/null "
+            "| head -c 64 | grep -q '^INFO'"
+        ),
+    ]
+    await _run_bridge_probe(
+        client,
+        network_name,
+        probe_cmd,
+        timeout_s=timeout_s,
+        label="NATS connectivity probe",
+        detail=(
+            f"(network={network_name}, target={host}:{port}). "
+            "Is the NATS container attached to the agent bridge under "
+            "the 'nats' alias?"
+        ),
+    )
+    logger.info(
+        "NATS reachable from agent network",
+        network=network_name,
+        target=f"{host}:{port}",
+    )

@@ -7,6 +7,19 @@ services:
     command: ["--jetstream", "--store_dir=/data"]
     volumes:
       - nats-data:/data
+    # Dual-homed on purpose:
+    #   * default     — keeps the host port mappings above, so the
+    #                   orchestrator (runs on the host) and all test code
+    #                   keep reaching NATS at nats://localhost:4222.
+    #   * agent-net   — EC-2 agent containers sit on an Internal=true
+    #                   bridge with no route to the host; they dial NATS
+    #                   by the ``nats`` service name, which Docker's
+    #                   embedded DNS resolves only if the nats container
+    #                   is attached to that same bridge. Without this the
+    #                   agent's first NATS round-trip fails mid-turn.
+    networks:
+      - default
+      - agent-net
 
   postgres:
     image: postgres:16
@@ -18,6 +31,31 @@ services:
       POSTGRES_PASSWORD: rolemesh
     volumes:
       - pgdata:/var/lib/postgresql/data
+
+networks:
+  # Compose owns the EC-2 agent bridge in dev. ``ensure_agent_network``
+  # in the orchestrator is idempotent — it reuses a network that already
+  # exists by name as long as the invariants below hold, so the
+  # orchestrator (which boots after ``compose up``) attaches to this one
+  # instead of creating its own. The name MUST equal
+  # ``CONTAINER_NETWORK_NAME`` (default ``rolemesh-agent-net``).
+  #
+  # Ordering note: bring this up (``docker compose up``) BEFORE the
+  # orchestrator. If the orchestrator runs first it creates the network
+  # itself with RoleMesh labels, and a later ``compose up`` then fails
+  # with a label-mismatch error — ``docker network rm rolemesh-agent-net``
+  # to recover.
+  agent-net:
+    name: rolemesh-agent-net
+    driver: bridge
+    # Mirrors the orchestrator's Internal=true invariant (network.py).
+    # If this is false the orchestrator reuses the network but logs a
+    # "weakened isolation" warning.
+    internal: true
+    # enable_icc is intentionally left at the bridge default (true):
+    # ICC is required for the agent↔gateway and gateway↔NATS paths, and
+    # the orchestrator's reuse check defaults a missing flag to "true",
+    # so omitting it keeps both sides agreeing without a warning.
 
 volumes:
   nats-data:

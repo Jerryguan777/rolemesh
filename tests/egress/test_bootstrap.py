@@ -29,6 +29,20 @@ import aiodocker.exceptions
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _stub_nats_probe() -> Any:
+    """EC-2 added a NATS reachability gate at the top of
+    ``ensure_gateway_running_and_register_dns``. These tests target the
+    gateway-bootstrap logic, so stub the probe to a no-op by default;
+    its own fail-closed behaviour is covered by the dedicated tests at
+    the end of this file, which re-patch it.
+    """
+    from rolemesh.egress import bootstrap
+
+    with patch.object(bootstrap, "wait_for_nats_ready", AsyncMock()):
+        yield
+
+
 @pytest.fixture
 def _runner_module() -> Any:
     """Import ``rolemesh.container.runner`` via a path that does NOT
@@ -397,3 +411,84 @@ async def test_inspect_format_anomaly_falls_through_to_launch(_runner_module: An
         "missing IP in existing container's inspect should trigger "
         "a fresh launch, not register a None IP"
     )
+
+
+# ---------------------------------------------------------------------------
+# EC-2 NATS reachability gate
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_nats_unreachable_aborts_before_touching_gateway(
+    _runner_module: Any,
+) -> None:
+    """If NATS isn't reachable on the agent bridge the bootstrap fails
+    closed at the top — before launching or even inspecting the gateway.
+    Without this gate agents come up clean and only fail on their first
+    NATS round-trip mid-turn (the dev-compose omission this guards).
+    """
+    from rolemesh.egress import bootstrap
+
+    runtime = _make_runtime()
+    _wire_existing_gateway(runtime, _make_gateway_inspect(running=True))
+
+    with (
+        patch.object(bootstrap, "CONTAINER_NETWORK_NAME", "rolemesh-agent-net"),
+        patch.object(
+            bootstrap,
+            "wait_for_nats_ready",
+            AsyncMock(side_effect=RuntimeError("nats not on bridge")),
+        ),
+        patch.object(bootstrap, "launch_egress_gateway", AsyncMock()) as launch_mock,
+        patch.object(bootstrap, "wait_for_gateway_ready", AsyncMock()) as wait_mock,
+        patch.object(_runner_module, "set_egress_gateway_dns_ip") as set_dns_mock,
+        pytest.raises(RuntimeError, match="nats not on bridge"),
+    ):
+        await bootstrap.ensure_gateway_running_and_register_dns(runtime)
+
+    launch_mock.assert_not_called()
+    wait_mock.assert_not_called()
+    set_dns_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_nats_gate_runs_on_the_reuse_path(_runner_module: Any) -> None:
+    """The NATS gate is checked even when an existing gateway is reused
+    (the common steady-state path), not just on fresh launch."""
+    from rolemesh.egress import bootstrap
+
+    runtime = _make_runtime()
+    _wire_existing_gateway(runtime, _make_gateway_inspect(running=True))
+    nats_probe = AsyncMock()
+
+    with (
+        patch.object(bootstrap, "CONTAINER_NETWORK_NAME", "rolemesh-agent-net"),
+        patch.object(bootstrap, "wait_for_nats_ready", nats_probe),
+        patch.object(bootstrap, "launch_egress_gateway", AsyncMock()) as launch_mock,
+        patch.object(bootstrap, "wait_for_gateway_ready", AsyncMock()),
+        patch.object(_runner_module, "set_egress_gateway_dns_ip"),
+    ):
+        result = await bootstrap.ensure_gateway_running_and_register_dns(runtime)
+
+    assert result == "172.18.0.7"
+    nats_probe.assert_awaited_once()
+    launch_mock.assert_not_called()  # reuse path, no relaunch
+
+
+@pytest.mark.asyncio
+async def test_nats_gate_skipped_when_ec2_inactive() -> None:
+    """Rollback mode (``CONTAINER_NETWORK_NAME=""``) short-circuits before
+    the NATS gate — there's no agent bridge to probe."""
+    from rolemesh.egress import bootstrap
+
+    runtime = _make_runtime()
+    nats_probe = AsyncMock()
+
+    with (
+        patch.object(bootstrap, "CONTAINER_NETWORK_NAME", ""),
+        patch.object(bootstrap, "wait_for_nats_ready", nats_probe),
+    ):
+        result = await bootstrap.ensure_gateway_running_and_register_dns(runtime)
+
+    assert result is None
+    nats_probe.assert_not_awaited()

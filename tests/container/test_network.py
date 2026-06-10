@@ -11,9 +11,11 @@ import aiodocker.exceptions
 import pytest
 
 from rolemesh.container.network import (
+    agent_facing_nats_url,
     ensure_agent_network,
     ensure_egress_network,
     verify_egress_gateway_reachable,
+    verify_nats_reachable,
 )
 
 
@@ -384,3 +386,114 @@ async def test_timeout_raises_runtime_error_and_cleans_probe() -> None:
             timeout_s=0.01,
         )
     probe.delete.assert_awaited()
+
+
+# ---------------------------------------------------------------------------
+# agent_facing_nats_url — single source of truth for the bridge rewrite
+# ---------------------------------------------------------------------------
+
+
+def test_agent_facing_nats_url_rewrites_loopback_forms() -> None:
+    assert agent_facing_nats_url("nats://localhost:4222") == "nats://nats:4222"
+    assert agent_facing_nats_url("nats://127.0.0.1:4222") == "nats://nats:4222"
+
+
+def test_agent_facing_nats_url_leaves_non_loopback_untouched() -> None:
+    # An operator who already points NATS_URL at a real host/alias should
+    # not have it rewritten out from under them.
+    assert agent_facing_nats_url("nats://nats.prod:4222") == "nats://nats.prod:4222"
+    assert agent_facing_nats_url("nats://10.0.0.5:4222") == "nats://10.0.0.5:4222"
+
+
+# ---------------------------------------------------------------------------
+# verify_nats_reachable
+# ---------------------------------------------------------------------------
+
+
+async def test_verify_nats_reachable_success() -> None:
+    probe = _make_probe_container(exit_code=0)
+    client = MagicMock()
+    client.images = MagicMock()
+    client.images.inspect = AsyncMock()
+    client.images.pull = AsyncMock()
+    client.containers = MagicMock()
+    client.containers.container = MagicMock(side_effect=_docker_error(404, "no stale"))
+    client.containers.create_or_replace = AsyncMock(return_value=probe)
+
+    await verify_nats_reachable(
+        client,
+        network_name="rolemesh-agent-net",
+        nats_url="nats://localhost:4222",
+    )
+
+    probe.start.assert_awaited_once()
+    probe.wait.assert_awaited_once()
+    probe.delete.assert_awaited()
+
+
+async def test_verify_nats_reachable_nonzero_exit_raises() -> None:
+    probe = _make_probe_container(exit_code=1)
+    client = MagicMock()
+    client.images = MagicMock()
+    client.images.inspect = AsyncMock()
+    client.images.pull = AsyncMock()
+    client.containers = MagicMock()
+    client.containers.container = MagicMock(side_effect=_docker_error(404, "no stale"))
+    client.containers.create_or_replace = AsyncMock(return_value=probe)
+
+    with pytest.raises(RuntimeError, match="probe failed"):
+        await verify_nats_reachable(
+            client,
+            network_name="rolemesh-agent-net",
+            nats_url="nats://localhost:4222",
+        )
+    probe.delete.assert_awaited()
+
+
+async def test_verify_nats_reachable_empty_network_name_is_noop() -> None:
+    client = MagicMock()
+    client.containers = MagicMock()
+    client.containers.create_or_replace = AsyncMock()
+
+    await verify_nats_reachable(
+        client,
+        network_name="",
+        nats_url="nats://localhost:4222",
+    )
+
+    client.containers.create_or_replace.assert_not_awaited()
+
+
+async def test_verify_nats_reachable_probe_targets_service_name_and_info_banner() -> None:
+    """The probe must dial the rewritten ``nats`` alias on the agent
+    bridge (not localhost) and match NATS's server-first INFO banner —
+    a bare port-open check would pass against the wrong service."""
+    probe = _make_probe_container(exit_code=0)
+    captured: dict[str, Any] = {}
+
+    async def _capture_create(name: str, config: dict[str, Any]) -> MagicMock:
+        captured["config"] = config
+        return probe
+
+    client = MagicMock()
+    client.images = MagicMock()
+    client.images.inspect = AsyncMock()
+    client.containers = MagicMock()
+    client.containers.container = MagicMock(side_effect=_docker_error(404, "no stale"))
+    client.containers.create_or_replace = AsyncMock(side_effect=_capture_create)
+
+    await verify_nats_reachable(
+        client,
+        network_name="rolemesh-agent-net",
+        nats_url="nats://localhost:4222",
+    )
+
+    host_config = captured["config"]["HostConfig"]
+    assert host_config["NetworkMode"] == "rolemesh-agent-net"
+    assert not host_config.get("ExtraHosts")
+    probe_cmd = " ".join(captured["config"]["Cmd"])
+    # Localhost must have been rewritten to the bridge-resolvable alias.
+    assert "nats 4222" in probe_cmd
+    assert "localhost" not in probe_cmd
+    # INFO banner check, not a bare `nc -z` port probe.
+    assert "INFO" in probe_cmd

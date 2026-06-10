@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from rolemesh.auth.permissions import AgentPermissions
 from rolemesh.container.docker_runtime import _parse_memory
+from rolemesh.container.network import agent_facing_nats_url
 from rolemesh.container.runtime import (
     CONTAINER_HOST_GATEWAY,
     ContainerSpec,
@@ -430,9 +431,7 @@ def build_container_spec(
         # production the operator puts NATS on the bridge directly. The
         # orchestrator itself still uses the .env-configured URL (usually
         # localhost:4222), so rewrite here rather than in the .env.
-        nats_url = NATS_URL.replace("://localhost:", "://nats:").replace(
-            "://127.0.0.1:", "://nats:"
-        )
+        nats_url = agent_facing_nats_url(NATS_URL)
         proxy_base = f"http://{EGRESS_GATEWAY_CONTAINER_NAME}:{CREDENTIAL_PROXY_PORT}"
         forward_proxy_url = (
             f"http://{EGRESS_GATEWAY_CONTAINER_NAME}:{EGRESS_GATEWAY_FORWARD_PORT}"

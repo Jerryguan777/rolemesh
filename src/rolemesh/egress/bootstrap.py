@@ -56,7 +56,11 @@ from rolemesh.core.config import (
     EGRESS_GATEWAY_CONTAINER_NAME,
 )
 from rolemesh.core.logger import get_logger
-from rolemesh.egress.launcher import launch_egress_gateway, wait_for_gateway_ready
+from rolemesh.egress.launcher import (
+    launch_egress_gateway,
+    wait_for_gateway_ready,
+    wait_for_nats_ready,
+)
 
 # ``rolemesh.container.runner`` imports from ``rolemesh.agent`` which
 # imports back into ``rolemesh.container.runner`` — module-level
@@ -163,6 +167,18 @@ async def ensure_gateway_running_and_register_dns(
     from rolemesh.container.runner import set_egress_gateway_dns_ip
 
     docker_client = runtime._ensure_client()  # type: ignore[attr-defined]
+
+    # EC-2 fail-closed gate: agents on the Internal=true bridge can only
+    # reach NATS via the ``nats`` alias attached to that bridge. If it
+    # isn't attached (the classic dev-compose omission where the nats
+    # container never joins agent-net), the orchestrator and gateway —
+    # which reach NATS over the host gateway — still come up clean, and
+    # the breakage only surfaces on an agent's first NATS round-trip
+    # mid-turn. Assert reachability here so startup fails loudly instead.
+    # Gated on hasattr so non-Docker runtimes (k8s) that grow their own
+    # bootstrap path are unaffected.
+    if hasattr(runtime, "verify_nats_reachable"):
+        await wait_for_nats_ready(docker_client, agent_network=CONTAINER_NETWORK_NAME)
 
     # Reuse-if-running fast path. Skips ``launch_egress_gateway``'s
     # destructive ``create_or_replace`` so a running gateway in use
