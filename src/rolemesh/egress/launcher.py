@@ -32,7 +32,10 @@ from typing import Any
 import aiodocker
 import aiodocker.exceptions
 
-from rolemesh.container.network import verify_egress_gateway_reachable
+from rolemesh.container.network import (
+    verify_egress_gateway_reachable,
+    verify_nats_reachable,
+)
 from rolemesh.container.runtime import (
     get_host_gateway_extra_hosts,
     rewrite_loopback_to_host_gateway,
@@ -41,6 +44,7 @@ from rolemesh.core.config import (
     CREDENTIAL_PROXY_PORT,
     EGRESS_GATEWAY_CONTAINER_NAME,
     EGRESS_GATEWAY_IMAGE,
+    NATS_URL,
     PROJECT_ROOT,
 )
 from rolemesh.core.logger import get_logger
@@ -185,6 +189,50 @@ async def wait_for_gateway_ready(
     msg = (
         f"Egress gateway did not become ready after {attempts} attempts "
         f"({attempts * interval_s:.1f}s). Last error: {last_exc}"
+    )
+    raise RuntimeError(msg) from last_exc
+
+
+async def wait_for_nats_ready(
+    client: aiodocker.Docker,
+    *,
+    agent_network: str,
+    nats_url: str = NATS_URL,
+    attempts: int = 15,
+    interval_s: float = 1.0,
+) -> None:
+    """Probe NATS from the agent bridge with retry until it answers or
+    the budget exhausts.
+
+    In dev the nats container (docker-compose) may still be coming up
+    when the orchestrator boots, so the first attempts can legitimately
+    fail; a budget around ``attempts * interval_s`` seconds absorbs that
+    cold start. A healthy NATS already attached to the bridge returns on
+    the first attempt. When EC is off (``agent_network`` empty) the
+    underlying probe is a no-op and this returns immediately.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            await verify_nats_reachable(
+                client,
+                network_name=agent_network,
+                nats_url=nats_url,
+            )
+            return
+        except RuntimeError as exc:
+            last_exc = exc
+            logger.debug(
+                "NATS not reachable yet, retrying",
+                attempt=attempt,
+                max_attempts=attempts,
+            )
+            await asyncio.sleep(interval_s)
+    assert last_exc is not None
+    msg = (
+        f"NATS not reachable from the agent bridge after {attempts} attempts "
+        f"({attempts * interval_s:.1f}s). Agents will fail on their first "
+        f"NATS round-trip. Last error: {last_exc}"
     )
     raise RuntimeError(msg) from last_exc
 

@@ -153,6 +153,11 @@ async def test_launch_aborts_when_gateway_launch_fails() -> None:
 
     with (
         patch.object(main_module, "_runtime", rt),
+        # bootstrap is imported lazily inside the call below, so patching
+        # the launcher source binds these mocks into bootstrap. The NATS
+        # gate runs first; stub it to a no-op so the launch failure is
+        # what propagates.
+        patch("rolemesh.egress.launcher.wait_for_nats_ready", AsyncMock()),
         patch("rolemesh.egress.launcher.launch_egress_gateway", launch_mock),
         patch("rolemesh.egress.launcher.wait_for_gateway_ready", wait_mock),
         pytest.raises(RuntimeError, match="image missing"),
@@ -181,6 +186,7 @@ async def test_launch_aborts_when_gateway_readiness_probe_fails() -> None:
 
     with (
         patch.object(main_module, "_runtime", rt),
+        patch.object(bootstrap, "wait_for_nats_ready", AsyncMock()),
         patch.object(bootstrap, "launch_egress_gateway", launch_mock),
         patch.object(bootstrap, "wait_for_gateway_ready", wait_mock),
         pytest.raises(RuntimeError, match="probe exhausted"),
