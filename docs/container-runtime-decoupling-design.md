@@ -252,7 +252,8 @@ spec:
   改调 `runtime.get_network_info()`）、NATS IPC、safety 管道、skill 投影、
   `mount_security.py`、WebUI/channels——零改动。
 - `erofs_watcher.py`：readonly-rootfs 在两个 runtime 下报错形态相同（EROFS），不动。
-- evaluation CLI：改用与 main.py 相同的 provider 入口后自动获得双 runtime 能力。
+- evaluation CLI：**仅支持 docker 模式**（已拍板）。改用与 main.py 相同的
+  provider 入口；`ROLEMESH_CONTAINER_RUNTIME=k8s` 时 CLI 直接报错退出。
 
 ---
 
@@ -437,11 +438,10 @@ pytest tests/container/contract --runtime=k8s
 | watch 断流 / API server 抖动 | wait() 卡死或误判 | resourceVersion 续传 + 周期 read 兜底 + 现有 CONTAINER_TIMEOUT 上限兜底 |
 | `aiodocker` 与 `kubernetes_asyncio` 依赖共存 | 镜像/安装体积 | 双 extra：`uv sync --extra k8s`；运行时按 `ROLEMESH_CONTAINER_RUNTIME` 延迟导入 |
 
-**开放问题**（实现前需拍板）：
-1. agent Pod 与平台组件是否分 namespace？（建议：同 namespace 起步，RBAC 已按
-   namespace 收窄；分 namespace 是后续增强）
-2. evaluation CLI 在 K8s 模式下是否支持集群外运行？（建议：支持，走 KUBECONFIG，
-   gateway 用既有 Deployment 不再自举）
+**已拍板的决策**（2026-06-11 评审）：
+1. agent Pod 与平台组件**同 namespace** 起步（RBAC 已按 namespace 收窄；
+   分 namespace 是后续增强）。
+2. evaluation CLI **仅在本地 docker 模式运行**，不支持 K8s。
 
 ---
 
