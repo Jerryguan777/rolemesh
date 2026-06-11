@@ -454,3 +454,41 @@ pytest tests/container/contract --runtime=k8s
 | **P3 Helm chart** | chart 全量模板 + 三档 values + NOTES；RKE2 部署文档 | `helm lint` + `helm template` 快照测试；kind 上 `helm install` 后端到端跑通一条 agent 会话 |
 
 最终交付物 = P1 解耦代码 + P2 K8sRuntime + 契约测试双绿 + P3 可执行 Helm chart。
+
+---
+
+## 附录 A：泄漏点清单 → 修复归属（评审核对表）
+
+评审中逐行核对出的 11 处 Docker 泄漏，按处理方式分三组。
+原则：实质泄漏必须落在 §4 已有接缝里（不为单点新增抽象）；
+注释/文案级不立设计条目，但列入 P1 清理清单防止遗漏。
+
+### A.1 设计已显式点名（4）
+
+| 位置 | 泄漏 | 归属 |
+|---|---|---|
+| `runner.py:435-447` | EC 开关分支拼 proxy_base / forward_proxy_url / NO_PROXY，gateway 容器名当主机名 | §4.4：改调 `HostAccessPolicy`，主机名来自 `GatewayEndpoints`，分支消失 |
+| `egress/bootstrap.py:93-129` | 业务代码直接持有 aiodocker、解析 NetworkSettings | §4.3（= C3）：整体并入 `DockerEgressGatewayProvider`——aiodocker 调用不消失，搬进 docker 专属实现 |
+| `container_executor.py:728-733` | `getattr(runtime, "_ensure_client")` 偷客户端 inspect | §4.2（= C1）：改调 `runtime.get_network_info()` |
+| `runtime.py:202-238` | `rewrite_loopback_to_host_gateway()` 字符串替换成为公共 API | §4.4（= C5）：收编进 `DockerHostAccessPolicy`，公共模块删除 |
+
+### A.2 已有接缝的必然结果，此处显式登记（3）
+
+| 位置 | 泄漏 | 归属 |
+|---|---|---|
+| `container_executor.py:299-303` | MCP proxy URL 在 gateway 名与 `host.docker.internal` 间二选一 | `GatewayEndpoints` 增加 `reverse_proxy_base` 字段；executor 拼 MCP URL 从 endpoints 取主机，EC/回退判断收进 provider |
+| `runtime.py:146` | `CONTAINER_HOST_GATEWAY = "host.docker.internal"` 公共常量 | 迁入 `DockerHostAccessPolicy` 私有；§4.4 落地后 runner/executor 的 import 清零 |
+| `runner.py:319-340` | `_build_extra_hosts()`：host-gateway 映射 + metadata 黑洞 | 即 `HostAccessPolicy.extra_hosts()`。metadata 黑洞（/etc/hosts 名字劫持）是 docker 侧纵深防御；K8s 由 default-deny NetworkPolicy 承担同一职责，`K8sHostAccessPolicy` 返回空，不做 hostAliases 模拟 |
+
+### A.3 注释/文案级——P1 顺手清理，不立设计条目（4）
+
+| 位置 | 内容 | 处理 |
+|---|---|---|
+| `runner.py:577-597` | 告警文案 "Docker's default resolver" | 措辞改运行时中立。附注：该 `elif` 分支本身 fail-open（EC 开但 DNS IP 未注册→告警继续跑）；provider 化后 `dns_ip` 是 `ensure_running()` 返回值必填字段，生产路径自然关闭，测试跳过 gateway 的路径保留原告警即可 |
+| `runtime.py:75-85` | `ContainerSpec` docstring 写死 Docker 行为（127.0.0.11 等） | P1 改 Protocol 时重写为中立语义；契约由契约测试定义，不靠 docstring |
+| `ipc/protocol.py:27` | `McpServerSpec.url` 注释举例 `host.docker.internal` | URL 值的来源由 A.2 第一条覆盖；注释示例一并改掉 |
+| `egress/bootstrap.py:16` | 流程注释 "dockerd version gate" | bootstrap 并入 `DockerEgressGatewayProvider` 后该注释留在 docker 专属文件中是恰当的；通用流程文档改措辞 |
+
+**刻意不做的**（防过度设计）：不为日志文案建抽象、不为 docstring 建 lint、
+不在 K8s 侧模拟 ExtraHosts/metadata 黑洞（NetworkPolicy 已覆盖）、
+不把 `GatewayEndpoints` 泛化为服务发现框架。
