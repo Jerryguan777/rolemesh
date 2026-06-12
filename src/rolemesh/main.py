@@ -1931,7 +1931,6 @@ async def main() -> None:
 
     egress_responder_subs = await start_responders(
         _transport.nc,
-        state=_state,
         rules_fetcher=fetch_all_egress_rules,
     )
 

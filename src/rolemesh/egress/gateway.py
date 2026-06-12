@@ -55,11 +55,6 @@ from rolemesh.core.logger import get_logger
 from .dns_policy import GlobalDnsPolicy
 from .dns_resolver import DnsServer, UpstreamResolver
 from .forward_proxy import ForwardProxy
-from .identity import (
-    IdentityResolver,
-    fetch_identity_snapshot_via_nats,
-    subscribe_lifecycle,
-)
 from .mcp_cache import (
     apply_snapshot_to_registry,
     fetch_mcp_snapshot_via_nats,
@@ -157,31 +152,6 @@ async def main() -> None:
         rule_sub = await subscribe_rule_changes(nats_client, cache)
         stack.push_async_callback(rule_sub.unsubscribe)  # type: ignore[attr-defined]
 
-        # --- Identity resolver: snapshot + lifecycle subscribe -------
-        identity = IdentityResolver()
-        # Seed from orchestrator's identity registry BEFORE subscribing
-        # to live events. Without this, a gateway restart strands every
-        # already-running agent at "Unknown source identity" until its
-        # next spawn — lifecycle events are NEW-only on the gateway's
-        # consumer and have no replay. A snapshot failure here is
-        # non-fatal: seed empty, keep going, and rely on live events to
-        # refill as new agents spawn. That's the same behavior we had
-        # before this snapshot was implemented, so a degraded snapshot
-        # RPC doesn't make things worse.
-        try:
-            identity_entries = await fetch_identity_snapshot_via_nats(
-                nats_client, timeout_s=_SNAPSHOT_TIMEOUT_S
-            )
-            await identity.seed(identity_entries)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "gateway: identity snapshot fetch failed — continuing with empty "
-                "cache; live lifecycle events will refill",
-                error=str(exc),
-            )
-        lifecycle_sub = await subscribe_lifecycle(nats_client, identity)
-        stack.push_async_callback(lifecycle_sub.unsubscribe)  # type: ignore[attr-defined]
-
         # --- Safety caller (audit publish via NATS) ------------------
         audit = AuditPublisher(nats_client=nats_client)
         # Checks are registered by check_id. EC-3 adds the
@@ -266,7 +236,6 @@ async def main() -> None:
             port=CREDENTIAL_PROXY_PORT,
             host="0.0.0.0",
             credential_resolver=credential_resolver,
-            identity_resolver=identity,
             safety_caller=safety,
             token_authority=token_authority,
         )
@@ -274,7 +243,6 @@ async def main() -> None:
 
         # --- Forward proxy (port 3128) -------------------------------
         forward = ForwardProxy(
-            identity_resolver=identity,
             safety_caller=safety,
             token_authority=token_authority,
         )

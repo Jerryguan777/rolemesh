@@ -32,19 +32,41 @@ TENANT_ID = "tenant-a"
 COWORKER_ID = "coworker-x"
 
 
-def _connect_script(host: str, port: int, path: str = "/") -> str:
+def _identity(job_id: str) -> dict[str, str]:
+    """Identity claims for a token; tenant matches the seeded rule."""
+    return {
+        "tenant_id": TENANT_ID,
+        "coworker_id": COWORKER_ID,
+        "user_id": "user-1",
+        "conversation_id": "conv-1",
+        "job_id": job_id,
+    }
+
+
+def _connect_script(host: str, port: int, token: str, path: str = "/") -> str:
     """Python snippet for raw CONNECT + HTTP GET through the tunnel.
+
+    Sends the identity token in ``Proxy-Authorization: Basic`` (what a
+    real client derives from the ``HTTP_PROXY`` userinfo). The raw
+    socket can't read env, so we build the header explicitly.
 
     Emits structured lines the test parses with regex — stdout is the
     only way back out of ``docker exec``.
     """
+    import base64 as _b64
+    cred = _b64.b64encode(f"job:{token}".encode()).decode()
     return f"""
 import socket
 
 s = socket.socket()
 s.settimeout(5)
 s.connect(('egress-gateway', 3128))
-req = b'CONNECT {host}:{port} HTTP/1.1\\r\\nHost: {host}:{port}\\r\\n\\r\\n'
+req = (
+    b'CONNECT {host}:{port} HTTP/1.1\\r\\n'
+    b'Host: {host}:{port}\\r\\n'
+    b'Proxy-Authorization: Basic {cred}\\r\\n'
+    b'\\r\\n'
+)
 s.sendall(req)
 # Read status line + headers from proxy response.
 buf = b''
@@ -124,20 +146,11 @@ async def test_connect_allow_path_tunnels_bytes(
     """Rule allows the fake upstream → gateway returns 200 + bytes flow end-to-end."""
     await _bootstrap_rules(topology, allow_host=topology.fake_upstream_name)
 
-    probe = await topology.spawn_probe()
-    await topology.publish_lifecycle_started(
-        probe,
-        identity={
-            "tenant_id": TENANT_ID,
-            "coworker_id": COWORKER_ID,
-            "user_id": "user-1",
-            "conversation_id": "conv-1",
-            "job_id": "job-p0-2-allow",
-        },
-    )
+    token = topology.mint_token(_identity("job-p0-2-allow"))
+    probe = await topology.spawn_probe(egress_token=token)
 
     rc, out = await probe.exec_sh(
-        f"python3 - <<'PY'\n{_connect_script(topology.fake_upstream_name, 443)}\nPY"
+        f"python3 - <<'PY'\n{_connect_script(topology.fake_upstream_name, 443, token)}\nPY"
     )
     # On any assertion failure, dump gateway + fake upstream logs so we
     # see the whole chain in one shot.
@@ -165,20 +178,11 @@ async def test_connect_block_path_returns_403_with_reason(
     # to pick a host that doesn't match it.
     await _bootstrap_rules(topology, allow_host=topology.fake_upstream_name)
 
-    probe = await topology.spawn_probe()
-    await topology.publish_lifecycle_started(
-        probe,
-        identity={
-            "tenant_id": TENANT_ID,
-            "coworker_id": COWORKER_ID,
-            "user_id": "user-1",
-            "conversation_id": "conv-1",
-            "job_id": "job-p0-2-block",
-        },
-    )
+    token = topology.mint_token(_identity("job-p0-2-block"))
+    probe = await topology.spawn_probe(egress_token=token)
 
     rc, out = await probe.exec_sh(
-        f"python3 - <<'PY'\n{_connect_script('evil.test', 443)}\nPY"
+        f"python3 - <<'PY'\n{_connect_script('evil.test', 443, token)}\nPY"
     )
     assert rc == 0, out
     assert "PROXY_STATUS='HTTP/1.1 403" in out, out
@@ -201,17 +205,8 @@ async def test_connect_audit_events_published(
 
     await _bootstrap_rules(topology, allow_host=topology.fake_upstream_name)
 
-    probe = await topology.spawn_probe()
-    await topology.publish_lifecycle_started(
-        probe,
-        identity={
-            "tenant_id": TENANT_ID,
-            "coworker_id": COWORKER_ID,
-            "user_id": "user-1",
-            "conversation_id": "conv-1",
-            "job_id": "job-p0-2-audit",
-        },
-    )
+    token = topology.mint_token(_identity("job-p0-2-audit"))
+    probe = await topology.spawn_probe(egress_token=token)
 
     # Start the capture BEFORE firing requests so we don't race the
     # publish.
@@ -222,10 +217,10 @@ async def test_connect_audit_events_published(
 
     # One allow + one block under the same identity.
     await probe.exec_sh(
-        f"python3 - <<'PY'\n{_connect_script(topology.fake_upstream_name, 443)}\nPY"
+        f"python3 - <<'PY'\n{_connect_script(topology.fake_upstream_name, 443, token)}\nPY"
     )
     await probe.exec_sh(
-        f"python3 - <<'PY'\n{_connect_script('evil.test', 443)}\nPY"
+        f"python3 - <<'PY'\n{_connect_script('evil.test', 443, token)}\nPY"
     )
 
     events = await capture_task

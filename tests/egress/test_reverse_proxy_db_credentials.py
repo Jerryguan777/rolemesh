@@ -2,15 +2,16 @@
 
 Exercises the full request path:
 
-    client -> reverse proxy -> IdentityResolver -> CredentialResolver
+    client -> reverse proxy -> token verify -> CredentialResolver
                             -> tenant_model_credentials -> Fernet decrypt
                             -> upstream LLM API (here: a local echo
                                server that records the injected headers)
 
-Two source IPs (127.0.0.1 and 127.0.0.2 — Linux 127.0.0.0/8 loopback
-aliases) distinguish tenant A from tenant B requests on the same
-process. The proxy reads the source IP from ``request.transport`` so
-this is the real production code path, not a mock.
+Identity comes from a signed token in the request path
+(``/proxy/<token>/<provider>/...``), exactly as the orchestrator injects
+it into the agent's ``ANTHROPIC_BASE_URL``. Each tenant gets its own
+minted token; the proxy verifies it and reads the tenant from the
+claims. This is the real production code path, not a mock.
 
 Each test names the mutation it pins.
 """
@@ -29,16 +30,19 @@ from cryptography.fernet import Fernet
 from rolemesh.auth.credential_vault import CredentialVault
 from rolemesh.db import _get_admin_pool, create_tenant
 from rolemesh.egress.credentials import CredentialResolver
-from rolemesh.egress.identity import Identity, IdentityResolver
 from rolemesh.egress.reverse_proxy import (
     _bedrock_upstream,
     start_credential_proxy,
 )
+from rolemesh.egress.token_identity import Identity, TokenAuthority
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
 pytestmark = [pytest.mark.usefixtures("test_db"), pytest.mark.asyncio]
+
+# Shared signing secret for the test proxy's TokenAuthority.
+_TOKEN_SECRET = "db-cred-test-secret-16+chars"
 
 
 # ---------------------------------------------------------------------------
@@ -97,21 +101,21 @@ def _pick_free_port() -> int:
         return int(s.getsockname()[1])
 
 
+_AUTHORITY = TokenAuthority(secret=_TOKEN_SECRET, ttl_seconds=3600)
+
+
 async def _start_proxy(
     *,
     vault: CredentialVault,
-    identities: dict[str, Identity],
 ) -> tuple[web.AppRunner, int]:
-    """Boot a proxy with the given (source_ip -> Identity) map seeded."""
-    identity = IdentityResolver()
-    identity.by_ip.update(identities)
+    """Boot a proxy wired with the shared token authority."""
     resolver = CredentialResolver(vault)
     port = _pick_free_port()
     runner = await start_credential_proxy(
         port=port,
         host="127.0.0.1",
         credential_resolver=resolver,
-        identity_resolver=identity,
+        token_authority=_AUTHORITY,
     )
     return runner, port
 
@@ -125,6 +129,11 @@ def _identity(tenant_id: str, suffix: str = "1") -> Identity:
         job_id="",
         container_name=f"container-{suffix}",
     )
+
+
+def _token_for(tenant_id: str, suffix: str = "1") -> str:
+    """Mint a token the test proxy will accept for *tenant_id*."""
+    return _AUTHORITY.mint(_identity(tenant_id, suffix))
 
 
 async def _new_tenant(slug_hint: str) -> str:
@@ -148,10 +157,9 @@ async def _write_cred(
         )
 
 
-def _client_from(local_ip: str) -> aiohttp.ClientSession:
-    """Open an aiohttp ClientSession with its outbound socket bound to local_ip."""
-    connector = aiohttp.TCPConnector(local_addr=(local_ip, 0))
-    return aiohttp.ClientSession(connector=connector)
+def _proxy_url(port: int, token: str, provider: str, path: str = "v1/messages") -> str:
+    """Build the token-bearing reverse-proxy URL the SDKs would form."""
+    return f"http://127.0.0.1:{port}/proxy/{token}/{provider}/{path}"
 
 
 # ---------------------------------------------------------------------------
@@ -179,26 +187,21 @@ async def test_per_tenant_api_key_injected(
         tenant_b, "anthropic", vault.encrypt_json({"api_key": "K_BETA"}),
     )
 
-    runner, port = await _start_proxy(
-        vault=vault,
-        identities={
-            "127.0.0.1": _identity(tenant_a, "a"),
-            "127.0.0.2": _identity(tenant_b, "b"),
-        },
-    )
+    runner, port = await _start_proxy(vault=vault)
+    url_a = _proxy_url(port, _token_for(tenant_a, "a"), "anthropic")
+    url_b = _proxy_url(port, _token_for(tenant_b, "b"), "anthropic")
     try:
-        url = f"http://127.0.0.1:{port}/proxy/anthropic/v1/messages"
-
-        async with _client_from("127.0.0.1") as session, session.post(url, data=b"{}") as resp:
-            assert resp.status == 200, await resp.text()
-        async with _client_from("127.0.0.2") as session, session.post(url, data=b"{}") as resp:
-            assert resp.status == 200, await resp.text()
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url_a, data=b"{}") as resp:
+                assert resp.status == 200, await resp.text()
+            async with session.post(url_b, data=b"{}") as resp:
+                assert resp.status == 200, await resp.text()
     finally:
         await runner.cleanup()
 
     assert len(echo.received) == 2
     keys = [r["headers"].get("x-api-key") for r in echo.received]  # type: ignore[union-attr]
-    # First request was from 127.0.0.1 (tenant A); second from 127.0.0.2 (tenant B).
+    # First request carried tenant A's token; second tenant B's.
     assert keys[0] == "K_ALPHA"
     assert keys[1] == "K_BETA"
 
@@ -224,13 +227,10 @@ async def test_missing_credential_returns_401_no_silent_fallback(
     tenant_id = await _new_tenant("nocred")
     # No row written.
 
-    runner, port = await _start_proxy(
-        vault=vault,
-        identities={"127.0.0.1": _identity(tenant_id, "n")},
-    )
+    runner, port = await _start_proxy(vault=vault)
+    url = _proxy_url(port, _token_for(tenant_id, "n"), "anthropic")
     try:
-        url = f"http://127.0.0.1:{port}/proxy/anthropic/v1/messages"
-        async with _client_from("127.0.0.1") as session, session.post(url, data=b"{}") as resp:
+        async with aiohttp.ClientSession() as session, session.post(url, data=b"{}") as resp:
             assert resp.status == 401
             assert "MISSING_CREDENTIAL" in await resp.text()
     finally:
@@ -242,17 +242,18 @@ async def test_missing_credential_returns_401_no_silent_fallback(
 
 
 # ---------------------------------------------------------------------------
-# Test 3 — unknown source IP returns 401
+# Test 3 — invalid identity token returns 401
 # ---------------------------------------------------------------------------
 
 
-async def test_unknown_source_ip_returns_401(
+async def test_invalid_token_returns_401(
     vault: CredentialVault, echo: _Echo, monkeypatch: pytest.MonkeyPatch
 ):
-    """Pin: an IP not seeded into IdentityResolver -> 401 UNKNOWN_SOURCE.
+    """Pin: a request whose path token fails verification -> 401 UNKNOWN_SOURCE.
 
-    Mutation: defaulting unknown IPs to any tenant ("dev fallback")
-    would let 127.0.0.3 reach an upstream with someone's credential.
+    Mutation: defaulting an unverifiable token to any tenant ("dev
+    fallback") would let a forged request reach an upstream with
+    someone's credential.
     """
     monkeypatch.setenv("ANTHROPIC_BASE_URL", f"http://127.0.0.1:{echo.port}")
 
@@ -261,14 +262,13 @@ async def test_unknown_source_ip_returns_401(
         tenant_id, "anthropic", vault.encrypt_json({"api_key": "K"}),
     )
 
-    runner, port = await _start_proxy(
-        vault=vault,
-        identities={"127.0.0.1": _identity(tenant_id, "k")},
-        # 127.0.0.3 deliberately NOT registered
-    )
+    runner, port = await _start_proxy(vault=vault)
+    # A real token, tampered in its signature half — must not verify.
+    good = _token_for(tenant_id, "k")
+    forged = good[:-2] + ("aa" if good[-2:] != "aa" else "bb")
+    url = _proxy_url(port, forged, "anthropic")
     try:
-        url = f"http://127.0.0.1:{port}/proxy/anthropic/v1/messages"
-        async with _client_from("127.0.0.3") as session, session.post(url, data=b"{}") as resp:
+        async with aiohttp.ClientSession() as session, session.post(url, data=b"{}") as resp:
             assert resp.status == 401
             assert "UNKNOWN_SOURCE" in await resp.text()
     finally:
@@ -301,13 +301,10 @@ async def test_anthropic_oauth_via_extras_uses_bearer(
         ),
     )
 
-    runner, port = await _start_proxy(
-        vault=vault,
-        identities={"127.0.0.1": _identity(tenant_id, "o")},
-    )
+    runner, port = await _start_proxy(vault=vault)
+    url = _proxy_url(port, _token_for(tenant_id, "o"), "anthropic")
     try:
-        url = f"http://127.0.0.1:{port}/proxy/anthropic/v1/messages"
-        async with _client_from("127.0.0.1") as session, session.post(url, data=b"{}") as resp:
+        async with aiohttp.ClientSession() as session, session.post(url, data=b"{}") as resp:
             assert resp.status == 200, await resp.text()
     finally:
         await runner.cleanup()
@@ -370,13 +367,10 @@ async def test_root_catchall_route_returns_404(
     ``/{path:.*}`` somewhere) would let requests fall through to a
     handler again and we'd see a non-404 status.
     """
-    tenant_id = await _new_tenant("legacy")
-    runner, port = await _start_proxy(
-        vault=vault,
-        identities={"127.0.0.1": _identity(tenant_id, "l")},
-    )
+    await _new_tenant("legacy")
+    runner, port = await _start_proxy(vault=vault)
     try:
-        async with _client_from("127.0.0.1") as session:
+        async with aiohttp.ClientSession() as session:
             # Bare root.
             async with session.get(f"http://127.0.0.1:{port}/") as resp:
                 assert resp.status == 404

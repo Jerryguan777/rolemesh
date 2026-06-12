@@ -59,9 +59,31 @@ from dataclasses import dataclass
 
 from rolemesh.core.logger import get_logger
 
-from .identity import Identity
-
 logger = get_logger()
+
+
+@dataclass(frozen=True)
+class Identity:
+    """Authoritative view of which agent a request came from.
+
+    Carried inside the signed egress token and reconstructed by the
+    gateway on ``verify``. Frozen so a shared record can't be mutated
+    in flight through the safety pipeline. All fields are strings
+    because the downstream ``safety_decisions`` table keys off strings;
+    asking Identity to know about UUID types would force an ``asyncpg``
+    import into every gateway code path.
+
+    ``container_name`` is retained for audit/debug continuity even
+    though the token scheme no longer needs a container→identity index
+    (that was the source-IP resolver's job, now removed).
+    """
+
+    tenant_id: str
+    coworker_id: str
+    user_id: str
+    conversation_id: str
+    job_id: str
+    container_name: str
 
 
 # Env knobs. The secret has no default — its absence under EC must
@@ -190,47 +212,6 @@ def verify(
         return None
 
 
-def reconcile(
-    token_identity: Identity | None,
-    ip_identity: Identity | None,
-    *,
-    source_ip: str = "",
-    token_expected: bool = False,
-) -> Identity | None:
-    """Pick the authoritative identity during the dual-run window.
-
-    Shared by both proxies so the migration's consistency semantics
-    live in one place:
-
-    * Token wins whenever present. A token-vs-IP disagreement (both
-      resolve but name different tenant/job) is logged ERROR — the
-      signal the 2b pipeline-removal gate watches; it must stay at
-      zero before the IP path is deleted.
-    * Token absent/invalid but IP resolves, with a token *expected*
-      (authority wired): logged INFO as a coverage gap (< 100% of
-      spawns carrying a valid token).
-    """
-    if token_identity is not None:
-        if ip_identity is not None and (
-            ip_identity.tenant_id != token_identity.tenant_id
-            or ip_identity.job_id != token_identity.job_id
-        ):
-            logger.error(
-                "identity mismatch: token disagrees with source IP",
-                token_tenant=token_identity.tenant_id,
-                token_job=token_identity.job_id,
-                ip_tenant=ip_identity.tenant_id,
-                ip_job=ip_identity.job_id,
-            )
-        return token_identity
-    if token_expected and ip_identity is not None:
-        logger.info(
-            "identity: token absent/invalid, source-IP fallback",
-            source_ip=source_ip,
-        )
-    return ip_identity
-
-
 @dataclass(frozen=True)
 class TokenAuthority:
     """Bundles the shared secret + TTL so call sites mint/verify without
@@ -292,6 +273,5 @@ __all__ = [
     "Identity",
     "TokenAuthority",
     "mint",
-    "reconcile",
     "verify",
 ]

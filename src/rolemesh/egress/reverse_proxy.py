@@ -37,12 +37,10 @@ from rolemesh.core.logger import get_logger
 
 from .credentials import CredentialResolverProtocol, MissingCredentialError
 from .safety_call import EgressRequest
-from .token_identity import reconcile
 
 if TYPE_CHECKING:
-    from .identity import Identity, IdentityResolver
     from .safety_call import EgressSafetyCaller
-    from .token_identity import TokenAuthority
+    from .token_identity import Identity, TokenAuthority
 
 logger = get_logger()
 
@@ -280,7 +278,6 @@ async def start_credential_proxy(
     host: str = "127.0.0.1",
     *,
     credential_resolver: CredentialResolverProtocol,
-    identity_resolver: IdentityResolver | None = None,
     safety_caller: EgressSafetyCaller | None = None,
     token_authority: TokenAuthority | None = None,
 ) -> web.AppRunner:
@@ -292,55 +289,31 @@ async def start_credential_proxy(
     keys — the boot-time secrets dict that earlier versions read is
     gone.
 
-    Identity resolution is token-first, IP-fallback (token-identity
-    refactor, dual-run window):
-
-    * ``token_authority`` set — the leading path segment after
-      ``/proxy/`` (or ``/mcp-proxy/``) is verified as a signed identity
-      token. On success the identity comes from the token and the
-      provider/server is the *next* segment.
-    * Token absent or invalid — fall back to ``identity_resolver`` keyed
-      on the source IP, treating the leading segment as the
-      provider/server (the pre-refactor route shape).
-
-    When neither yields an identity the handler returns 401
-    UNKNOWN_SOURCE (still fail-closed). Both being ``None`` is a valid
-    host-side unit-test configuration that always 401s.
+    Identity comes from a signed token in the request path: the leading
+    segment after ``/proxy/`` (or ``/mcp-proxy/``) is verified by
+    ``token_authority``; on success the identity is read from the token
+    and the provider/server is the *next* segment. An absent or invalid
+    token, or a ``None`` ``token_authority`` (host-side unit-test
+    configuration), yields 401 UNKNOWN_SOURCE — fail-closed.
     """
     session = ClientSession()
 
     def _resolve(
         request: web.Request, first_seg: str, rest: str
     ) -> tuple[Identity | None, str, str]:
-        """Token-first, IP-fallback identity + route split.
+        """Verify the leading path segment as an identity token.
 
-        Returns ``(identity, provider_or_server, upstream_path)``. In
-        token mode the token segment is stripped and the
-        provider/server is the head of *rest*; in IP mode *first_seg*
-        is itself the provider/server. A token-vs-IP disagreement
-        (both resolve, identities differ) is logged ERROR — the
-        dual-run consistency signal the migration watches.
+        Returns ``(identity, provider_or_server, upstream_path)``: the
+        token segment is stripped and the provider/server is the head of
+        *rest*. On a missing/invalid token (or no authority wired) the
+        identity is ``None`` and the caller fails closed; the route
+        split is still returned for logging symmetry.
         """
-        peer = request.transport.get_extra_info("peername") if request.transport else None
-        source_ip = peer[0] if peer else ""
-        ip_identity = identity_resolver.resolve(source_ip) if identity_resolver else None
-        token_identity = (
+        identity = (
             token_authority.verify(first_seg) if token_authority is not None else None
         )
-        identity = reconcile(
-            token_identity,
-            ip_identity,
-            source_ip=source_ip,
-            token_expected=token_authority is not None,
-        )
-        if token_identity is not None:
-            # Token mode: the token segment is consumed; the
-            # provider/server is the head of the remaining path.
-            head, _, tail = rest.partition("/")
-            return identity, head, tail
-        # IP-fallback mode: the captured first segment IS the
-        # provider/server and the whole tail is the upstream path.
-        return identity, first_seg, rest
+        head, _, tail = rest.partition("/")
+        return identity, head, tail
 
     async def _stream_upstream(
         request: web.Request,
@@ -371,10 +344,10 @@ async def start_credential_proxy(
 
     async def handle_provider_proxy(request: web.Request) -> web.StreamResponse:
         # Route captured the FIRST segment after /proxy/ as
-        # ``provider_name``; under token identity that segment is the
-        # token and the real provider is the head of ``path_info``.
-        # ``_resolve`` disambiguates and returns the effective provider
-        # + the remaining upstream path.
+        # ``provider_name``, but that segment is the identity TOKEN; the
+        # real provider is the head of ``path_info``. ``_resolve``
+        # verifies the token and returns the effective provider + the
+        # remaining upstream path.
         first_seg = request.match_info["provider_name"]
         rest = request.match_info.get("path_info", "")
         identity, provider_name, upstream_path = _resolve(request, first_seg, rest)
@@ -484,9 +457,9 @@ async def start_credential_proxy(
             return web.Response(status=502, text="Bad Gateway")
 
     async def handle_mcp_proxy(request: web.Request) -> web.StreamResponse:
-        # Same token-first split as the provider route: the first
-        # segment after /mcp-proxy/ is the token (token mode) or the
-        # server name (IP fallback).
+        # Same token split as the provider route: the first segment
+        # after /mcp-proxy/ is the identity token; the server name is
+        # the head of the remaining path.
         first_seg = request.match_info["server_name"]
         rest = request.match_info.get("path_info", "")
         identity, server_name, upstream_path = _resolve(request, first_seg, rest)
@@ -563,7 +536,6 @@ async def start_credential_proxy(
         port=port,
         host=host,
         providers=[*_PROVIDER_TEMPLATES, "anthropic", "bedrock"],
-        identity_wired=identity_resolver is not None,
         token_wired=token_authority is not None,
         safety_gated=safety_caller is not None,
     )

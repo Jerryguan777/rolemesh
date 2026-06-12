@@ -3,8 +3,8 @@
 Two kinds of plumbing live here:
 
   1. NATS responders — serve the gateway's initial-state RPCs.
-     * ``egress.rules.snapshot.request``   → current egress-stage rules
-     * ``egress.identity.snapshot.request`` → current agent IP map
+     * ``egress.rules.snapshot.request`` → current egress-stage rules
+     * ``egress.mcp.snapshot.request``   → current MCP registry
 
   2. NATS publishers — push deltas to the gateway after the initial
      snapshot. Module-level helpers so existing orchestrator code
@@ -12,9 +12,9 @@ Two kinds of plumbing live here:
      dragging NATS client types through their signatures.
 
 The gateway always reads snapshot → subscribe to deltas in that order.
-Any event that lands before the snapshot is idempotent (started events
-are keyed on container name; rule events on rule_id), so a benign race
-between the two operations just leads to one duplicate apply.
+Any event that lands before the snapshot is idempotent (rule events on
+rule_id, MCP events on name), so a benign race between the two
+operations just leads to one duplicate apply.
 
 Keeping these adapters in a single file (rather than scattered across
 container_executor / webui / main) makes it easy to reason about the
@@ -39,14 +39,10 @@ if TYPE_CHECKING:
 
     import nats.aio.client
 
-    from rolemesh.core.orchestrator_state import OrchestratorState
-
 logger = get_logger()
 
-# Subject names — imported from egress.policy_cache + egress.identity
-# so there's a single authoritative string for each subject. Duplicate
-# definitions would drift.
-from .identity import IDENTITY_SNAPSHOT_SUBJECT, LIFECYCLE_SUBJECT  # noqa: E402
+# Subject names — imported so there's a single authoritative string for
+# each subject. Duplicate definitions would drift.
 from .mcp_cache import (  # noqa: E402
     MCP_CHANGED_SUBJECT,
     MCP_SNAPSHOT_REQUEST_SUBJECT,
@@ -58,90 +54,8 @@ from .remote_credentials import CREDENTIAL_REQUEST_SUBJECT  # noqa: E402
 from .remote_token_vault import TOKEN_ACCESS_REQUEST_SUBJECT  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# Identity registry (mirrors what we've published to the gateway)
-# ---------------------------------------------------------------------------
-#
-# The gateway's identity cache is fed by two streams — an initial
-# snapshot on its boot, then live lifecycle events. Before this module
-# grew a registry, the snapshot was empty (returned []), so a gateway
-# restart while agents were already running stranded every one of them
-# at "Unknown source identity" until the next spawn.
-#
-# We mirror the same writes we send over NATS here so the snapshot
-# responder has an authoritative view without having to re-walk Docker
-# or cross-reference OrchestratorState. Because this registry and the
-# NATS publish are updated atomically (same function body), the two
-# cannot disagree: the gateway either sees an entry as both a snapshot
-# entry and via a live 'started' event (idempotent on the gateway
-# side), or sees neither.
-
-_identity_registry: dict[str, dict[str, str]] = {}
-
-
-# ---------------------------------------------------------------------------
 # Publishers
 # ---------------------------------------------------------------------------
-
-
-async def publish_lifecycle_started(
-    nc: nats.aio.client.Client,
-    *,
-    container_name: str,
-    ip: str,
-    tenant_id: str,
-    coworker_id: str,
-    user_id: str,
-    conversation_id: str,
-    job_id: str,
-) -> None:
-    """Emit an agent-started event for the gateway's identity map.
-
-    Swallows publish errors: the gateway snapshots identity on its own
-    startup (via IDENTITY_SNAPSHOT_SUBJECT), so a momentary NATS outage
-    here produces at most a brief window where the gateway denies
-    requests from this container. That's acceptable; promoting to
-    fail-closed at this site would also kill agent startup for every
-    downstream workload.
-    """
-    entry: dict[str, str] = {
-        "container_name": container_name,
-        "ip": ip,
-        "tenant_id": tenant_id,
-        "coworker_id": coworker_id,
-        "user_id": user_id,
-        "conversation_id": conversation_id,
-        "job_id": job_id,
-    }
-    # Register BEFORE publish so if the gateway happens to restart
-    # between our publish and its subscription, the next snapshot still
-    # includes this agent. Docker reuses bridge IPs only after the prior
-    # container is removed, which in our flow comes with its own stop
-    # event; see handle_stopped on the gateway side for the dedup.
-    _identity_registry[container_name] = entry
-
-    payload = {"event": "started", **entry}
-    try:
-        await nc.publish(LIFECYCLE_SUBJECT, json.dumps(payload).encode("utf-8"))
-    except Exception as exc:  # noqa: BLE001 — best-effort
-        logger.warning("lifecycle publish failed (started)", error=str(exc))
-
-
-async def publish_lifecycle_stopped(
-    nc: nats.aio.client.Client,
-    *,
-    container_name: str,
-) -> None:
-    # Drop from the local registry first (mirrors the publish-before-
-    # register ordering in publish_lifecycle_started). A benign race
-    # where two stop events arrive back-to-back is harmless — the
-    # second pop silently no-ops.
-    _identity_registry.pop(container_name, None)
-
-    payload = {"event": "stopped", "container_name": container_name}
-    try:
-        await nc.publish(LIFECYCLE_SUBJECT, json.dumps(payload).encode("utf-8"))
-    except Exception as exc:  # noqa: BLE001 — best-effort
-        logger.warning("lifecycle publish failed (stopped)", error=str(exc))
 
 
 async def publish_mcp_registry_changed(
@@ -212,7 +126,6 @@ async def publish_rule_changed(
 async def start_responders(
     nc: nats.aio.client.Client,
     *,
-    state: OrchestratorState,
     rules_fetcher: Callable[[], Awaitable[list[dict[str, Any]]]],
     mcp_fetcher: Callable[[], Awaitable[list[McpEntry]]] | None = None,
 ) -> list[object]:
@@ -246,16 +159,6 @@ async def start_responders(
         with contextlib.suppress(Exception):
             await msg.respond(body)  # type: ignore[attr-defined]
 
-    async def _identity_handler(msg: object) -> None:
-        try:
-            snapshot = _build_identity_snapshot(state)
-            body = json.dumps({"entries": snapshot}).encode("utf-8")
-        except Exception as exc:  # noqa: BLE001
-            logger.error("identity snapshot build failed", error=str(exc))
-            body = json.dumps({"entries": [], "error": str(exc)}).encode("utf-8")
-        with contextlib.suppress(Exception):
-            await msg.respond(body)  # type: ignore[attr-defined]
-
     async def _mcp_handler(msg: object) -> None:
         try:
             entries = await mcp_fetcher()
@@ -269,17 +172,15 @@ async def start_responders(
             await msg.respond(body)  # type: ignore[attr-defined]
 
     rules_sub = await nc.subscribe(SNAPSHOT_REQUEST_SUBJECT, cb=_rules_handler)
-    identity_sub = await nc.subscribe(IDENTITY_SNAPSHOT_SUBJECT, cb=_identity_handler)
     mcp_sub = await nc.subscribe(MCP_SNAPSHOT_REQUEST_SUBJECT, cb=_mcp_handler)
     logger.info(
         "egress responders subscribed",
         subjects=[
             SNAPSHOT_REQUEST_SUBJECT,
-            IDENTITY_SNAPSHOT_SUBJECT,
             MCP_SNAPSHOT_REQUEST_SUBJECT,
         ],
     )
-    return [rules_sub, identity_sub, mcp_sub]
+    return [rules_sub, mcp_sub]
 
 
 async def fetch_all_mcp_servers() -> list[McpEntry]:
@@ -494,22 +395,3 @@ async def fetch_all_egress_rules() -> list[dict[str, Any]]:
         )
         out.extend(r.to_snapshot_dict() for r in rows)
     return out
-
-
-def _build_identity_snapshot(state: OrchestratorState) -> list[dict[str, Any]]:
-    """Return all agents the orchestrator has registered as started.
-
-    Source of truth is ``_identity_registry``, which the lifecycle
-    publishers update in lockstep with their NATS publish. That means
-    the snapshot mirrors the sum of every 'started' event we've sent
-    minus every 'stopped' event — the same state the gateway would
-    have assembled if it had been listening the whole time.
-
-    ``state`` is unused now but kept in the signature so a future
-    implementation can cross-check against OrchestratorState if we
-    ever want a defense-in-depth consistency probe.
-    """
-    _ = state
-    # Copy each entry so a concurrent publish mutating the registry
-    # dict can't surprise JSON serialization.
-    return [dict(entry) for entry in _identity_registry.values()]

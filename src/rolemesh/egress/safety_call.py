@@ -42,8 +42,8 @@ from rolemesh.core.logger import get_logger
 if TYPE_CHECKING:
     import nats.aio.client
 
-    from .identity import Identity
     from .policy_cache import PolicyCache
+    from .token_identity import Identity
 
 logger = get_logger()
 
@@ -119,9 +119,9 @@ class EgressSafetyCaller:
     ) -> EgressDecision:
         """Evaluate all applicable rules and return the aggregate decision.
 
-        ``identity is None`` → block unconditionally. This is the
-        unknown-source-IP path discussed in identity.py: the gateway
-        will NOT default to a tenant.
+        ``identity is None`` → block unconditionally: a request whose
+        token did not verify has no identity, and the gateway will NOT
+        default to a tenant.
         """
         if identity is None:
             decision = EgressDecision(

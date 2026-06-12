@@ -2,21 +2,19 @@
 
 Covers the security-load-bearing properties: a valid token round-trips
 to the exact identity, and every tampering / expiry / wrong-key / shape
-failure returns None (fail-closed). Also pins ``from_env`` validation
-and the dual-run ``reconcile`` policy.
+failure returns None (fail-closed). Also pins ``from_env`` validation.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from rolemesh.egress.identity import Identity
 from rolemesh.egress.token_identity import (
     SECRET_ENV,
     TTL_ENV,
+    Identity,
     TokenAuthority,
     mint,
-    reconcile,
     verify,
 )
 
@@ -102,28 +100,3 @@ def test_authority_from_env_rejects_bad_ttl(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv(TTL_ENV, "-5")
     with pytest.raises(ValueError, match=TTL_ENV):
         TokenAuthority.from_env()
-
-
-# --- reconcile (dual-run policy) -------------------------------------
-
-
-def test_reconcile_prefers_token() -> None:
-    tok_id = _identity(tenant="from-token")
-    ip_id = _identity(tenant="from-ip")
-    assert reconcile(tok_id, ip_id, token_expected=True) is tok_id
-
-
-def test_reconcile_falls_back_to_ip_when_no_token() -> None:
-    ip_id = _identity()
-    assert reconcile(None, ip_id, token_expected=True) is ip_id
-
-
-def test_reconcile_none_when_neither() -> None:
-    assert reconcile(None, None, token_expected=True) is None
-
-
-def test_reconcile_mismatch_logs_but_trusts_token(caplog: pytest.LogCaptureFixture) -> None:
-    tok_id = _identity(tenant="A", job="j1")
-    ip_id = _identity(tenant="B", job="j2")
-    # Token still wins; the mismatch is a logged signal, not a block.
-    assert reconcile(tok_id, ip_id, token_expected=True) is tok_id

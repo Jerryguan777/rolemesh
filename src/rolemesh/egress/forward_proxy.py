@@ -34,12 +34,10 @@ from typing import TYPE_CHECKING
 from rolemesh.core.logger import get_logger
 
 from .safety_call import EgressRequest
-from .token_identity import reconcile
 
 if TYPE_CHECKING:
-    from .identity import Identity, IdentityResolver
     from .safety_call import EgressSafetyCaller
-    from .token_identity import TokenAuthority
+    from .token_identity import Identity, TokenAuthority
 
 logger = get_logger()
 
@@ -77,22 +75,20 @@ class ForwardProxy:
     """CONNECT + plain HTTP forward proxy.
 
     Thin wrapper around ``asyncio.start_server``; kept as a class only
-    so the caller can stash the state it needs (identity resolver,
+    so the caller can stash the state it needs (token authority,
     safety caller) without reaching for module globals.
     """
 
     def __init__(
         self,
         *,
-        identity_resolver: IdentityResolver,
         safety_caller: EgressSafetyCaller,
         token_authority: TokenAuthority | None = None,
     ) -> None:
-        self._identity = identity_resolver
         self._safety = safety_caller
-        # Token-identity: when wired, the Proxy-Authorization credential
-        # is verified first and the source-IP map is only a fallback
-        # (dual-run). None keeps pure IP behaviour.
+        # Identity comes from the signed token in the Proxy-Authorization
+        # header. ``None`` authority means no request can be identified —
+        # every CONNECT is challenged with 407 (fail-closed).
         self._token_authority = token_authority
 
     async def serve(self, host: str, port: int) -> asyncio.Server:
@@ -142,22 +138,17 @@ class ForwardProxy:
             await _close(writer)
             return
 
-        # Token-first identity (token-identity refactor). The token
-        # rides in the Proxy-Authorization password field; verify it,
-        # then fall back to the source-IP map. ``reconcile`` logs the
-        # dual-run mismatch / coverage signals.
-        ip_identity = self._identity.resolve(source_ip)
-        token_identity: Identity | None = None
+        # Identity is the signed token in the Proxy-Authorization
+        # password field. No/invalid token → identity None → the
+        # handlers challenge with 407 so an RFC-compliant client retries
+        # with credentials (the agent image configures every client to
+        # send the token up front; 407 is the safety net + the correct
+        # rejection now that there is no source-IP fallback).
+        identity: Identity | None = None
         if self._token_authority is not None:
             token = _extract_proxy_auth_token(parsed)
             if token:
-                token_identity = self._token_authority.verify(token)
-        identity = reconcile(
-            token_identity,
-            ip_identity,
-            source_ip=source_ip,
-            token_expected=self._token_authority is not None,
-        )
+                identity = self._token_authority.verify(token)
         if parsed.method == "CONNECT":
             await self._handle_connect(reader, writer, source_ip, identity, parsed)
         else:
@@ -168,7 +159,7 @@ class ForwardProxy:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
         source_ip: str,
-        identity: object | None,
+        identity: Identity | None,
         parsed: ParsedRequest,
     ) -> None:
         try:
@@ -177,8 +168,16 @@ class ForwardProxy:
             await _respond(writer, 400, "Invalid CONNECT target")
             return
 
+        if identity is None:
+            # No/invalid identity token. Challenge per RFC 7235 so an
+            # anyauth client (which withholds credentials until asked)
+            # retries with Proxy-Authorization; a client with no token
+            # at all simply fails closed.
+            await _challenge_proxy_auth(writer, source_ip, host)
+            return
+
         decision = await self._safety.decide(
-            identity=identity,  # type: ignore[arg-type]
+            identity=identity,
             request=EgressRequest(host=host, port=port, mode="forward", method="CONNECT"),
         )
         if decision.action == "block":
@@ -226,7 +225,7 @@ class ForwardProxy:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
         source_ip: str,
-        identity: object | None,
+        identity: Identity | None,
         parsed: ParsedRequest,
     ) -> None:
         """Plain HTTP (non-CONNECT) forward.
@@ -241,8 +240,12 @@ class ForwardProxy:
             await _respond(writer, 400, "Missing target host")
             return
 
+        if identity is None:
+            await _challenge_proxy_auth(writer, source_ip, host)
+            return
+
         decision = await self._safety.decide(
-            identity=identity,  # type: ignore[arg-type]
+            identity=identity,
             request=EgressRequest(
                 host=host, port=port, mode="forward", method=parsed.method
             ),
@@ -540,6 +543,31 @@ async def _respond(
     except (ConnectionError, OSError):
         pass
     await _close(writer)
+
+
+async def _challenge_proxy_auth(
+    writer: asyncio.StreamWriter, source_ip: str, host: str
+) -> None:
+    """Reject an unidentified request with 407 Proxy Authentication Required.
+
+    Sending 407 (rather than 403) with ``Proxy-Authenticate: Basic`` is
+    what lets an RFC 7235 client that withheld credentials retry with
+    them. We close the connection (``Connection: close``); a retrying
+    client re-dials and re-sends the CONNECT carrying the token, so no
+    keep-alive challenge state machine is needed. ``realm`` is a fixed
+    label; the gateway only ever accepts the signed job token.
+    """
+    logger.info(
+        "forward proxy: 407 (no/invalid identity token)",
+        source_ip=source_ip,
+        host=host,
+    )
+    await _respond(
+        writer,
+        407,
+        "Proxy Authentication Required",
+        extra_headers={'Proxy-Authenticate': 'Basic realm="egress"'},
+    )
 
 
 async def _close(writer: asyncio.StreamWriter) -> None:

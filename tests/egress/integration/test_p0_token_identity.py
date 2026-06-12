@@ -1,11 +1,9 @@
 """P0 — token identity drives the forward proxy (token-identity refactor).
 
 These prove the gateway recovers identity from the SIGNED TOKEN the
-agent presents in ``Proxy-Authorization``, independent of any source-IP
-lifecycle registration. Both cases send a *valid* token, so the token
-wins in ``reconcile`` and the source-IP map is irrelevant — that makes
-them robust against the shared-session gateway reusing a bridge IP from
-an earlier test (which would otherwise flake a "no identity" assertion).
+agent presents in ``Proxy-Authorization``. Both cases send a *valid*
+token for a specific tenant, and the rule is scoped to that tenant, so
+the allow/block verdict can only come from the token's claims.
 
   1. Token for ``tenant-tok``, which has an allow rule for the upstream
      → CONNECT tunnels (200). Only the token's tenant has the rule, so a
