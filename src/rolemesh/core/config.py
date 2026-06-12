@@ -1,4 +1,31 @@
-"""Configuration constants and paths."""
+"""Configuration constants and paths.
+
+Where does a new env-driven setting go? ONE authoritative read site per
+env var — never two. Pick by consumer scope:
+
+1. Read by MULTIPLE modules, non-sensitive, no parse-time validation
+   beyond a cast → module-level constant HERE (ports, image names,
+   bridge names, mode switches like EGRESS_CONTROL_ENABLE).
+
+2. Read by ONE component, or needs construction-time validation /
+   fail-closed semantics, or is a SECRET → a ``from_env()`` on that
+   component's own config object (see egress/token_identity.py
+   TokenAuthority, egress/dns_policy.py GlobalDnsPolicy). Do NOT
+   mirror it here: a second reader of the same env var silently
+   drifts from the real one (we shipped exactly that bug once —
+   a dead EGRESS_TOKEN_TTL_SECONDS constant nobody imported).
+   Other modules that need the value take the constructed object
+   via dependency injection, not a re-read of os.environ.
+
+3. Deployment-level override with a single use site and no fan-out
+   (e.g. ANTHROPIC_BASE_URL upstream override in reverse_proxy) →
+   lazy read at the use site, with a comment saying why.
+
+Module-level constants here are frozen at import; tests overriding
+them must patch every importing module's binding (a documented trap —
+see tests/container/test_startup_order.py). Category-2 objects are
+monkeypatch.setenv-testable, which is one of the reasons they exist.
+"""
 
 from __future__ import annotations
 
@@ -172,12 +199,9 @@ EGRESS_GATEWAY_DNS_PORT: int = int(
 )
 
 # Egress identity tokens: EGRESS_TOKEN_SECRET and EGRESS_TOKEN_TTL_SECONDS
-# are deliberately NOT mirrored here. They are component-scoped config
-# with a single consumer — rolemesh.egress.token_identity.TokenAuthority
-# .from_env() reads, validates, and fail-closes on them at construction.
-# Mirroring them as module constants would create a second reader of the
-# same env vars that silently drifts from the real one (which is exactly
-# what happened once; see the config-pattern note in docs/16).
+# are deliberately NOT mirrored here — category 2 of the module-docstring
+# rules (single consumer + validation + secret). Their one read site is
+# rolemesh.egress.token_identity.TokenAuthority.from_env().
 
 # Allowlist for env vars that the orchestrator dynamically injects into
 # containers (R8). Anything produced by build_container_spec() or passed
