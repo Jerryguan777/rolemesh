@@ -13,13 +13,13 @@ from typing import Any
 
 import pytest
 
-from rolemesh.egress.identity import Identity
 from rolemesh.egress.policy_cache import PolicyCache
 from rolemesh.egress.safety_call import (
     AuditPublisher,
     EgressRequest,
     EgressSafetyCaller,
 )
+from rolemesh.egress.token_identity import Identity
 
 pytestmark = pytest.mark.asyncio
 

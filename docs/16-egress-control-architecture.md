@@ -285,34 +285,33 @@ expiry never lands mid-turn, and the gateway stays a stateless
 verifier. The secret lives only on the orchestrator and gateway (shared
 `.env`), never inside an agent container.
 
-Migration is dual-run: the gateway verifies tokens first and falls back
-to the source-IP map when a token is absent or invalid, logging both a
-coverage signal (fallback used) and a consistency signal (token vs IP
-disagree). The IP pipeline is removed only once those signals confirm
-100% token coverage with zero disagreement. (A rejected/forged token is
-not a hole during dual-run: the token claims are discarded and the
-request proceeds under the agent's *real* source-IP identity, which the
-agent cannot forge — the forged tenant never takes effect.)
+Identity is token-only: the gateway reads it solely from the verified
+token (the leading reverse-proxy path segment, or the forward proxy's
+`Proxy-Authorization`). There is no source-IP fallback — a request with
+no/invalid token has no identity and is refused. (This replaced a
+dual-run window where the gateway also consulted a NATS-fed source-IP
+map; that pipeline — lifecycle events, the identity snapshot RPC, the
+in-memory IP→identity table — was removed once token coverage reached
+100% with zero token-vs-IP disagreement.)
 
 Client gotcha — proxy-auth method: clients must present the token
 *proactively* in the `Proxy-Authorization` header. Most do
 (curl/httpx/requests/urllib/undici all send Basic from the proxy URL
 userinfo), but **git** defaults to `http.proxyAuthMethod=anyauth`,
-which waits for a `407` challenge before sending credentials — and the
-gateway never challenges during dual-run (it just IP-falls-back). The
-agent image therefore pins `git config --system http.proxyAuthMethod
-basic` so git sends the token up front. Any other anyauth client added
-later needs the same treatment.
+which waits for a `407` challenge before sending credentials. The agent
+image therefore pins `git config --system http.proxyAuthMethod basic`
+so git sends the token up front. Any other anyauth client added later
+needs the same treatment.
 
-2b prerequisite — the `407` challenge: once the IP fallback is deleted,
-a CONNECT with a missing/invalid token must return `407
-Proxy-Authentication Required` with `Proxy-Authenticate: Basic`, **not**
-`403`. Otherwise an anyauth client that deliberately withholds
-credentials pending a challenge hard-fails instead of retrying with the
-token. Implementing this means the forward proxy must keep the
-connection alive across the 407 to read the re-sent CONNECT (today it
-closes after any non-200), so it is scoped to 2b rather than retrofitted
-into the dual-run window where silent IP-fallback is intentional.
+The `407` challenge: a forward-proxy CONNECT (or plain HTTP request)
+with a missing/invalid token returns `407 Proxy Authentication
+Required` with `Proxy-Authenticate: Basic` — **not** `403`. This lets an
+anyauth client that withheld credentials retry with them; a client with
+no token at all simply fails closed. The connection is closed after the
+407 (`Connection: close`), so a retrying client re-dials and re-sends
+the CONNECT carrying the token — no keep-alive challenge state machine
+is needed. The reverse proxy returns `401` for the same condition (it
+is the upstream server, not a proxy, so 401 is the correct status).
 
 ---
 
@@ -343,7 +342,7 @@ If item 1 fails = EC-1 as a whole is pointless.
 - Forward proxy (HTTP CONNECT) — `src/rolemesh/egress/forward_proxy.py`
 - Reverse-proxy business logic moves from `credential_proxy.py` to `src/rolemesh/egress/reverse_proxy.py` (`credential_proxy.py` becomes a thin re-export keeping its public API)
 - Controlled DNS resolver — `src/rolemesh/egress/dns_resolver.py` (dnslib-based; reject TXT/ANY/SRV to prevent DNS tunneling)
-- Identity Resolver — maintain IP → tenant/coworker in-memory map via NATS `orchestrator.agent.lifecycle`
+- Identity — recovered from the per-request signed token (`token_identity.py`); see "HTTP-plane identity: signed tokens" above. (Originally a NATS-fed source-IP → identity map; replaced by tokens.)
 - Rule cache — full load at startup + NATS `safety.rule.changed` incremental invalidation
 - Lightweight pipeline — `src/rolemesh/egress/safety_call.py` (call Safety Check + write audit inside Gateway)
 

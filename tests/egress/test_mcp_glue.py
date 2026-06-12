@@ -188,7 +188,7 @@ async def test_responder_returns_current_registry(nc: FakeNats) -> None:
     async def _rules_fetcher() -> list[dict[str, Any]]:
         return []
 
-    await start_responders(nc, state=None, rules_fetcher=_rules_fetcher)  # type: ignore[arg-type]
+    await start_responders(nc, rules_fetcher=_rules_fetcher)
 
     mcp_subs = [s for s in nc.subs if s.subject == MCP_SNAPSHOT_REQUEST_SUBJECT]
     assert len(mcp_subs) == 1, "MCP snapshot subject must be subscribed"
@@ -216,7 +216,6 @@ async def test_responder_replies_with_empty_on_fetcher_error(nc: FakeNats) -> No
 
     await start_responders(
         nc,
-        state=None,  # type: ignore[arg-type]
         rules_fetcher=_rules_fetcher,
         mcp_fetcher=_broken_mcp_fetcher,
     )
@@ -236,10 +235,8 @@ async def test_responder_attaches_three_subjects(nc: FakeNats) -> None:
     async def _rules_fetcher() -> list[dict[str, Any]]:
         return []
 
-    subs = await start_responders(
-        nc, state=None, rules_fetcher=_rules_fetcher  # type: ignore[arg-type]
-    )
-    assert len(subs) == 3
+    subs = await start_responders(nc, rules_fetcher=_rules_fetcher)
+    assert len(subs) == 2  # rules + mcp (identity responder removed in 2b)
     subjects = {s.subject for s in nc.subs}
     assert MCP_SNAPSHOT_REQUEST_SUBJECT in subjects
 

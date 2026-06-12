@@ -23,9 +23,8 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from rolemesh.egress.identity import Identity
 from rolemesh.egress.reverse_proxy import start_credential_proxy
-from rolemesh.egress.token_identity import TokenAuthority
+from rolemesh.egress.token_identity import Identity, TokenAuthority
 
 pytestmark = pytest.mark.asyncio
 
@@ -41,16 +40,6 @@ class _FakeCredResolver:
     async def resolve(self, tenant_id: str, provider: str) -> dict[str, Any]:
         self.calls.append((tenant_id, provider))
         return {"api_key": "sk-test"}
-
-
-class _FixedIpResolver:
-    """Source-IP resolver stub: returns a fixed identity (or None)."""
-
-    def __init__(self, identity: Identity | None) -> None:
-        self._identity = identity
-
-    def resolve(self, source_ip: str) -> Identity | None:
-        return self._identity
 
 
 async def _make_upstream() -> TestServer:
@@ -83,11 +72,9 @@ async def test_token_route_uses_token_identity(monkeypatch: pytest.MonkeyPatch) 
 
     cred = _FakeCredResolver()
     authority = TokenAuthority(secret=_SECRET, ttl_seconds=3600)
-    # IP resolver would say tenant "ip-tenant"; token says "token-tenant".
     runner = await start_credential_proxy(
         0,
         credential_resolver=cred,  # type: ignore[arg-type]
-        identity_resolver=_FixedIpResolver(_identity("ip-tenant")),  # type: ignore[arg-type]
         token_authority=authority,
     )
     client = await _client(runner)
@@ -99,7 +86,7 @@ async def test_token_route_uses_token_identity(monkeypatch: pytest.MonkeyPatch) 
         # Provider was parsed as the segment AFTER the token; the
         # upstream saw the stripped path.
         assert "/v1/messages" in body
-        # Credential lookup used the TOKEN's tenant, not the IP's.
+        # Credential lookup used the token's tenant.
         assert cred.calls == [("token-tenant", "anthropic")]
     finally:
         await client.close()
@@ -107,45 +94,37 @@ async def test_token_route_uses_token_identity(monkeypatch: pytest.MonkeyPatch) 
         await upstream.close()
 
 
-async def test_no_token_falls_back_to_ip(monkeypatch: pytest.MonkeyPatch) -> None:
-    upstream = await _make_upstream()
-    monkeypatch.setenv("ANTHROPIC_BASE_URL", str(upstream._root))
-
+async def test_no_token_is_401() -> None:
+    """First segment isn't a valid token → no identity → 401, and the
+    credential resolver is never consulted (fail-closed)."""
     cred = _FakeCredResolver()
     authority = TokenAuthority(secret=_SECRET, ttl_seconds=3600)
     runner = await start_credential_proxy(
         0,
         credential_resolver=cred,  # type: ignore[arg-type]
-        identity_resolver=_FixedIpResolver(_identity("ip-tenant")),  # type: ignore[arg-type]
         token_authority=authority,
     )
     client = await _client(runner)
     try:
-        # First segment is the provider (no token) — IP fallback applies.
+        # 'anthropic' is not a token; with no IP fallback this is 401.
         resp = await client.post("/proxy/anthropic/v1/messages", data=b"{}")
-        assert resp.status == 200
-        assert cred.calls == [("ip-tenant", "anthropic")]
+        assert resp.status == 401
+        assert cred.calls == []
     finally:
         await client.close()
         await runner.cleanup()
-        await upstream.close()
 
 
-async def test_invalid_token_no_ip_is_401() -> None:
+async def test_invalid_token_is_401() -> None:
     cred = _FakeCredResolver()
     authority = TokenAuthority(secret=_SECRET, ttl_seconds=3600)
     runner = await start_credential_proxy(
         0,
         credential_resolver=cred,  # type: ignore[arg-type]
-        identity_resolver=_FixedIpResolver(None),  # type: ignore[arg-type]
         token_authority=authority,
     )
     client = await _client(runner)
     try:
-        # 'anthropic' is not a valid token and the IP resolves to None;
-        # but note 'anthropic' becomes the provider and identity is None
-        # -> UNKNOWN_SOURCE. A clearly-bogus token segment behaves the
-        # same way.
         resp = await client.post("/proxy/not-a-real-token/anthropic/v1/messages", data=b"{}")
         assert resp.status == 401
         assert cred.calls == []

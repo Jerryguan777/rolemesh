@@ -48,19 +48,21 @@ EXPECTED_HEADER_NAMES = {"authorization", "x-api-key"}
 PLACEHOLDER = "placeholder"
 
 
-def _reverse_proxy_exec_script(path: str, body_b64: str) -> str:
+def _reverse_proxy_exec_script(path: str, body_b64: str, token: str) -> str:
     """Python snippet the probe runs: talks reverse proxy via HTTP.
 
-    Prints the JSON the fake upstream echoed back so the test can
-    assert on specific keys without shipping JSON-parsing into the
-    probe.
+    The identity token is the leading path segment
+    (``/proxy/<token>/anthropic/...``) — exactly what the orchestrator
+    bakes into ``ANTHROPIC_BASE_URL``. Prints the JSON the fake upstream
+    echoed back so the test can assert on specific keys without shipping
+    JSON-parsing into the probe.
     """
     return f"""
 import base64, urllib.request, sys
 
 body = base64.b64decode('{body_b64}')
 req = urllib.request.Request(
-    'http://egress-gateway:3001/proxy/anthropic{path}',
+    'http://egress-gateway:3001/proxy/{token}/anthropic{path}',
     data=body,
     headers={{'Content-Type': 'application/json', 'X-Test-Tag': 'rv-regression'}},
     method='POST',
@@ -121,24 +123,21 @@ async def test_reverse_proxy_injects_credentials_and_rewrites_host(
     # "LLM provider not configured". We test that explicit path —
     # which IS a real regression guard on the registry logic — and
     # skip the credential-forwarding assertions when 404 comes back.
-    probe = await topology.spawn_probe()
-    await topology.publish_lifecycle_started(
-        probe,
-        identity={
-            "tenant_id": "tenant-a",
-            "coworker_id": "coworker-x",
-            "user_id": "u",
-            "conversation_id": "c",
-            "job_id": "job-rv-regression",
-        },
-    )
+    token = topology.mint_token({
+        "tenant_id": "tenant-a",
+        "coworker_id": "coworker-x",
+        "user_id": "u",
+        "conversation_id": "c",
+        "job_id": "job-rv-regression",
+    })
+    probe = await topology.spawn_probe(egress_token=token)
 
     payload = b'{"model":"claude-3","messages":[{"role":"user","content":"ping"}]}'
     import base64
 
     body_b64 = base64.b64encode(payload).decode("ascii")
     rc, out = await probe.exec_sh(
-        f"python3 - <<'PY'\n{_reverse_proxy_exec_script('/v1/messages', body_b64)}\nPY"
+        f"python3 - <<'PY'\n{_reverse_proxy_exec_script('/v1/messages', body_b64, token)}\nPY"
     )
     assert rc == 0, out
 
@@ -203,31 +202,31 @@ async def test_reverse_proxy_unknown_provider_returns_404(
     reverse proxy or forwarding to a bogus upstream. Covers a category
     of bugs where the migration reshuffled the match_info parsing.
     """
-    probe = await topology.spawn_probe()
-    await topology.publish_lifecycle_started(
-        probe,
-        identity={
-            "tenant_id": "tenant-a",
-            "coworker_id": "coworker-x",
-            "user_id": "u",
-            "conversation_id": "c",
-            "job_id": "job-rv-404",
-        },
-    )
+    token = topology.mint_token({
+        "tenant_id": "tenant-a",
+        "coworker_id": "coworker-x",
+        "user_id": "u",
+        "conversation_id": "c",
+        "job_id": "job-rv-404",
+    })
+    probe = await topology.spawn_probe(egress_token=token)
 
+    # Valid token (so identity resolves) + an UNKNOWN provider segment
+    # after it → the registry lookup, not the token check, must produce
+    # the 404. A bogus token here would 401 instead and miss the guard.
     rc, out = await probe.exec_sh(
-        """
+        f"""
 python3 - <<'PY'
 import urllib.request, urllib.error
 try:
     urllib.request.urlopen(
-        'http://egress-gateway:3001/proxy/definitely-not-a-real-provider/v1/anything',
+        'http://egress-gateway:3001/proxy/{token}/definitely-not-a-real-provider/v1/anything',
         timeout=5,
     )
     print("STATUS=unexpected-200")
 except urllib.error.HTTPError as e:
-    print(f"STATUS={e.code}")
-    print(f"BODY={e.read().decode()[:200]}")
+    print(f"STATUS={{e.code}}")
+    print(f"BODY={{e.read().decode()[:200]}}")
 PY
 """
     )

@@ -30,14 +30,25 @@ TENANT_ID = "tenant-a"
 COWORKER_ID = "coworker-x"
 
 
-def _connect_script(host: str, port: int) -> str:
-    """Minimal CONNECT probe — success vs 403 is all we care about here."""
+def _connect_script(host: str, port: int, token: str) -> str:
+    """Minimal CONNECT probe — success vs 403 is all we care about here.
+
+    Carries the identity token in ``Proxy-Authorization`` (the raw
+    socket can't read the ``HTTP_PROXY`` userinfo, so we set it).
+    """
+    import base64 as _b64
+    cred = _b64.b64encode(f"job:{token}".encode()).decode()
     return f"""
 import socket
 s = socket.socket()
 s.settimeout(5)
 s.connect(('egress-gateway', 3128))
-s.sendall(b'CONNECT {host}:{port} HTTP/1.1\\r\\nHost: {host}:{port}\\r\\n\\r\\n')
+s.sendall(
+    b'CONNECT {host}:{port} HTTP/1.1\\r\\n'
+    b'Host: {host}:{port}\\r\\n'
+    b'Proxy-Authorization: Basic {cred}\\r\\n'
+    b'\\r\\n'
+)
 buf = b''
 while b'\\r\\n\\r\\n' not in buf:
     try:
@@ -97,21 +108,18 @@ async def test_rule_disable_propagates_to_live_gateway(
     await topology.seed_rules_responder([rule])
     await topology.publish_rule_changed("created", rule)
 
-    probe = await topology.spawn_probe()
-    await topology.publish_lifecycle_started(
-        probe,
-        identity={
-            "tenant_id": TENANT_ID,
-            "coworker_id": COWORKER_ID,
-            "user_id": "u",
-            "conversation_id": "c",
-            "job_id": "job-p0-4",
-        },
-    )
+    token = topology.mint_token({
+        "tenant_id": TENANT_ID,
+        "coworker_id": COWORKER_ID,
+        "user_id": "u",
+        "conversation_id": "c",
+        "job_id": "job-p0-4",
+    })
+    probe = await topology.spawn_probe(egress_token=token)
 
     # --- Before: allow ---
     rc1, out1 = await probe.exec_sh(
-        f"python3 - <<'PY'\n{_connect_script(topology.fake_upstream_name, 443)}\nPY"
+        f"python3 - <<'PY'\n{_connect_script(topology.fake_upstream_name, 443, token)}\nPY"
     )
     assert rc1 == 0, out1
     assert "STATUS='HTTP/1.1 200" in out1, (
@@ -125,7 +133,7 @@ async def test_rule_disable_propagates_to_live_gateway(
 
     # --- After: block ---
     rc2, out2 = await probe.exec_sh(
-        f"python3 - <<'PY'\n{_connect_script(topology.fake_upstream_name, 443)}\nPY"
+        f"python3 - <<'PY'\n{_connect_script(topology.fake_upstream_name, 443, token)}\nPY"
     )
     assert rc2 == 0, out2
     # The reason phrase comes from safety_call.py — catches a

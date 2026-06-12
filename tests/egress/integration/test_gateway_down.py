@@ -65,17 +65,17 @@ async def test_gateway_down_blocks_all_egress_paths(
     proxy, and DNS resolution. Any of them unexpectedly succeeding
     would invalidate the EC-1 physical-isolation claim.
     """
-    probe = await topology.spawn_probe()
-    await topology.publish_lifecycle_started(
-        probe,
-        identity={
-            "tenant_id": "tenant-a",
-            "coworker_id": "coworker-x",
-            "user_id": "u",
-            "conversation_id": "c",
-            "job_id": "job-gw-down",
-        },
-    )
+    # The probe carries a valid token, but these assertions are about
+    # the gateway being DOWN — every path fails at the transport layer
+    # regardless of identity, so the token only needs to exist.
+    token = topology.mint_token({
+        "tenant_id": "tenant-a",
+        "coworker_id": "coworker-x",
+        "user_id": "u",
+        "conversation_id": "c",
+        "job_id": "job-gw-down",
+    })
+    probe = await topology.spawn_probe(egress_token=token)
     # Sanity check: gateway reachable now.
     rc, out = await probe.exec_sh(
         "python3 -c \"import urllib.request; "

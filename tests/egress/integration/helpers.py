@@ -97,11 +97,6 @@ class ContainerHandle:
         c = self.docker.containers.container(self.name)
         return await c.show()
 
-    async def ip_on(self, network_name: str) -> str:
-        info = await self.inspect()
-        net = info["NetworkSettings"]["Networks"].get(network_name, {}) or {}
-        return str(net.get("IPAddress") or "")
-
 
 @dataclass
 class Topology:
@@ -178,12 +173,10 @@ class Topology:
         """Sign an egress identity token the gateway will accept.
 
         Uses :data:`EGRESS_TOKEN_SECRET_VALUE` — the same secret conftest
-        gave the gateway — so token-mode tests can spawn a probe whose
-        identity the gateway recovers from the token alone, with no
-        lifecycle (IP) registration.
+        gave the gateway — so a probe carries its identity in the token,
+        exactly as the orchestrator injects it in production.
         """
-        from rolemesh.egress.identity import Identity
-        from rolemesh.egress.token_identity import mint
+        from rolemesh.egress.token_identity import Identity, mint
 
         return mint(
             Identity(
@@ -197,35 +190,6 @@ class Topology:
             secret=EGRESS_TOKEN_SECRET_VALUE,
             ttl_seconds=3600,
         )
-
-    async def publish_lifecycle_started(self, probe: ContainerHandle, identity: dict[str, Any]) -> None:
-        """Tell the gateway's identity resolver about a probe container.
-
-        We are standing in for the orchestrator here — in production
-        ContainerAgentExecutor publishes lifecycle events; in tests we
-        do it ourselves with identity fields under our control.
-        """
-        import nats  # type: ignore[import-not-found]
-
-        ip = await probe.ip_on(self.agent_network)
-        assert ip, f"probe {probe.name} has no IP on {self.agent_network}"
-        payload = {
-            "event": "started",
-            "container_name": probe.name,
-            "ip": ip,
-            **identity,
-        }
-        nc = await nats.connect(self.nats_url)
-        try:
-            await nc.publish(
-                "orchestrator.agent.lifecycle",
-                json.dumps(payload).encode("utf-8"),
-            )
-            await nc.flush()
-        finally:
-            await nc.close()
-        # Give the gateway's subscriber a beat to consume.
-        await asyncio.sleep(0.5)
 
     async def seed_rules_responder(self, rules: list[dict[str, Any]]) -> Any:
         """Stand up a responder for ``egress.rules.snapshot.request``.
