@@ -289,7 +289,30 @@ Migration is dual-run: the gateway verifies tokens first and falls back
 to the source-IP map when a token is absent or invalid, logging both a
 coverage signal (fallback used) and a consistency signal (token vs IP
 disagree). The IP pipeline is removed only once those signals confirm
-100% token coverage with zero disagreement.
+100% token coverage with zero disagreement. (A rejected/forged token is
+not a hole during dual-run: the token claims are discarded and the
+request proceeds under the agent's *real* source-IP identity, which the
+agent cannot forge — the forged tenant never takes effect.)
+
+Client gotcha — proxy-auth method: clients must present the token
+*proactively* in the `Proxy-Authorization` header. Most do
+(curl/httpx/requests/urllib/undici all send Basic from the proxy URL
+userinfo), but **git** defaults to `http.proxyAuthMethod=anyauth`,
+which waits for a `407` challenge before sending credentials — and the
+gateway never challenges during dual-run (it just IP-falls-back). The
+agent image therefore pins `git config --system http.proxyAuthMethod
+basic` so git sends the token up front. Any other anyauth client added
+later needs the same treatment.
+
+2b prerequisite — the `407` challenge: once the IP fallback is deleted,
+a CONNECT with a missing/invalid token must return `407
+Proxy-Authentication Required` with `Proxy-Authenticate: Basic`, **not**
+`403`. Otherwise an anyauth client that deliberately withholds
+credentials pending a challenge hard-fails instead of retrying with the
+token. Implementing this means the forward proxy must keep the
+connection alive across the 407 to read the re-sent CONNECT (today it
+closes after any non-200), so it is scoped to 2b rather than retrofitted
+into the dual-run window where silent IP-fallback is intentional.
 
 ---
 
