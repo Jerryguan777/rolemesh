@@ -12,12 +12,21 @@ query from the agent arrives here. The gateway then:
 
   1. Accepts only A / AAAA / CNAME queries (blocks TXT / ANY / SRV /
      NULL / WKS which are the usual tunneling carriers).
-  2. Resolves the source IP to an Identity; unknown source → REFUSED.
-  3. Runs the same Safety pipeline as forward_proxy, with mode='dns'.
-  4. On allow, recurses to the upstream resolver list.
-  5. On block, responds NXDOMAIN — the attacker's DNS server gets
+  2. Evaluates the qname against the platform-wide
+     :class:`rolemesh.egress.dns_policy.GlobalDnsPolicy` — the same
+     answer for every tenant; see that module for why DNS does not
+     need per-tenant identity (proxied traffic never resolves its
+     target in the agent container).
+  3. On allow, recurses to the upstream resolver list.
+  4. On block, responds NXDOMAIN — the attacker's DNS server gets
      nothing, not even a resolve-failure signal, because we never
      emit the query upstream.
+
+Decisions are recorded as structured gateway logs (qname redacted past
+the registered domain, mirroring safety_call's audit redaction) rather
+than ``safety_decisions`` rows: the audit fan-in requires an
+authenticated per-agent identity, which platform-level DNS decisions
+deliberately no longer carry.
 """
 
 from __future__ import annotations
@@ -29,11 +38,10 @@ from typing import TYPE_CHECKING
 
 from rolemesh.core.logger import get_logger
 
-from .safety_call import EgressRequest
+from .safety_call import redact_dns_qname
 
 if TYPE_CHECKING:
-    from .identity import IdentityResolver
-    from .safety_call import EgressSafetyCaller
+    from .dns_policy import GlobalDnsPolicy
 
 logger = get_logger()
 
@@ -66,7 +74,7 @@ class UpstreamResolver:
 
 
 class DnsServer:
-    """Asyncio UDP server that evaluates each query through the Safety pipeline.
+    """Asyncio UDP server that evaluates each query against the platform policy.
 
     State is captured in the constructor so the datagram handler is a
     pure function of the packet + the resolver closure — makes testing
@@ -76,14 +84,12 @@ class DnsServer:
     def __init__(
         self,
         *,
-        identity_resolver: IdentityResolver,
-        safety_caller: EgressSafetyCaller,
+        policy: GlobalDnsPolicy,
         upstreams: list[UpstreamResolver],
     ) -> None:
         if not upstreams:
             raise ValueError("DnsServer requires at least one upstream resolver")
-        self._identity = identity_resolver
-        self._safety = safety_caller
+        self._policy = policy
         self._upstreams = list(upstreams)
         self._transport: asyncio.DatagramTransport | None = None
 
@@ -149,26 +155,35 @@ class DnsServer:
             respond(_build_error(query, _RCODE_REFUSED))
             return
 
-        identity = self._identity.resolve(source_addr[0])
-        decision = await self._safety.decide(
-            identity=identity,
-            request=EgressRequest(
-                host=qname,
-                port=0,  # DNS is port-less
-                mode="dns",
-                qtype=qtype,
-            ),
-        )
-        if decision.action == "block":
+        # Platform-wide policy: same answer for every source. The qname
+        # is redacted in logs past the registered domain — exfil
+        # attempts put the payload in the leftmost labels, and this
+        # tripwire's own log must not become the place it lands.
+        if not self._policy.is_allowed(qname):
+            display = redact_dns_qname(qname)
+            if self._policy.mode == "observe":
+                logger.warning(
+                    "dns: would block (observe mode)",
+                    source=source_addr[0],
+                    qname=display,
+                    qtype=qtype,
+                )
+            else:
+                logger.warning(
+                    "dns: blocked",
+                    source=source_addr[0],
+                    qname=display,
+                    qtype=qtype,
+                )
+                respond(_build_error(query, _RCODE_NXDOMAIN))
+                return
+        else:
             logger.info(
-                "dns: blocked",
+                "dns: allowed",
                 source=source_addr[0],
                 qname=qname,
                 qtype=qtype,
-                reason=decision.reason,
             )
-            respond(_build_error(query, _RCODE_NXDOMAIN))
-            return
 
         # Recurse upstream. The first upstream to respond within budget
         # wins; the rest are cancelled. Falling all the way through

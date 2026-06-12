@@ -54,6 +54,9 @@ dev = [
     "ruff>=0.8",
     "mypy>=1.13",
     "testcontainers[postgres]>=4.0",
+    # Gateway-runtime dep (see Dockerfile.egress-gateway); mirrored here
+    # so the dns_resolver unit tests can build/parse real DNS packets.
+    "dnslib>=0.9",
 ]
 # V2 Safety Framework: optional ML-backed checks. Install with
 # ``uv sync --extra safety-ml`` to enable presidio.pii,

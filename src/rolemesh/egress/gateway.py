@@ -52,6 +52,7 @@ from rolemesh.core.config import (
 )
 from rolemesh.core.logger import get_logger
 
+from .dns_policy import GlobalDnsPolicy
 from .dns_resolver import DnsServer, UpstreamResolver
 from .forward_proxy import ForwardProxy
 from .identity import (
@@ -86,6 +87,8 @@ logger = get_logger()
 #   workloads.
 # EGRESS_SNAPSHOT_TIMEOUT: how long the gateway waits for the initial
 #   rule snapshot before giving up and failing start.
+# EGRESS_DNS_ALLOWLIST / EGRESS_DNS_MODE: platform DNS policy — see
+#   dns_policy.py for semantics and the empty-by-default rationale.
 _UPSTREAM_DNS_DEFAULT = "8.8.8.8,1.1.1.1"
 _SNAPSHOT_TIMEOUT_S = 5.0
 
@@ -118,6 +121,11 @@ async def main() -> None:
     upstream_dns = _parse_upstream_dns(
         os.environ.get("EGRESS_UPSTREAM_DNS", _UPSTREAM_DNS_DEFAULT)
     )
+
+    # Platform DNS policy. Loaded before any network setup so a config
+    # typo (bad EGRESS_DNS_MODE) kills the boot immediately — same
+    # fail-closed posture as the rule-snapshot fetch below.
+    dns_policy = GlobalDnsPolicy.from_env()
 
     # Import nats-py lazily so unit tests importing this module don't
     # require the dependency. The gateway Dockerfile pins it, so
@@ -265,9 +273,10 @@ async def main() -> None:
         stack.push_async_callback(_close_forward)
 
         # --- DNS resolver (port 53) ----------------------------------
+        # Platform-wide policy, no identity: see dns_policy.py for why
+        # the DNS plane is the one place per-tenant scoping buys nothing.
         dns = DnsServer(
-            identity_resolver=identity,
-            safety_caller=safety,
+            policy=dns_policy,
             upstreams=upstream_dns,
         )
         await dns.serve("0.0.0.0", EGRESS_GATEWAY_DNS_PORT)
@@ -282,6 +291,7 @@ async def main() -> None:
             reverse_port=CREDENTIAL_PROXY_PORT,
             forward_port=EGRESS_GATEWAY_FORWARD_PORT,
             dns_port=EGRESS_GATEWAY_DNS_PORT,
+            dns_mode=dns_policy.mode,
             upstreams=[f"{u.host}:{u.port}" for u in upstream_dns],
             stage="EC-2",
         )

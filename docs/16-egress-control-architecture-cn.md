@@ -198,19 +198,49 @@ agent 发 https://github.com/...
   ↓ agent ↔ github.com 端到端 TLS (Gateway 不解密)
 ```
 
-**DNS 路径**：
+**DNS 路径**（平台级策略 — 见下文"DNS 面：平台级策略"）：
 ```
-agent: dig api.anthropic.com
+agent: dig metrics.corp.example      # 在 EGRESS_DNS_ALLOWLIST 中
   ↓ UDP 53 → Gateway 内 DNS resolver
-  ↓ Safety pipeline (EGRESS_REQUEST, host=api.anthropic.com, mode=dns)
+  ↓ 平台白名单命中（无身份判定，对所有租户一致）
   ↓ allow → 递归向上游查询 → 返回 A 记录
 
 agent: dig evil.com
   ↓ UDP 53 → Gateway 内 DNS resolver
-  ↓ Safety pipeline → block (域名不在白名单)
+  ↓ 平台白名单未命中 → block
   ↓ 返回 NXDOMAIN, 不向上游查询
   ↓ ★ 攻击者控制的 DNS 完全收不到任何信号
 ```
+
+### DNS 面：平台级策略（非按租户）
+
+DNS resolver 最初通过源 IP 身份映射复用按租户的 `egress.domain_rule`
+规则行。这层耦合已退役：DNS 决策现在来自一份平台级全局白名单
+（`EGRESS_DNS_ALLOWLIST`，默认**空表**），配合 `EGRESS_DNS_MODE`：
+`enforce`（默认）或 `observe`（全部放行、记录本应拦截的查询；仅作迁移
+观察用）。
+
+为什么平台级足够 — 以及为什么这份列表保持空：
+
+- 经代理的流量从不在 agent 容器内解析目标域名。设置了 `HTTP_PROXY`
+  后，SDK 把域名作为字符串交给 gateway（CONNECT 请求行 / 绝对形式
+  URL），由 **gateway** 在自己的出口侧解析链路上解析——本策略不约束
+  那条链路。按租户的访问控制在 CONNECT / reverse proxy 层，原样保留。
+- 容器名（`nats`、`egress-gateway`）由 Docker 内嵌 DNS（127.0.0.11）
+  本地应答；只有外部域名会被转发到 gateway resolver。
+- 因此到达本 resolver 的每个查询都来自绕开代理约定的代码——要么是
+  未配置代理的工具，要么是 DNS 渗出攻击。在这里放行任何域名都救不了
+  任何合法流程（网桥没有到解析结果的路由）；这个 resolver 是**绊网**
+  而不是服务。修复不认代理的工具，而不是放宽这份列表。
+- 租户自助配置绝不能触达这份列表：否则恶意租户把自己控制的域名加入
+  白名单，等于给**所有**租户的被攻陷 agent 开了一条 DNS 渗出通道。
+  列表由运维设置（env），将来若确需运行时编辑，升级路径是
+  `platform_safety_rules`。
+
+审计影响：DNS 决策记录为 gateway 结构化日志（qname 在注册域之外
+脱敏），不再写 `safety_decisions` 行——平台级决策不携带审计 fan-in
+做 coworker 复验所需的 per-agent 身份。HTTP 面保留完整的按租户审计
+归因；一次 DNS 渗出尝试几乎总是伴随一条可归因的 CONNECT 拦截记录。
 
 ---
 

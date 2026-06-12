@@ -11,8 +11,8 @@ from rolemesh.safety.checks.egress_domain_rule import (
     EgressDomainCode,
     EgressDomainRuleCheck,
     EgressDomainRuleConfig,
-    _matches,
     make_egress_domain_check,
+    matches_domain,
 )
 from rolemesh.safety.types import SafetyContext, Stage
 
@@ -28,39 +28,39 @@ class _FakeRequest:
 
 
 # ---------------------------------------------------------------------------
-# _matches — the shared matching primitive
+# matches_domain — the shared matching primitive
 # ---------------------------------------------------------------------------
 
 
 class TestMatches:
     def test_exact_match(self) -> None:
-        assert _matches("api.anthropic.com", "api.anthropic.com")
+        assert matches_domain("api.anthropic.com", "api.anthropic.com")
 
     def test_exact_mismatch(self) -> None:
-        assert not _matches("api.openai.com", "api.anthropic.com")
+        assert not matches_domain("api.openai.com", "api.anthropic.com")
 
     def test_wildcard_matches_subdomain(self) -> None:
-        assert _matches("api.github.com", "*.github.com")
-        assert _matches("raw.github.com", "*.github.com")
+        assert matches_domain("api.github.com", "*.github.com")
+        assert matches_domain("raw.github.com", "*.github.com")
 
     def test_wildcard_does_not_match_evil_suffix(self) -> None:
         """Regression guard: a pattern ``*.github.com`` must NOT let
         ``github.com.evil.com`` through. The old substring-match bug
         class has burnt plenty of security products; pin it."""
-        assert not _matches("github.com.evil.com", "*.github.com")
+        assert not matches_domain("github.com.evil.com", "*.github.com")
 
     def test_wildcard_does_not_match_bare_apex(self) -> None:
         """``*.github.com`` matches subdomains only, not ``github.com``
         itself. Operators who want both must list them explicitly."""
-        assert not _matches("github.com", "*.github.com")
+        assert not matches_domain("github.com", "*.github.com")
 
     def test_case_insensitive(self) -> None:
-        assert _matches("API.Anthropic.COM", "api.anthropic.com")
-        assert _matches("API.Anthropic.COM", "*.ANTHROPIC.COM")
+        assert matches_domain("API.Anthropic.COM", "api.anthropic.com")
+        assert matches_domain("API.Anthropic.COM", "*.ANTHROPIC.COM")
 
     def test_trailing_dot_tolerated(self) -> None:
         """DNS wire-format names sometimes arrive with a trailing dot."""
-        assert _matches("api.anthropic.com.", "api.anthropic.com")
+        assert matches_domain("api.anthropic.com.", "api.anthropic.com")
 
 
 # ---------------------------------------------------------------------------
