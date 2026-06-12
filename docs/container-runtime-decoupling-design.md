@@ -1,9 +1,41 @@
 # 容器运行时解耦设计：`ROLEMESH_CONTAINER_RUNTIME=docker|k8s`
 
-> 状态：设计稿（待评审）
+> 状态：设计稿 rev2（2026-06-12 与 main@be953c5 重新对齐：token 身份 / EC=off / 路由整合）
 > 目标：同一份业务代码，通过一个环境变量在 Docker 与 Kubernetes 之间切换；
 > 本地 Ubuntu（amd64）用 Docker 模式与 kind 模式验证，生产部署到
 > Rancher RKE2 + Helm chart。
+
+---
+
+## 0. rev2 基线更新（main@be953c5，PR #81–#84）
+
+rev1 基于 `0e72ae3`。其后 main 合入四个 PR，三处实质影响本方案：
+
+1. **源 IP 身份机制已删除，改为签名 token**（#82/#83）。`egress/identity.py`
+   （IP→身份内存表 + lifecycle 事件管道）整体移除，替换为
+   `egress/token_identity.py`：orchestrator 在 spawn 时签发 HMAC token，
+   随请求带内传递（forward proxy 的 userinfo / reverse proxy 的路径段），
+   gateway 无状态验签。其动机注释明确写着 IP 方案 "breaks under NAT / k8s /
+   multi-host"——**该重构正是为 K8s 做的**。直接后果：
+   - 本方案 rev1 的 §5.2（podIP→身份映射）、`get_network_info()` Protocol
+     方法、源 IP 保留校验（masqueradeAll 探测）全部作废；
+   - gateway 不再持每租户内存态，**多副本不再有身份层障碍**；
+   - 新增部署面要求：`EGRESS_TOKEN_SECRET` 必须同时下发 orchestrator 与
+     gateway（K8s Secret），且绝不进 agent Pod。
+2. **EC 开关路由已整合为单一纯函数**（#84）：`runner.compute_egress_routing()`
+   → `EgressRouting` dataclass，吸收了原先散在 runner/executor 的 7 处
+   EC=on/off 分支（含 MCP proxy 主机选择、extra_hosts、NATS 重写、DNS、
+   proxy env）。其 docstring 自述为 "planned ContainerPlatform abstraction
+   (docker|k8s) 的集结地"。**附录 A 的泄漏点 #1、#2、#4 已在 main 解决或
+   收敛**；本方案 §4.4 据此重写——P1 不再发明新接缝，而是把这个现成接缝
+   平台化。
+3. **EC=off 模式恢复，由 `EGRESS_CONTROL_ENABLE` 控制**（#84），token 在
+   EC=off 下仍用于 host 侧凭证代理的租户隔离。本方案立场：**K8s 模式强制
+   EC=on**，`provision_infrastructure()` 把 `EGRESS_CONTROL_ENABLE=false` +
+   k8s 视为配置错误（fail-closed）；EC=off 仍是 docker 模式专属的开发回退。
+
+另：DNS 白名单已平台化（#81，`dns_policy.py`），DNS 面与身份彻底解耦——
+这消除了 rev1 中"DNS 按源 IP 查身份"的隐含依赖，K8s 映射（§5.3）不变但更稳。
 
 ---
 
@@ -67,7 +99,7 @@
 | 流式 stderr | `container.log(stderr=True, follow=True)` | `read_namespaced_pod_log(follow=True)`（注：K8s 不分流 stdout/stderr，见 §5.6） |
 | 停止 + 清理 | stop + delete force | delete Pod（grace period = timeout） |
 | 孤儿清理 | name 前缀 + 镜像白名单 | label selector `rolemesh.io/managed-by=orchestrator` + 镜像白名单 |
-| 查询沙箱网络身份（IP） | inspect `NetworkSettings.Networks[net].IPAddress` | Pod `status.podIP` |
+| 请求级身份识别 | 签名 token 带内传递（main@be953c5 起，与 L3 拓扑无关） | **同一机制原样工作**，零改动 |
 | 网络隔离（agent 无直接出网） | `Internal=true` bridge | 默认拒绝的 egress `NetworkPolicy`（仅放行 → gateway Pod、→ NATS、→ gateway:53/udp） |
 | egress gateway 双面性 | 双网卡（agent-net + egress-net） | 单网卡即可：对内是 Service，对外不受 agent 侧 NetworkPolicy 限制（gateway 自己的 policy 放行出网） |
 | agent 的 DNS 强制走 gateway | `HostConfig.Dns = [gateway bridge IP]` | Pod `dnsPolicy: None` + `dnsConfig.nameservers: [gateway Service ClusterIP]` |
@@ -115,9 +147,9 @@ class ContainerRuntime(Protocol):
     # ——既有——
     name / ensure_available / run / stop / cleanup_orphans / close
 
-    # ——新增：堵住 C1——
-    async def get_network_info(self, container_name: str) -> ContainerNetworkInfo:
-        """返回沙箱的网络身份（ip），供 agent-lifecycle 事件 / identity 映射使用。"""
+    # rev2：原计划的 get_network_info() 已无消费者——它唯一的用途是
+    # 给 IP 身份机制发 lifecycle 事件，该机制在 main@be953c5 已删除。
+    # 不再加入 Protocol；将来出现真实消费者时再加。
 
     # ——新增：吸收 C2 的 hasattr 探测——
     async def provision_infrastructure(self) -> InfraReport:
@@ -153,26 +185,32 @@ class K8sEgressGatewayProvider:
 `set_egress_gateway_dns_ip()` 全局变量保留（runner.py 的纯函数继续从它读），
 但唯一写入方变成 provider 的返回值——业务侧完全不变。
 
-### 4.4 拓扑假设的消除（修 C5）
+### 4.4 路由平台化（修 C5；rev2 重写，对齐 main 的 `compute_egress_routing`）
 
-`host.docker.internal` / `rewrite_loopback_to_host_gateway()` /
-`_detect_proxy_bind_host()` 全部收编为 runtime 的策略对象：
+rev1 在此设计了 `HostAccessPolicy`；main@be953c5 已经把同一批拓扑事实
+（NATS 重写、proxy env、MCP 主机、extra_hosts、DNS、网络名）整合进
+`runner.compute_egress_routing() -> EgressRouting`，且 docstring 自述为
+ContainerPlatform 抽象的集结地。**P1 不再发明新接缝，直接平台化这个函数**：
 
 ```python
-class HostAccessPolicy(Protocol):
-    def rewrite_url_for_sandbox(self, url: str) -> str: ...
-    def extra_hosts(self) -> dict[str, str]: ...
-    def proxy_bind_host(self) -> str: ...
+class AgentRoutingProvider(Protocol):
+    def agent_routing(self, egress_token: str | None) -> EgressRouting: ...
+    def proxy_bind_host(self) -> str: ...   # orchestrator 侧凭证代理 bind 地址
+
+class DockerAgentRouting:
+    """= 现 compute_egress_routing 函数体原样搬入（EC=on/off 两分支都保留）。"""
+
+class K8sAgentRouting:
+    """仅 EC=on（EC=off + k8s 是配置错误）。所有主机名是 Service DNS 名：
+    nats_url 恒等返回；proxy_base/mcp_proxy_host = gateway Service 名；
+    dns_servers = [gateway Service ClusterIP]；extra_hosts = {}（metadata
+    黑洞由 default-deny NetworkPolicy 承担）；proxy_bind_host = 0.0.0.0。"""
 ```
 
-- **DockerHostAccessPolicy**：现行为（loopback→`host.docker.internal`、
-  Linux 加 `host-gateway` ExtraHosts、docker0 探测）。
-- **K8sHostAccessPolicy**：`rewrite_url_for_sandbox` 是恒等函数（orchestrator
-  是 Pod，配置里本来就写 Service DNS 名，如 `nats://rolemesh-nats:4222`）；
-  `extra_hosts()` 返回空；`proxy_bind_host()` 返回 `0.0.0.0`（凭证代理监听
-  Pod 网卡，由 NetworkPolicy 限制谁能访问，而非 bind 地址）。
-
-`runner.py:434-452` 的 NATS URL 重写改为调 policy，分支逻辑消失。
+`EgressRouting` dataclass 本身已是运行时中立的（字段都是 URL/名字/列表），
+原样复用。`runner.build_container_spec` 与 executor 已统一从它取值（#84），
+调用点零改动。`rewrite_loopback_to_host_gateway()` / `CONTAINER_HOST_GATEWAY`
+随函数体迁入 `DockerAgentRouting` 私有，公共 runtime 模块删除。
 
 ### 4.5 挂载翻译（修 C6）
 
@@ -239,6 +277,8 @@ spec:
 + 镜像白名单复核（沿用 `_normalize_image_ref` 思路），双信号不变量与 Docker 版一致。
 
 `provision_infrastructure()`（K8s 版，全是只读校验）：
+0. `EGRESS_CONTROL_ENABLE` 必须为 true——K8s 模式不支持 EC=off 回退，
+   关着就拒绝启动；
 1. PVC `ROLEMESH_K8S_DATA_PVC` 存在且 Bound；
 2. NetworkPolicy `rolemesh-agent-default-deny` 与 `rolemesh-agent-allow-gateway`
    存在，且 podSelector 命中 `rolemesh.io/role=agent`；
@@ -271,15 +311,19 @@ spec:
    53/443/80 及 values 声明的端口（gateway 自身仍有应用层 allowlist，双保险）。
 4. `orchestrator-policy`：egress → K8s API、Postgres、NATS、gateway。
 
-### 5.2 身份映射（C8）
+### 5.2 身份机制（rev2 重写：token 带内传递，拓扑无关）
 
-Docker：lifecycle 事件携带 `NetworkSettings...IPAddress`。
-K8s：`run()` 返回后 watch 至 `status.podIP` 非空（PodScheduled 之后立即有），
-`get_network_info()` 返回 podIP。gateway 的 `IdentityResolver` 逻辑零改动——
-它只消费 "ip → identity" 事件，不关心 IP 怎么来。
+main@be953c5 起身份是 spawn 时签发的 HMAC token，随请求带内传递，gateway
+无状态验签——**在 K8s 下原样工作，零改动**。源 IP 不再承担身份职责，因此：
 
-**注意点**：Pod IP 在 Pod 删除后可被复用，与 Docker bridge IP 行为一致，
-现有 `handle_stopped()` 清理路径已覆盖；契约测试加用例锁定（§7 T-NET-3）。
+- rev1 的源 IP 保留校验（kube-proxy `masqueradeAll` 探测、T-NET 源 IP 回显
+  用例）**取消**；NetworkPolicy 限制"谁能到达 gateway"仍保留，作为纵深防御。
+- gateway 不再持每租户内存态，多副本不再有身份层障碍（本期仍默认 1 副本，
+  扩副本只是 values 改数字）。
+- 部署面新增硬要求：`EGRESS_TOKEN_SECRET` 经 K8s Secret 同时下发
+  orchestrator 与 gateway，**绝不进 agent Pod**（agent 只拿到自己的 token）。
+  token TTL 需覆盖 Pod 拉镜像/调度延迟，K8s 下冷启动比 Docker 慢，TTL
+  下限写进 Helm values 校验。
 
 ### 5.3 DNS
 
@@ -351,8 +395,8 @@ tests/container/contract/
   test_filesystem.py   # T-FS-*: readonly rootfs(EROFS)/tmpfs 可写+属主/挂载翻译 ro|rw
   test_env_security.py # T-SEC-*: env 注入/CapDrop 生效/no-new-privileges/
                        #          非 root UID/K8s 无 SA token
-  test_network.py      # T-NET-*: get_network_info 返回可路由 IP/agent 无直接外网/
-                       #          agent→gateway 可达/DNS 只能经 gateway/IP 复用语义
+  test_network.py      # T-NET-*: agent 无直接外网/agent→gateway 可达/
+                       #          DNS 只能经 gateway/无 token 请求被 407 拒绝
   test_streams.py      # T-IO-*:  stderr 诊断行可见/输出大小上限
 ```
 
@@ -394,7 +438,9 @@ deploy/charts/rolemesh/
     credential-proxy-service.yaml
     data-pvc.yaml
     networkpolicy-*.yaml           # §5.1 的 4 条
-    secrets.yaml                   # LLM keys / WS_TICKET_SECRET / DB URL（支持 existingSecret）
+    secrets.yaml                   # LLM keys / WS_TICKET_SECRET / EGRESS_TOKEN_SECRET
+                                   #   / DB URL（支持 existingSecret；EGRESS_TOKEN_SECRET
+                                   #   只挂 orchestrator 与 gateway，绝不进 agent Pod）
     job-seed-admin.yaml            # ROLEMESH_SEED_ADMIN_EMAIL 的 Helm hook（可选）
   NOTES.txt                        # podPidsLimit、RWX、gVisor、CNI NetworkPolicy 支持等检查清单
 ```
@@ -476,6 +522,19 @@ pytest tests/container/contract --runtime=k8s
 评审中逐行核对出的 11 处 Docker 泄漏，按处理方式分三组。
 原则：实质泄漏必须落在 §4 已有接缝里（不为单点新增抽象）；
 注释/文案级不立设计条目，但列入 P1 清理清单防止遗漏。
+
+**rev2 状态更新（main@be953c5 核对）**：
+- **已在 main 解决**：#1 executor MCP 主机选择（现统一读
+  `EgressRouting.mcp_proxy_host`）；#4 `_publish_agent_started` 的
+  `getattr(_ensure_client)`（随 IP 身份机制整体删除）。
+- **已收敛、待平台化**：#2 proxy 拼接、#5 `CONTAINER_HOST_GATEWAY`、
+  #6 loopback 重写、#7 extra_hosts——全部聚进了 `compute_egress_routing`
+  单一函数，§4.4 平台化时随函数体迁入 `DockerAgentRouting`，一次解决。
+  #8 的 fail-open 分支现在是 `EgressRouting.warn_missing_dns` 字段，
+  平台化时同样收口。
+- **仍待处理**：#3 bootstrap.py 直接 aiodocker、#11 "dockerd version gate"
+  注释（归属不变：§4.3 `DockerEgressGatewayProvider`）；#9/#10 注释清扫不变。
+- 行号引用以 rev1 基线 `0e72ae3` 为准，main 上已漂移。
 
 ### A.1 设计已显式点名（4）
 
