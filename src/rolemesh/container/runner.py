@@ -33,6 +33,7 @@ from rolemesh.core.config import (
     CONTAINER_PIDS_LIMIT,
     CREDENTIAL_PROXY_PORT,
     DATA_DIR,
+    EGRESS_CONTROL_ENABLE,
     EGRESS_GATEWAY_CONTAINER_NAME,
     EGRESS_GATEWAY_FORWARD_PORT,
     NATS_URL,
@@ -319,21 +320,20 @@ _METADATA_BLACKHOLE: dict[str, str] = {
 def _build_extra_hosts() -> dict[str, str]:
     """Return /etc/hosts entries for the agent container.
 
-    EC enabled (``CONTAINER_NETWORK_NAME`` non-empty):
+    EC enabled:
       Agent bridge is ``Internal=true`` and the gateway is reached by
       service name via Docker embedded DNS — ``host.docker.internal``
       isn't needed (and wouldn't route there anyway). Only the
       metadata-service blackhole entries remain.
 
-    EC off (rollback):
+    EC off:
       Reinstate ``host.docker.internal:host-gateway`` so agents on the
-      default bridge can reach the host-side credential proxy the way
-      they did pre-EC-1. Metadata blackhole still applies.
+      default bridge can reach the host-side credential proxy.
+      Metadata blackhole still applies.
     """
     hosts: dict[str, str] = dict(_METADATA_BLACKHOLE)
-    if not CONTAINER_NETWORK_NAME:
-        # Pre-EC / rollback: restore the host-gateway ExtraHosts entry
-        # that the pre-EC-1 orchestrator relied on so
+    if not EGRESS_CONTROL_ENABLE:
+        # EC off: restore the host-gateway ExtraHosts entry so
         # ``http://host.docker.internal:3001`` reaches the host-side
         # start_credential_proxy.
         hosts.update(get_host_gateway_extra_hosts())
@@ -434,7 +434,7 @@ def build_container_spec(
     #     OPENAI base URLs point at the host-side credential_proxy via
     #     host-gateway. No HTTP(S)_PROXY env is injected — there is no
     #     forward proxy.
-    if CONTAINER_NETWORK_NAME:
+    if EGRESS_CONTROL_ENABLE:
         # Agent bridge is Internal=true — no route to the host. NATS must
         # be reachable by a name that resolves on agent-net. In local dev
         # that's the ``nats`` alias we attach to the nats container; in
@@ -465,12 +465,15 @@ def build_container_spec(
             "NO_PROXY": f"{EGRESS_GATEWAY_CONTAINER_NAME},localhost,127.0.0.1",
         }
     else:
-        # Rollback: emulate pre-EC-1 routing. Token identity is an
-        # EC-on concept (the host-side proxy gains it in the EC=off
-        # restoration step); keep the token-free reverse-proxy prefix.
+        # EC off: agent is on the host bridge and reaches the host-side
+        # credential proxy via host.docker.internal. No forward proxy
+        # exists (so no HTTP_PROXY env), but the reverse-proxy URL still
+        # carries the identity token so the host proxy can verify it and
+        # inject the requesting tenant's credential — per-tenant isolation
+        # without the network isolation.
         nats_url = NATS_URL.replace("localhost", CONTAINER_HOST_GATEWAY)
         proxy_base = f"http://{CONTAINER_HOST_GATEWAY}:{CREDENTIAL_PROXY_PORT}"
-        provider_prefix = "/proxy"
+        provider_prefix = f"/proxy/{egress_token}" if egress_token else "/proxy"
         proxy_env = {}
 
     env: dict[str, str] = {
@@ -607,10 +610,10 @@ def build_container_spec(
     # resolver and the DNS exfil protection never runs. See the P1
     # finding in the EC-2 code review.
     dns_servers: list[str] = []
-    if CONTAINER_NETWORK_NAME and _EGRESS_GATEWAY_DNS_IP:
+    if EGRESS_CONTROL_ENABLE and _EGRESS_GATEWAY_DNS_IP:
         dns_servers = [_EGRESS_GATEWAY_DNS_IP]
-    elif CONTAINER_NETWORK_NAME:
-        # Custom bridge configured but gateway IP wasn't registered —
+    elif EGRESS_CONTROL_ENABLE:
+        # EC on but gateway IP wasn't registered —
         # typically means the orchestrator forgot to call
         # ``set_egress_gateway_dns_ip`` after launching the gateway, or
         # the gateway launch was skipped (tests). Log loudly so this
@@ -638,7 +641,10 @@ def build_container_spec(
         pids_limit=CONTAINER_PIDS_LIMIT,
         dns=dns_servers,
         ulimits=_default_ulimits(),
-        network_name=CONTAINER_NETWORK_NAME or None,
+        # EC off → Docker default bridge (None), even though the bridge
+        # name is still configured; EC on → the named Internal=true bridge
+        # (``or None`` keeps an empty name mapping to the default bridge).
+        network_name=(CONTAINER_NETWORK_NAME or None) if EGRESS_CONTROL_ENABLE else None,
         runtime=oci_runtime,
     )
 

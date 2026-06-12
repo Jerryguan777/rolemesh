@@ -63,6 +63,7 @@ from rolemesh.core.config import (
     CONTAINER_IMAGE,
     CONTAINER_NETWORK_NAME,
     CREDENTIAL_PROXY_PORT,
+    EGRESS_CONTROL_ENABLE,
     EGRESS_GATEWAY_IMAGE,
     GLOBAL_MAX_CONTAINERS,
     NATS_URL,
@@ -123,6 +124,8 @@ from rolemesh.egress.token_identity import TokenAuthority
 from rolemesh.security.credential_proxy import register_mcp_server, set_token_vault, start_credential_proxy
 
 if TYPE_CHECKING:
+    from aiohttp import web
+
     from rolemesh.container.runtime import ContainerRuntime
     from rolemesh.core.types import (
         ChannelBinding,
@@ -1723,12 +1726,32 @@ async def _ensure_container_system_running() -> None:
     global _runtime
     _runtime = get_runtime()
     await _runtime.ensure_available()
-    if hasattr(_runtime, "ensure_agent_network"):
-        await _runtime.ensure_agent_network(CONTAINER_NETWORK_NAME)
-    # egress-net only exists to carry the gateway's outbound; if EC is
-    # turned off there's no gateway to attach, so skip the bridge too.
-    if CONTAINER_NETWORK_NAME and hasattr(_runtime, "ensure_egress_network"):
-        await _runtime.ensure_egress_network(CONTAINER_EGRESS_NETWORK_NAME)
+
+    # Egress control bridges only exist when EC is on. With EC off the
+    # agent runs on Docker's default bridge and reaches the host-side
+    # credential proxy — no internal/egress bridges, no gateway.
+    if EGRESS_CONTROL_ENABLE:
+        if not CONTAINER_NETWORK_NAME:
+            raise RuntimeError(
+                "EGRESS_CONTROL_ENABLE is on but CONTAINER_NETWORK_NAME is "
+                "empty — egress control needs a named Internal=true bridge. "
+                "Set CONTAINER_NETWORK_NAME, or disable EC with "
+                "EGRESS_CONTROL_ENABLE=0."
+            )
+        if hasattr(_runtime, "ensure_agent_network"):
+            await _runtime.ensure_agent_network(CONTAINER_NETWORK_NAME)
+        if hasattr(_runtime, "ensure_egress_network"):
+            await _runtime.ensure_egress_network(CONTAINER_EGRESS_NETWORK_NAME)
+    elif not CONTAINER_NETWORK_NAME:
+        # Legacy migration aid: CONTAINER_NETWORK_NAME="" used to be the
+        # EC off-switch. It no longer is — EGRESS_CONTROL_ENABLE governs
+        # that. Since EC is already off here this is harmless, but warn
+        # so operators move to the dedicated switch.
+        logger.warning(
+            "CONTAINER_NETWORK_NAME is empty. This no longer disables "
+            "egress control; use EGRESS_CONTROL_ENABLE=0 instead. "
+            "(EC is already off here via EGRESS_CONTROL_ENABLE.)"
+        )
 
     # INV-3: name prefix alone is not safe — a foreign container the
     # user happens to name with "rolemesh-" could be killed. The image
@@ -1813,11 +1836,12 @@ async def main() -> None:
         # Frontdesk v1.2: the executor injects this for is_frontdesk spawns.
         return render_agent_catalog(_state, tenant_id, exclude=exclude_id)
 
-    # Token-identity: build the shared signing authority once. Under EC
-    # this fail-closes if EGRESS_TOKEN_SECRET is unset (same secret the
-    # gateway loads). With EC off there is no gateway to verify against,
-    # so the authority stays None and spawns are token-free.
-    _token_authority = TokenAuthority.from_env() if CONTAINER_NETWORK_NAME else None
+    # Token-identity: build the shared signing authority once. Required
+    # in BOTH modes — EC=on the gateway verifies with the same secret;
+    # EC=off the host-side credential proxy verifies it to recover the
+    # tenant for per-tenant credential injection. Fail-closes if
+    # EGRESS_TOKEN_SECRET is unset (see TokenAuthority.from_env).
+    _token_authority = TokenAuthority.from_env()
 
     # Build one executor per backend.
     for cfg in (CLAUDE_CODE_BACKEND, PI_BACKEND):
@@ -1842,15 +1866,26 @@ async def main() -> None:
     set_credential_vault(create_credential_vault_from_env())
     _credential_resolver = CredentialResolver(get_credential_vault())
 
-    # Host-side credential proxy: bound so the `register_mcp_server` /
-    # `set_token_vault` wiring below has a sink to write to. Agents
-    # reach the gateway container directly via Docker DNS, not this
-    # host listener.
-    proxy_runner = await start_credential_proxy(
-        CREDENTIAL_PROXY_PORT,
-        PROXY_BIND_HOST,
-        credential_resolver=_credential_resolver,
-    )
+    # Host-side credential proxy. Only bound when EC is OFF — that is the
+    # one configuration where agents dial it (on the host bridge, via
+    # host.docker.internal:3001). With EC on, agents reach the gateway
+    # container instead, so binding a host listener here would be dead
+    # weight; the MCP-registry / token-vault wiring below still runs
+    # unconditionally because it populates process globals that feed the
+    # gateway's snapshot RPC in EC=on (register_mcp_server ->
+    # get_mcp_registry -> fetch_all_mcp_servers).
+    #
+    # The token authority IS wired here so the host proxy verifies the
+    # agent's signed token and injects the requesting tenant's credential
+    # — the per-tenant isolation that keeps working with EC off.
+    proxy_runner: web.AppRunner | None = None
+    if not EGRESS_CONTROL_ENABLE:
+        proxy_runner = await start_credential_proxy(
+            CREDENTIAL_PROXY_PORT,
+            PROXY_BIND_HOST,
+            credential_resolver=_credential_resolver,
+            token_authority=_token_authority,
+        )
 
     # Gateway reachability is already enforced in
     # _ensure_container_system_running() via wait_for_gateway_ready. No
@@ -2145,7 +2180,8 @@ async def main() -> None:
     if _safety_thread_pool is not None:
         with contextlib.suppress(Exception):
             _safety_thread_pool.shutdown(wait=False)  # type: ignore[attr-defined]
-    await proxy_runner.cleanup()
+    if proxy_runner is not None:
+        await proxy_runner.cleanup()
     await _queue.shutdown(10000)
     for gw in _gateways.values():
         await gw.shutdown()

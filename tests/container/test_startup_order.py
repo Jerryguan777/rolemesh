@@ -19,7 +19,7 @@ back together. These tests pin the invariants for each phase:
   3. Happy path of bridge-prep: four steps in order, NO launch/wait.
   4. launch_egress_gateway() failure must prevent the readiness probe.
   5. wait_for_gateway_ready() failure must propagate (fail-closed).
-  6. Path C rollback (``CONTAINER_NETWORK_NAME=""``) skips the egress
+  6. EC off (``EGRESS_CONTROL_ENABLE=0``) skips the egress
      bridge in phase 1 and the entire launch path in phase 2.
   7. Backends without the EC-1 hooks (future k8s) fall back to the old
      surface gracefully — we use hasattr() gates for each hook so a
@@ -196,41 +196,50 @@ async def test_launch_aborts_when_gateway_readiness_probe_fails() -> None:
     launch_mock.assert_awaited_once()
 
 
-async def test_rollback_mode_skips_egress_bridge() -> None:
-    """Path C contract on the bridge-prep half: ``CONTAINER_NETWORK_NAME=""``
-    is the operator rollback switch, and ``_ensure_container_system_running``
-    must skip ``ensure_egress_network`` (the egress bridge has no purpose
-    when the gateway is disabled). Other steps still run.
-
-    Pre-Path-C the code tried to create the egress bridge unconditionally
-    and crashed when the operator opted out.
+async def test_ec_off_skips_both_bridges() -> None:
+    """EC off (``EGRESS_CONTROL_ENABLE=0``): ``_ensure_container_system_running``
+    creates NEITHER bridge — agents run on Docker's default bridge — and
+    only ``cleanup_orphans`` runs alongside the version gate.
     """
     from rolemesh import main as main_module
 
     rt = _make_runtime_mock()
 
     with (
-        patch.object(main_module, "CONTAINER_NETWORK_NAME", ""),
+        patch.object(main_module, "EGRESS_CONTROL_ENABLE", False),
         patch.object(main_module, "get_runtime", return_value=rt),
     ):
         await main_module._ensure_container_system_running()
 
     rt.ensure_available.assert_awaited_once()
-    rt.ensure_agent_network.assert_awaited_once_with("")
+    rt.ensure_agent_network.assert_not_awaited()
     rt.ensure_egress_network.assert_not_awaited()
     rt.cleanup_orphans.assert_awaited_once()
 
 
-async def test_launch_skips_in_rollback_mode() -> None:
-    """Path C contract on the launch half: ``CONTAINER_NETWORK_NAME=""``
-    must short-circuit ``_launch_egress_gateway_once_ready`` so launch +
-    readiness probe + IP discovery are all skipped. Pre-Path-C, launch
-    was attempted with an empty network name and crashed startup.
+async def test_ec_on_empty_bridge_name_is_config_error() -> None:
+    """EC on with an empty bridge name is a hard config error — there's
+    no Internal=true bridge to enforce isolation on."""
+    from rolemesh import main as main_module
 
-    The rollback gate was moved into ``bootstrap._ec2_active`` after
-    the egress-helper extraction, so we patch
-    ``CONTAINER_NETWORK_NAME`` on the bootstrap module — patching
-    main's reference no longer reaches the read site.
+    rt = _make_runtime_mock()
+
+    with (
+        patch.object(main_module, "EGRESS_CONTROL_ENABLE", True),
+        patch.object(main_module, "CONTAINER_NETWORK_NAME", ""),
+        patch.object(main_module, "get_runtime", return_value=rt),
+        pytest.raises(RuntimeError, match="EGRESS_CONTROL_ENABLE"),
+    ):
+        await main_module._ensure_container_system_running()
+
+
+async def test_launch_skips_when_egress_control_disabled() -> None:
+    """EC off must short-circuit ``_launch_egress_gateway_once_ready`` so
+    launch + readiness probe + IP discovery are all skipped.
+
+    The EC gate lives in ``bootstrap._ec2_active``, which reads
+    ``EGRESS_CONTROL_ENABLE``, so we patch it on the bootstrap module —
+    patching main's reference no longer reaches the read site.
     """
     from rolemesh import main as main_module
     from rolemesh.egress import bootstrap
@@ -240,7 +249,7 @@ async def test_launch_skips_in_rollback_mode() -> None:
     wait_mock = AsyncMock()
 
     with (
-        patch.object(bootstrap, "CONTAINER_NETWORK_NAME", ""),
+        patch.object(bootstrap, "EGRESS_CONTROL_ENABLE", False),
         patch.object(main_module, "_runtime", rt),
         patch.object(bootstrap, "launch_egress_gateway", launch_mock),
         patch.object(bootstrap, "wait_for_gateway_ready", wait_mock),

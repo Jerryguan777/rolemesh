@@ -30,10 +30,10 @@ from rolemesh.container.skill_projection import (
 )
 from rolemesh.core.config import (
     CONTAINER_MAX_OUTPUT_SIZE,
-    CONTAINER_NETWORK_NAME,
     CONTAINER_TIMEOUT,
     CREDENTIAL_PROXY_PORT,
     DATA_DIR,
+    EGRESS_CONTROL_ENABLE,
     EGRESS_GATEWAY_CONTAINER_NAME,
     IDLE_TIMEOUT,
     MCP_PROXY_PREFIX,
@@ -264,11 +264,12 @@ class ContainerAgentExecutor:
         container_name = f"rolemesh-{safe_name}-{start_epoch_ms}"
 
         # Token-identity: mint the signed token this container will carry
-        # in its proxy env. Only under EC (no gateway to verify against
-        # otherwise) and only when an authority is wired. None flows
-        # through as token-free URLs + gateway IP fallback.
+        # in its proxy env. Minted in BOTH EC modes — the verifier is the
+        # gateway (EC on) or the host-side credential proxy (EC off); both
+        # share the secret. None only when no authority is wired (eval CLI
+        # / tests), which yields token-free URLs.
         egress_token: str | None = None
-        if self._token_authority is not None and CONTAINER_NETWORK_NAME:
+        if self._token_authority is not None:
             egress_token = self._token_authority.mint(
                 Identity(
                     tenant_id=tenant_id,
@@ -336,7 +337,7 @@ class ContainerAgentExecutor:
         # for LLM calls.
         mcp_proxy_host = (
             EGRESS_GATEWAY_CONTAINER_NAME
-            if CONTAINER_NETWORK_NAME
+            if EGRESS_CONTROL_ENABLE
             else CONTAINER_HOST_GATEWAY
         )
         mcp_specs: list[McpServerSpec] | None = None

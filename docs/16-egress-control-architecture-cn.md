@@ -412,13 +412,41 @@ EC 模块**完全复用** Safety Framework 已有的基础设施，**不新建**
 | 风险 | 严重度 | 缓解 |
 |---|---|---|
 | Gateway 挂 = 全租户断网 | 高 | restart-unless-stopped + 监控；V2 double-replica |
-| Identity 信息丢失（orchestrator 重启） | 中 | Gateway 重启时通过 internal REST 拉快照；orchestrator 重启时主动 republish lifecycle |
 | `safety.rule.changed` 事件丢失 | 低 | Gateway 后台每 5 分钟对账（拉全量做对比） |
 | DNS resolver 上游不可达 | 中 | 配多个 upstream（8.8.8.8 + 1.1.1.1 fallback） |
 | Docker `--internal` 在某 dockerd 版本行为异常 | 高 | EC-1 集成测试第 1 项必过；CI 守护 |
 | reverse_proxy 搬迁破坏现有 LLM 调用 | 高 | 严格保持 `credential_proxy.py` public API；测试覆盖所有 provider |
 
-回滚开关：`CONTAINER_NETWORK_NAME=""` → orchestrator 不创建任何网络（agent 用默认 bridge），完全退到 Container Hardening 之前的行为。**仅紧急用**。
+### 关闭 Egress Control（`EGRESS_CONTROL_ENABLE=0`）
+
+EC 由单一开关 `EGRESS_CONTROL_ENABLE`（默认开）控制。关闭是受支持的
+模式,不只是应急手段——在不便用自定义 Docker 网桥或没有 gateway 镜像的
+宿主（含 Docker Desktop）上有用。变化:
+
+| | EC 开 | EC 关 |
+|---|---|---|
+| Agent 网桥 | `Internal=true`,无宿主路由 | Docker 默认 bridge |
+| egress 网络管控 | forward proxy + DNS resolver + 隔离 | **关**——agent 可直连外网 |
+| 凭证注入 | gateway 容器（无状态、远程 resolver） | orchestrator 内 host 侧 proxy（本地 DB resolver） |
+| 多租户凭证隔离 | 有 | **有**（保留） |
+| 身份 | 请求里的签名 token | **请求里的签名 token**（同一机制） |
+
+关键点:关 EC 丢的是**网络**管控,保留的是**多租户凭证隔离**。这之所以
+成立,是因为身份是请求里携带的签名 token（reverse proxy URL 路径段）,而
+非从网络位置推断——所以 host 侧 proxy 验同一个 token、还原 tenant、注入该
+租户自己的 key。租户 A 仍拿不到租户 B 的凭证。
+
+由于 token 身份与拓扑无关,EC=off 在 Docker Desktop / WSL 上也能用——旧的
+源 IP 方案做不到（VM 的 NAT 把真实容器 IP 藏掉了）。`EGRESS_TOKEN_SECRET`
+两种模式都必需。
+
+形态说明:host 侧 credential proxy 监听器**仅**在 EC 关时绑定（那是唯一
+agent 会拨它的配置,经 `host.docker.internal:3001`）。EC 开时 agent 打到
+gateway 容器,不绑 host 监听器;而喂给 gateway 快照的 MCP 注册表 / token
+vault 接线两种模式都照常跑。
+
+迁移:历史上的 `CONTAINER_NETWORK_NAME=""` 关闭开关已废除。改用
+`EGRESS_CONTROL_ENABLE=0`;EC 开时网桥名为空现在是启动错误。
 
 ---
 

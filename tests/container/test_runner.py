@@ -208,10 +208,8 @@ class TestBuildContainerSpec:
             runner.set_egress_gateway_dns_ip(None)
 
     def test_rollback_mode_restores_pre_ec_routing(self) -> None:
-        """``CONTAINER_NETWORK_NAME=""`` is documented as a rollback
-        switch. Pre-Path-C it was half-finished — EC-1 env still
-        pointed agents at ``egress-gateway`` which doesn't exist on
-        the default bridge. Path C completes the rollback:
+        """``EGRESS_CONTROL_ENABLE=0`` routes agents at the host-side
+        credential proxy instead of the gateway container:
 
           * ANTHROPIC_BASE_URL / OPENAI_BASE_URL go to
             ``host.docker.internal:3001`` via host-gateway
@@ -220,14 +218,14 @@ class TestBuildContainerSpec:
           * ExtraHosts includes ``host.docker.internal:host-gateway``
             (Linux) so the above URLs actually resolve
 
-        Pin the full rollback shape here so regressing this path shows
+        Pin the full EC-off shape here so regressing this path shows
         up as a single-line test failure rather than a mysterious
         "agent can't reach LLM after toggling the switch".
         """
         from rolemesh.container import runner
 
         with (
-            patch.object(runner, "CONTAINER_NETWORK_NAME", ""),
+            patch.object(runner, "EGRESS_CONTROL_ENABLE", False),
             patch.object(runner, "NATS_URL", "nats://localhost:4222"),
             patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"),
         ):
@@ -259,6 +257,29 @@ class TestBuildContainerSpec:
         if platform.system() == "Linux":
             assert spec.extra_hosts.get("host.docker.internal") == "host-gateway"
 
+    def test_ec_off_carries_token_in_reverse_url_no_forward_proxy(self) -> None:
+        """EC off still injects the identity token into the reverse-proxy
+        URL so the host-side proxy can recover the tenant — but injects no
+        HTTP_PROXY, because there is no forward proxy off the gateway."""
+        from rolemesh.container import runner
+
+        with (
+            patch.object(runner, "EGRESS_CONTROL_ENABLE", False),
+            patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"),
+        ):
+            spec = build_container_spec([], "c", "j", egress_token="TOK123")
+
+        # Token rides in the reverse-proxy path, host-gateway host.
+        assert spec.env["ANTHROPIC_BASE_URL"] == (
+            "http://host.docker.internal:3001/proxy/TOK123/anthropic"
+        )
+        assert spec.env["BEDROCK_BASE_URL"] == (
+            "http://host.docker.internal:3001/proxy/TOK123/bedrock"
+        )
+        # No forward proxy in EC off.
+        assert "HTTP_PROXY" not in spec.env
+        assert "HTTPS_PROXY" not in spec.env
+
     def test_spec_dns_empty_when_gateway_ip_unregistered(self) -> None:
         """Without the registered IP, build_container_spec falls back
         to an empty Dns list (Docker keeps its embedded resolver). A
@@ -270,8 +291,8 @@ class TestBuildContainerSpec:
              patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
             spec = build_container_spec([], "c", "j")
         assert spec.dns == []
-        # WARN fires because CONTAINER_NETWORK_NAME is set by default
-        # but the gateway IP isn't.
+        # WARN fires because EC is on by default (EGRESS_CONTROL_ENABLE)
+        # but the gateway IP isn't registered.
         warn_calls = [
             call for call in mock_logger.warning.call_args_list
             if "egress gateway DNS IP" in str(call)
@@ -527,8 +548,19 @@ class TestMetadataBlackholeAndNetwork:
         # Default config points at rolemesh-agent-net unless CONTAINER_NETWORK_NAME='' is set.
         assert spec.network_name == "rolemesh-agent-net"
 
+    def test_ec_off_yields_no_network_name(self) -> None:
+        """EC off -> Docker default bridge (network_name None), even though
+        the bridge name is still configured by default."""
+        with (
+            patch("rolemesh.container.runner.EGRESS_CONTROL_ENABLE", False),
+            patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"),
+        ):
+            spec = build_container_spec([], "c", "j")
+        assert spec.network_name is None
+
     def test_empty_network_name_yields_none(self) -> None:
-        """Operator escape hatch: CONTAINER_NETWORK_NAME='' -> None -> Docker default bridge."""
+        """Defensive: an empty bridge name still maps to the default
+        bridge (None) rather than an empty NetworkMode string."""
         with (
             patch("rolemesh.container.runner.CONTAINER_NETWORK_NAME", ""),
             patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"),

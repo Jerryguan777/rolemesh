@@ -436,13 +436,48 @@ The cost is that EC's design is **deeply bound** to the V1 shape of the Safety F
 | Risk | Severity | Mitigation |
 |---|---|---|
 | Gateway down = all tenants offline | High | restart-unless-stopped + monitoring; V2 double-replica |
-| Identity info lost (orchestrator restart) | Medium | Gateway restart pulls a snapshot via internal REST; orchestrator restart proactively republishes lifecycle |
 | `safety.rule.changed` event lost | Low | Gateway reconciles every 5 minutes (pulls full set, diffs) |
 | DNS resolver upstream unreachable | Medium | Configure multiple upstreams (8.8.8.8 + 1.1.1.1 fallback) |
 | Docker `--internal` behaves oddly on some dockerd version | High | EC-1 integration test item 1 must pass; CI guards |
 | reverse_proxy migration breaks existing LLM calls | High | Strictly preserve `credential_proxy.py` public API; tests cover every provider |
 
-Rollback switch: `CONTAINER_NETWORK_NAME=""` → orchestrator creates no network (agents use default bridge), full rollback to pre-Container-Hardening behavior. **Emergency use only.**
+### Turning Egress Control off (`EGRESS_CONTROL_ENABLE=0`)
+
+EC is a single switch, `EGRESS_CONTROL_ENABLE` (default on). Off is a
+supported mode, not just an emergency hatch — useful on hosts where
+custom Docker bridges or the gateway image aren't available (incl.
+Docker Desktop). What changes:
+
+| | EC on | EC off |
+|---|---|---|
+| Agent bridge | `Internal=true`, no host route | Docker default bridge |
+| Egress network control | forward proxy + DNS resolver + isolation | **off** — agent can reach the internet directly |
+| Credential injection | gateway container (stateless, remote resolver) | host-side proxy in the orchestrator (local DB resolver) |
+| Per-tenant credential isolation | yes | **yes** (preserved) |
+| Identity | signed token in request | **signed token in request** (same mechanism) |
+
+The key point: turning EC off drops the **network** controls but keeps
+**multi-tenant credential isolation**. That works because identity is a
+signed token carried in the request (the reverse-proxy URL path), not an
+inference from network position — so the host-side proxy verifies the
+same token, recovers the tenant, and injects that tenant's own key.
+Tenant A still cannot obtain tenant B's credential.
+
+Because token identity is topology-independent, EC=off also works on
+Docker Desktop / WSL, where the old source-IP scheme could not (the VM
+NAT hid the real container IP). `EGRESS_TOKEN_SECRET` is required in
+both modes.
+
+Form note: the host-side credential proxy listener is bound **only**
+when EC is off (that is the one configuration where agents dial it, via
+`host.docker.internal:3001`). With EC on, agents reach the gateway
+container instead, so no host listener is bound; the MCP-registry /
+token-vault wiring that feeds the gateway's snapshot still runs in both
+modes.
+
+Migration: the historical `CONTAINER_NETWORK_NAME=""` off-switch is
+gone. Set `EGRESS_CONTROL_ENABLE=0` instead; an empty bridge name with
+EC on is now a startup error.
 
 ---
 
