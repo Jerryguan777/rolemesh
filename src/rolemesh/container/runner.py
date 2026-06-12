@@ -33,6 +33,7 @@ from rolemesh.core.config import (
     CONTAINER_PIDS_LIMIT,
     CREDENTIAL_PROXY_PORT,
     DATA_DIR,
+    EGRESS_CONTROL_ENABLE,
     EGRESS_GATEWAY_CONTAINER_NAME,
     EGRESS_GATEWAY_FORWARD_PORT,
     NATS_URL,
@@ -316,28 +317,115 @@ _METADATA_BLACKHOLE: dict[str, str] = {
 }
 
 
-def _build_extra_hosts() -> dict[str, str]:
-    """Return /etc/hosts entries for the agent container.
+@dataclass(frozen=True)
+class EgressRouting:
+    """Per-spawn agent network routing, derived from the EC mode once.
 
-    EC enabled (``CONTAINER_NETWORK_NAME`` non-empty):
-      Agent bridge is ``Internal=true`` and the gateway is reached by
-      service name via Docker embedded DNS — ``host.docker.internal``
-      isn't needed (and wouldn't route there anyway). Only the
-      metadata-service blackhole entries remain.
+    THE single place the EC=on/off topology fork is decided for the
+    spawn path. Seven behaviours used to fork on EGRESS_CONTROL_ENABLE
+    across runner + container_executor; one of them (the host proxy's
+    token wiring) shipped broken for two release cycles precisely
+    because the fork points were scattered. Everything an agent spawn
+    needs to know about "where do my bytes go" is now a field here,
+    computed by :func:`compute_egress_routing` — adding an eighth
+    behaviour means adding a field, and every consumer is forced
+    through the same decision.
 
-    EC off (rollback):
-      Reinstate ``host.docker.internal:host-gateway`` so agents on the
-      default bridge can reach the host-side credential proxy the way
-      they did pre-EC-1. Metadata blackhole still applies.
+    This is also the staging ground for the planned ContainerPlatform
+    abstraction (docker|k8s runtime decoupling): the whole of
+    ``compute_egress_routing`` becomes the Docker implementation of
+    ``platform.agent_routing()`` when that lands.
     """
-    hosts: dict[str, str] = dict(_METADATA_BLACKHOLE)
-    if not CONTAINER_NETWORK_NAME:
-        # Pre-EC / rollback: restore the host-gateway ExtraHosts entry
-        # that the pre-EC-1 orchestrator relied on so
-        # ``http://host.docker.internal:3001`` reaches the host-side
-        # start_credential_proxy.
-        hosts.update(get_host_gateway_extra_hosts())
-    return hosts
+
+    nats_url: str
+    proxy_base: str            # http://host:port — no path
+    provider_prefix: str       # "/proxy/<token>" or "/proxy"
+    proxy_env: dict[str, str]  # HTTP_PROXY/HTTPS_PROXY/NO_PROXY, or {}
+    network_name: str | None   # named EC bridge, or None = default bridge
+    dns_servers: list[str]
+    warn_missing_dns: bool     # EC on but gateway DNS IP unregistered
+    extra_hosts: dict[str, str]
+    mcp_proxy_host: str        # host part of agent-facing MCP proxy URLs
+
+
+def compute_egress_routing(egress_token: str | None) -> EgressRouting:
+    """Derive the agent's network routing for one spawn.
+
+    Pure and side-effect free (the missing-DNS warning is returned as a
+    flag so the caller logs it with its own spawn context). The only
+    ``if EGRESS_CONTROL_ENABLE`` on the spawn path lives here.
+
+    EC on:
+      Agent sits on the Internal=true bridge. NATS is reached by the
+      ``nats`` alias on agent-net; LLM/MCP calls go to the gateway
+      container by service name; HTTP(S)_PROXY points every client at
+      the forward proxy; DNS is pinned to the gateway's resolver; only
+      the metadata blackhole rides in extra_hosts.
+
+    EC off:
+      Agent sits on Docker's default bridge. NATS and the host-side
+      credential proxy are reached via host.docker.internal (added to
+      extra_hosts); no forward proxy exists so no HTTP(S)_PROXY env;
+      DNS is Docker's default. The reverse-proxy URL still carries the
+      identity token so the host proxy can verify it and inject the
+      requesting tenant's credential — per-tenant isolation without
+      the network isolation.
+
+    The signed token rides in two places (spike-verified): the
+    forward-proxy userinfo (clients emit Proxy-Authorization
+    automatically) and a leading path segment on each reverse-proxy
+    base URL (SDKs preserve the prefix before appending /v1/messages).
+    """
+    provider_prefix = f"/proxy/{egress_token}" if egress_token else "/proxy"
+    extra_hosts: dict[str, str] = dict(_METADATA_BLACKHOLE)
+
+    if EGRESS_CONTROL_ENABLE:
+        # NATS must be reachable by a name that resolves on agent-net.
+        # In local dev that's the ``nats`` alias we attach to the nats
+        # container; in production the operator puts NATS on the bridge
+        # directly. The orchestrator itself still uses the .env URL
+        # (usually localhost:4222), so rewrite here, not in the .env.
+        forward_authority = (
+            f"job:{egress_token}@{EGRESS_GATEWAY_CONTAINER_NAME}"
+            if egress_token
+            else EGRESS_GATEWAY_CONTAINER_NAME
+        )
+        forward_proxy_url = (
+            f"http://{forward_authority}:{EGRESS_GATEWAY_FORWARD_PORT}"
+        )
+        return EgressRouting(
+            nats_url=agent_facing_nats_url(NATS_URL),
+            proxy_base=f"http://{EGRESS_GATEWAY_CONTAINER_NAME}:{CREDENTIAL_PROXY_PORT}",
+            provider_prefix=provider_prefix,
+            proxy_env={
+                "HTTP_PROXY": forward_proxy_url,
+                "HTTPS_PROXY": forward_proxy_url,
+                "NO_PROXY": f"{EGRESS_GATEWAY_CONTAINER_NAME},localhost,127.0.0.1",
+            },
+            # ``or None`` keeps an empty bridge name mapping to the
+            # default bridge instead of an empty NetworkMode string.
+            network_name=CONTAINER_NETWORK_NAME or None,
+            dns_servers=[_EGRESS_GATEWAY_DNS_IP] if _EGRESS_GATEWAY_DNS_IP else [],
+            warn_missing_dns=not _EGRESS_GATEWAY_DNS_IP,
+            extra_hosts=extra_hosts,
+            mcp_proxy_host=EGRESS_GATEWAY_CONTAINER_NAME,
+        )
+
+    # EC off: restore the host-gateway ExtraHosts entry so
+    # ``http://host.docker.internal:3001`` reaches the host-side
+    # start_credential_proxy.
+    extra_hosts.update(get_host_gateway_extra_hosts())
+    return EgressRouting(
+        nats_url=NATS_URL.replace("localhost", CONTAINER_HOST_GATEWAY),
+        proxy_base=f"http://{CONTAINER_HOST_GATEWAY}:{CREDENTIAL_PROXY_PORT}",
+        provider_prefix=provider_prefix,
+        proxy_env={},
+        network_name=None,
+        dns_servers=[],
+        warn_missing_dns=False,
+        extra_hosts=extra_hosts,
+        mcp_proxy_host=CONTAINER_HOST_GATEWAY,
+    )
 
 
 def _clamp_memory(value: str, max_value: str, *, coworker_name: str) -> str:
@@ -419,63 +507,14 @@ def build_container_spec(
     """
     image = backend_config.image if backend_config else CONTAINER_IMAGE
 
-    # Branch on whether EC is active. The whole env block flips
-    # between EC and rollback modes:
-    #
-    #   EC enabled — the agent is on the Internal=true bridge and
-    #     reaches the gateway by service name. NATS_URL is passed
-    #     through as-is (operator ensures NATS is reachable on the
-    #     bridge; documented in deployment.md). Proxy env vars point
-    #     every HTTP client at the forward proxy.
-    #
-    #   EC off — pre-EC-1 behaviour. NATS_URL's ``localhost`` is
-    #     substituted for host-gateway so agents on Docker's default
-    #     bridge can reach the NATS process on the host. ANTHROPIC /
-    #     OPENAI base URLs point at the host-side credential_proxy via
-    #     host-gateway. No HTTP(S)_PROXY env is injected — there is no
-    #     forward proxy.
-    if CONTAINER_NETWORK_NAME:
-        # Agent bridge is Internal=true — no route to the host. NATS must
-        # be reachable by a name that resolves on agent-net. In local dev
-        # that's the ``nats`` alias we attach to the nats container; in
-        # production the operator puts NATS on the bridge directly. The
-        # orchestrator itself still uses the .env-configured URL (usually
-        # localhost:4222), so rewrite here rather than in the .env.
-        nats_url = agent_facing_nats_url(NATS_URL)
-        proxy_base = f"http://{EGRESS_GATEWAY_CONTAINER_NAME}:{CREDENTIAL_PROXY_PORT}"
-        # Token-identity: the signed token rides in two places per the
-        # spike-verified mechanisms — the forward-proxy userinfo
-        # (clients emit Proxy-Authorization automatically) and a leading
-        # path segment on each reverse-proxy base URL (SDKs preserve the
-        # prefix before appending /v1/messages). ``provider_prefix`` is
-        # the reverse-proxy path root: ``/proxy/<token>`` with a token,
-        # plain ``/proxy`` without (dual-run IP-fallback path).
-        if egress_token:
-            forward_authority = f"job:{egress_token}@{EGRESS_GATEWAY_CONTAINER_NAME}"
-            provider_prefix = f"/proxy/{egress_token}"
-        else:
-            forward_authority = EGRESS_GATEWAY_CONTAINER_NAME
-            provider_prefix = "/proxy"
-        forward_proxy_url = (
-            f"http://{forward_authority}:{EGRESS_GATEWAY_FORWARD_PORT}"
-        )
-        proxy_env: dict[str, str] = {
-            "HTTP_PROXY": forward_proxy_url,
-            "HTTPS_PROXY": forward_proxy_url,
-            "NO_PROXY": f"{EGRESS_GATEWAY_CONTAINER_NAME},localhost,127.0.0.1",
-        }
-    else:
-        # Rollback: emulate pre-EC-1 routing. Token identity is an
-        # EC-on concept (the host-side proxy gains it in the EC=off
-        # restoration step); keep the token-free reverse-proxy prefix.
-        nats_url = NATS_URL.replace("localhost", CONTAINER_HOST_GATEWAY)
-        proxy_base = f"http://{CONTAINER_HOST_GATEWAY}:{CREDENTIAL_PROXY_PORT}"
-        provider_prefix = "/proxy"
-        proxy_env = {}
+    # All EC=on/off topology decisions (NATS URL, proxy base, token
+    # placement, proxy env, bridge, DNS, extra_hosts) are made in one
+    # place — see EgressRouting / compute_egress_routing above.
+    routing = compute_egress_routing(egress_token)
 
     env: dict[str, str] = {
         "TZ": TIMEZONE,
-        "NATS_URL": nats_url,
+        "NATS_URL": routing.nats_url,
         "JOB_ID": job_id,
         # Per-provider proxy URL. The reverse proxy routes everything
         # through ``/proxy/{provider}/`` since the legacy catch-all was
@@ -483,25 +522,22 @@ def build_container_spec(
         # without the suffix the SDK hits 404. Both Pi and Claude SDKs
         # honour ANTHROPIC_BASE_URL and append ``/v1/messages`` etc., so
         # the suffix flows through cleanly.
-        "ANTHROPIC_BASE_URL": f"{proxy_base}{provider_prefix}/anthropic",
+        "ANTHROPIC_BASE_URL": f"{routing.proxy_base}{routing.provider_prefix}/anthropic",
         # Multi-provider proxy URLs for Pi backend (each SDK reads its own env var)
-        "OPENAI_BASE_URL": f"{proxy_base}{provider_prefix}/openai",
+        "OPENAI_BASE_URL": f"{routing.proxy_base}{routing.provider_prefix}/openai",
         # Bedrock — boto3 honours ``BEDROCK_BASE_URL`` as ``endpoint_url``.
-        # Same per-spawn ``proxy_base`` as Anthropic/OpenAI so EC-2
-        # (agent on Internal=true bridge) and rollback (agent on host
-        # bridge) both resolve a reachable address. Setting this here
-        # rather than in ``_pi_extra_env`` is deliberate — that helper
-        # runs at module load time, before CONTAINER_NETWORK_NAME is
-        # decided per spawn, and would have to reimplement the EC-2
-        # branching that already lives above (proxy_base).
-        "BEDROCK_BASE_URL": f"{proxy_base}{provider_prefix}/bedrock",
+        # Same per-spawn ``proxy_base`` as Anthropic/OpenAI so both EC
+        # modes resolve a reachable address. Setting this here rather
+        # than in ``_pi_extra_env`` is deliberate — that helper runs at
+        # module load time, before the per-spawn routing is decided.
+        "BEDROCK_BASE_URL": f"{routing.proxy_base}{routing.provider_prefix}/bedrock",
         # Redirect Claude Code CLI's .claude.json writes into the per-coworker
         # writable bind mount at /home/agent/.claude. Without this, the CLI
         # tries to write /home/agent/.claude.json on the readonly rootfs and
         # the Claude backend fails its 30s initialize handshake.
         # Pi backend ignores this env, so shipping it unconditionally is safe.
         "CLAUDE_CONFIG_DIR": "/home/agent/.claude",
-        **proxy_env,
+        **routing.proxy_env,
     }
 
     # Mirror the host's auth method with a placeholder value.
@@ -600,21 +636,13 @@ def build_container_spec(
     # the whole point, and Docker itself will reject an unregistered runtime.
     oci_runtime = (cfg.runtime if cfg and cfg.runtime else CONTAINER_OCI_RUNTIME)
 
-    # EC-2: pin the egress gateway as DNS so every agent DNS query
-    # flows through the authoritative resolver. Without this the
-    # dns_resolver.py module is dead code — agents keep resolving via
-    # Docker's embedded DNS (127.0.0.11) which forwards to the host
-    # resolver and the DNS exfil protection never runs. See the P1
-    # finding in the EC-2 code review.
-    dns_servers: list[str] = []
-    if CONTAINER_NETWORK_NAME and _EGRESS_GATEWAY_DNS_IP:
-        dns_servers = [_EGRESS_GATEWAY_DNS_IP]
-    elif CONTAINER_NETWORK_NAME:
-        # Custom bridge configured but gateway IP wasn't registered —
-        # typically means the orchestrator forgot to call
-        # ``set_egress_gateway_dns_ip`` after launching the gateway, or
-        # the gateway launch was skipped (tests). Log loudly so this
-        # gap isn't silent in production.
+    # EC-2: the gateway is pinned as the agent's DNS (routing.dns_servers)
+    # so every query flows through the authoritative resolver. When EC is
+    # on but the gateway IP wasn't registered yet — the orchestrator
+    # forgot to call ``set_egress_gateway_dns_ip`` after launch, or launch
+    # was skipped (tests) — dns_resolver.py is dead code and DNS exfil
+    # protection is inactive, so warn loudly.
+    if routing.warn_missing_dns:
         logger.warning(
             "No egress gateway DNS IP registered — agent will use Docker's "
             "default resolver; DNS exfil protection is inactive",
@@ -628,7 +656,7 @@ def build_container_spec(
         mounts=mounts,
         env=env,
         user=user,
-        extra_hosts=_build_extra_hosts(),
+        extra_hosts=routing.extra_hosts,
         entrypoint=backend_config.entrypoint if backend_config else None,
         memory_limit=memory_limit,
         cpu_limit=cpu_limit,
@@ -636,9 +664,9 @@ def build_container_spec(
         readonly_rootfs=True,
         tmpfs=_default_tmpfs(run_uid, run_gid),
         pids_limit=CONTAINER_PIDS_LIMIT,
-        dns=dns_servers,
+        dns=routing.dns_servers,
         ulimits=_default_ulimits(),
-        network_name=CONTAINER_NETWORK_NAME or None,
+        network_name=routing.network_name,
         runtime=oci_runtime,
     )
 

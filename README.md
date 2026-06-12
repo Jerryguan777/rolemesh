@@ -173,10 +173,11 @@ channel with its bot tokens.
 | Key                          | Purpose                                                                  |
 |------------------------------|--------------------------------------------------------------------------|
 | `ASSISTANT_NAME`             | Display name for your AI coworker.                                       |
-| `CONTAINER_NETWORK_NAME`     | EC-2 agent bridge (Internal=true) + egress gateway. Defaults to `rolemesh-agent-net` (EC **on**); set to `""` to roll back to the plain Docker bridge. |
+| `EGRESS_CONTROL_ENABLE`      | Master switch for Egress Control. Default **on**. On: agents run on the Internal=true bridge behind the egress gateway (network isolation + forward/DNS proxies + per-tenant credentials). Off (`0`): agents run on the Docker default bridge and reach a host-side credential proxy directly — egress **network** control is disabled, but per-tenant **credential** isolation is preserved. Replaces the old `CONTAINER_NETWORK_NAME=""` off-switch. |
+| `CONTAINER_NETWORK_NAME`     | Name of the EC agent bridge (Internal=true). Defaults to `rolemesh-agent-net`. Only consulted when EC is on; with EC on it must be non-empty (empty → startup error). |
 | `EGRESS_DNS_ALLOWLIST`       | Platform-wide DNS allowlist for the gateway resolver (comma-separated, `exact` or `*.suffix`). Default **empty** — proxied traffic never needs agent-side DNS, so the resolver is a tripwire; see docs/16. |
 | `EGRESS_DNS_MODE`            | `enforce` (default: non-matching names get NXDOMAIN) or `observe` (resolve everything, log would-be blocks; migration aid only). |
-| `EGRESS_TOKEN_SECRET`        | **Required under EC.** Shared HMAC secret (≥16 chars) the orchestrator signs and the gateway verifies agent identity tokens with. Same value in both processes via the shared `.env`; never injected into agent containers. Missing → orchestrator/gateway refuse to boot. |
+| `EGRESS_TOKEN_SECRET`        | **Required in both EC modes.** Shared HMAC secret (≥16 chars) used to sign and verify agent identity tokens. EC on: the gateway verifies; EC off: the host-side credential proxy verifies (it's how per-tenant credential isolation survives with EC off). Never injected into agent containers. Missing → refuse to boot. |
 | `EGRESS_TOKEN_TTL_SECONDS`   | Max lifetime of an identity token (and thus an agent container before the orchestrator re-mints). Default 7 days. |
 | `ROLEMESH_ENV`               | `development` (default) or `production`. See note below.                 |
 | `ROLEMESH_SEED_ADMIN_EMAIL`  | If set, the WebUI seeds a `platform_admin` with this email at startup.   |

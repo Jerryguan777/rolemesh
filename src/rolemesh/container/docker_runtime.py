@@ -227,9 +227,9 @@ class DockerRuntime:
             msg = (
                 f"dockerd {version_str} is below the hardening floor "
                 f"{_MIN_DOCKERD_VERSION[0]}.{_MIN_DOCKERD_VERSION[1]}. "
-                "Upgrade Docker, or set CONTAINER_NETWORK_NAME='' to fall "
+                "Upgrade Docker, or set EGRESS_CONTROL_ENABLE=0 to fall "
                 "back to the default bridge (at the cost of losing custom-"
-                "network isolation)."
+                "network isolation and egress control)."
             )
             raise IncompatibleDockerVersionError(msg)
         logger.info("dockerd version OK", version=version_str)

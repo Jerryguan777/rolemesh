@@ -53,6 +53,7 @@ from rolemesh.core.config import (
     CONTAINER_EGRESS_NETWORK_NAME,
     CONTAINER_NETWORK_NAME,
     CREDENTIAL_PROXY_PORT,
+    EGRESS_CONTROL_ENABLE,
     EGRESS_GATEWAY_CONTAINER_NAME,
 )
 from rolemesh.core.logger import get_logger
@@ -130,13 +131,12 @@ async def _registered_gateway_ip_after_launch(
 
 
 def _ec2_active(runtime: ContainerRuntime) -> bool:
-    """EC-2 is active when both the operator opted in
-    (``CONTAINER_NETWORK_NAME`` is non-empty) and the runtime
-    backend supports egress networks (Docker today; k8s grows its
-    own bootstrap path later).
+    """EC-2 is active when the operator left egress control on
+    (``EGRESS_CONTROL_ENABLE``) and the runtime backend supports egress
+    networks (Docker today; k8s grows its own bootstrap path later).
     """
     return bool(
-        CONTAINER_NETWORK_NAME
+        EGRESS_CONTROL_ENABLE
         and hasattr(runtime, "ensure_egress_network")
         and hasattr(runtime, "verify_egress_gateway_reachable")
     )

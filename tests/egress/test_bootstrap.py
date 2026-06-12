@@ -155,12 +155,12 @@ async def test_returns_none_when_runtime_lacks_ec2_methods() -> None:
 
 
 @pytest.mark.asyncio
-async def test_returns_none_when_container_network_name_unset() -> None:
-    """Rollback mode (operator turned EC off) — no-op."""
+async def test_returns_none_when_egress_control_disabled() -> None:
+    """EC off (EGRESS_CONTROL_ENABLE=0) — no-op even on a capable runtime."""
     from rolemesh.egress.bootstrap import ensure_gateway_running_and_register_dns
 
     runtime = _make_runtime(ec2_capable=True)
-    with patch("rolemesh.egress.bootstrap.CONTAINER_NETWORK_NAME", ""):
+    with patch("rolemesh.egress.bootstrap.EGRESS_CONTROL_ENABLE", False):
         result = await ensure_gateway_running_and_register_dns(runtime)
 
     assert result is None
@@ -477,15 +477,15 @@ async def test_nats_gate_runs_on_the_reuse_path(_runner_module: Any) -> None:
 
 @pytest.mark.asyncio
 async def test_nats_gate_skipped_when_ec2_inactive() -> None:
-    """Rollback mode (``CONTAINER_NETWORK_NAME=""``) short-circuits before
-    the NATS gate — there's no agent bridge to probe."""
+    """EC off (``EGRESS_CONTROL_ENABLE=0``) short-circuits before the NATS
+    gate — there's no agent bridge to probe."""
     from rolemesh.egress import bootstrap
 
     runtime = _make_runtime()
     nats_probe = AsyncMock()
 
     with (
-        patch.object(bootstrap, "CONTAINER_NETWORK_NAME", ""),
+        patch.object(bootstrap, "EGRESS_CONTROL_ENABLE", False),
         patch.object(bootstrap, "wait_for_nats_ready", nats_probe),
     ):
         result = await bootstrap.ensure_gateway_running_and_register_dns(runtime)

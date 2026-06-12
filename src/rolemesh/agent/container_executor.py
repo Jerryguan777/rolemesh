@@ -22,19 +22,17 @@ from rolemesh.container.erofs_watcher import ErofsWatcher
 from rolemesh.container.runner import (
     build_container_spec,
     build_volume_mounts,
+    compute_egress_routing,
 )
-from rolemesh.container.runtime import CONTAINER_HOST_GATEWAY
 from rolemesh.container.skill_projection import (
     cleanup_spawn_skills,
     materialize_skills_for_spawn,
 )
 from rolemesh.core.config import (
     CONTAINER_MAX_OUTPUT_SIZE,
-    CONTAINER_NETWORK_NAME,
     CONTAINER_TIMEOUT,
     CREDENTIAL_PROXY_PORT,
     DATA_DIR,
-    EGRESS_GATEWAY_CONTAINER_NAME,
     IDLE_TIMEOUT,
     MCP_PROXY_PREFIX,
 )
@@ -264,11 +262,12 @@ class ContainerAgentExecutor:
         container_name = f"rolemesh-{safe_name}-{start_epoch_ms}"
 
         # Token-identity: mint the signed token this container will carry
-        # in its proxy env. Only under EC (no gateway to verify against
-        # otherwise) and only when an authority is wired. None flows
-        # through as token-free URLs + gateway IP fallback.
+        # in its proxy env. Minted in BOTH EC modes — the verifier is the
+        # gateway (EC on) or the host-side credential proxy (EC off); both
+        # share the secret. None only when no authority is wired (eval CLI
+        # / tests), which yields token-free URLs.
         egress_token: str | None = None
-        if self._token_authority is not None and CONTAINER_NETWORK_NAME:
+        if self._token_authority is not None:
             egress_token = self._token_authority.mint(
                 Identity(
                     tenant_id=tenant_id,
@@ -329,16 +328,12 @@ class ContainerAgentExecutor:
         logs_dir.mkdir(parents=True, exist_ok=True)
 
         # Build MCP server specs from the coworker's projected bindings.
-        # proxy_host branches on EC: egress-gateway service name when
-        # EC is active, host.docker.internal for the pre-EC rollback
-        # path — matches build_container_spec's env routing so a
-        # coworker's MCP proxy URL hits the same endpoint agents use
-        # for LLM calls.
-        mcp_proxy_host = (
-            EGRESS_GATEWAY_CONTAINER_NAME
-            if CONTAINER_NETWORK_NAME
-            else CONTAINER_HOST_GATEWAY
-        )
+        # The MCP proxy host comes from the same single source of truth
+        # as build_container_spec's LLM env routing (EgressRouting), so a
+        # coworker's MCP proxy URL always hits the same endpoint agents
+        # use for LLM calls — gateway service name with EC on, host
+        # gateway with EC off.
+        mcp_proxy_host = compute_egress_routing(egress_token).mcp_proxy_host
         mcp_specs: list[McpServerSpec] | None = None
         coworker_mcp_configs = self._get_mcp_configs(coworker.id)
         if coworker_mcp_configs:

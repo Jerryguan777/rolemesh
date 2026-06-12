@@ -1,4 +1,31 @@
-"""Configuration constants and paths."""
+"""Configuration constants and paths.
+
+Where does a new env-driven setting go? ONE authoritative read site per
+env var — never two. Pick by consumer scope:
+
+1. Read by MULTIPLE modules, non-sensitive, no parse-time validation
+   beyond a cast → module-level constant HERE (ports, image names,
+   bridge names, mode switches like EGRESS_CONTROL_ENABLE).
+
+2. Read by ONE component, or needs construction-time validation /
+   fail-closed semantics, or is a SECRET → a ``from_env()`` on that
+   component's own config object (see egress/token_identity.py
+   TokenAuthority, egress/dns_policy.py GlobalDnsPolicy). Do NOT
+   mirror it here: a second reader of the same env var silently
+   drifts from the real one (we shipped exactly that bug once —
+   a dead EGRESS_TOKEN_TTL_SECONDS constant nobody imported).
+   Other modules that need the value take the constructed object
+   via dependency injection, not a re-read of os.environ.
+
+3. Deployment-level override with a single use site and no fan-out
+   (e.g. ANTHROPIC_BASE_URL upstream override in reverse_proxy) →
+   lazy read at the use site, with a comment saying why.
+
+Module-level constants here are frozen at import; tests overriding
+them must patch every importing module's binding (a documented trap —
+see tests/container/test_startup_order.py). Category-2 objects are
+monkeypatch.setenv-testable, which is one of the reasons they exist.
+"""
 
 from __future__ import annotations
 
@@ -101,8 +128,44 @@ CONTAINER_MAX_CPU: float = float(os.environ.get("CONTAINER_MAX_CPU", "4.0"))
 # bridge. Containers on it physically cannot route to the public internet
 # — all outbound traffic must flow through the egress gateway which sits
 # on a second bridge (CONTAINER_EGRESS_NETWORK_NAME) with a real default
-# route.
+# route. This name is ONLY a bridge name now; whether egress control is
+# active is governed by EGRESS_CONTROL_ENABLE below.
 CONTAINER_NETWORK_NAME: str = os.environ.get("CONTAINER_NETWORK_NAME", "rolemesh-agent-net")
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    """Parse a boolean env var. Accepts 1/0, true/false, yes/no, on/off
+    (case-insensitive). Unset → *default*; an unrecognised value raises
+    so a typo fails the boot loudly rather than silently flipping a
+    security-relevant switch."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    val = raw.strip().lower()
+    if val in ("1", "true", "yes", "on"):
+        return True
+    if val in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(
+        f"{name} must be a boolean (1/0, true/false, yes/no, on/off), got {raw!r}"
+    )
+
+
+# Master switch for Egress Control (EC-1/2/3). The single authoritative
+# knob: when on, agents run on the Internal=true bridge behind the egress
+# gateway (network-layer enforcement + forward/DNS proxies + per-tenant
+# credential injection at the gateway). When off, agents run on the host
+# bridge and reach a host-side credential proxy directly — egress NETWORK
+# control is disabled, but multi-tenant CREDENTIAL isolation is preserved
+# (the host proxy verifies the same signed identity token and injects the
+# requesting tenant's own key). See docs/16.
+#
+# Replaces the historical overload where CONTAINER_NETWORK_NAME="" doubled
+# as the EC off-switch. That overload is gone: an empty bridge name with
+# EC on is now a hard configuration error (see startup validation), and
+# operators turn EC off with EGRESS_CONTROL_ENABLE=0.
+EGRESS_CONTROL_ENABLE: bool = _env_flag("EGRESS_CONTROL_ENABLE", default=True)
+
 
 # Outbound bridge used by the egress gateway (EC-1). Regular bridge with
 # icc=false. The gateway container is dual-homed: agent-net (internal) on
@@ -135,16 +198,10 @@ EGRESS_GATEWAY_DNS_PORT: int = int(
     os.environ.get("EGRESS_GATEWAY_DNS_PORT", "53")
 )
 
-# Egress identity tokens (token-identity refactor). The orchestrator
-# mints a signed token per spawn; the gateway verifies it. Secret is
-# read lazily in rolemesh.egress.token_identity (sensitive, no default,
-# fail-closed under EC); only the non-secret TTL lives here so the
-# value has a documented home. ``EGRESS_TOKEN_TTL_SECONDS`` bounds how
-# long a single token (and thus a single agent container before the
-# orchestrator re-mints) may live; default 7 days, see token_identity.
-EGRESS_TOKEN_TTL_SECONDS: int = int(
-    os.environ.get("EGRESS_TOKEN_TTL_SECONDS", str(7 * 24 * 60 * 60))
-)
+# Egress identity tokens: EGRESS_TOKEN_SECRET and EGRESS_TOKEN_TTL_SECONDS
+# are deliberately NOT mirrored here — category 2 of the module-docstring
+# rules (single consumer + validation + secret). Their one read site is
+# rolemesh.egress.token_identity.TokenAuthority.from_env().
 
 # Allowlist for env vars that the orchestrator dynamically injects into
 # containers (R8). Anything produced by build_container_spec() or passed
