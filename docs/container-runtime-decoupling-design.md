@@ -1,507 +1,395 @@
 # 容器运行时解耦设计：`ROLEMESH_CONTAINER_RUNTIME=docker|k8s`
 
-> 状态：设计稿 rev2（2026-06-12 与 main@be953c5 重新对齐：token 身份 / EC=off / 路由整合）
+> 状态：设计稿 **rev3**（2026-06-12）
 > 目标：同一份业务代码，通过一个环境变量在 Docker 与 Kubernetes 之间切换；
 > 本地 Ubuntu（amd64）用 Docker 模式与 kind 模式验证，生产部署到
 > Rancher RKE2 + Helm chart。
 
 ---
 
-## 0. rev2 基线更新（main@be953c5，PR #81–#84）
+## 0. 修订历史与 rev3 要旨
 
-rev1 基于 `0e72ae3`。其后 main 合入四个 PR，三处实质影响本方案：
+| 版本 | 基线 | 内容 |
+|---|---|---|
+| rev1 | `0e72ae3` | 初版：Protocol 扩展 + EgressGatewayProvider + HostAccessPolicy |
+| rev2 | `be953c5` | 与 main 重对齐：token 身份取代源 IP、`compute_egress_routing` 收敛 |
+| **rev3** | `be953c5` | **架构转向：基础设施全面声明化、orchestrator 容器化、删除 EC=off 与宿主机拓扑** |
 
-1. **源 IP 身份机制已删除，改为签名 token**（#82/#83）。`egress/identity.py`
-   （IP→身份内存表 + lifecycle 事件管道）整体移除，替换为
-   `egress/token_identity.py`：orchestrator 在 spawn 时签发 HMAC token，
-   随请求带内传递（forward proxy 的 userinfo / reverse proxy 的路径段），
-   gateway 无状态验签。其动机注释明确写着 IP 方案 "breaks under NAT / k8s /
-   multi-host"——**该重构正是为 K8s 做的**。直接后果：
-   - 本方案 rev1 的 §5.2（podIP→身份映射）、`get_network_info()` Protocol
-     方法、源 IP 保留校验（masqueradeAll 探测）全部作废；
-   - gateway 不再持每租户内存态，**多副本不再有身份层障碍**；
-   - 新增部署面要求：`EGRESS_TOKEN_SECRET` 必须同时下发 orchestrator 与
-     gateway（K8s Secret），且绝不进 agent Pod。
-2. **EC 开关路由已整合为单一纯函数**（#84）：`runner.compute_egress_routing()`
-   → `EgressRouting` dataclass，吸收了原先散在 runner/executor 的 7 处
-   EC=on/off 分支（含 MCP proxy 主机选择、extra_hosts、NATS 重写、DNS、
-   proxy env）。其 docstring 自述为 "planned ContainerPlatform abstraction
-   (docker|k8s) 的集结地"。**附录 A 的泄漏点 #1、#2、#4 已在 main 解决或
-   收敛**；本方案 §4.4 据此重写——P1 不再发明新接缝，而是把这个现成接缝
-   平台化。
-3. **EC=off 模式恢复，由 `EGRESS_CONTROL_ENABLE` 控制**（#84），token 在
-   EC=off 下仍用于 host 侧凭证代理的租户隔离。本方案立场：**K8s 模式强制
-   EC=on**，`provision_infrastructure()` 把 `EGRESS_CONTROL_ENABLE=false` +
-   k8s 视为配置错误（fail-closed）；EC=off 仍是 docker 模式专属的开发回退。
+**rev3 核心论点**：rev1/rev2 把"声明式基础设施 + 应用只校验"原则用在了
+K8s 侧，却默许 Docker 侧继续在业务进程里命令式地造网桥、启 gateway、
+运行时发现 DNS IP。rev3 把同一原则**对称地**应用到两边：
 
-另：DNS 白名单已平台化（#81，`dns_policy.py`），DNS 面与身份彻底解耦——
-这消除了 rev1 中"DNS 按源 IP 查身份"的隐含依赖，K8s 映射（§5.3）不变但更稳。
+1. **静态基础设施下沉到部署层**。网络、gateway、NATS、Postgres 由
+   docker compose（本地）/ Helm（生产）声明；应用代码不再创建它们，
+   只在启动时校验不变量，不满足即拒绝启动（fail-closed）。
+2. **orchestrator 进入网络栈**（compose 服务 / K8s Deployment）。本地与
+   生产的拓扑同构，"宿主机视角 vs 容器视角"的翻译层
+   （`host.docker.internal`、loopback 重写、ExtraHosts host-gateway）
+   失去存在前提，整体删除。
+3. **删除 EC=off 模式与 hybrid 运行方式**（已拍板，2026-06-12）。
+   `EGRESS_CONTROL_ENABLE` 开关及其代码分支移除——**注意：这撤销了
+   main PR #84 刚恢复的 EC=off 回退**，撤销理由：回退应当是"部署另一份
+   compose profile"这种部署期选择，而非业务代码里的运行时分支（#84 自己
+   的提交注释印证了分支散落的代价：一处 fork 带病发布了两个版本周期）。
+   现处开发阶段、无生产数据，是收编代码分支的唯一低成本窗口。
+4. 应用代码保留的唯一命令式容器操作：**按 job 创建/销毁 agent 沙箱**。
+   这是动态的、每请求的、真正属于应用的职责。
+
+预期净效果：删除约 900 行命令式 provisioning / 视角翻译代码，换来
+~150 行 compose YAML；启动时序 bug 类别（gateway 先于 agent、DNS IP
+注册顺序——参见 #79 修的 egress-dev-nats-unreachable）整类消失。
 
 ---
 
-## 1. 现状分析
+## 1. 现状分析（基线 main@be953c5）
 
 ### 1.1 已有的好基础
 
-- `src/rolemesh/container/runtime.py` 已定义 `ContainerRuntime` / `ContainerHandle`
-  Protocol 与 `ContainerSpec` / `VolumeMount` frozen dataclass；`get_runtime()`
-  工厂已预留 `k8s` 分支（当前抛 `NotImplementedError`）。
-- 规格构建（`runner.py`）与调度（`scheduler.py`）是纯函数 / 纯 asyncio，
-  不直接触碰 Docker。
-- Agent 与 orchestrator 之间的 IPC 走 NATS（KV 初始化 + JetStream 流式结果），
-  **不依赖 stdin/stdout**——这在 K8s 下天然成立。
-- 环境变量注入有 `CONTAINER_ENV_ALLOWLIST` 白名单，挂载有
-  `mount_security.py` 校验，均与运行时无关。
+- `ContainerRuntime` / `ContainerHandle` Protocol 与 `ContainerSpec` /
+  `VolumeMount` frozen dataclass 已就位；`get_runtime()` 工厂预留 k8s 分支。
+- **token 身份**（#82/#83）：spawn 时签发 HMAC token 带内传递，gateway
+  无状态验签——与 L3 拓扑无关，K8s 下零改动可用。
+- **路由已收敛**（#84）：`compute_egress_routing() -> EgressRouting`
+  是 EC 拓扑事实的单一出口，runner/executor 统一从它取值。
+- DNS 白名单平台化（#81），DNS 面与身份解耦。
+- gateway 是无状态边界：镜像不含 `rolemesh.db`/`rolemesh.auth`，凭证经
+  NATS RPC 回 orchestrator 解析（`RemoteCredentialResolver`）。
+- agent ↔ orchestrator IPC 走 NATS（KV 初始化 + JetStream 结果流），
+  不依赖 stdin/stdout。
 
-### 1.2 耦合点清单（按修复优先级）
+### 1.2 rev3 要消除的耦合（按处置方式分组）
 
-| # | 耦合点 | 位置 | 性质 |
-|---|--------|------|------|
-| C1 | `container_executor._publish_agent_started()` 用 `getattr(runtime, "_ensure_client")` 绕过抽象直接查容器 IP | `agent/container_executor.py:710-756` | 抽象泄漏 |
-| C2 | `DockerRuntime` 上挂了 Protocol 之外的网络方法（`ensure_agent_network` / `ensure_egress_network` / `verify_*`），`main.py` 用 `hasattr` 探测调用 | `container/docker_runtime.py:322-358`, `main.py:1724-1742` | 抽象泄漏 |
-| C3 | egress gateway 由 orchestrator 用 aiodocker 直接启动（双网卡 connect、镜像 inspect、就绪轮询） | `egress/launcher.py`, `egress/bootstrap.py` | 进程级 Docker 依赖 |
-| C4 | 网络拓扑 = Docker 特有概念：`Internal=true` bridge、双网卡、`enable_icc`、Alpine 探针容器 | `container/network.py` | 架构级 |
-| C5 | `host.docker.internal` / docker0 探测 / `rewrite_loopback_to_host_gateway()`——隐含"orchestrator 跑在宿主机、agent 跑在容器"的拓扑假设 | `container/runtime.py:146-238` | 拓扑假设 |
-| C6 | `VolumeMount.host_path` 是 orchestrator 本机绝对路径（`DATA_DIR = PROJECT_ROOT/"data"`），bind mount 假设 orchestrator 与容器同宿主 | `runner.py`, `skill_projection.py` | 存储假设 |
-| C7 | DNS 走 `HostConfig.Dns`（注入 egress gateway 的 bridge IP）；IP 在 gateway 启动后由 `set_egress_gateway_dns_ip()` 全局注册 | `runner.py:280-299,584`, `egress/bootstrap.py` | Docker API 特有 |
-| C8 | 身份识别：gateway 按 source IP 反查 agent 身份，IP 取自 `docker inspect NetworkSettings` | `egress/identity.py` + C1 | 依赖 C1 修复 |
-| C9 | 开关名为 `CONTAINER_BACKEND`，需统一为 `ROLEMESH_CONTAINER_RUNTIME` | `core/config.py:74` | 命名 |
-| C10 | 无 K8s/Helm/kind 任何文件；无契约测试框架（现状 = mocked 单测 + 真 Docker 集成测试） | — | 缺失 |
+**第一组：随"基础设施声明化"直接删除的代码**
 
-**核心判断**：生命周期抽象（run/wait/stop/logs）的迁移是机械工作；
-**真正的设计工作在 C3–C8**——网络隔离、egress gateway 归属、DNS、身份、存储，
-这五件事在两个运行时下的"实现机制"完全不同，必须把它们从"代码做什么"
-提升为"运行时承诺什么"。
+| 代码 | 现职责 | rev3 处置 |
+|---|---|---|
+| `container/network.py` 创建/探针逻辑（~400 行） | aiodocker 造 agent-net / egress-net、Alpine 探针 | 网络由 compose 声明；代码只留只读校验 |
+| `egress/launcher.py`（~350 行） | aiodocker 启动 gateway、双网卡接线、就绪轮询 | gateway 是 compose 服务 / Helm Deployment；删除 |
+| `egress/bootstrap.py`（~240 行） | 幂等启动 + inspect 拿 IP + `set_egress_gateway_dns_ip` 全局注册 | DNS IP 变成部署期静态配置；删除 |
+| `runner.set_egress_gateway_dns_ip` 全局变量 | 跨模块传递运行时发现的 IP | 改为 `EGRESS_GATEWAY_DNS_IP` 配置项 |
+
+**第二组：随"orchestrator 容器化"失去前提而删除的代码**
+
+| 代码 | 存在理由 | rev3 处置 |
+|---|---|---|
+| `CONTAINER_HOST_GATEWAY` 常量 | 容器寻址宿主机 | 宿主机上无服务可寻址；删除 |
+| `rewrite_loopback_to_host_gateway()` | 宿主机视角 URL → 容器视角翻译 | 全员同视角，配置直接写服务名；删除 |
+| `get_host_gateway_extra_hosts()` / ExtraHosts host-gateway | Linux 上让 `host.docker.internal` 可解析 | 删除 |
+| `compute_egress_routing` 的 EC=off 分支 | agent 经宿主机访问 NATS / 凭证代理 | 随 EC=off 模式删除 |
+| host 侧 `start_credential_proxy`（bind 127.0.0.1 路径） | EC=off 下的凭证注入 | 删除（EC=on 的凭证注入在 gateway，经 NATS RPC 解析，保留） |
+| `EGRESS_CONTROL_ENABLE` 配置 | EC 模式开关 | 删除；EC 永远开启 |
+
+**第三组：真正保留并平台化的运行时差异**
+
+| 关注点 | 说明 |
+|---|---|
+| 沙箱生命周期 | docker create/wait/log/delete vs Pod create/watch/log/delete——§4.2 |
+| 挂载路径翻译 | 两个 runtime 是**同一形状**的问题（§6.1）：orchestrator 容器内路径 ≠ 沙箱挂载源路径 |
+| 加固字段映射 | HostConfig ↔ securityContext——§4.5 |
+| 隔离校验方式 | 校验 internal 网桥 vs 校验 NetworkPolicy——§4.4 |
+
+### 1.3 核心判断（rev3 版）
+
+rev1 说"C3–C8 必须从『代码做什么』提升为『运行时承诺什么』"。rev3 给出
+承诺的统一载体：**部署产物（compose/Helm）承诺拓扑，应用启动时校验承诺，
+契约测试锁定承诺**。网络隔离、gateway 归属、DNS、身份、存储五件事中，
+身份已被 token 化解决，前三件不再需要抽象——它们退出代码；只有存储
+（挂载翻译）和生命周期留在代码里，而这两件恰好是机械工作。
 
 ---
 
 ## 2. 设计原则
 
-1. **业务代码只依赖契约，不依赖机制。** 业务层（executor、scheduler、egress
-   逻辑、safety）只看到 `ContainerRuntime` 及配套 Protocol；"用 bridge 还是
-   NetworkPolicy 实现隔离"是 runtime 实现的私事。
-2. **声明式优先。** Docker 模式下 orchestrator 必须自己创建网络、启动 gateway
-   （命令式）；K8s 模式下这些由 Helm chart 声明，runtime 只做**发现与校验**
-   （fail-closed：校验不过拒绝启动 agent）。
-3. **契约测试是契约的可执行定义。** 同一套测试用例参数化跑在两个 runtime 上；
-   一切"两边行为应当一致"的承诺都必须有对应用例，否则不算承诺。
-4. **fail-closed 不降级。** K8s 模式下若 NetworkPolicy 不可校验、gateway 不可达、
-   DNS 未指向 gateway，与 Docker 模式下 dockerd 版本过低同等处理：拒绝启动。
+1. **业务代码只依赖契约，不依赖机制。**
+2. **对称声明式**：两个运行时的静态基础设施都由部署产物声明；应用启动
+   只做只读校验，fail-closed，不降级、不自举、不修复。
+3. **单一拓扑**：orchestrator 与 agent 在同一网络栈内，全部互访走服务名；
+   不存在第二种视角，因此不存在视角翻译代码。
+4. **单一代码路径**：没有 EC 开关，没有部署形态分支。需要不同形态时，
+   部署不同的 compose profile / values，而不是翻转环境变量走另一条代码。
+5. **契约测试是契约的可执行定义**：同一套用例参数化跑两个 runtime，
+   用例体内零 `if runtime == ...`。
 
 ---
 
 ## 3. 两套运行时的机制映射总表
 
-| 契约（业务代码看到的） | Docker 实现 | K8s 实现 |
+| 契约 | Docker（compose 声明） | K8s（Helm 声明） |
 |---|---|---|
-| 启动一个 agent 沙箱 | `containers.create_or_replace` + start | 创建 Pod（`restartPolicy: Never`，打标签 `rolemesh.io/role=agent`） |
-| 等待退出 / 取退出码 | `container.wait()` | watch Pod phase → `Succeeded/Failed`，取 terminated.exitCode |
-| 流式 stderr | `container.log(stderr=True, follow=True)` | `read_namespaced_pod_log(follow=True)`（注：K8s 不分流 stdout/stderr，见 §5.6） |
-| 停止 + 清理 | stop + delete force | delete Pod（grace period = timeout） |
-| 孤儿清理 | name 前缀 + 镜像白名单 | label selector `rolemesh.io/managed-by=orchestrator` + 镜像白名单 |
-| 请求级身份识别 | 签名 token 带内传递（main@be953c5 起，与 L3 拓扑无关） | **同一机制原样工作**，零改动 |
-| 网络隔离（agent 无直接出网） | `Internal=true` bridge | 默认拒绝的 egress `NetworkPolicy`（仅放行 → gateway Pod、→ NATS、→ gateway:53/udp） |
-| egress gateway 双面性 | 双网卡（agent-net + egress-net） | 单网卡即可：对内是 Service，对外不受 agent 侧 NetworkPolicy 限制（gateway 自己的 policy 放行出网） |
-| agent 的 DNS 强制走 gateway | `HostConfig.Dns = [gateway bridge IP]` | Pod `dnsPolicy: None` + `dnsConfig.nameservers: [gateway Service ClusterIP]` |
-| gateway 生命周期 | orchestrator 用 aiodocker 启动（launcher.py） | Helm 管理的 Deployment + Service；orchestrator 只发现 + 健康检查 |
-| 凭证代理可达性 | `host.docker.internal` + ExtraHosts host-gateway | orchestrator 本身是 Pod，agent 通过 orchestrator Service 直达；无需任何 URL 重写 |
-| 资源限制 | Memory/NanoCpus/PidsLimit | resources.limits（pids 是 kubelet `podPidsLimit`，集群级，见 §9 风险） |
-| 加固 | CapDrop ALL / ReadonlyRootfs / no-new-privileges / tmpfs | securityContext（drop ALL、readOnlyRootFilesystem、runAsNonRoot、seccompProfile RuntimeDefault）+ emptyDir(medium=Memory, sizeLimit) |
-| gVisor | `HostConfig.Runtime: runsc` | `runtimeClassName: gvisor`（RKE2 需预装 RuntimeClass） |
-| 存储（workspace/sessions/skills） | bind mount 宿主路径 | 共享 PVC + `subPath`（orchestrator 与 agent Pod 挂同一 PVC，见 §6） |
-| 连通性自检 | Alpine 探针容器 | 探针 Pod（同镜像策略），或 orchestrator Pod 内直接 TCP 探测 |
+| agent 无直接出网 | `internal: true` 网络 | default-deny egress NetworkPolicy |
+| gateway 存在且双面 | compose 服务，挂 agent-net + egress-net 双网络 | Deployment + Service（单网卡，policy 区分内外） |
+| gateway DNS 地址 | compose ipam 固定 IP → `EGRESS_GATEWAY_DNS_IP` 配置 | Service ClusterIP → 同名配置 |
+| agent DNS 强制走 gateway | `HostConfig.Dns=[配置 IP]` | `dnsPolicy: None` + `dnsConfig.nameservers=[配置 IP]` |
+| 请求级身份 | 签名 token 带内传递 | **同一机制，零改动** |
+| 凭证解析 | gateway → NATS RPC → orchestrator（密钥不出 orchestrator/DB） | 同一机制，零改动 |
+| NATS/DB 可达 | compose 服务名 | Service DNS 名 |
+| 启动顺序 | `depends_on: condition: service_healthy` | readiness probe + 应用侧校验重试 |
+| 沙箱生命周期 | `docker run` 等价（aiodocker） | 裸 Pod，`restartPolicy: Never` |
+| 流式诊断日志 | container log (stderr) | pod log（stdout/stderr 合流，见 §5.5） |
+| 孤儿清理 | name 前缀 + 镜像白名单 | label selector + 镜像白名单 |
+| 资源限制 | Memory/NanoCpus/PidsLimit | resources.limits（pids 为 kubelet 级，见 §9） |
+| 加固 | CapDrop/ReadonlyRootfs/no-new-privileges/tmpfs | securityContext + emptyDir(Memory) |
+| gVisor | compose `runtime: runsc`（agent 沙箱经 spec.runtime） | `runtimeClassName: gvisor` |
+| metadata 防护 | internal 网桥（裸 IP）+ /etc/hosts 黑洞（域名，白送的保底） | default-deny NetworkPolicy + gateway DNS 白名单（不模拟 hostAliases） |
+| 存储共享 | orchestrator 与 agent bind 同一宿主目录（经路径翻译，§6.1） | 共享 PVC + subPath（同一翻译层） |
 
 ---
 
-## 4. 代码解耦设计
+## 4. 代码设计
 
-### 4.1 配置开关（修 C9）
+### 4.1 配置
 
 ```python
-# core/config.py
-CONTAINER_RUNTIME: str = (
-    os.environ.get("ROLEMESH_CONTAINER_RUNTIME")
-    or os.environ.get("CONTAINER_BACKEND")   # 兼容别名，读到时打 deprecation 警告
-    or "docker"
-)
+CONTAINER_RUNTIME = os.environ.get("ROLEMESH_CONTAINER_RUNTIME", "docker")
 ```
 
-新增 K8s 专属配置（全部带 `ROLEMESH_K8S_` 前缀，docker 模式下忽略）：
-
-| 变量 | 默认 | 用途 |
+| 变量 | 模式 | 说明 |
 |---|---|---|
-| `ROLEMESH_K8S_NAMESPACE` | 当前 Pod 的 namespace（downward API） | agent Pod 所在 namespace |
-| `ROLEMESH_K8S_DATA_PVC` | `rolemesh-data` | orchestrator/agent 共享 PVC 名 |
-| `ROLEMESH_K8S_EGRESS_GATEWAY_SERVICE` | `rolemesh-egress-gateway` | gateway Service 名（发现 DNS IP 用） |
-| `ROLEMESH_K8S_IMAGE_PULL_SECRET` | 空 | 私有 registry 凭证 |
-| `ROLEMESH_K8S_RUNTIME_CLASS` | 空 | gVisor 等 RuntimeClass |
+| `ROLEMESH_CONTAINER_RUNTIME` | 通用 | `docker` \| `k8s`（旧 `CONTAINER_BACKEND` 删除，无兼容层——开发期无包袱） |
+| `EGRESS_GATEWAY_DNS_IP` | 通用 | **静态配置**：compose 固定 IP / Service ClusterIP。取代运行时发现 |
+| `EGRESS_GATEWAY_HOST` | 通用 | gateway 服务名（compose: `egress-gateway`；helm: `rolemesh-egress-gateway`） |
+| `NATS_URL` 等服务地址 | 通用 | 一律写服务名；不再有 localhost 重写 |
+| `ROLEMESH_HOST_DATA_DIR` | docker | DATA_DIR 在**宿主机**上的真实路径（DooD 路径翻译用，§6.1）；compose 注入 `${PWD}/data` |
+| `ROLEMESH_K8S_NAMESPACE` / `_DATA_PVC` / `_IMAGE_PULL_SECRET` / `_RUNTIME_CLASS` | k8s | 同 rev2 |
 
-`CONTAINER_IMAGE` / `EGRESS_GATEWAY_IMAGE` 保持通用（值改为 registry 限定名即可）。
+删除：`EGRESS_CONTROL_ENABLE`、`CONTAINER_HOST_GATEWAY` 及全部派生逻辑。
 
-### 4.2 Protocol 扩展（修 C1、C2、C3）
-
-`runtime.py` 中的 `ContainerRuntime` Protocol 扩展为：
+### 4.2 `ContainerRuntime` Protocol（最终形态）
 
 ```python
 class ContainerRuntime(Protocol):
-    # ——既有——
-    name / ensure_available / run / stop / cleanup_orphans / close
-
-    # rev2：原计划的 get_network_info() 已无消费者——它唯一的用途是
-    # 给 IP 身份机制发 lifecycle 事件，该机制在 main@be953c5 已删除。
-    # 不再加入 Protocol；将来出现真实消费者时再加。
-
-    # ——新增：吸收 C2 的 hasattr 探测——
-    async def provision_infrastructure(self) -> InfraReport:
-        """Docker：创建/复用 agent-net + egress-net（命令式）。
-        K8s：校验 NetworkPolicy / RBAC / PVC 存在且符合不变量（声明式发现）。
-        任何不变量不满足 → 抛 InfrastructureError，orchestrator 拒绝启动。"""
-
-    async def verify_connectivity(self, nats_url: str, gateway: GatewayEndpoints) -> None:
-        """两个 runtime 各自用自己的机制验证 agent→gateway、agent→NATS 可达。"""
+    name: str
+    async def ensure_available(self) -> None: ...          # API 可达 + 版本
+    async def verify_infrastructure(self) -> None: ...     # 校验部署层承诺（只读，fail-closed）
+    async def run(self, spec: ContainerSpec) -> ContainerHandle: ...
+    async def stop(self, name: str) -> None: ...
+    async def cleanup_orphans(self, ...) -> list[str]: ...
+    async def close(self) -> None: ...
 ```
 
-`main.py:1724-1742` 的 `hasattr(_runtime, "ensure_agent_network")` 序列改为
-统一调用 `provision_infrastructure()` + `verify_connectivity()`。
+与 rev1/rev2 的区别：没有 `provision_*`（两边都不创建任何东西），没有
+`get_network_info`（IP 身份已死），没有 EgressGatewayProvider /
+HostAccessPolicy（前提已被消除）。`verify_infrastructure()` 两边同形：
 
-### 4.3 EgressGatewayProvider（修 C3、C7）
+- **Docker 版**：agent-net 存在且 `Internal=true`、egress-net 存在、
+  gateway 容器健康（/healthz）、`EGRESS_GATEWAY_DNS_IP` 与 gateway 实际
+  地址一致、NATS 可达。
+- **K8s 版**：四条 NetworkPolicy 存在且 selector 命中、deny 实测生效
+  （探针 Pod 出网必须失败——防 CNI 不支持 NetworkPolicy 的假绿）、PVC
+  Bound、gateway Service/healthz、RBAC 自检（SelfSubjectAccessReview）。
 
-把 `egress/launcher.py` + `bootstrap.py` 里"如何让 gateway 存在并拿到它的
-DNS IP"抽成新 Protocol（放在 `egress/provider.py`）：
+### 4.3 `compute_egress_routing` 退化为单路径配置读取
+
+EC 分支删除后，函数体收缩为：
 
 ```python
-class EgressGatewayProvider(Protocol):
-    async def ensure_running(self) -> GatewayEndpoints: ...
-    # GatewayEndpoints: dns_ip / reverse_proxy_url / forward_proxy_url / nats_visible_url
-
-class DockerEgressGatewayProvider:
-    """现 launcher.py 逻辑原样搬入：镜像 inspect、双网卡 connect、健康轮询。"""
-
-class K8sEgressGatewayProvider:
-    """不启动任何东西。读取 gateway Service 的 ClusterIP（dns_ip），
-    探测 /healthz；Service 不存在或不健康 → fail-closed。"""
+def compute_egress_routing(egress_token: str | None) -> EgressRouting:
+    forward = f"http://job:{egress_token}@{EGRESS_GATEWAY_HOST}:{FORWARD_PORT}"
+    return EgressRouting(
+        nats_url=NATS_URL,                       # 服务名，无重写
+        proxy_base=f"http://{EGRESS_GATEWAY_HOST}:{CREDENTIAL_PROXY_PORT}",
+        provider_prefix=f"/proxy/{egress_token}" if egress_token else "/proxy",
+        proxy_env={"HTTP_PROXY": forward, "HTTPS_PROXY": forward,
+                   "NO_PROXY": f"{EGRESS_GATEWAY_HOST},localhost,127.0.0.1"},
+        network_name=CONTAINER_NETWORK_NAME or None,   # k8s runtime 忽略
+        dns_servers=[EGRESS_GATEWAY_DNS_IP],
+        extra_hosts=_METADATA_BLACKHOLE if runtime_is_docker else {},
+        mcp_proxy_host=EGRESS_GATEWAY_HOST,
+    )
 ```
 
-`set_egress_gateway_dns_ip()` 全局变量保留（runner.py 的纯函数继续从它读），
-但唯一写入方变成 provider 的返回值——业务侧完全不变。
+docker/k8s 跑同一段代码，差异只在配置值与两个 runtime 专属小字段
+（`network_name` / `extra_hosts`），后续可进一步把这两个字段移交
+ContainerSpec 组装侧——不强求，避免过度设计。`warn_missing_dns`
+fail-open 路径删除：`EGRESS_GATEWAY_DNS_IP` 缺失是配置错误，启动即拒。
 
-### 4.4 路由平台化（修 C5；rev2 重写，对齐 main 的 `compute_egress_routing`）
+### 4.4 K8sRuntime 实现要点（沿袭 rev2，仅列要点）
 
-rev1 在此设计了 `HostAccessPolicy`；main@be953c5 已经把同一批拓扑事实
-（NATS 重写、proxy env、MCP 主机、extra_hosts、DNS、网络名）整合进
-`runner.compute_egress_routing() -> EgressRouting`，且 docstring 自述为
-ContainerPlatform 抽象的集结地。**P1 不再发明新接缝，直接平台化这个函数**：
+`container/k8s_runtime.py`，依赖 `kubernetes_asyncio`（可选 extra，延迟导入）。
+ContainerSpec → 裸 Pod（`restartPolicy: Never`、
+`automountServiceAccountToken: false`、`enableServiceLinks: false`、
+label `rolemesh.io/role=agent` + `rolemesh.io/managed-by=orchestrator`）；
+加固逐字段映射 securityContext；tmpfs → emptyDir(medium=Memory, sizeLimit)；
+`wait()` = watch + resourceVersion 续传 + 周期 read 兜底；重名 = 先删后建
+（对齐 docker create_or_replace）；孤儿清理 = label selector + 镜像白名单。
 
-```python
-class AgentRoutingProvider(Protocol):
-    def agent_routing(self, egress_token: str | None) -> EgressRouting: ...
-    def proxy_bind_host(self) -> str: ...   # orchestrator 侧凭证代理 bind 地址
+### 4.5 orchestrator 容器化
 
-class DockerAgentRouting:
-    """= 现 compute_egress_routing 函数体原样搬入（EC=on/off 两分支都保留）。"""
+- 新增 `container/orchestrator.Dockerfile`（Python 3.12-slim + uv sync）。
+- compose 中挂载：`./src → /app/src`（开发热重载，watchfiles/reload 模式）、
+  `./data → /app/data`、`/var/run/docker.sock`（仅 docker 模式；唯一用途是
+  spawn agent 沙箱——provisioning 权限需求已随 rev3 消失）。
+- 调试：debugpy 端口（compose 暴露 5678），替代宿主机进程直挂。
+- orchestrator 同时挂 agent-net（reach NATS/gateway）与 egress-net
+  （出网：LLM 安全检查等自身流量）。
+- evaluation CLI（仅 docker 模式，已拍板）：作为一次性容器
+  `docker compose run --rm orchestrator python -m rolemesh.evaluation ...`。
 
-class K8sAgentRouting:
-    """仅 EC=on（EC=off + k8s 是配置错误）。所有主机名是 Service DNS 名：
-    nats_url 恒等返回；proxy_base/mcp_proxy_host = gateway Service 名；
-    dns_servers = [gateway Service ClusterIP]；extra_hosts = {}（metadata
-    黑洞由 default-deny NetworkPolicy 承担）；proxy_bind_host = 0.0.0.0。"""
-```
+### 4.6 不动的部分
 
-`EgressRouting` dataclass 本身已是运行时中立的（字段都是 URL/名字/列表），
-原样复用。`runner.build_container_spec` 与 executor 已统一从它取值（#84），
-调用点零改动。`rewrite_loopback_to_host_gateway()` / `CONTAINER_HOST_GATEWAY`
-随函数体迁入 `DockerAgentRouting` 私有，公共 runtime 模块删除。
-
-### 4.5 挂载翻译（修 C6）
-
-`VolumeMount.host_path` 语义改为 **「DATA_DIR 下的逻辑路径」**（业务代码
-继续生成绝对路径，不改一行）；翻译发生在 runtime 内部：
-
-- **DockerRuntime**：恒等翻译（绝对路径直接 bind）。
-- **K8sRuntime**：要求路径在 `DATA_DIR` 之下，计算
-  `relpath = host_path.relative_to(DATA_DIR)`，生成
-  `volumeMounts: {name: data, subPath: relpath}`，volume 指向共享 PVC。
-  `DATA_DIR` 之外的路径（mount-allowlist 的额外挂载）在 K8s 模式下默认拒绝，
-  允许的例外通过 values 显式声明为额外 volume（见 §6.3）。
-
-`skill_projection.py` 不变：它写文件到 `DATA_DIR/spawns/<job_id>/skills/`，
-在 K8s 下这恰好就是 PVC 里的路径，agent Pod 通过 subPath 看到同一份数据。
-
-### 4.6 K8sRuntime 实现要点
-
-新文件 `container/k8s_runtime.py`，依赖 `kubernetes_asyncio`（加入 pyproject
-可选 extra `k8s`；docker 模式不安装也能跑——`get_runtime()` 里延迟导入，
-与现在 `DockerRuntime` 的延迟导入一致）。
-
-`ContainerSpec → Pod` 映射（关键字段）：
-
-```yaml
-metadata:
-  name: {spec.name}                       # 已是 DNS-safe 的 rolemesh- 前缀
-  labels:
-    rolemesh.io/managed-by: orchestrator   # cleanup_orphans 的选择子
-    rolemesh.io/role: agent                # NetworkPolicy 的选择子
-spec:
-  restartPolicy: Never
-  automountServiceAccountToken: false      # agent 绝不能拿到 K8s API 凭证
-  enableServiceLinks: false
-  runtimeClassName: {ROLEMESH_K8S_RUNTIME_CLASS or omit}
-  dnsPolicy: "None"                        # 仅 role=agent；gateway 探活等用默认
-  dnsConfig: {nameservers: [spec.dns]}
-  containers:
-  - image: {spec.image}
-    env: [...]                             # 白名单已在 runner.py 过滤
-    securityContext:
-      readOnlyRootFilesystem: {spec.readonly_rootfs}
-      capabilities: {drop: spec.cap_drop, add: spec.cap_add}
-      runAsUser/runAsGroup: {spec.user}
-      allowPrivilegeEscalation: false      # ≙ no-new-privileges
-      seccompProfile: {type: RuntimeDefault}
-    resources:
-      limits: {memory: spec.memory_limit, cpu: spec.cpu_limit}
-    volumeMounts: [...]                    # §4.5 翻译结果 + tmpfs→emptyDir
-  volumes:
-  - name: data
-    persistentVolumeClaim: {claimName: ROLEMESH_K8S_DATA_PVC}
-  - name: tmp                              # spec.tmpfs 逐项转 emptyDir
-    emptyDir: {medium: Memory, sizeLimit: "64Mi"}
-```
-
-`K8sContainerHandle`：
-- `wait()` — `watch` Pod，`Succeeded→0`，`Failed→containerStatuses[0].state.terminated.exitCode`；
-  watch 断线用 resourceVersion 续传 + 最终 read 兜底。
-- `stop()` — `delete_namespaced_pod(grace_period_seconds=timeout)`。
-- `read_stderr()` — pod log follow 流（语义差异见 §5.6）。
-
-孤儿清理：`list_namespaced_pod(label_selector="rolemesh.io/managed-by=orchestrator")`
-+ 镜像白名单复核（沿用 `_normalize_image_ref` 思路），双信号不变量与 Docker 版一致。
-
-`provision_infrastructure()`（K8s 版，全是只读校验）：
-0. `EGRESS_CONTROL_ENABLE` 必须为 true——K8s 模式不支持 EC=off 回退，
-   关着就拒绝启动；
-1. PVC `ROLEMESH_K8S_DATA_PVC` 存在且 Bound；
-2. NetworkPolicy `rolemesh-agent-default-deny` 与 `rolemesh-agent-allow-gateway`
-   存在，且 podSelector 命中 `rolemesh.io/role=agent`；
-3. CNI 支持 NetworkPolicy 的探测：创建一个带 deny-all 标签的探针 Pod 尝试访问
-   外网 IP，必须失败（kind 默认 kindnet **不支持** NetworkPolicy——见 §8.2）；
-4. RBAC 自检：SelfSubjectAccessReview 确认有 pods 的 create/delete/watch/log 权限。
-
-### 4.7 不动的部分（明确边界）
-
-- `scheduler.py`、`container_executor.py` 主流程（除删掉 C1 的 getattr 特例，
-  改调 `runtime.get_network_info()`）、NATS IPC、safety 管道、skill 投影、
-  `mount_security.py`、WebUI/channels——零改动。
-- `erofs_watcher.py`：readonly-rootfs 在两个 runtime 下报错形态相同（EROFS），不动。
-- evaluation CLI：**仅支持 docker 模式**（已拍板）。改用与 main.py 相同的
-  provider 入口；`ROLEMESH_CONTAINER_RUNTIME=k8s` 时 CLI 直接报错退出。
+scheduler、container_executor 主流程、NATS IPC（含 orch_glue 快照 RPC、
+RemoteCredentialResolver）、token_identity、dns_policy/dns_resolver、
+safety 管道、skill_projection、mount_security、erofs_watcher、WebUI。
 
 ---
 
-## 5. 网络与安全模型映射（细化）
+## 5. 网络与安全模型
 
-### 5.1 K8s 侧 NetworkPolicy（Helm 模板，共 4 条）
+### 5.1 K8s NetworkPolicy（Helm 模板，4 条）
 
-1. `agent-default-deny`：`podSelector: rolemesh.io/role=agent`，
-   `policyTypes: [Egress, Ingress]`，无规则（全拒）。
-2. `agent-allow-egress`：放行 agent →
-   gateway Pod（53/udp+tcp、3001、3128）、→ NATS Pod（4222）、
-   → orchestrator Pod（凭证代理端口，若启用）。**不放行** kube-dns——agent 的
-   DNS 只能去 gateway（与 Docker 模式 `HostConfig.Dns` 等价且更强）。
-3. `gateway-policy`：ingress 仅来自 agent/orchestrator；egress 放行
-   53/443/80 及 values 声明的端口（gateway 自身仍有应用层 allowlist，双保险）。
-4. `orchestrator-policy`：egress → K8s API、Postgres、NATS、gateway。
+1. `agent-default-deny`：`role=agent`，Ingress+Egress 全拒（独立存在，
+   便于单独校验"默认拒绝"不变量）。
+2. `agent-allow-egress`：仅放行 agent → gateway（53/udp+tcp、3001、3128）、
+   → NATS（4222）。**不放行 kube-dns**。
+3. `gateway-policy`：入站仅 agent/orchestrator；出站放行 **NATS（4222，
+   凭证 RPC 与快照订阅必需）**、53/80/443 及 values 声明端口。
+4. `orchestrator-policy`：出站 → K8s API、Postgres、NATS、gateway、
+   外网 HTTPS（自身 LLM 调用）。
 
-### 5.2 身份机制（rev2 重写：token 带内传递，拓扑无关）
+### 5.2 身份与凭证（沿袭 rev2）
 
-main@be953c5 起身份是 spawn 时签发的 HMAC token，随请求带内传递，gateway
-无状态验签——**在 K8s 下原样工作，零改动**。源 IP 不再承担身份职责，因此：
-
-- rev1 的源 IP 保留校验（kube-proxy `masqueradeAll` 探测、T-NET 源 IP 回显
-  用例）**取消**；NetworkPolicy 限制"谁能到达 gateway"仍保留，作为纵深防御。
-- gateway 不再持每租户内存态，多副本不再有身份层障碍（本期仍默认 1 副本，
-  扩副本只是 values 改数字）。
-- 部署面新增硬要求：`EGRESS_TOKEN_SECRET` 经 K8s Secret 同时下发
-  orchestrator 与 gateway，**绝不进 agent Pod**（agent 只拿到自己的 token）。
-  token TTL 需覆盖 Pod 拉镜像/调度延迟，K8s 下冷启动比 Docker 慢，TTL
-  下限写进 Helm values 校验。
+token 带内传递，gateway 无状态验签，两个 runtime 零差异。
+`EGRESS_TOKEN_SECRET` 经 compose env / K8s Secret 同时下发 orchestrator
+与 gateway，绝不进 agent。真实 LLM 密钥只存在于 DB（Fernet 加密）与
+orchestrator 解密路径；gateway 每请求经 NATS RPC 取用、TTL 缓存。
+token TTL 须覆盖 K8s 冷启动延迟（values 校验下限）。
 
 ### 5.3 DNS
 
-gateway 的 DNS server 监听 `0.0.0.0:53`（容器内），两个模式都一样；
-区别只在"agent 怎么被指过去"：Docker 用 `HostConfig.Dns=[bridge IP]`，
-K8s 用 `dnsPolicy: None + nameservers=[Service ClusterIP]`。
-ClusterIP 稳定（Service 不重建不变），比 Docker 下"gateway 重启换 IP 需重新注册"
-更可靠。
+gateway resolver 统一监听 **1053**（两边一致，去掉 NET_BIND_SERVICE：
+compose 端口映射 53→1053 / K8s Service port 53 → targetPort 1053，
+K8s namespace 可全量 PSA restricted）。agent 的 nameserver 指向
+`EGRESS_GATEWAY_DNS_IP`（静态配置）。
 
-### 5.4 凭证代理
+### 5.4 gVisor
 
-K8s 下 orchestrator 是 Deployment，凭证代理端口暴露为 headless/ClusterIP
-Service；`HTTP_PROXY` 注入值从 policy 拿 Service DNS 名。真实密钥仍只存在于
-orchestrator Pod（来自 K8s Secret），agent Pod 只见占位符——安全模型不变。
+docker：spec.runtime=runsc；K8s：runtimeClassName=gvisor。本地 Ubuntu
+可装 runsc，docker 模式全链路可验；K8s 侧以 RKE2 实测为准
+（`k8s-prod-only` 标记）。
 
-### 5.5 gVisor
+### 5.5 已知语义差异（契约文档显式列出）
 
-RKE2 节点装好 containerd-shim-runsc + RuntimeClass `gvisor` 后，
-`ROLEMESH_K8S_RUNTIME_CLASS=gvisor` 即可；与 Docker 模式
-`CONTAINER_OCI_RUNTIME=runsc` 的 fail-closed 语义一致（RuntimeClass 不存在则
-Pod 创建失败）。本地 Ubuntu 可直接安装 runsc：**Docker 模式的 gVisor 契约
-测试在本地即可全链路验证**；kind 节点内装 runsc 不作要求，K8s 侧的
-RuntimeClass 以 RKE2 实测为准（对应用例标记 `k8s-prod-only`）。
-
-### 5.6 已知语义差异（写进契约文档，不掩盖）
-
-| 差异 | Docker | K8s | 处理 |
-|---|---|---|---|
-| 日志流 | 可只取 stderr | stdout/stderr 合流 | agent_runner 的协议输出走 NATS 而非 stdout，stderr 仅用于诊断日志 → 合流可接受；契约测试只断言"诊断行出现在流中" |
-| pids limit | 每容器 `PidsLimit` | kubelet `podPidsLimit`（节点级） | Helm NOTES + `provision_infrastructure` 打告警；RKE2 values 文档给 kubelet 参数 |
-| tmpfs uid/gid/mode 选项 | 支持 | emptyDir 不支持 mount 选项 | 镜像内以 UID 1000 运行，emptyDir 默认属主即运行用户，实测等价；契约测试 T-FS-2 锁定 |
-| 容器重名 | create_or_replace 顶替 | Pod 名冲突报 409 | K8sRuntime.run() 先 delete 旧 Pod 再 create（与 Docker 行为对齐） |
+| 差异 | 处理 |
+|---|---|
+| K8s 日志 stdout/stderr 合流 | 协议输出走 NATS，stderr 仅诊断 → 可接受；用例只断言"诊断行出现" |
+| pids limit 节点级 | Helm NOTES + 启动告警 + RKE2 kubelet 配置文档 |
+| emptyDir 无 uid/gid 挂载选项 | 镜像 UID 1000 运行，默认属主即运行用户；T-FS 用例锁定 |
+| Pod 名冲突 409 | runtime 内先删后建，对齐 docker 行为 |
 
 ---
 
 ## 6. 存储模型
 
-### 6.1 数据面清单
+### 6.1 挂载翻译（两个 runtime 同一形状）
 
-`DATA_DIR` 下：`workspace/<coworker>`、`shared/`、`sessions/`、`logs/`、
-`spawns/<job_id>/skills/`。写入方 = orchestrator（投影、初始化），
-读写方 = agent Pod。**同一时刻同一路径只有一个 agent 写**（per-spawn 目录 +
-scheduler 串行化），所以对存储一致性要求不苛刻。
+orchestrator 容器化引入 docker-out-of-docker 路径翻译：orchestrator 在
+容器内看到 `/app/data/...`，但它通过宿主机 dockerd 创建 agent 容器时，
+bind 源必须是**宿主机路径**。这与 K8s 的 PVC subPath 翻译是同一问题：
 
-### 6.2 各环境的卷方案
+```
+业务代码生成：  VolumeMount(host_path=DATA_DIR / "spawns/<job>/skills")
+                                │ relpath = path.relative_to(DATA_DIR)
+DockerRuntime： bind 源 = ROLEMESH_HOST_DATA_DIR / relpath
+K8sRuntime：    volumeMounts: {name: data, subPath: relpath}
+```
+
+业务代码（skill_projection 等）零改动；`DATA_DIR` 之外的路径在两个
+runtime 下都默认拒绝，例外经部署文件显式声明（compose 额外 volume /
+values `agent.extraVolumes`），`mount_security.py` 仍校验容器内目标路径。
+
+### 6.2 各环境卷方案
 
 | 环境 | 方案 |
 |---|---|
-| 本地 + Docker 模式 | 现状不变（bind mount） |
-| 本地 + kind | `hostPath` PV 绑到 kind node 的 `extraMounts`（kind 配置把宿主 `./data` 映射进 node），或单副本 `local-path` PVC——orchestrator 与 agent Pod 同节点（kind 单 node），RWO 即够 |
-| RKE2 生产 | **RWX StorageClass**（Longhorn RWX / NFS / CephFS）。若集群只有 RWO：orchestrator 与 agent Pod 用 podAffinity 钉到同节点 + RWO PVC（chart 提供 `storage.mode=rwx|rwo-colocated` 两档） |
-
-### 6.3 额外挂载（mount-allowlist）
-
-Docker 模式不变。K8s 模式：`values.yaml` 的 `agent.extraVolumes` 显式声明
-（hostPath/PVC/configMap），orchestrator 端 `mount_security.py` 依旧校验容器内
-目标路径；不在声明清单里的额外挂载请求 fail-closed。
+| 本地 docker | compose 把 `./data` 挂给 orchestrator；agent bind `ROLEMESH_HOST_DATA_DIR`（=`${PWD}/data`） |
+| 本地 kind | kind node `extraMounts` 映射 `./data`，hostPath PV 或 local-path PVC（单节点 RWO 即够） |
+| RKE2 生产 | RWX StorageClass（Longhorn RWX/NFS）；无 RWX 时 `storage.mode=rwo-colocated`（podAffinity 同节点） |
 
 ---
 
-## 7. 契约测试设计
-
-### 7.1 框架
+## 7. 契约测试
 
 ```
 tests/container/contract/
-  conftest.py          # runtime fixture: --runtime=docker|k8s（pytest 选项）
-  test_lifecycle.py    # T-LC-*: run/wait/exit code/stop/重名顶替/孤儿清理
-  test_filesystem.py   # T-FS-*: readonly rootfs(EROFS)/tmpfs 可写+属主/挂载翻译 ro|rw
-  test_env_security.py # T-SEC-*: env 注入/CapDrop 生效/no-new-privileges/
-                       #          非 root UID/K8s 无 SA token
-  test_network.py      # T-NET-*: agent 无直接外网/agent→gateway 可达/
-                       #          DNS 只能经 gateway/无 token 请求被 407 拒绝
-  test_streams.py      # T-IO-*:  stderr 诊断行可见/输出大小上限
+  conftest.py          # --runtime=docker|k8s；fixture 产出真实 runtime + 校验部署层已就位
+  test_verify.py       # T-VER-*: verify_infrastructure 各不变量缺失时 fail-closed
+  test_lifecycle.py    # T-LC-*:  run/退出码/stop/重名顶替/孤儿清理
+  test_filesystem.py   # T-FS-*:  EROFS/tmpfs 可写+属主/挂载翻译 ro|rw
+  test_env_security.py # T-SEC-*: env 白名单/CapDrop/非 root/无 SA token(k8s)
+  test_network.py      # T-NET-*: agent 无直接外网/裸 IP metadata 不可达/
+                       #          DNS 只能经 gateway/无 token 请求 407
+  test_streams.py      # T-IO-*:  诊断流可见/输出上限
 ```
 
-要点：
-- fixture 产出真实 runtime 实例（不 mock）：docker 模式要求本机 dockerd；
-  k8s 模式要求 `KUBECONFIG` 指向 kind/任意集群且 chart 的
-  `rolemesh-test` values 已安装（仅 PVC+NetworkPolicy+gateway，不装 orchestrator）。
-- 测试镜像用 `rolemesh-agent` 本体 + entrypoint 覆盖为 shell 断言命令
-  （`ContainerSpec.entrypoint` 已支持），不再依赖 Alpine。
-- 同一用例体两边跑：`pytest tests/container/contract --runtime=docker` 与
-  `--runtime=k8s`；CI 矩阵两个 job。
-- 现有 `tests/container/test_docker_runtime.py`（mocked）保留为单测；
-  `tests/egress/integration/` 的隔离验证逐步并入 T-NET。
-
-### 7.2 通过标准（交付验收）
-
-- Docker 模式：Ubuntu（amd64）本机全绿（含 `CONTAINER_OCI_RUNTIME=runsc`）。
-- K8s 模式：同机 kind（+ Calico）全绿。
-- 同一份用例文件，零 `if runtime == ...` 分支（语义差异只允许出现在
-  §5.6 列出的、以 marker 显式标注的用例上）。
+- 前置：docker 模式要求 `docker compose up` 的基础设施已起；k8s 模式要求
+  chart 的 `rolemesh-test` values 已装（PVC+NetworkPolicy+gateway+NATS）。
+  **测试不自建基础设施**——这本身就是对"声明式"的测试。
+- 验收：Ubuntu 本机 docker 全绿（含 runsc）；同机 kind（Calico）全绿；
+  同一份用例零 runtime 分支。
+- 现有 `tests/egress/integration/` 中与基础设施自举相关的 fixture 改为
+  依赖 compose；`test_bootstrap.py` 随 bootstrap.py 删除。
 
 ---
 
 ## 8. 部署面
 
-### 8.1 Helm chart（`deploy/charts/rolemesh/`）
+### 8.1 本地：`deploy/compose/compose.yaml`（取代 README 的进程式启动）
 
-```
-deploy/charts/rolemesh/
-  Chart.yaml                  # dependencies: nats（官方 chart）, postgresql（bitnami，可选 enabled=false 用外部 DB）
-  values.yaml
-  values-kind.yaml            # 本地 kind 档
-  values-rke2.example.yaml    # 生产示例档
-  templates/
-    orchestrator-deployment.yaml   # replicas 固定 1（scheduler 全局并发控制是进程内的）
-    orchestrator-rbac.yaml         # Role: pods create/get/list/watch/delete + pods/log；绑定 SA
-    webui-deployment.yaml / webui-service.yaml / ingress.yaml
-    egress-gateway-deployment.yaml / egress-gateway-service.yaml
-    credential-proxy-service.yaml
-    data-pvc.yaml
-    networkpolicy-*.yaml           # §5.1 的 4 条
-    secrets.yaml                   # LLM keys / WS_TICKET_SECRET / EGRESS_TOKEN_SECRET
-                                   #   / DB URL（支持 existingSecret；EGRESS_TOKEN_SECRET
-                                   #   只挂 orchestrator 与 gateway，绝不进 agent Pod）
-    job-seed-admin.yaml            # ROLEMESH_SEED_ADMIN_EMAIL 的 Helm hook（可选）
-  NOTES.txt                        # podPidsLimit、RWX、gVisor、CNI NetworkPolicy 支持等检查清单
-```
-
-values 关键面：`image.registry/repository/tag`（orchestrator/webui/agent/gateway 四个镜像）、
-`storage.mode`、`networkPolicy.enabled`（强制默认 true，关掉时 orchestrator 启动告警）、
-`gvisor.runtimeClassName`、`postgresql.enabled|externalUrl`、`nats.*`。
-
-**RKE2 专项**：默认 CNI Canal/ Calico 均支持 NetworkPolicy ✅；私有 registry 用
-`imagePullSecrets`；若启 PSA，namespace 标 `pod-security.kubernetes.io/enforce=baseline`
-（agent Pod 本身满足 restricted，gateway 需要 NET_BIND_SERVICE——或把 gateway DNS
-改听 1053 + Service 端口映射 53→1053，即可全 namespace restricted，**推荐后者**）。
-
-### 8.2 本地 Ubuntu（amd64）
-
-**前置要求**：
-- **标准 rootful Docker Engine ≥ 20.10**。不支持 rootless 模式——rootless 下
-  bridge 走 slirp4netns，`Internal=true` 隔离语义与容器源 IP 行为都会变化，
-  而源 IP 是 identity 机制的根基。
-- 用户 UID = 1000（Ubuntu 默认首用户）。镜像内 agent 以 UID 1000 运行，
-  bind mount 的读写权限依赖该对齐；Linux 上没有 Docker Desktop 的文件共享
-  魔法，这条在本地是真实生效的约束。
-- 非 EC 回退路径依赖 `ExtraHosts: host-gateway`（Docker ≥ 20.10 即可），
-  原生 Linux 上没有内置 `host.docker.internal`——现有代码的 Linux 分支
-  已处理，本地契约测试会真实覆盖到该分支。
-- 可选：本地安装 gVisor（runsc），Docker 模式的 gVisor 用例即可解除 skip。
-
-**Docker 模式**（README Quick Start 不变）：现有流程原样保留，回归即可。
-
-**kind 模式**（Linux 原生运行，无 VM 中间层）：
-```bash
-deploy/kind/cluster.yaml      # extraMounts: ./data → node；禁用默认 CNI
-deploy/kind/up.sh             # 前置检查 inotify 限额；kind create cluster &&
-                              # 安装 Calico（kindnet 不支持 NetworkPolicy，
-                              # 契约测试 T-NET 会 fail-closed 拦住）
-container/build.sh --kind-load  # 本机 amd64 构建 + kind load docker-image
-helm install rolemesh deploy/charts/rolemesh -f values-kind.yaml
-pytest tests/container/contract --runtime=k8s
+```yaml
+networks:
+  agent-net:  {name: rolemesh-agent-net, internal: true,
+               ipam: {config: [{subnet: 172.28.100.0/24}]}}   # 冷门网段防碰撞
+  egress-net: {name: rolemesh-egress-net}
+services:
+  nats:     {networks: {agent-net: {aliases: [nats]}}, ...}
+  postgres: {...}
+  egress-gateway:
+    networks:
+      agent-net: {ipv4_address: 172.28.100.53}   # = EGRESS_GATEWAY_DNS_IP
+      egress-net: {}
+    healthcheck: {test: curl -f http://localhost:3001/healthz, ...}
+  orchestrator:
+    depends_on: {nats: {condition: service_healthy},
+                 egress-gateway: {condition: service_healthy}, ...}
+    volumes: [./src:/app/src, ./data:/app/data,
+              /var/run/docker.sock:/var/run/docker.sock]
+    environment: {ROLEMESH_HOST_DATA_DIR: ${PWD}/data, ...}
+  webui: {...}
 ```
 
-**镜像架构**：本地（amd64）与生产 RKE2（amd64）一致，**单架构镜像贯穿
-本地验证与生产**——本地验过的镜像与生产运行的是同一架构。`build.sh` 保留
-`--platform` 参数，多架构（如增补 arm64）是可选项，不进交付物。
+README Quick Start 变为：`container/build.sh && docker compose up`。
+不设 hybrid profile（已拍板）：orchestrator 不再支持宿主机进程方式运行。
+
+### 8.2 生产：Helm chart（`deploy/charts/rolemesh/`）
+
+结构沿袭 rev2（orchestrator 单副本 Deployment + RBAC 仅 pods、webui、
+gateway Deployment+Service、4×NetworkPolicy、PVC、Secrets 含
+`EGRESS_TOKEN_SECRET`、seed Job、NOTES），更新两点：
+gateway-policy 放行 NATS 出站（§5.1）；gateway DNS 走 53→1053 端口映射，
+namespace 全量 PSA restricted。NATS/Postgres 为 chart 依赖，可切外部实例。
+
+### 8.3 本地 kind
+
+沿袭 rev2 §8.2：rootful Docker、Calico（kindnet 无 NetworkPolicy）、
+inotify 预检、单架构 amd64 镜像 `kind load`、`values-kind.yaml`。
 
 ---
 
-## 9. 风险与开放问题
+## 9. 风险与缓解
 
-| 风险 | 影响 | 缓解 |
-|---|---|---|
-| kind 默认 CNI 不支持 NetworkPolicy | 本地 k8s 验证出现"假绿"（隔离形同虚设） | `provision_infrastructure()` 主动探测 deny 是否生效（§4.6 第 3 条），探不到就拒启 |
-| RWX 存储在目标 RKE2 不可用 | agent 与 orchestrator 不能共享 DATA_DIR | chart 的 `rwo-colocated` 档（podAffinity 同节点）；长期可演进为 init-container 拷贝/对象存储 |
-| podPidsLimit 是节点级 | fork 炸弹防护弱于 Docker 模式 | NOTES + 启动告警；RKE2 文档给 kubelet 配置片段 |
-| Pod 启动延迟 > Docker 容器启动 | per-message agent 冷启动用户可感 | 镜像预拉（DaemonSet puller 或 `imagePullPolicy: IfNotPresent` + 节点预热）；后续可做 agent Pod 池（明确不在本期范围） |
-| watch 断流 / API server 抖动 | wait() 卡死或误判 | resourceVersion 续传 + 周期 read 兜底 + 现有 CONTAINER_TIMEOUT 上限兜底 |
-| `aiodocker` 与 `kubernetes_asyncio` 依赖共存 | 镜像/安装体积 | 双 extra：`uv sync --extra k8s`；运行时按 `ROLEMESH_CONTAINER_RUNTIME` 延迟导入 |
+| 风险 | 缓解 |
+|---|---|
+| DooD 路径翻译配错（`ROLEMESH_HOST_DATA_DIR` 与实际不符） | `verify_infrastructure` 启动时做回环自检：orchestrator 写入 data 下哨兵文件 → 以宿主路径 bind 给探针容器读取，读不到即拒启 |
+| compose 固定子网与宿主已有网络冲突 | 选冷门网段 + 文档说明可覆盖；`verify` 检查网络属性而非假设创建成功 |
+| kind CNI 假绿 | deny 实测探针（§4.2），探不到拒启 |
+| RWX 不可用 | `storage.mode=rwo-colocated` 档 |
+| pids limit 节点级 | NOTES + 告警 + kubelet 配置文档 |
+| K8s watch 断流 | resourceVersion 续传 + 周期 read + CONTAINER_TIMEOUT 兜底 |
+| 撤销 #84（EC=off）引发回退顾虑 | 回退语义改由部署层承担：需要"无管控"环境时另写一份 compose 文件（不进主仓库默认路径）；业务代码不再为此分叉 |
+| 开发体验变化（容器内调试） | bind-mount + reload；debugpy 5678；文档给 IDE 配置样例 |
 
-**已拍板的决策**（2026-06-11 评审）：
-1. agent Pod 与平台组件**同 namespace** 起步（RBAC 已按 namespace 收窄；
-   分 namespace 是后续增强）。
-2. evaluation CLI **仅在本地 docker 模式运行**，不支持 K8s。
+**已拍板决策汇总**：同 namespace 起步；evaluation CLI 仅 docker 模式；
+采纳 rev3 声明化方向；不设 hybrid profile；删除 EC=off（撤销 #84）。
 
 ---
 
@@ -509,59 +397,35 @@ pytest tests/container/contract --runtime=k8s
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| **P1 解耦**（纯重构，行为不变） | C9 配置统一；Protocol 扩展（§4.2）；EgressGatewayProvider 抽出（§4.3）；HostAccessPolicy（§4.4）；挂载翻译接缝（§4.5）；删 C1/C2 绕路；契约测试框架 + docker 模式全绿 | 现有全部测试 + 新契约测试在 Docker 模式通过；README Quick Start 不变 |
-| **P2 K8sRuntime** | `k8s_runtime.py` + provider + policy 三件套；kind 配置与脚本 | 契约测试 `--runtime=k8s` 在本地 kind（Ubuntu amd64 + Calico）全绿 |
-| **P3 Helm chart** | chart 全量模板 + 三档 values + NOTES；RKE2 部署文档 | `helm lint` + `helm template` 快照测试；kind 上 `helm install` 后端到端跑通一条 agent 会话 |
+| **P1 声明化 + 解耦** | compose 文件 + orchestrator Dockerfile；删第一、二组代码（§1.2）；`verify_infrastructure` 两 stub（docker 实现 + k8s NotImplemented）；挂载翻译层；`compute_egress_routing` 单路径化；契约测试框架 | docker 模式契约测试全绿；`docker compose up` 端到端跑通一条 agent 会话；**净删码** |
+| **P2 K8sRuntime** | `k8s_runtime.py` + verify K8s 版 + kind 脚本 | 契约测试 `--runtime=k8s` kind 全绿 |
+| **P3 Helm chart** | chart + 三档 values + NOTES + RKE2 文档 | helm lint/template 快照；kind 上 `helm install` 端到端一条 agent 会话 |
 
-最终交付物 = P1 解耦代码 + P2 K8sRuntime + 契约测试双绿 + P3 可执行 Helm chart。
+**工作量估算（rev3 修订）**：
+
+| 阶段 | 估算 | 备注 |
+|---|---|---|
+| P1 | 新增 ~700（compose 150 + verify 150 + 翻译层 80 + 契约测试 ~700 中先落 docker 侧）；**删除 ~1,100** | 生产代码净负 |
+| P2 | ~1,200（k8s_runtime 650–800 + verify-k8s 100 + kind 150 + k8s 测试 fixture 300） | 较 rev2 略降（无 provider/policy 三件套） |
+| P3 | ~1,100（YAML 为主） | 与 rev2 持平 |
 
 ---
 
-## 附录 A：泄漏点清单 → 修复归属（评审核对表）
+## 附录 A：rev1 泄漏点清单的 rev3 终局
 
-评审中逐行核对出的 11 处 Docker 泄漏，按处理方式分三组。
-原则：实质泄漏必须落在 §4 已有接缝里（不为单点新增抽象）；
-注释/文案级不立设计条目，但列入 P1 清理清单防止遗漏。
+| 泄漏点 | rev3 处置 |
+|---|---|
+| #1 executor MCP 主机选择 | main #84 已解决（读 EgressRouting） |
+| #2 runner proxy 拼接 EC 分支 | EC=off 删除后单路径化（§4.3） |
+| #3 bootstrap 直接 aiodocker | **文件删除**（不再有东西需要 bootstrap） |
+| #4 `getattr(_ensure_client)` | main #83 已随 IP 身份删除 |
+| #5 `CONTAINER_HOST_GATEWAY` | **删除**（无宿主机服务可寻址） |
+| #6 `rewrite_loopback_to_host_gateway` | **删除**（视角统一） |
+| #7 `_build_extra_hosts` host-gateway 部分 | **删除**；metadata 黑洞保留为 docker 侧两行常量 |
+| #8 "Docker's default resolver" fail-open 告警 | 分支删除：DNS IP 缺失 = 配置错误，启动即拒 |
+| #9 ContainerSpec docstring Docker-isms | P1 顺手改写为中立语义 |
+| #10 protocol.py 注释示例 | P1 顺手改（示例改服务名） |
+| #11 "dockerd version gate" 注释 | 随 bootstrap.py 删除 |
 
-**rev2 状态更新（main@be953c5 核对）**：
-- **已在 main 解决**：#1 executor MCP 主机选择（现统一读
-  `EgressRouting.mcp_proxy_host`）；#4 `_publish_agent_started` 的
-  `getattr(_ensure_client)`（随 IP 身份机制整体删除）。
-- **已收敛、待平台化**：#2 proxy 拼接、#5 `CONTAINER_HOST_GATEWAY`、
-  #6 loopback 重写、#7 extra_hosts——全部聚进了 `compute_egress_routing`
-  单一函数，§4.4 平台化时随函数体迁入 `DockerAgentRouting`，一次解决。
-  #8 的 fail-open 分支现在是 `EgressRouting.warn_missing_dns` 字段，
-  平台化时同样收口。
-- **仍待处理**：#3 bootstrap.py 直接 aiodocker、#11 "dockerd version gate"
-  注释（归属不变：§4.3 `DockerEgressGatewayProvider`）；#9/#10 注释清扫不变。
-- 行号引用以 rev1 基线 `0e72ae3` 为准，main 上已漂移。
-
-### A.1 设计已显式点名（4）
-
-| 位置 | 泄漏 | 归属 |
-|---|---|---|
-| `runner.py:435-447` | EC 开关分支拼 proxy_base / forward_proxy_url / NO_PROXY，gateway 容器名当主机名 | §4.4：改调 `HostAccessPolicy`，主机名来自 `GatewayEndpoints`，分支消失 |
-| `egress/bootstrap.py:93-129` | 业务代码直接持有 aiodocker、解析 NetworkSettings | §4.3（= C3）：整体并入 `DockerEgressGatewayProvider`——aiodocker 调用不消失，搬进 docker 专属实现 |
-| `container_executor.py:728-733` | `getattr(runtime, "_ensure_client")` 偷客户端 inspect | §4.2（= C1）：改调 `runtime.get_network_info()` |
-| `runtime.py:202-238` | `rewrite_loopback_to_host_gateway()` 字符串替换成为公共 API | §4.4（= C5）：收编进 `DockerHostAccessPolicy`，公共模块删除 |
-
-### A.2 已有接缝的必然结果，此处显式登记（3）
-
-| 位置 | 泄漏 | 归属 |
-|---|---|---|
-| `container_executor.py:299-303` | MCP proxy URL 在 gateway 名与 `host.docker.internal` 间二选一 | `GatewayEndpoints` 增加 `reverse_proxy_base` 字段；executor 拼 MCP URL 从 endpoints 取主机，EC/回退判断收进 provider |
-| `runtime.py:146` | `CONTAINER_HOST_GATEWAY = "host.docker.internal"` 公共常量 | 迁入 `DockerHostAccessPolicy` 私有；§4.4 落地后 runner/executor 的 import 清零 |
-| `runner.py:319-340` | `_build_extra_hosts()`：host-gateway 映射 + metadata 黑洞 | 即 `HostAccessPolicy.extra_hosts()`。metadata 黑洞（/etc/hosts 名字劫持）是 docker 侧纵深防御；K8s 由 default-deny NetworkPolicy 承担同一职责，`K8sHostAccessPolicy` 返回空，不做 hostAliases 模拟 |
-
-### A.3 注释/文案级——P1 顺手清理，不立设计条目（4）
-
-| 位置 | 内容 | 处理 |
-|---|---|---|
-| `runner.py:577-597` | 告警文案 "Docker's default resolver" | 措辞改运行时中立。附注：该 `elif` 分支本身 fail-open（EC 开但 DNS IP 未注册→告警继续跑）；provider 化后 `dns_ip` 是 `ensure_running()` 返回值必填字段，生产路径自然关闭，测试跳过 gateway 的路径保留原告警即可 |
-| `runtime.py:75-85` | `ContainerSpec` docstring 写死 Docker 行为（127.0.0.11 等） | P1 改 Protocol 时重写为中立语义；契约由契约测试定义，不靠 docstring |
-| `ipc/protocol.py:27` | `McpServerSpec.url` 注释举例 `host.docker.internal` | URL 值的来源由 A.2 第一条覆盖；注释示例一并改掉 |
-| `egress/bootstrap.py:16` | 流程注释 "dockerd version gate" | bootstrap 并入 `DockerEgressGatewayProvider` 后该注释留在 docker 专属文件中是恰当的；通用流程文档改措辞 |
-
-**刻意不做的**（防过度设计）：不为日志文案建抽象、不为 docstring 建 lint、
-不在 K8s 侧模拟 ExtraHosts/metadata 黑洞（NetworkPolicy 已覆盖）、
-不把 `GatewayEndpoints` 泛化为服务发现框架。
+11 处中 7 处的解法是**删除其存在前提**而非封装——这是 rev3 与
+rev1/rev2 的本质区别。
