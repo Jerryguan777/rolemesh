@@ -200,19 +200,58 @@ agent sends https://github.com/...
   ↓ agent ↔ github.com end-to-end TLS (Gateway does not decrypt)
 ```
 
-**DNS path**:
+**DNS path** (platform policy — see "DNS plane: platform-level policy" below):
 ```
-agent: dig api.anthropic.com
+agent: dig metrics.corp.example      # on EGRESS_DNS_ALLOWLIST
   ↓ UDP 53 → Gateway-internal DNS resolver
-  ↓ Safety pipeline (EGRESS_REQUEST, host=api.anthropic.com, mode=dns)
+  ↓ platform allowlist match (identity-free, identical for all tenants)
   ↓ allow → recursive query upstream → return A record
 
 agent: dig evil.com
   ↓ UDP 53 → Gateway-internal DNS resolver
-  ↓ Safety pipeline → block (domain not in allowlist)
+  ↓ platform allowlist miss → block
   ↓ Return NXDOMAIN, do not query upstream
   ↓ ★ Attacker-controlled DNS receives nothing
 ```
+
+### DNS plane: platform-level policy (not per-tenant)
+
+The DNS resolver originally re-used the per-tenant `egress.domain_rule`
+rows via the source-IP identity map. That coupling was retired: DNS
+decisions now come from a single platform-wide allowlist
+(`EGRESS_DNS_ALLOWLIST`, default **empty**), with an `EGRESS_DNS_MODE`
+of `enforce` (default) or `observe` (resolve everything, log would-be
+blocks; migration aid only).
+
+Why platform-level is sufficient — and why the list stays empty:
+
+- Proxied traffic never resolves its target inside the agent
+  container. With `HTTP_PROXY` set, the SDK hands the hostname to the
+  gateway as a string (CONNECT request line / absolute-form URL) and
+  the **gateway** resolves it on its own egress-side resolver path,
+  which this policy does not touch. Per-tenant access control happens
+  at the CONNECT / reverse-proxy layer, unchanged.
+- Container names (`nats`, `egress-gateway`) are answered locally by
+  Docker's embedded DNS (127.0.0.11); only external names are
+  forwarded to the gateway resolver.
+- Therefore every query that reaches this resolver comes from code
+  bypassing the proxy convention — a tool missing proxy config, or a
+  DNS-exfiltration attempt. Allowing a name here rescues no legitimate
+  flow (the bridge has no route to the resolved address); the resolver
+  is a **tripwire**, not a service. Fix proxy-unaware tools at the
+  tool, not by widening this list.
+- Tenant self-service must not reach this list: a malicious tenant
+  allowlisting an attacker-controlled apex would otherwise open a DNS
+  exfil channel usable by *every* tenant's compromised agents. The
+  list is operator-set (env), with `platform_safety_rules` as the
+  upgrade path if runtime editing is ever needed.
+
+Audit consequence: DNS decisions are recorded as structured gateway
+logs (qname redacted past the registered domain) rather than
+`safety_decisions` rows — platform-level decisions carry no per-agent
+identity for the audit fan-in's coworker re-validation. The
+HTTP planes retain full per-tenant audit attribution; a DNS-exfil
+attempt almost always pairs with an attributed CONNECT block.
 
 ---
 

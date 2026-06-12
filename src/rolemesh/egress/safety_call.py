@@ -234,7 +234,7 @@ class AuditPublisher:
         # ``context_digest`` above keeps the SHA-256 so dedup of
         # repeated queries still works.
         display_host = (
-            _redact_dns_qname(request.host)
+            redact_dns_qname(request.host)
             if request.mode == "dns"
             else request.host
         )
@@ -269,12 +269,13 @@ class AuditPublisher:
             )
 
 
-def _redact_dns_qname(qname: str) -> str:
+def redact_dns_qname(qname: str) -> str:
     """Keep the last two labels, redact everything to their left.
 
     Egress-design threat: an agent sends a DNS query whose leftmost
     labels are the thing the attacker wants to exfiltrate. Dropping
     everything past the public-suffix heuristic keeps the audit row
+    (and dns_resolver's decision logs, which share this helper)
     useful ("some query under attacker.com") without recording the
     secret. The two-label heuristic is a deliberate simplification —
     proper Public Suffix List handling lives in V2's secret scanner

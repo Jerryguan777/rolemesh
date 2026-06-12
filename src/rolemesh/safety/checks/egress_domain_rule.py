@@ -91,12 +91,17 @@ class EgressDomainRuleConfig(BaseModel):
         return clean
 
 
-def _matches(host: str, pattern: str) -> bool:
+def matches_domain(host: str, pattern: str) -> bool:
     """Domain-aware match used by the gateway and the admin-side check.
 
     Both sides strip trailing dots + lowercase; keeps
     "Api.Anthropic.com." identical to "api.anthropic.com" regardless of
     which side of the wire the label came from.
+
+    Public because ``rolemesh.egress.dns_policy`` shares it — the
+    platform DNS allowlist and the tenant ``egress.domain_rule`` rules
+    must agree on what ``*.example.com`` means, and one function is the
+    only way to keep them from drifting.
     """
     pattern = pattern.lower().rstrip(".")
     host = host.lower().rstrip(".")
@@ -162,7 +167,7 @@ class EgressDomainRuleCheck:
         if cfg.ports is not None and port not in cfg.ports:
             return Verdict(action="allow")
         matched = next(
-            (p for p in cfg.domain_patterns if _matches(host, p)), None
+            (p for p in cfg.domain_patterns if matches_domain(host, p)), None
         )
         if matched is None:
             return Verdict(action="allow")
@@ -186,7 +191,7 @@ def make_egress_domain_check() -> Any:
             -> tuple[bool, list[dict]]
     — a flat shape that doesn't require importing the full
     ``SafetyContext`` type into the gateway image. This factory
-    returns exactly that callable, sharing the ``_matches`` helper
+    returns exactly that callable, sharing the ``matches_domain`` helper
     with the Protocol-compliant class above.
     """
     async def _check(
@@ -203,7 +208,7 @@ def make_egress_domain_check() -> Any:
         if cfg.ports is not None and port not in cfg.ports:
             return False, []
         matched = next(
-            (p for p in cfg.domain_patterns if _matches(host, p)), None
+            (p for p in cfg.domain_patterns if matches_domain(host, p)), None
         )
         if matched is None:
             return False, []
@@ -224,4 +229,5 @@ __all__ = [
     "EgressDomainRuleCheck",
     "EgressDomainRuleConfig",
     "make_egress_domain_check",
+    "matches_domain",
 ]

@@ -217,6 +217,11 @@ async def topology(docker_client: aiodocker.Docker) -> AsyncIterator[Topology]:
                 # smoke test. Block-path tests never reach upstream so
                 # this isn't load-bearing for those.
                 "EGRESS_UPSTREAM_DNS=8.8.8.8,1.1.1.1",
+                # Platform DNS allowlist (session-wide; the gateway is
+                # session-scoped). dns.google backs the allow-path smoke
+                # test in test_p0_dns — it needs a name that really
+                # resolves on the public upstreams above.
+                "EGRESS_DNS_ALLOWLIST=dns.google",
             ],
             "HostConfig": {
                 "NetworkMode": agent_network,

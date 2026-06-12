@@ -174,6 +174,8 @@ channel with its bot tokens.
 |------------------------------|--------------------------------------------------------------------------|
 | `ASSISTANT_NAME`             | Display name for your AI coworker.                                       |
 | `CONTAINER_NETWORK_NAME`     | EC-2 agent bridge (Internal=true) + egress gateway. Defaults to `rolemesh-agent-net` (EC **on**); set to `""` to roll back to the plain Docker bridge. |
+| `EGRESS_DNS_ALLOWLIST`       | Platform-wide DNS allowlist for the gateway resolver (comma-separated, `exact` or `*.suffix`). Default **empty** — proxied traffic never needs agent-side DNS, so the resolver is a tripwire; see docs/16. |
+| `EGRESS_DNS_MODE`            | `enforce` (default: non-matching names get NXDOMAIN) or `observe` (resolve everything, log would-be blocks; migration aid only). |
 | `ROLEMESH_ENV`               | `development` (default) or `production`. See note below.                 |
 | `ROLEMESH_SEED_ADMIN_EMAIL`  | If set, the WebUI seeds a `platform_admin` with this email at startup.   |
 | `WS_TICKET_SECRET`           | **Required.** Dedicated signing key for WebSocket handshake tickets.     |
