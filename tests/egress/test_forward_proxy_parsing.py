@@ -9,12 +9,14 @@ than spinning up an asyncio server.
 from __future__ import annotations
 
 import asyncio
+import base64
 
 import pytest
 
 from rolemesh.egress.forward_proxy import (
     ParsedRequest,
     _extract_plain_http_target,
+    _extract_proxy_auth_token,
     _read_request,
     _rewrite_request_line,
     _split_host_port,
@@ -179,3 +181,53 @@ class TestRewriteRequestLine:
             raw, "GET", "/", host_header_value="allowed.com:8080"
         )
         assert b"Host: allowed.com:8080\r\n" in rewritten
+
+    def test_proxy_authorization_stripped_on_forward(self) -> None:
+        """R1 red line: the identity token rides in Proxy-Authorization;
+        it must NOT reach the origin or it leaks the bearer credential."""
+        raw = (
+            b"GET http://allowed.com/ HTTP/1.1\r\n"
+            b"Host: allowed.com\r\n"
+            b"Proxy-Authorization: Basic am9iOnNlY3JldC10b2tlbg==\r\n"
+            b"Proxy-Connection: keep-alive\r\n"
+            b"User-Agent: probe\r\n"
+            b"\r\n"
+        )
+        rewritten = _rewrite_request_line(
+            raw, "GET", "/", host_header_value="allowed.com"
+        )
+        assert b"Proxy-Authorization" not in rewritten
+        assert b"am9iOnNlY3JldC10b2tlbg" not in rewritten
+        assert b"Proxy-Connection" not in rewritten
+        # Non-hop-by-hop headers survive.
+        assert b"User-Agent: probe\r\n" in rewritten
+
+
+class TestExtractProxyAuthToken:
+    def _parsed(self, header_val: str | None) -> ParsedRequest:
+        headers = {}
+        if header_val is not None:
+            headers["proxy-authorization"] = header_val
+        return ParsedRequest(method="CONNECT", target="x:443", headers=headers, raw=b"")
+
+    def test_extracts_password_half(self) -> None:
+        cred = base64.b64encode(b"job:my-signed-token").decode()
+        token = _extract_proxy_auth_token(self._parsed(f"Basic {cred}"))
+        assert token == "my-signed-token"
+
+    def test_token_may_contain_dots(self) -> None:
+        cred = base64.b64encode(b"job:payload.sig").decode()
+        assert _extract_proxy_auth_token(self._parsed(f"Basic {cred}")) == "payload.sig"
+
+    def test_missing_header_returns_none(self) -> None:
+        assert _extract_proxy_auth_token(self._parsed(None)) is None
+
+    def test_non_basic_scheme_returns_none(self) -> None:
+        assert _extract_proxy_auth_token(self._parsed("Bearer abc")) is None
+
+    def test_garbage_base64_returns_none(self) -> None:
+        assert _extract_proxy_auth_token(self._parsed("Basic !!!notb64")) is None
+
+    def test_no_colon_in_decoded_returns_none(self) -> None:
+        cred = base64.b64encode(b"nocolon").decode()
+        assert _extract_proxy_auth_token(self._parsed(f"Basic {cred}")) is None

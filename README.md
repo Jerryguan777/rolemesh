@@ -176,6 +176,8 @@ channel with its bot tokens.
 | `CONTAINER_NETWORK_NAME`     | EC-2 agent bridge (Internal=true) + egress gateway. Defaults to `rolemesh-agent-net` (EC **on**); set to `""` to roll back to the plain Docker bridge. |
 | `EGRESS_DNS_ALLOWLIST`       | Platform-wide DNS allowlist for the gateway resolver (comma-separated, `exact` or `*.suffix`). Default **empty** — proxied traffic never needs agent-side DNS, so the resolver is a tripwire; see docs/16. |
 | `EGRESS_DNS_MODE`            | `enforce` (default: non-matching names get NXDOMAIN) or `observe` (resolve everything, log would-be blocks; migration aid only). |
+| `EGRESS_TOKEN_SECRET`        | **Required under EC.** Shared HMAC secret (≥16 chars) the orchestrator signs and the gateway verifies agent identity tokens with. Same value in both processes via the shared `.env`; never injected into agent containers. Missing → orchestrator/gateway refuse to boot. |
+| `EGRESS_TOKEN_TTL_SECONDS`   | Max lifetime of an identity token (and thus an agent container before the orchestrator re-mints). Default 7 days. |
 | `ROLEMESH_ENV`               | `development` (default) or `production`. See note below.                 |
 | `ROLEMESH_SEED_ADMIN_EMAIL`  | If set, the WebUI seeds a `platform_admin` with this email at startup.   |
 | `WS_TICKET_SECRET`           | **Required.** Dedicated signing key for WebSocket handshake tickets.     |

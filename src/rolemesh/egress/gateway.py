@@ -74,6 +74,7 @@ from .remote_credentials import RemoteCredentialResolver
 from .remote_token_vault import RemoteTokenVault
 from .reverse_proxy import set_token_vault, start_credential_proxy
 from .safety_call import AuditPublisher, EgressSafetyCaller
+from .token_identity import TokenAuthority
 
 logger = get_logger()
 
@@ -252,6 +253,14 @@ async def main() -> None:
         # orchestrator's start_credential_responder over NATS.
         credential_resolver = RemoteCredentialResolver(nats_client)
 
+        # --- Token authority (token-identity refactor) --------------
+        # Verifies the signed identity token agents carry in their proxy
+        # env. Shares EGRESS_TOKEN_SECRET with the orchestrator (same
+        # bind-mounted .env). Fail-closed: a missing secret raises here
+        # and the gateway refuses to boot, same posture as the rule
+        # snapshot. The IP resolver stays wired as the dual-run fallback.
+        token_authority = TokenAuthority.from_env()
+
         # --- Reverse proxy (port 3001) -------------------------------
         reverse_runner = await start_credential_proxy(
             port=CREDENTIAL_PROXY_PORT,
@@ -259,11 +268,16 @@ async def main() -> None:
             credential_resolver=credential_resolver,
             identity_resolver=identity,
             safety_caller=safety,
+            token_authority=token_authority,
         )
         stack.push_async_callback(reverse_runner.cleanup)
 
         # --- Forward proxy (port 3128) -------------------------------
-        forward = ForwardProxy(identity_resolver=identity, safety_caller=safety)
+        forward = ForwardProxy(
+            identity_resolver=identity,
+            safety_caller=safety,
+            token_authority=token_authority,
+        )
         forward_server = await forward.serve("0.0.0.0", EGRESS_GATEWAY_FORWARD_PORT)
 
         async def _close_forward() -> None:

@@ -253,6 +253,67 @@ identity for the audit fan-in's coworker re-validation. The
 HTTP planes retain full per-tenant audit attribution; a DNS-exfil
 attempt almost always pairs with an attributed CONNECT block.
 
+### HTTP-plane identity: signed tokens (not source IP)
+
+The forward and reverse proxies originally recovered an agent's
+identity by mapping its bridge IP through an in-memory table fed by
+NATS `orchestrator.agent.lifecycle` events. That scheme is being
+replaced by **stateless signed tokens** (`egress/token_identity.py`):
+
+- The orchestrator mints an HMAC-SHA256 token per spawn carrying the
+  full identity (tenant / coworker / user / conversation / job) plus an
+  expiry, and injects it into the agent's proxy env — in the
+  forward-proxy URL userinfo (`HTTP_PROXY=http://job:<token>@gateway`,
+  emitted as `Proxy-Authorization: Basic`) and as a leading path
+  segment on each reverse-proxy base URL (`/proxy/<token>/<provider>`).
+- The gateway verifies the token with the shared `EGRESS_TOKEN_SECRET`
+  and reads identity straight out of it — no shared state, no event
+  stream, no lookup table. Verification is a pure function.
+
+Why: the IP scheme couples identity to L3 topology (breaks under NAT /
+k8s / multi-host) and to a distributed-state pipeline whose every
+failure mode is a silent 401 (lost lifecycle event → permanent 401
+until the next gateway restart). A token travels in-band, so identity
+is established the instant the container starts and survives a gateway
+restart with zero recovery.
+
+TTL and recycling: a token is a bearer credential, bounded by
+`EGRESS_TOKEN_TTL_SECONDS` (default 7 days). Because a session container
+can outlive any fixed window, the orchestrator re-mints by recycling
+the container at a message boundary before the token ages out — so
+expiry never lands mid-turn, and the gateway stays a stateless
+verifier. The secret lives only on the orchestrator and gateway (shared
+`.env`), never inside an agent container.
+
+Migration is dual-run: the gateway verifies tokens first and falls back
+to the source-IP map when a token is absent or invalid, logging both a
+coverage signal (fallback used) and a consistency signal (token vs IP
+disagree). The IP pipeline is removed only once those signals confirm
+100% token coverage with zero disagreement. (A rejected/forged token is
+not a hole during dual-run: the token claims are discarded and the
+request proceeds under the agent's *real* source-IP identity, which the
+agent cannot forge — the forged tenant never takes effect.)
+
+Client gotcha — proxy-auth method: clients must present the token
+*proactively* in the `Proxy-Authorization` header. Most do
+(curl/httpx/requests/urllib/undici all send Basic from the proxy URL
+userinfo), but **git** defaults to `http.proxyAuthMethod=anyauth`,
+which waits for a `407` challenge before sending credentials — and the
+gateway never challenges during dual-run (it just IP-falls-back). The
+agent image therefore pins `git config --system http.proxyAuthMethod
+basic` so git sends the token up front. Any other anyauth client added
+later needs the same treatment.
+
+2b prerequisite — the `407` challenge: once the IP fallback is deleted,
+a CONNECT with a missing/invalid token must return `407
+Proxy-Authentication Required` with `Proxy-Authenticate: Basic`, **not**
+`403`. Otherwise an anyauth client that deliberately withholds
+credentials pending a challenge hard-fails instead of retrying with the
+token. Implementing this means the forward proxy must keep the
+connection alive across the 407 to read the re-sent CONNECT (today it
+closes after any non-200), so it is scoped to 2b rather than retrofitted
+into the dual-run window where silent IP-fallback is intentional.
+
 ---
 
 ## Three Independent PRs (EC-1 / EC-2 / EC-3)

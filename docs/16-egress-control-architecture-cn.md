@@ -242,6 +242,53 @@ DNS resolver 最初通过源 IP 身份映射复用按租户的 `egress.domain_ru
 做 coworker 复验所需的 per-agent 身份。HTTP 面保留完整的按租户审计
 归因；一次 DNS 渗出尝试几乎总是伴随一条可归因的 CONNECT 拦截记录。
 
+### HTTP 面身份：签名 token（而非源 IP）
+
+forward / reverse proxy 最初通过把 agent 的网桥 IP 经 NATS
+`orchestrator.agent.lifecycle` 事件喂养的内存表反查来获取身份。该方案
+正被**无状态签名 token**（`egress/token_identity.py`）替代：
+
+- orchestrator 在每次 spawn 时签发一个 HMAC-SHA256 token，携带完整身份
+  （tenant / coworker / user / conversation / job）加过期时间，注入 agent
+  的代理 env——放在 forward proxy URL 的 userinfo
+  （`HTTP_PROXY=http://job:<token>@gateway`，客户端自动发
+  `Proxy-Authorization: Basic`）以及每个 reverse proxy base URL 的前导
+  路径段（`/proxy/<token>/<provider>`）。
+- gateway 用共享的 `EGRESS_TOKEN_SECRET` 验签并直接读出身份——无共享
+  状态、无事件流、无查找表，验证是纯函数。
+
+动机：IP 方案把身份与 L3 拓扑绑死（NAT / k8s / 多机下失效），且依赖一条
+分布式状态管道，其每种失败模式都是静默 401（丢一条 lifecycle 事件 →
+该 agent 在 gateway 下次重启前永久 401）。token 随请求同行，容器一启动
+身份即成立，gateway 重启零恢复。
+
+TTL 与回收：token 是 bearer 凭证，受 `EGRESS_TOKEN_TTL_SECONDS`（默认
+7 天）约束。由于会话容器可能超过任何固定窗口，orchestrator 在消息边界
+于 token 到期前回收容器来重新签发——过期永不落在对话中途，gateway 保持
+无状态验证者。密钥只存在于 orchestrator 和 gateway（共享 `.env`），绝不
+进入 agent 容器。
+
+迁移采用双跑：gateway 先验 token，token 缺失或无效时回退到源 IP 表，
+并同时记录覆盖率信号（用了回退）和一致性信号（token 与 IP 不一致）。
+只有当这两个信号确认 token 覆盖率 100% 且零不一致后，才删除 IP 管道。
+（双跑期内伪造/被拒的 token 不构成漏洞：token claim 被丢弃，请求按
+agent 的**真实**源 IP 身份继续，而源 IP 是 agent 无法伪造的——伪造的
+tenant 永远不会生效。）
+
+客户端坑——代理认证方式：客户端必须在 `Proxy-Authorization` 头里**主动**
+出示 token。多数客户端如此（curl/httpx/requests/urllib/undici 都从代理
+URL 的 userinfo 发 Basic），但 **git** 默认 `http.proxyAuthMethod=anyauth`，
+要等代理回 `407` 质询后才发凭据——而 gateway 在双跑期从不质询（直接 IP
+回退）。因此 agent 镜像固定了 `git config --system http.proxyAuthMethod
+basic`，让 git 主动发 token。日后新增的任何 anyauth 客户端需同样处理。
+
+2b 前置——`407` 质询：一旦删除 IP 回退，对缺失/无效 token 的 CONNECT
+必须回 `407 Proxy-Authentication Required` 带 `Proxy-Authenticate: Basic`，
+**而非** `403`。否则故意等质询才发凭据的 anyauth 客户端会硬失败而不重试。
+实现它要求 forward proxy 在 407 之后保持连接以读取重发的 CONNECT（当前
+对任何非 200 响应都会关连接），因此归入 2b，而不是塞进刻意保留静默 IP
+回退的双跑窗口。
+
 ---
 
 ## 三个独立 PR（EC-1 / EC-2 / EC-3）

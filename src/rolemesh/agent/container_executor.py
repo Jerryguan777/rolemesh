@@ -39,6 +39,7 @@ from rolemesh.core.config import (
     MCP_PROXY_PREFIX,
 )
 from rolemesh.core.logger import get_logger
+from rolemesh.egress.identity import Identity
 from rolemesh.ipc.protocol import AgentInitData, McpServerSpec
 
 if TYPE_CHECKING:
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
 
     from rolemesh.container.runtime import ContainerRuntime
     from rolemesh.core.types import Coworker, McpServerConfig
+    from rolemesh.egress.token_identity import TokenAuthority
     from rolemesh.ipc.nats_transport import NatsTransport
 
 logger = get_logger()
@@ -56,6 +58,7 @@ def rewrite_mcp_url_for_container(
     proxy_host: str = "host.docker.internal",
     proxy_port: int = 3001,
     proxy_prefix: str = "mcp-proxy",
+    egress_token: str | None = None,
 ) -> McpServerSpec:
     """Rewrite a host-side MCP URL to point at the credential proxy.
 
@@ -66,12 +69,22 @@ def rewrite_mcp_url_for_container(
 
     The proxy strips the /mcp-proxy/{name} prefix and forwards to the actual URL.
     The trailing path after the host:port is preserved.
+
+    ``egress_token`` (token-identity): when set, inserted as a leading
+    path segment — ``/mcp-proxy/<token>/<name>/...`` — so the gateway
+    recovers identity from the path the same way it does for the LLM
+    reverse-proxy routes. ``None`` keeps the token-free shape for the
+    IP-fallback path.
     """
     from urllib.parse import urlparse
 
     parsed = urlparse(mcp_config.url)
     original_path = parsed.path
-    proxy_url = f"http://{proxy_host}:{proxy_port}/{proxy_prefix}/{mcp_config.name}{original_path}"
+    token_seg = f"{egress_token}/" if egress_token else ""
+    proxy_url = (
+        f"http://{proxy_host}:{proxy_port}/{proxy_prefix}/"
+        f"{token_seg}{mcp_config.name}{original_path}"
+    )
     return McpServerSpec(
         name=mcp_config.name,
         type=mcp_config.type,
@@ -112,11 +125,18 @@ class ContainerAgentExecutor:
         *,
         get_mcp_configs: Callable[[str], list[McpServerConfig]] | None = None,
         render_catalog: Callable[[str, str], str] | None = None,
+        token_authority: TokenAuthority | None = None,
     ) -> None:
         self._config = config
         self._runtime = runtime
         self._transport = transport
         self._get_coworker = get_coworker
+        # Token-identity refactor: mints the per-spawn signed identity
+        # token embedded in the agent's proxy env. The orchestrator
+        # wires a real authority from env at startup; tests and the eval
+        # CLI leave it None, so spawns produce token-free proxy URLs and
+        # the gateway falls back to source-IP identity (dual-run window).
+        self._token_authority = token_authority
         # Frontdesk v1.2: optional callback rendering the delegatable-
         # specialist catalog for a tenant. Signature:
         # ``(tenant_id, exclude_coworker_id) -> str``. Invoked at spawn
@@ -243,6 +263,23 @@ class ContainerAgentExecutor:
         safe_name = re.sub(r"[^a-zA-Z0-9-]", "-", inp.group_folder)
         container_name = f"rolemesh-{safe_name}-{start_epoch_ms}"
 
+        # Token-identity: mint the signed token this container will carry
+        # in its proxy env. Only under EC (no gateway to verify against
+        # otherwise) and only when an authority is wired. None flows
+        # through as token-free URLs + gateway IP fallback.
+        egress_token: str | None = None
+        if self._token_authority is not None and CONTAINER_NETWORK_NAME:
+            egress_token = self._token_authority.mint(
+                Identity(
+                    tenant_id=tenant_id,
+                    coworker_id=inp.coworker_id or "",
+                    user_id=inp.user_id or "",
+                    conversation_id=conversation_id,
+                    job_id=job_id,
+                    container_name=container_name,
+                )
+            )
+
         # Resolve coworker.model_id → Pi-format string. Falls back to
         # host .env PI_MODEL_ID on any failure (no model_id set,
         # orphan reference, DB blip) — best-effort, never blocks the
@@ -274,6 +311,7 @@ class ContainerAgentExecutor:
             self._config,
             coworker=coworker,
             pi_model_id_override=pi_model_override,
+            egress_token=egress_token,
         )
 
         logger.info(
@@ -310,6 +348,7 @@ class ContainerAgentExecutor:
                     proxy_host=mcp_proxy_host,
                     proxy_port=CREDENTIAL_PROXY_PORT,
                     proxy_prefix=MCP_PROXY_PREFIX,
+                    egress_token=egress_token,
                 )
                 for tool_cfg in coworker_mcp_configs
             ]

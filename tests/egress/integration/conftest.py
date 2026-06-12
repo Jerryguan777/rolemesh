@@ -32,6 +32,7 @@ import pytest
 import pytest_asyncio
 
 from .helpers import (
+    EGRESS_TOKEN_SECRET_VALUE,
     FAKE_UPSTREAM_IMAGE,
     GATEWAY_IMAGE,
     NATS_IMAGE,
@@ -222,6 +223,10 @@ async def topology(docker_client: aiodocker.Docker) -> AsyncIterator[Topology]:
                 # test in test_p0_dns — it needs a name that really
                 # resolves on the public upstreams above.
                 "EGRESS_DNS_ALLOWLIST=dns.google",
+                # Token-identity: the gateway fail-closes its boot
+                # without this. Tests mint tokens with the same value
+                # via Topology.mint_token (EGRESS_TOKEN_SECRET_VALUE).
+                f"EGRESS_TOKEN_SECRET={EGRESS_TOKEN_SECRET_VALUE}",
             ],
             "HostConfig": {
                 "NetworkMode": agent_network,

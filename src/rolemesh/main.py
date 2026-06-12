@@ -119,6 +119,7 @@ from rolemesh.auth.credential_vault import (
 )
 from rolemesh.channels.admission import admit_telegram_1on1
 from rolemesh.egress.credentials import CredentialResolver
+from rolemesh.egress.token_identity import TokenAuthority
 from rolemesh.security.credential_proxy import register_mcp_server, set_token_vault, start_credential_proxy
 
 if TYPE_CHECKING:
@@ -1812,12 +1813,19 @@ async def main() -> None:
         # Frontdesk v1.2: the executor injects this for is_frontdesk spawns.
         return render_agent_catalog(_state, tenant_id, exclude=exclude_id)
 
+    # Token-identity: build the shared signing authority once. Under EC
+    # this fail-closes if EGRESS_TOKEN_SECRET is unset (same secret the
+    # gateway loads). With EC off there is no gateway to verify against,
+    # so the authority stays None and spawns are token-free.
+    _token_authority = TokenAuthority.from_env() if CONTAINER_NETWORK_NAME else None
+
     # Build one executor per backend.
     for cfg in (CLAUDE_CODE_BACKEND, PI_BACKEND):
         _executors[cfg.name] = ContainerAgentExecutor(
             cfg, _runtime, _transport, _get_coworker,
             get_mcp_configs=_mcp_configs_from_state,
             render_catalog=_render_catalog_for_executor,
+            token_authority=_token_authority,
         )
 
     if AGENT_BACKEND_DEFAULT not in _executors:

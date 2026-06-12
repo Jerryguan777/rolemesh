@@ -26,6 +26,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
+# Egress token identity: force git to send Basic proxy credentials
+# proactively. git's default ``http.proxyAuthMethod=anyauth`` makes
+# libcurl wait for a 407 challenge before presenting credentials, but
+# the egress gateway never challenges during the dual-run window (it
+# silently falls back to source-IP identity), so the per-job identity
+# token embedded in HTTP(S)_PROXY userinfo would never be sent and git
+# traffic would be misattributed — and would hard-fail once the IP
+# fallback is removed. ``basic`` makes git send the token up front,
+# like every other client (curl/httpx/requests/undici). No effect when
+# no proxy is configured.
+RUN git config --system http.proxyAuthMethod basic
+
 # Install Python agent SDK (bundles Claude Code CLI) and Pi backend dependencies.
 # ``structlog`` is needed by the rolemesh.core.logger shim that the safety
 # loader + hook handler imports at module load — without it, agent_runner
