@@ -16,6 +16,7 @@ from rolemesh.container.runner import (
     _filter_env_allowlist,
     build_container_spec,
     build_volume_mounts,
+    compute_egress_routing,
 )
 from rolemesh.container.runtime import VolumeMount
 from rolemesh.core.types import ContainerConfig, Coworker
@@ -567,6 +568,59 @@ class TestMetadataBlackholeAndNetwork:
         ):
             spec = build_container_spec([], "c", "j")
         assert spec.network_name is None
+
+
+class TestComputeEgressRouting:
+    """Single source of truth for the EC=on/off spawn-path fork."""
+
+    def test_ec_on_with_token(self) -> None:
+        from rolemesh.container import runner
+
+        with (
+            patch.object(runner, "EGRESS_CONTROL_ENABLE", True),
+            patch.object(runner, "_EGRESS_GATEWAY_DNS_IP", "172.20.0.2"),
+        ):
+            r = compute_egress_routing("TOK")
+
+        assert r.proxy_base == "http://egress-gateway:3001"
+        assert r.provider_prefix == "/proxy/TOK"
+        assert r.proxy_env["HTTP_PROXY"] == "http://job:TOK@egress-gateway:3128"
+        assert r.proxy_env["HTTPS_PROXY"] == "http://job:TOK@egress-gateway:3128"
+        assert r.network_name == "rolemesh-agent-net"
+        assert r.dns_servers == ["172.20.0.2"]
+        assert r.warn_missing_dns is False
+        assert r.mcp_proxy_host == "egress-gateway"
+        assert "host.docker.internal" not in r.extra_hosts
+
+    def test_ec_on_without_token_or_dns_ip(self) -> None:
+        from rolemesh.container import runner
+
+        with (
+            patch.object(runner, "EGRESS_CONTROL_ENABLE", True),
+            patch.object(runner, "_EGRESS_GATEWAY_DNS_IP", None),
+        ):
+            r = compute_egress_routing(None)
+
+        assert r.provider_prefix == "/proxy"  # no token segment
+        assert r.proxy_env["HTTP_PROXY"] == "http://egress-gateway:3128"  # no userinfo
+        assert r.dns_servers == []
+        assert r.warn_missing_dns is True  # EC on but no gateway DNS IP
+
+    def test_ec_off_with_token(self) -> None:
+        from rolemesh.container import runner
+
+        with patch.object(runner, "EGRESS_CONTROL_ENABLE", False):
+            r = compute_egress_routing("TOK")
+
+        assert r.proxy_base == "http://host.docker.internal:3001"
+        assert r.provider_prefix == "/proxy/TOK"  # token still carried
+        assert r.proxy_env == {}  # no forward proxy off the gateway
+        assert r.network_name is None  # default bridge
+        assert r.dns_servers == []
+        assert r.warn_missing_dns is False
+        assert r.mcp_proxy_host == "host.docker.internal"
+        # EC off restores the host-gateway hosts entry.
+        assert "host.docker.internal" in r.extra_hosts
 
 
 # ---------------------------------------------------------------------------
