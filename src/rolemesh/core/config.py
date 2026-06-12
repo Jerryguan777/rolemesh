@@ -171,16 +171,13 @@ EGRESS_GATEWAY_DNS_PORT: int = int(
     os.environ.get("EGRESS_GATEWAY_DNS_PORT", "53")
 )
 
-# Egress identity tokens (token-identity refactor). The orchestrator
-# mints a signed token per spawn; the gateway verifies it. Secret is
-# read lazily in rolemesh.egress.token_identity (sensitive, no default,
-# fail-closed under EC); only the non-secret TTL lives here so the
-# value has a documented home. ``EGRESS_TOKEN_TTL_SECONDS`` bounds how
-# long a single token (and thus a single agent container before the
-# orchestrator re-mints) may live; default 7 days, see token_identity.
-EGRESS_TOKEN_TTL_SECONDS: int = int(
-    os.environ.get("EGRESS_TOKEN_TTL_SECONDS", str(7 * 24 * 60 * 60))
-)
+# Egress identity tokens: EGRESS_TOKEN_SECRET and EGRESS_TOKEN_TTL_SECONDS
+# are deliberately NOT mirrored here. They are component-scoped config
+# with a single consumer — rolemesh.egress.token_identity.TokenAuthority
+# .from_env() reads, validates, and fail-closes on them at construction.
+# Mirroring them as module constants would create a second reader of the
+# same env vars that silently drifts from the real one (which is exactly
+# what happened once; see the config-pattern note in docs/16).
 
 # Allowlist for env vars that the orchestrator dynamically injects into
 # containers (R8). Anything produced by build_container_spec() or passed
