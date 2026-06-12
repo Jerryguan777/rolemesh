@@ -229,6 +229,13 @@ class TestBuildContainerSpec:
             patch.object(runner, "EGRESS_CONTROL_ENABLE", False),
             patch.object(runner, "NATS_URL", "nats://localhost:4222"),
             patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"),
+            # Platform-dependent helper (Linux-only entry; {} on Docker
+            # Desktop) — patch for a deterministic assertion everywhere.
+            patch.object(
+                runner,
+                "get_host_gateway_extra_hosts",
+                return_value={"host.docker.internal": "host-gateway"},
+            ),
         ):
             spec = build_container_spec([], "c", "j")
 
@@ -252,11 +259,10 @@ class TestBuildContainerSpec:
         # NATS substitution restored so localhost reaches host.
         assert spec.env["NATS_URL"] == "nats://host.docker.internal:4222"
 
-        # ExtraHosts has host-gateway (Linux — empty on mac in CI, but
-        # the metadata blackhole is always there; assert on Linux only).
-        import platform
-        if platform.system() == "Linux":
-            assert spec.extra_hosts.get("host.docker.internal") == "host-gateway"
+        # ExtraHosts merges the (patched) host-gateway entry on top of
+        # the always-present metadata blackhole.
+        assert spec.extra_hosts.get("host.docker.internal") == "host-gateway"
+        assert spec.extra_hosts.get("169.254.169.254") == "127.0.0.1"
 
     def test_ec_off_carries_token_in_reverse_url_no_forward_proxy(self) -> None:
         """EC off still injects the identity token into the reverse-proxy
@@ -609,7 +615,20 @@ class TestComputeEgressRouting:
     def test_ec_off_with_token(self) -> None:
         from rolemesh.container import runner
 
-        with patch.object(runner, "EGRESS_CONTROL_ENABLE", False):
+        # get_host_gateway_extra_hosts is platform-dependent (the
+        # host-gateway entry exists on Linux only; Docker Desktop on
+        # macOS/Windows resolves host.docker.internal natively and the
+        # helper returns {}). Patch it so this test pins the WIRING
+        # contract — EC off merges the helper's output — deterministically
+        # on every platform, instead of the helper's platform logic.
+        with (
+            patch.object(runner, "EGRESS_CONTROL_ENABLE", False),
+            patch.object(
+                runner,
+                "get_host_gateway_extra_hosts",
+                return_value={"host.docker.internal": "host-gateway"},
+            ),
+        ):
             r = compute_egress_routing("TOK")
 
         assert r.proxy_base == "http://host.docker.internal:3001"
@@ -619,8 +638,10 @@ class TestComputeEgressRouting:
         assert r.dns_servers == []
         assert r.warn_missing_dns is False
         assert r.mcp_proxy_host == "host.docker.internal"
-        # EC off restores the host-gateway hosts entry.
-        assert "host.docker.internal" in r.extra_hosts
+        # EC off merges the platform helper's host-gateway entry on top
+        # of the always-present metadata blackhole.
+        assert r.extra_hosts["host.docker.internal"] == "host-gateway"
+        assert r.extra_hosts["169.254.169.254"] == "127.0.0.1"
 
 
 # ---------------------------------------------------------------------------
