@@ -25,6 +25,7 @@ explicitly V2+.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import re
 from dataclasses import dataclass
@@ -33,10 +34,12 @@ from typing import TYPE_CHECKING
 from rolemesh.core.logger import get_logger
 
 from .safety_call import EgressRequest
+from .token_identity import reconcile
 
 if TYPE_CHECKING:
-    from .identity import IdentityResolver
+    from .identity import Identity, IdentityResolver
     from .safety_call import EgressSafetyCaller
+    from .token_identity import TokenAuthority
 
 logger = get_logger()
 
@@ -83,9 +86,14 @@ class ForwardProxy:
         *,
         identity_resolver: IdentityResolver,
         safety_caller: EgressSafetyCaller,
+        token_authority: TokenAuthority | None = None,
     ) -> None:
         self._identity = identity_resolver
         self._safety = safety_caller
+        # Token-identity: when wired, the Proxy-Authorization credential
+        # is verified first and the source-IP map is only a fallback
+        # (dual-run). None keeps pure IP behaviour.
+        self._token_authority = token_authority
 
     async def serve(self, host: str, port: int) -> asyncio.Server:
         """Bind and return the running server. Caller owns shutdown via
@@ -134,7 +142,22 @@ class ForwardProxy:
             await _close(writer)
             return
 
-        identity = self._identity.resolve(source_ip)
+        # Token-first identity (token-identity refactor). The token
+        # rides in the Proxy-Authorization password field; verify it,
+        # then fall back to the source-IP map. ``reconcile`` logs the
+        # dual-run mismatch / coverage signals.
+        ip_identity = self._identity.resolve(source_ip)
+        token_identity: Identity | None = None
+        if self._token_authority is not None:
+            token = _extract_proxy_auth_token(parsed)
+            if token:
+                token_identity = self._token_authority.verify(token)
+        identity = reconcile(
+            token_identity,
+            ip_identity,
+            source_ip=source_ip,
+            token_expected=self._token_authority is not None,
+        )
         if parsed.method == "CONNECT":
             await self._handle_connect(reader, writer, source_ip, identity, parsed)
         else:
@@ -320,6 +343,44 @@ async def _read_request(reader: asyncio.StreamReader) -> ParsedRequest:
     return ParsedRequest(method=method, target=target, headers=headers, raw=raw)
 
 
+def _extract_proxy_auth_token(parsed: ParsedRequest) -> str | None:
+    """Pull the identity token out of ``Proxy-Authorization: Basic ...``.
+
+    The orchestrator injects ``HTTP_PROXY=http://job:<token>@gateway``,
+    so clients send ``Basic base64("job:<token>")``. We return just the
+    ``<token>`` (the password half); the ``job`` username is a fixed
+    sentinel and carries no meaning. Any malformed header yields
+    ``None`` and the caller falls back to source-IP identity.
+    """
+    raw = parsed.headers.get("proxy-authorization", "")
+    if not raw:
+        return None
+    scheme, _, encoded = raw.partition(" ")
+    if scheme.lower() != "basic" or not encoded:
+        return None
+    try:
+        decoded = base64.b64decode(encoded, validate=True).decode("ascii")
+    except (ValueError, UnicodeDecodeError):
+        return None
+    _user, sep, token = decoded.partition(":")
+    if not sep:
+        return None
+    return token or None
+
+
+# Hop-by-hop headers that must never reach the origin. Proxy-Authorization
+# carries the agent's identity TOKEN — forwarding it would leak the bearer
+# credential to every upstream the agent talks to (the R1 red line).
+_STRIP_ON_FORWARD = re.compile(
+    rb"\r\n(?i:proxy-authorization|proxy-connection)[^\S\r\n]*:[^\r\n]*",
+)
+
+
+def _strip_forward_only_headers(body_with_leading_crlf: bytes) -> bytes:
+    """Remove hop-by-hop proxy headers from a plain-HTTP replay block."""
+    return _STRIP_ON_FORWARD.sub(b"", body_with_leading_crlf)
+
+
 def _split_host_port(target: str, *, default_port: int) -> tuple[str, int]:
     """Parse ``host:port`` from a CONNECT target; host alone defaults to 443."""
     if not target:
@@ -397,6 +458,11 @@ def _rewrite_request_line(
     version = original.rsplit(" ", 1)[-1] if " " in original else "HTTP/1.1"
     new_line = f"{method} {path} {version}".encode("ascii")
     rest = raw[newline:]
+
+    # R1: drop Proxy-Authorization (the agent's identity token) and
+    # other proxy hop-by-hop headers before the bytes leave for the
+    # origin. Forwarding them would hand the bearer token to upstream.
+    rest = _strip_forward_only_headers(rest)
 
     if host_header_value is not None:
         rest = _replace_host_header(rest, host_header_value)

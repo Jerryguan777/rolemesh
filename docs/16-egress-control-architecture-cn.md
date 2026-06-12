@@ -242,6 +242,36 @@ DNS resolver 最初通过源 IP 身份映射复用按租户的 `egress.domain_ru
 做 coworker 复验所需的 per-agent 身份。HTTP 面保留完整的按租户审计
 归因；一次 DNS 渗出尝试几乎总是伴随一条可归因的 CONNECT 拦截记录。
 
+### HTTP 面身份：签名 token（而非源 IP）
+
+forward / reverse proxy 最初通过把 agent 的网桥 IP 经 NATS
+`orchestrator.agent.lifecycle` 事件喂养的内存表反查来获取身份。该方案
+正被**无状态签名 token**（`egress/token_identity.py`）替代：
+
+- orchestrator 在每次 spawn 时签发一个 HMAC-SHA256 token，携带完整身份
+  （tenant / coworker / user / conversation / job）加过期时间，注入 agent
+  的代理 env——放在 forward proxy URL 的 userinfo
+  （`HTTP_PROXY=http://job:<token>@gateway`，客户端自动发
+  `Proxy-Authorization: Basic`）以及每个 reverse proxy base URL 的前导
+  路径段（`/proxy/<token>/<provider>`）。
+- gateway 用共享的 `EGRESS_TOKEN_SECRET` 验签并直接读出身份——无共享
+  状态、无事件流、无查找表，验证是纯函数。
+
+动机：IP 方案把身份与 L3 拓扑绑死（NAT / k8s / 多机下失效），且依赖一条
+分布式状态管道，其每种失败模式都是静默 401（丢一条 lifecycle 事件 →
+该 agent 在 gateway 下次重启前永久 401）。token 随请求同行，容器一启动
+身份即成立，gateway 重启零恢复。
+
+TTL 与回收：token 是 bearer 凭证，受 `EGRESS_TOKEN_TTL_SECONDS`（默认
+7 天）约束。由于会话容器可能超过任何固定窗口，orchestrator 在消息边界
+于 token 到期前回收容器来重新签发——过期永不落在对话中途，gateway 保持
+无状态验证者。密钥只存在于 orchestrator 和 gateway（共享 `.env`），绝不
+进入 agent 容器。
+
+迁移采用双跑：gateway 先验 token，token 缺失或无效时回退到源 IP 表，
+并同时记录覆盖率信号（用了回退）和一致性信号（token 与 IP 不一致）。
+只有当这两个信号确认 token 覆盖率 100% 且零不一致后，才删除 IP 管道。
+
 ---
 
 ## 三个独立 PR（EC-1 / EC-2 / EC-3）

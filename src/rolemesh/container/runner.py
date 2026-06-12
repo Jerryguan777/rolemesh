@@ -392,10 +392,20 @@ def build_container_spec(
     backend_config: AgentBackendConfig | None = None,
     coworker: Coworker | None = None,
     pi_model_id_override: str | None = None,
+    egress_token: str | None = None,
 ) -> ContainerSpec:
     """Build a ContainerSpec from mounts and config.
 
     Merge order for resource limits: global default ← coworker override ← clamp to max.
+
+    ``egress_token`` (token-identity refactor): a signed identity token
+    the orchestrator minted for this spawn. When set (and EC is on), it
+    is embedded in the proxy env so the gateway can recover the agent's
+    identity in-band — in the forward-proxy URL's userinfo and as a path
+    segment on every reverse-proxy base URL. ``None`` (eval CLI and other
+    callers without an identity context) keeps the token-free URLs; the
+    gateway falls back to source-IP identity for those during the
+    dual-run migration window.
 
     ``pi_model_id_override`` (PR30): the Pi-format model string
     (``<provider>/<model_id>``) the caller resolved from
@@ -433,8 +443,21 @@ def build_container_spec(
         # localhost:4222), so rewrite here rather than in the .env.
         nats_url = agent_facing_nats_url(NATS_URL)
         proxy_base = f"http://{EGRESS_GATEWAY_CONTAINER_NAME}:{CREDENTIAL_PROXY_PORT}"
+        # Token-identity: the signed token rides in two places per the
+        # spike-verified mechanisms — the forward-proxy userinfo
+        # (clients emit Proxy-Authorization automatically) and a leading
+        # path segment on each reverse-proxy base URL (SDKs preserve the
+        # prefix before appending /v1/messages). ``provider_prefix`` is
+        # the reverse-proxy path root: ``/proxy/<token>`` with a token,
+        # plain ``/proxy`` without (dual-run IP-fallback path).
+        if egress_token:
+            forward_authority = f"job:{egress_token}@{EGRESS_GATEWAY_CONTAINER_NAME}"
+            provider_prefix = f"/proxy/{egress_token}"
+        else:
+            forward_authority = EGRESS_GATEWAY_CONTAINER_NAME
+            provider_prefix = "/proxy"
         forward_proxy_url = (
-            f"http://{EGRESS_GATEWAY_CONTAINER_NAME}:{EGRESS_GATEWAY_FORWARD_PORT}"
+            f"http://{forward_authority}:{EGRESS_GATEWAY_FORWARD_PORT}"
         )
         proxy_env: dict[str, str] = {
             "HTTP_PROXY": forward_proxy_url,
@@ -442,9 +465,12 @@ def build_container_spec(
             "NO_PROXY": f"{EGRESS_GATEWAY_CONTAINER_NAME},localhost,127.0.0.1",
         }
     else:
-        # Rollback: emulate pre-EC-1 routing.
+        # Rollback: emulate pre-EC-1 routing. Token identity is an
+        # EC-on concept (the host-side proxy gains it in the EC=off
+        # restoration step); keep the token-free reverse-proxy prefix.
         nats_url = NATS_URL.replace("localhost", CONTAINER_HOST_GATEWAY)
         proxy_base = f"http://{CONTAINER_HOST_GATEWAY}:{CREDENTIAL_PROXY_PORT}"
+        provider_prefix = "/proxy"
         proxy_env = {}
 
     env: dict[str, str] = {
@@ -457,9 +483,9 @@ def build_container_spec(
         # without the suffix the SDK hits 404. Both Pi and Claude SDKs
         # honour ANTHROPIC_BASE_URL and append ``/v1/messages`` etc., so
         # the suffix flows through cleanly.
-        "ANTHROPIC_BASE_URL": f"{proxy_base}/proxy/anthropic",
+        "ANTHROPIC_BASE_URL": f"{proxy_base}{provider_prefix}/anthropic",
         # Multi-provider proxy URLs for Pi backend (each SDK reads its own env var)
-        "OPENAI_BASE_URL": f"{proxy_base}/proxy/openai",
+        "OPENAI_BASE_URL": f"{proxy_base}{provider_prefix}/openai",
         # Bedrock — boto3 honours ``BEDROCK_BASE_URL`` as ``endpoint_url``.
         # Same per-spawn ``proxy_base`` as Anthropic/OpenAI so EC-2
         # (agent on Internal=true bridge) and rollback (agent on host
@@ -468,7 +494,7 @@ def build_container_spec(
         # runs at module load time, before CONTAINER_NETWORK_NAME is
         # decided per spawn, and would have to reimplement the EC-2
         # branching that already lives above (proxy_base).
-        "BEDROCK_BASE_URL": f"{proxy_base}/proxy/bedrock",
+        "BEDROCK_BASE_URL": f"{proxy_base}{provider_prefix}/bedrock",
         # Redirect Claude Code CLI's .claude.json writes into the per-coworker
         # writable bind mount at /home/agent/.claude. Without this, the CLI
         # tries to write /home/agent/.claude.json on the readonly rootfs and

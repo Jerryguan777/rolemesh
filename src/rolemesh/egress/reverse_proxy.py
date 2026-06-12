@@ -37,10 +37,12 @@ from rolemesh.core.logger import get_logger
 
 from .credentials import CredentialResolverProtocol, MissingCredentialError
 from .safety_call import EgressRequest
+from .token_identity import reconcile
 
 if TYPE_CHECKING:
-    from .identity import IdentityResolver
+    from .identity import Identity, IdentityResolver
     from .safety_call import EgressSafetyCaller
+    from .token_identity import TokenAuthority
 
 logger = get_logger()
 
@@ -232,7 +234,7 @@ def get_mcp_registry() -> dict[str, tuple[str, dict[str, str], str]]:
 async def _safety_gate(
     request: web.Request,
     *,
-    identity_resolver: IdentityResolver | None,
+    identity: Identity | None,
     safety_caller: EgressSafetyCaller | None,
     upstream_host: str,
     upstream_port: int,
@@ -243,13 +245,13 @@ async def _safety_gate(
     host-side backward compatibility during the PR-1 → PR-2 rollout
     where the legacy ``start_credential_proxy`` call still binds on
     the orchestrator host.
+
+    ``identity`` is resolved by the caller (token-first, IP fallback)
+    so the gate and the credential lookup agree on who the request is.
     """
-    if safety_caller is None or identity_resolver is None:
+    if safety_caller is None:
         return None
 
-    peer = request.transport.get_extra_info("peername") if request.transport else None
-    source_ip = peer[0] if peer else ""
-    identity = identity_resolver.resolve(source_ip)
     decision = await safety_caller.decide(
         identity=identity,
         request=EgressRequest(
@@ -280,6 +282,7 @@ async def start_credential_proxy(
     credential_resolver: CredentialResolverProtocol,
     identity_resolver: IdentityResolver | None = None,
     safety_caller: EgressSafetyCaller | None = None,
+    token_authority: TokenAuthority | None = None,
 ) -> web.AppRunner:
     """Start the reverse-proxy HTTP server on ``(host, port)``.
 
@@ -289,13 +292,55 @@ async def start_credential_proxy(
     keys — the boot-time secrets dict that earlier versions read is
     gone.
 
-    ``identity_resolver`` remains optional only because the host-
-    side orchestrator can run in unit-test configurations where no
-    NATS lifecycle stream exists yet; when it is ``None``, the
-    handler returns 401 UNKNOWN_SOURCE for every request (still
-    fail-closed).
+    Identity resolution is token-first, IP-fallback (token-identity
+    refactor, dual-run window):
+
+    * ``token_authority`` set — the leading path segment after
+      ``/proxy/`` (or ``/mcp-proxy/``) is verified as a signed identity
+      token. On success the identity comes from the token and the
+      provider/server is the *next* segment.
+    * Token absent or invalid — fall back to ``identity_resolver`` keyed
+      on the source IP, treating the leading segment as the
+      provider/server (the pre-refactor route shape).
+
+    When neither yields an identity the handler returns 401
+    UNKNOWN_SOURCE (still fail-closed). Both being ``None`` is a valid
+    host-side unit-test configuration that always 401s.
     """
     session = ClientSession()
+
+    def _resolve(
+        request: web.Request, first_seg: str, rest: str
+    ) -> tuple[Identity | None, str, str]:
+        """Token-first, IP-fallback identity + route split.
+
+        Returns ``(identity, provider_or_server, upstream_path)``. In
+        token mode the token segment is stripped and the
+        provider/server is the head of *rest*; in IP mode *first_seg*
+        is itself the provider/server. A token-vs-IP disagreement
+        (both resolve, identities differ) is logged ERROR — the
+        dual-run consistency signal the migration watches.
+        """
+        peer = request.transport.get_extra_info("peername") if request.transport else None
+        source_ip = peer[0] if peer else ""
+        ip_identity = identity_resolver.resolve(source_ip) if identity_resolver else None
+        token_identity = (
+            token_authority.verify(first_seg) if token_authority is not None else None
+        )
+        identity = reconcile(
+            token_identity,
+            ip_identity,
+            source_ip=source_ip,
+            token_expected=token_authority is not None,
+        )
+        if token_identity is not None:
+            # Token mode: the token segment is consumed; the
+            # provider/server is the head of the remaining path.
+            head, _, tail = rest.partition("/")
+            return identity, head, tail
+        # IP-fallback mode: the captured first segment IS the
+        # provider/server and the whole tail is the upstream path.
+        return identity, first_seg, rest
 
     async def _stream_upstream(
         request: web.Request,
@@ -325,21 +370,24 @@ async def start_credential_proxy(
         return headers
 
     async def handle_provider_proxy(request: web.Request) -> web.StreamResponse:
-        provider_name = request.match_info["provider_name"]
-        remaining_path = "/" + request.match_info.get("path_info", "")
-        if request.query_string:
-            remaining_path += "?" + request.query_string
+        # Route captured the FIRST segment after /proxy/ as
+        # ``provider_name``; under token identity that segment is the
+        # token and the real provider is the head of ``path_info``.
+        # ``_resolve`` disambiguates and returns the effective provider
+        # + the remaining upstream path.
+        first_seg = request.match_info["provider_name"]
+        rest = request.match_info.get("path_info", "")
+        identity, provider_name, upstream_path = _resolve(request, first_seg, rest)
 
         # Identity must resolve. UNKNOWN_SOURCE before credential
         # lookup so a leaked / off-network client gets a clear 401
         # rather than a misleading MISSING_CREDENTIAL.
-        if identity_resolver is None:
-            return web.Response(status=401, text="UNKNOWN_SOURCE")
-        peer = request.transport.get_extra_info("peername") if request.transport else None
-        source_ip = peer[0] if peer else ""
-        identity = identity_resolver.resolve(source_ip)
         if identity is None:
             return web.Response(status=401, text="UNKNOWN_SOURCE")
+
+        remaining_path = "/" + upstream_path
+        if request.query_string:
+            remaining_path += "?" + request.query_string
 
         # Per-tenant credential lookup — fail-closed if absent.
         # 401 vs 502 distinction matters: MISSING is "operator should
@@ -400,7 +448,7 @@ async def start_credential_proxy(
 
         blocked = await _safety_gate(
             request,
-            identity_resolver=identity_resolver,
+            identity=identity,
             safety_caller=safety_caller,
             upstream_host=up_host,
             upstream_port=up_port,
@@ -436,8 +484,14 @@ async def start_credential_proxy(
             return web.Response(status=502, text="Bad Gateway")
 
     async def handle_mcp_proxy(request: web.Request) -> web.StreamResponse:
-        server_name = request.match_info["server_name"]
-        remaining_path = "/" + request.match_info.get("path_info", "")
+        # Same token-first split as the provider route: the first
+        # segment after /mcp-proxy/ is the token (token mode) or the
+        # server name (IP fallback).
+        first_seg = request.match_info["server_name"]
+        rest = request.match_info.get("path_info", "")
+        identity, server_name, upstream_path = _resolve(request, first_seg, rest)
+
+        remaining_path = "/" + upstream_path
         if request.query_string:
             remaining_path += "?" + request.query_string
 
@@ -453,7 +507,7 @@ async def start_credential_proxy(
 
         blocked = await _safety_gate(
             request,
-            identity_resolver=identity_resolver,
+            identity=identity,
             safety_caller=safety_caller,
             upstream_host=up_host,
             upstream_port=up_port,
@@ -510,6 +564,7 @@ async def start_credential_proxy(
         host=host,
         providers=[*_PROVIDER_TEMPLATES, "anthropic", "bedrock"],
         identity_wired=identity_resolver is not None,
+        token_wired=token_authority is not None,
         safety_gated=safety_caller is not None,
     )
     return runner

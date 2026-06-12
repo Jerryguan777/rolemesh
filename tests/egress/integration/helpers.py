@@ -31,6 +31,12 @@ GATEWAY_IMAGE = "rolemesh-egress-gateway:latest"
 NATS_IMAGE = "nats:latest"
 FAKE_UPSTREAM_IMAGE = "rolemesh-fake-upstream:test"
 
+# Shared egress identity-token secret. conftest injects this into the
+# gateway container's env (the gateway fail-closes its boot without it),
+# and ``Topology.mint_token`` signs with the same value so token-mode
+# tests verify against what the gateway will accept.
+EGRESS_TOKEN_SECRET_VALUE = "integration-token-secret-please-32chars"
+
 
 def rand_suffix() -> str:
     """Short random hex for per-test resource names. Avoids collisions
@@ -117,6 +123,7 @@ class Topology:
         *,
         extra_env: dict[str, str] | None = None,
         dns: list[str] | None = None,
+        egress_token: str | None = None,
     ) -> ContainerHandle:
         """Spawn a probe container on the internal agent network.
 
@@ -124,10 +131,18 @@ class Topology:
         etc.); ``dns`` overrides the container resolver, defaulting to
         the gateway's authoritative resolver so DNS tests actually
         exercise the gateway path.
+
+        ``egress_token`` (token-identity): when set, the token rides in
+        the forward-proxy userinfo so the gateway recovers identity from
+        the Proxy-Authorization header instead of the source IP — mirrors
+        what the orchestrator injects in production.
         """
+        gateway_authority = (
+            f"job:{egress_token}@egress-gateway" if egress_token else "egress-gateway"
+        )
         env: dict[str, str] = {
-            "HTTP_PROXY": "http://egress-gateway:3128",
-            "HTTPS_PROXY": "http://egress-gateway:3128",
+            "HTTP_PROXY": f"http://{gateway_authority}:3128",
+            "HTTPS_PROXY": f"http://{gateway_authority}:3128",
             "NO_PROXY": "egress-gateway,localhost,127.0.0.1",
         }
         if extra_env:
@@ -158,6 +173,30 @@ class Topology:
         handle = ContainerHandle(name=name, docker=self.docker)
         self.containers_to_cleanup.append(handle)
         return handle
+
+    def mint_token(self, identity: dict[str, Any]) -> str:
+        """Sign an egress identity token the gateway will accept.
+
+        Uses :data:`EGRESS_TOKEN_SECRET_VALUE` — the same secret conftest
+        gave the gateway — so token-mode tests can spawn a probe whose
+        identity the gateway recovers from the token alone, with no
+        lifecycle (IP) registration.
+        """
+        from rolemesh.egress.identity import Identity
+        from rolemesh.egress.token_identity import mint
+
+        return mint(
+            Identity(
+                tenant_id=str(identity.get("tenant_id", "")),
+                coworker_id=str(identity.get("coworker_id", "")),
+                user_id=str(identity.get("user_id", "")),
+                conversation_id=str(identity.get("conversation_id", "")),
+                job_id=str(identity.get("job_id", "")),
+                container_name=str(identity.get("container_name", "")),
+            ),
+            secret=EGRESS_TOKEN_SECRET_VALUE,
+            ttl_seconds=3600,
+        )
 
     async def publish_lifecycle_started(self, probe: ContainerHandle, identity: dict[str, Any]) -> None:
         """Tell the gateway's identity resolver about a probe container.
