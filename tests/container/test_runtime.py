@@ -63,11 +63,19 @@ def test_get_runtime_docker() -> None:
     assert rt.name == "docker"
 
 
-def test_get_runtime_k8s_not_implemented() -> None:
-    with pytest.raises(NotImplementedError):
-        get_runtime("k8s")
+def test_get_runtime_k8s_returns_k8s_backend() -> None:
+    """k8s branch wires to K8sRuntime (kubernetes_asyncio is installed here).
+
+    Mutation guard: if get_runtime's k8s branch regressed to
+    ``raise NotImplementedError`` (or returned the docker backend), this
+    fails. Constructing K8sRuntime() does no I/O — ensure_available() is
+    what touches the cluster — so this is safe without a live API server.
+    """
+    pytest.importorskip("kubernetes_asyncio")
+    rt = get_runtime("k8s")
+    assert rt.name == "k8s"
 
 
 def test_get_runtime_unknown() -> None:
-    with pytest.raises(ValueError, match="Unknown container backend"):
+    with pytest.raises(ValueError, match="Unknown container runtime"):
         get_runtime("podman")

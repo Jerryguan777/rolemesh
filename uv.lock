@@ -1504,6 +1504,23 @@ wheels = [
 ]
 
 [[package]]
+name = "kubernetes-asyncio"
+version = "36.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "certifi" },
+    { name = "python-dateutil" },
+    { name = "pyyaml" },
+    { name = "six" },
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/60/45/9e15f4268454636aee32d92ddeaa7128c71100308644bc79685292c1efcc/kubernetes_asyncio-36.1.0.tar.gz", hash = "sha256:6d979d82e5ebe490bea298e7843732a2336173236bae28e200434889443d4443", size = 1426205, upload-time = "2026-06-04T19:42:45.669Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b2/dc/695601e3a6f08ca3d6035d300a944974c17084050591faec6e1de39e4a4e/kubernetes_asyncio-36.1.0-py3-none-any.whl", hash = "sha256:6d25915d1abff24fceda551a502208d986f674d72586297aa58bc7d55e7feaf3", size = 3044531, upload-time = "2026-06-04T19:42:43.84Z" },
+]
+
+[[package]]
 name = "librt"
 version = "0.9.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2904,6 +2921,9 @@ dev = [
 eval = [
     { name = "inspect-ai" },
 ]
+k8s = [
+    { name = "kubernetes-asyncio" },
+]
 pi = [
     { name = "anthropic" },
     { name = "boto3" },
@@ -2949,6 +2969,7 @@ requires-dist = [
     { name = "google-genai", marker = "extra == 'pi'", specifier = ">=1.0" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "inspect-ai", marker = "extra == 'eval'", specifier = ">=0.3" },
+    { name = "kubernetes-asyncio", marker = "extra == 'k8s'", specifier = ">=32.0" },
     { name = "llm-guard", marker = "extra == 'safety-ml'", specifier = ">=0.3" },
     { name = "mcp", marker = "extra == 'pi'", specifier = ">=1.6" },
     { name = "mistune", marker = "extra == 'pi'", specifier = ">=3.0" },
@@ -2976,7 +2997,7 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34" },
     { name = "wcwidth", marker = "extra == 'pi'", specifier = ">=0.2" },
 ]
-provides-extras = ["eval", "pi", "dev", "safety-ml"]
+provides-extras = ["eval", "k8s", "pi", "dev", "safety-ml"]
 
 [package.metadata.requires-dev]
 dev = [

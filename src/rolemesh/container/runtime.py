@@ -149,15 +149,15 @@ class ContainerRuntime(Protocol):
 
 
 def get_runtime(runtime_name: str | None = None) -> ContainerRuntime:
-    """Create a ContainerRuntime from name (defaults to CONTAINER_BACKEND env var).
+    """Create a ContainerRuntime from name (defaults to ROLEMESH_CONTAINER_RUNTIME).
 
     Note: this selects the runtime abstraction backend (Docker vs K8s), *not*
     the OCI runtime. OCI runtime (runc/runsc) is controlled by
     CONTAINER_OCI_RUNTIME and applied per-container via ContainerSpec.runtime.
     """
-    from rolemesh.core.config import CONTAINER_BACKEND
+    from rolemesh.core.config import ROLEMESH_CONTAINER_RUNTIME
 
-    name = runtime_name or CONTAINER_BACKEND
+    name = runtime_name or ROLEMESH_CONTAINER_RUNTIME
 
     if name == "docker":
         from rolemesh.container.docker_runtime import DockerRuntime
@@ -165,8 +165,20 @@ def get_runtime(runtime_name: str | None = None) -> ContainerRuntime:
         return DockerRuntime()
 
     if name == "k8s":
-        msg = "Kubernetes runtime is not yet implemented"
-        raise NotImplementedError(msg)
+        # Lazy import: kubernetes_asyncio is an optional ([k8s] extra)
+        # dependency, so importing this module must not require it. A
+        # docker-only deployment never reaches this branch.
+        try:
+            from rolemesh.container.k8s_runtime import K8sRuntime
+        except ImportError as exc:
+            msg = (
+                "The Kubernetes container backend requires the optional "
+                "kubernetes_asyncio dependency. Install it with: "
+                "uv sync --extra k8s"
+            )
+            raise RuntimeError(msg) from exc
 
-    msg = f"Unknown container backend: {name}"
+        return K8sRuntime()
+
+    msg = f"Unknown container runtime: {name}"
     raise ValueError(msg)

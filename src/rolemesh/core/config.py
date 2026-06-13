@@ -116,20 +116,39 @@ MAX_CONCURRENT_CONTAINERS: int = max(1, int(os.environ.get("MAX_CONCURRENT_CONTA
 GLOBAL_MAX_CONTAINERS: int = max(1, int(os.environ.get("GLOBAL_MAX_CONTAINERS", "20")))
 
 # Runtime-abstraction backend selector: "docker" | "k8s" (not OCI runtime).
-# Pairs with CONTAINER_OCI_RUNTIME below: BACKEND picks "which Python client
-# talks to which orchestrator", OCI_RUNTIME picks "which binary actually
-# runs the container process".
-CONTAINER_BACKEND: str = os.environ.get("CONTAINER_BACKEND", "docker")
+# Pairs with CONTAINER_OCI_RUNTIME below: ROLEMESH_CONTAINER_RUNTIME picks
+# "which Python client talks to which orchestrator", OCI_RUNTIME picks "which
+# binary actually runs the container process".
+ROLEMESH_CONTAINER_RUNTIME: str = os.environ.get("ROLEMESH_CONTAINER_RUNTIME", "docker")
+
+# Kubernetes backend settings (ROLEMESH_CONTAINER_RUNTIME=k8s; docs/21 §4.1).
+# Category 1 of the module-docstring rules: non-sensitive deployment-shape
+# values with no parse-time validation, read by container/k8s_runtime and
+# by the contract suite's k8s Topology (tests/container/contract). The
+# Helm chart declares the actual objects; these only tell the orchestrator
+# where to find them.
+#
+#   ROLEMESH_K8S_NAMESPACE        namespace holding all RoleMesh objects
+#   ROLEMESH_K8S_DATA_PVC         PVC bound to DATA_DIR (subPath translation,
+#                                 docs/21 §7.1)
+#   ROLEMESH_K8S_IMAGE_PULL_SECRET  optional imagePullSecrets name for agent
+#                                 pods (private registries); empty = none
+#   ROLEMESH_K8S_RUNTIME_CLASS    RuntimeClass used when a spec asks for the
+#                                 gVisor OCI runtime (spec.runtime="runsc");
+#                                 empty = the conventional name "gvisor"
+ROLEMESH_K8S_NAMESPACE: str = os.environ.get("ROLEMESH_K8S_NAMESPACE", "rolemesh")
+ROLEMESH_K8S_DATA_PVC: str = os.environ.get("ROLEMESH_K8S_DATA_PVC", "rolemesh-data")
+ROLEMESH_K8S_IMAGE_PULL_SECRET: str = os.environ.get("ROLEMESH_K8S_IMAGE_PULL_SECRET", "")
+ROLEMESH_K8S_RUNTIME_CLASS: str = os.environ.get("ROLEMESH_K8S_RUNTIME_CLASS", "")
 
 # OCI runtime selection (R1). "runc" is the default; "runsc" enables gVisor
 # syscall-level sandboxing and requires runsc to be registered in
 # /etc/docker/daemon.json on the host. Per-coworker overrides live in
 # ContainerConfig.runtime.
 #
-# Named OCI to disambiguate from CONTAINER_BACKEND (docker vs k8s). A
-# shorter name like CONTAINER_RUNTIME would collide with the old meaning
-# of that variable (runtime-abstraction selector) and confuse anyone who
-# saw both in an env file.
+# Named OCI to disambiguate from ROLEMESH_CONTAINER_RUNTIME (docker vs k8s):
+# this variable selects the OCI runtime binary (runc/runsc), not the
+# runtime-abstraction backend.
 CONTAINER_OCI_RUNTIME: str = os.environ.get("CONTAINER_OCI_RUNTIME", "runc")
 
 # Per-container resource ceilings (R7). Overrides come from ContainerConfig
