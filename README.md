@@ -123,7 +123,10 @@ echo "DOCKER_GID=$(getent group docker | cut -d: -f3)" >> .env
 # in the caller's environment, so don't rely on the caller's cwd.
 echo "ROLEMESH_HOST_DATA_DIR=$PWD/data" >> .env
 
-# WS_TICKET_SECRET must also be set (see Configuration below).
+# Two application secrets must also be set or the orchestrator AND the
+# webui refuse to boot (fail-closed): WS_TICKET_SECRET and
+# CREDENTIAL_VAULT_KEY (see Configuration below). For a dev login without
+# an IdP, set BOOTSTRAP_USERS too, then open the WebUI with ?token=...
 
 # Build the agent image (spawned by the orchestrator at runtime), then
 # build + start the full stack. --env-file matters: the project
@@ -206,6 +209,7 @@ channel with its bot tokens.
 |------------------------------|--------------------------------------------------------------------------|
 | `ASSISTANT_NAME`             | Display name for your AI coworker.                                       |
 | `CONTAINER_NETWORK_NAME`     | Name of the EC agent bridge (Internal=true). Defaults to `rolemesh-agent-net` and must match the compose-declared network; must be non-empty (empty → startup error). |
+| `CREDENTIAL_VAULT_KEY`       | **Required.** Master secret for the per-tenant LLM credential vault; hashed into a Fernet key, so any non-empty string works (use a long random value in production). The orchestrator AND the webui refuse to boot without it. |
 | `EGRESS_DNS_ALLOWLIST`       | Platform-wide DNS allowlist for the gateway resolver (comma-separated, `exact` or `*.suffix`). Default **empty** — proxied traffic never needs agent-side DNS, so the resolver is a tripwire; see docs/16. |
 | `EGRESS_DNS_MODE`            | `enforce` (default: non-matching names get NXDOMAIN) or `observe` (resolve everything, log would-be blocks; migration aid only). |
 | `EGRESS_TOKEN_SECRET`        | **Required.** Shared HMAC secret (≥16 chars) used to sign and verify agent identity tokens; the orchestrator signs, the gateway verifies. Never injected into agent containers. Missing → refuse to boot. |
