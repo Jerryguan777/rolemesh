@@ -1,0 +1,22 @@
+# Shared by every image built from the repo-root context
+# (container/Dockerfile, Dockerfile.egress-gateway, orchestrator.Dockerfile,
+# webui.Dockerfile). Keeps the build context small and keeps secrets and
+# runtime state out of image layers.
+.git
+.venv
+.env
+.env.*
+node_modules
+web/node_modules
+web/dist
+data
+store
+groups
+docs_bk
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage

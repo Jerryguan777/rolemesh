@@ -329,12 +329,8 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     # deployment layer and must already be up; the eval CLI — like the
     # orchestrator — only verifies the invariants and fails closed.
     # Agent DNS pinning is config-driven (EGRESS_GATEWAY_DNS_IP), so no
-    # per-process gateway-IP registration is needed anymore. With EC
-    # off there is no egress infrastructure to verify.
-    from rolemesh.core.config import EGRESS_CONTROL_ENABLE
-
-    if EGRESS_CONTROL_ENABLE:
-        await runtime.verify_infrastructure()
+    # per-process gateway-IP registration is needed anymore.
+    await runtime.verify_infrastructure()
 
     transport = NatsTransport(NATS_URL)
     try:

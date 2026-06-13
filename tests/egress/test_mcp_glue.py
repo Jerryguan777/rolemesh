@@ -242,32 +242,35 @@ async def test_responder_attaches_three_subjects(nc: FakeNats) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Bug 5 (2026-04-26): snapshot path rewrites localhost; the
-# orchestrator's in-process registry intentionally does NOT
+# Snapshot path serialises registry URLs VERBATIM (docs/21 §1: the
+# orchestrator and the gateway share one network stack, so a URL that
+# resolves for one resolves for the other; the launcher-era loopback
+# rewrite at this boundary is gone)
 # ---------------------------------------------------------------------------
 
 
-class TestSnapshotLoopbackRewrite:
+class TestSnapshotUrlPassthrough:
     @pytest.mark.asyncio
-    async def test_fetch_all_rewrites_localhost(self) -> None:
-        # Orchestrator stores the URL with literal localhost — that's
-        # correct in-process because the orchestrator runs on the host.
-        # But the snapshot is consumed by the gateway container, which
-        # must see host.docker.internal.
+    async def test_fetch_all_passes_service_name_url_verbatim(self) -> None:
         reverse_proxy.register_mcp_server(
-            "tropos-mcp", "https://localhost:8509", {}, "user"
+            "tropos-mcp", "https://tropos-mcp:8509", {}, "user"
         )
         entries = await fetch_all_mcp_servers()
         assert len(entries) == 1
-        assert entries[0].url == "https://host.docker.internal:8509"
+        assert entries[0].url == "https://tropos-mcp:8509"
 
     @pytest.mark.asyncio
-    async def test_fetch_all_rewrites_127_0_0_1(self) -> None:
+    async def test_fetch_all_does_not_rewrite_loopback(self) -> None:
+        # Regression: a re-introduced host-gateway rewrite would mangle
+        # this URL into host.docker.internal, which resolves nowhere in
+        # the single network stack. Loopback URLs pass through verbatim
+        # (and are simply wrong config the operator must fix — never
+        # silently "repaired").
         reverse_proxy.register_mcp_server(
             "local-mcp", "http://127.0.0.1:9100", {}, "service"
         )
         entries = await fetch_all_mcp_servers()
-        assert entries[0].url == "http://host.docker.internal:9100"
+        assert entries[0].url == "http://127.0.0.1:9100"
 
     @pytest.mark.asyncio
     async def test_fetch_all_leaves_external_host_unchanged(self) -> None:
@@ -276,18 +279,3 @@ class TestSnapshotLoopbackRewrite:
         )
         entries = await fetch_all_mcp_servers()
         assert entries[0].url == "https://api.github.com"
-
-    @pytest.mark.asyncio
-    async def test_orchestrator_in_process_registry_is_NOT_rewritten(self) -> None:
-        # Critical asymmetry: the rewrite is at the publish boundary,
-        # not at register time. The orchestrator's own reverse proxy
-        # (rollback / pre-EC-1 path) needs to dial the host's
-        # localhost — rewriting at register would break that.
-        # This pins the contract so a future "let's just rewrite
-        # everywhere" refactor doesn't quietly break the rollback path.
-        reverse_proxy.register_mcp_server(
-            "tropos-mcp", "https://localhost:8509", {}, "user"
-        )
-        # Orchestrator-side dict still carries the original URL.
-        registry = reverse_proxy.get_mcp_registry()
-        assert registry["tropos-mcp"][0] == "https://localhost:8509"

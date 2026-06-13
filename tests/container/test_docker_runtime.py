@@ -245,9 +245,11 @@ def test_spec_to_config_cpu() -> None:
 
 
 def test_spec_to_config_extra_hosts() -> None:
-    spec = ContainerSpec(name="test", image="img", extra_hosts={"host.docker.internal": "host-gateway"})
+    # Metadata blackhole is the production use of extra_hosts
+    # (see runner._METADATA_BLACKHOLE).
+    spec = ContainerSpec(name="test", image="img", extra_hosts={"169.254.169.254": "127.0.0.1"})
     config: dict[str, Any] = DockerRuntime._spec_to_config(spec)
-    assert "host.docker.internal:host-gateway" in config["HostConfig"]["ExtraHosts"]
+    assert "169.254.169.254:127.0.0.1" in config["HostConfig"]["ExtraHosts"]
 
 
 def test_spec_to_config_dns_plumbs_through() -> None:

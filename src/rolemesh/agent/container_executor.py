@@ -53,17 +53,22 @@ logger = get_logger()
 
 def rewrite_mcp_url_for_container(
     mcp_config: McpServerConfig,
-    proxy_host: str = "host.docker.internal",
+    proxy_host: str,
     proxy_port: int = 3001,
     proxy_prefix: str = "mcp-proxy",
     egress_token: str | None = None,
 ) -> McpServerSpec:
-    """Rewrite a host-side MCP URL to point at the credential proxy.
+    """Rewrite an MCP URL to point at the credential proxy.
+
+    ``proxy_host`` has no default on purpose: it is a routing decision
+    and must come from ``EgressRouting.mcp_proxy_host`` (the gateway
+    service name), keeping every caller on the single spawn-path
+    topology source of truth.
 
     Example:
-      input:  McpServerConfig(name="my-mcp-server", type="sse", url="http://localhost:9100/mcp/")
+      input:  McpServerConfig(name="my-mcp-server", type="sse", url="http://mcp-host:9100/mcp/")
       output: McpServerSpec(name="my-mcp-server", type="sse",
-                            url="http://host.docker.internal:3001/mcp-proxy/my-mcp-server/mcp/")
+                            url="http://egress-gateway:3001/mcp-proxy/my-mcp-server/mcp/")
 
     The proxy strips the /mcp-proxy/{name} prefix and forwards to the actual URL.
     The trailing path after the host:port is preserved.
@@ -262,10 +267,9 @@ class ContainerAgentExecutor:
         container_name = f"rolemesh-{safe_name}-{start_epoch_ms}"
 
         # Token-identity: mint the signed token this container will carry
-        # in its proxy env. Minted in BOTH EC modes — the verifier is the
-        # gateway (EC on) or the host-side credential proxy (EC off); both
-        # share the secret. None only when no authority is wired (eval CLI
-        # / tests), which yields token-free URLs.
+        # in its proxy env; the gateway verifies it with the shared
+        # secret. None only when no authority is wired (eval CLI /
+        # tests), which yields token-free URLs.
         egress_token: str | None = None
         if self._token_authority is not None:
             egress_token = self._token_authority.mint(
@@ -331,8 +335,7 @@ class ContainerAgentExecutor:
         # The MCP proxy host comes from the same single source of truth
         # as build_container_spec's LLM env routing (EgressRouting), so a
         # coworker's MCP proxy URL always hits the same endpoint agents
-        # use for LLM calls — gateway service name with EC on, host
-        # gateway with EC off.
+        # use for LLM calls — the gateway service name.
         mcp_proxy_host = compute_egress_routing(egress_token).mcp_proxy_host
         mcp_specs: list[McpServerSpec] | None = None
         coworker_mcp_configs = self._get_mcp_configs(coworker.id)

@@ -193,7 +193,18 @@ def _patch_topology_config(
     healthz_port: int | None = None,
     nats_port: int | None = None,
 ) -> None:
-    """Point the config the verifier reads at the local test listeners."""
+    """Point the config the verifier reads at the local test listeners.
+
+    ``ROLEMESH_HOST_DATA_DIR`` is pinned to "" because these cases test
+    invariants (a)-(e) only; the DooD self-check leg has its own suite
+    (test_dood_translation.py). Without the pin the tests are not
+    hermetic: a developer ``.env`` that sets the variable leaks in via
+    ``rolemesh.bootstrap``'s load_dotenv whenever another test module
+    in the same worker imported rolemesh.main/webui.main before
+    core.config — and the success-path tests then attempt a real DooD
+    probe against the fake docker client.
+    """
+    monkeypatch.setattr(config, "ROLEMESH_HOST_DATA_DIR", "")
     monkeypatch.setattr(config, "CONTAINER_NETWORK_NAME", AGENT_NET)
     monkeypatch.setattr(config, "CONTAINER_EGRESS_NETWORK_NAME", EGRESS_NET)
     monkeypatch.setattr(config, "EGRESS_GATEWAY_CONTAINER_NAME", GATEWAY)

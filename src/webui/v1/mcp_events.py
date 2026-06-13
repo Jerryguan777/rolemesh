@@ -49,15 +49,19 @@ def set_mcp_publisher(nc: Any) -> None:
 
 
 def _build_entry(row: MCPServerRow):
-    """Translate a DB row into the wire shape consumed by the gateway."""
-    from rolemesh.container.runtime import rewrite_loopback_to_host_gateway
+    """Translate a DB row into the wire shape consumed by the gateway.
+
+    The origin is published VERBATIM: webui, orchestrator and gateway
+    share one network stack (docs/21 §1), so operator-entered MCP URLs
+    must already use service names that resolve inside it.
+    """
     from rolemesh.egress.mcp_cache import McpEntry
 
     parsed = urlparse(row.url)
     origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme else row.url
     return McpEntry(
         name=row.name,
-        url=rewrite_loopback_to_host_gateway(origin),
+        url=origin,
         headers={str(k): str(v) for k, v in (row.extra_headers or {}).items()},
         auth_mode=row.auth_mode,
     )

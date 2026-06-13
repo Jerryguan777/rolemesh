@@ -3,25 +3,15 @@
 Defines the ContainerRuntime Protocol and supporting types (ContainerSpec,
 ContainerHandle, VolumeMount).  Concrete implementations live in separate
 modules (e.g. docker_runtime.py).
-
-Platform helpers for proxy bind-host and host-gateway detection are kept as
-module-level functions so they can be used regardless of runtime.
 """
 
 from __future__ import annotations
 
-import os
-import platform
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-
-from rolemesh.core.logger import get_logger
-
-logger = get_logger()
 
 # ---------------------------------------------------------------------------
 # Data types
@@ -72,16 +62,17 @@ class ContainerSpec:
     memory_swappiness: int | None = 0
     ulimits: list[dict[str, object]] = field(default_factory=list)
 
-    # Hardening — network. None keeps Docker's default bridge (backward compat);
-    # production runs should set this to a custom bridge with enable_icc=false.
+    # Hardening — network. None keeps the runtime's default network
+    # (backward compat); production runs set the isolated agent network
+    # declared by the deployment layer.
     network_name: str | None = None
 
-    # Hardening — explicit DNS servers. When set, Docker overrides the
-    # default embedded resolver (127.0.0.11) with these IPs. EC-2
-    # points agent containers at the egress gateway's authoritative
-    # resolver so DNS exfil attempts go through the Safety pipeline.
-    # An empty list keeps the default — appropriate for the gateway
-    # container itself and any non-agent container.
+    # Hardening — explicit DNS servers. When set, the runtime overrides
+    # its default resolver with these IPs. EC-2 points agent containers
+    # at the egress gateway's authoritative resolver so DNS exfil
+    # attempts go through the Safety pipeline. An empty list keeps the
+    # default — appropriate for the gateway container itself and any
+    # non-agent container.
     dns: list[str] = field(default_factory=list)
 
     # Hardening — OCI runtime selection: "runc" (default) | "runsc" (gVisor).
@@ -150,105 +141,6 @@ class ContainerRuntime(Protocol):
     ) -> list[str]: ...
 
     async def close(self) -> None: ...
-
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-CONTAINER_HOST_GATEWAY: str = "host.docker.internal"
-
-
-# ---------------------------------------------------------------------------
-# Platform helpers
-# ---------------------------------------------------------------------------
-
-
-def _detect_proxy_bind_host() -> str:
-    """Detect the appropriate bind host for the credential proxy.
-
-    Docker Desktop (macOS): 127.0.0.1 -- the VM routes host.docker.internal to loopback.
-    Docker (Linux): bind to the docker0 bridge IP so only containers can reach it.
-    """
-    if platform.system() == "Darwin":
-        return "127.0.0.1"
-
-    # WSL uses Docker Desktop -- loopback is correct
-    if Path("/proc/sys/fs/binfmt_misc/WSLInterop").exists():
-        return "127.0.0.1"
-
-    # Bare-metal Linux: try to find docker0 bridge IP
-    try:
-        import fcntl
-        import socket
-        import struct
-
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            addr = fcntl.ioctl(sock.fileno(), 0x8915, struct.pack("256s", b"docker0"[:15]))  # SIOCGIFADDR
-            return socket.inet_ntoa(addr[20:24])
-        except OSError:
-            pass
-        finally:
-            sock.close()
-    except ImportError:
-        pass
-
-    return "0.0.0.0"
-
-
-PROXY_BIND_HOST: str = os.environ.get("CREDENTIAL_PROXY_HOST") or _detect_proxy_bind_host()
-
-
-def detect_proxy_bind_host() -> str:
-    """Public API for proxy bind host detection."""
-    return PROXY_BIND_HOST
-
-
-def get_host_gateway_extra_hosts() -> dict[str, str]:
-    """Extra hosts needed for containers to resolve the host gateway."""
-    if platform.system() == "Linux":
-        return {"host.docker.internal": "host-gateway"}
-    return {}
-
-
-def rewrite_loopback_to_host_gateway(url: str) -> str:
-    """Rewrite ``localhost`` / ``127.0.0.1`` in a URL's authority to
-    ``host.docker.internal``.
-
-    Required at every boundary that hands a URL from the orchestrator
-    (running on the host) to a process running inside a container —
-    inside the container, ``localhost`` resolves to the container's
-    own loopback, not the host. Examples:
-
-      * ``NATS_URL`` injected into the egress-gateway's environment.
-      * MCP server origins serialised into ``egress.mcp.changed``
-        events / ``egress.mcp.snapshot.request`` replies — the
-        gateway stores them verbatim and dials directly.
-
-    The rewrite is universal across platforms because
-    ``host.docker.internal`` is resolvable on every platform we
-    support:
-
-      * Linux: via the ``ExtraHosts: host-gateway`` mapping
-        ``create_host_config`` adds (see ``get_host_gateway_extra_hosts``).
-      * macOS / Windows / WSL (Docker Desktop): built into the
-        platform's embedded DNS resolver.
-
-    Anchors on ``://...:`` so paths or hostnames containing the
-    substring ``localhost`` (e.g. ``mylocalhost.example.com``) are
-    not touched.
-
-    Note: do NOT use this on the orchestrator's own in-process
-    registries. There, ``localhost`` legitimately means "the host"
-    (because the orchestrator IS on the host) and rewriting would
-    redirect intra-host calls through Docker's DNS for no reason.
-    The right place is at every IPC boundary where a URL leaves
-    the orchestrator process.
-    """
-    return url.replace("://localhost:", "://host.docker.internal:").replace(
-        "://127.0.0.1:", "://host.docker.internal:"
-    )
 
 
 # ---------------------------------------------------------------------------

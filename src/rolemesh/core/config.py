@@ -5,7 +5,7 @@ env var — never two. Pick by consumer scope:
 
 1. Read by MULTIPLE modules, non-sensitive, no parse-time validation
    beyond a cast → module-level constant HERE (ports, image names,
-   bridge names, mode switches like EGRESS_CONTROL_ENABLE).
+   bridge names).
 
 2. Read by ONE component, or needs construction-time validation /
    fail-closed semantics, or is a SECRET → a ``from_env()`` on that
@@ -49,10 +49,31 @@ SCHEDULER_POLL_INTERVAL: float = 60.0  # seconds
 PROJECT_ROOT: Path = Path.cwd()
 HOME_DIR: Path = Path.home()
 
-MOUNT_ALLOWLIST_PATH: Path = HOME_DIR / ".config" / "rolemesh" / "mount-allowlist.json"
+# Mount allowlist location. Default (host dev flow): the operator's
+# ~/.config/rolemesh. ROLEMESH_MOUNT_ALLOWLIST overrides it for the
+# containerized orchestrator, where the deployment layer bind-mounts the
+# operator's config dir to a fixed in-container path (compose) or ships
+# it as a ConfigMap (K8s) — see deploy/compose/compose.yaml.
+_MOUNT_ALLOWLIST_ENV: str = os.environ.get("ROLEMESH_MOUNT_ALLOWLIST", "")
+MOUNT_ALLOWLIST_PATH: Path = (
+    Path(_MOUNT_ALLOWLIST_ENV)
+    if _MOUNT_ALLOWLIST_ENV
+    else HOME_DIR / ".config" / "rolemesh" / "mount-allowlist.json"
+)
 STORE_DIR: Path = PROJECT_ROOT / "store"
 GROUPS_DIR: Path = PROJECT_ROOT / "groups"
 DATA_DIR: Path = PROJECT_ROOT / "data"
+
+# DooD path translation (docs/21 §7.1). When the orchestrator itself runs
+# in a container, the bind sources it assembles (DATA_DIR / ...) are paths
+# in ITS OWN filesystem, but the host dockerd that spawns agent sandboxes
+# interprets bind sources against the HOST filesystem. This variable holds
+# the host path that the deployment layer bind-mounted onto DATA_DIR
+# (compose: ../../data -> /app/data), and DockerRuntime.run() rewrites
+# every bind source under DATA_DIR to ROLEMESH_HOST_DATA_DIR/<relpath>.
+# Empty (the default) = translation disabled — the host-process dev flow
+# and the test suite keep their unchanged semantics.
+ROLEMESH_HOST_DATA_DIR: str = os.environ.get("ROLEMESH_HOST_DATA_DIR", "")
 
 DATABASE_URL: str = os.environ.get("DATABASE_URL", "postgresql://rolemesh:rolemesh@localhost:5432/rolemesh")
 # RLS rollout (PR-B): a separate pool for cross-tenant maintenance,
@@ -119,52 +140,16 @@ CONTAINER_PIDS_LIMIT: int = int(os.environ.get("CONTAINER_PIDS_LIMIT", "512"))
 CONTAINER_MAX_MEMORY: str = os.environ.get("CONTAINER_MAX_MEMORY", "8g")
 CONTAINER_MAX_CPU: float = float(os.environ.get("CONTAINER_MAX_CPU", "4.0"))
 
-# Custom bridge network for agent containers (R5). Setting this to the
-# empty string falls back to Docker's default bridge (loses ICC isolation
-# and metadata-blackhole scope; use only when custom networks are
-# unsupported on the host).
+# Custom bridge network for agent containers (R5).
 #
 # Egress Control V1 (EC-1) turns this network into a Docker --internal
 # bridge. Containers on it physically cannot route to the public internet
 # — all outbound traffic must flow through the egress gateway which sits
 # on a second bridge (CONTAINER_EGRESS_NETWORK_NAME) with a real default
-# route. This name is ONLY a bridge name now; whether egress control is
-# active is governed by EGRESS_CONTROL_ENABLE below.
+# route. Egress control is always on (docs/21 §1: the EC=off runtime
+# branch was removed); an empty value is a hard configuration error at
+# startup.
 CONTAINER_NETWORK_NAME: str = os.environ.get("CONTAINER_NETWORK_NAME", "rolemesh-agent-net")
-
-
-def _env_flag(name: str, default: bool) -> bool:
-    """Parse a boolean env var. Accepts 1/0, true/false, yes/no, on/off
-    (case-insensitive). Unset → *default*; an unrecognised value raises
-    so a typo fails the boot loudly rather than silently flipping a
-    security-relevant switch."""
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    val = raw.strip().lower()
-    if val in ("1", "true", "yes", "on"):
-        return True
-    if val in ("0", "false", "no", "off"):
-        return False
-    raise ValueError(
-        f"{name} must be a boolean (1/0, true/false, yes/no, on/off), got {raw!r}"
-    )
-
-
-# Master switch for Egress Control (EC-1/2/3). The single authoritative
-# knob: when on, agents run on the Internal=true bridge behind the egress
-# gateway (network-layer enforcement + forward/DNS proxies + per-tenant
-# credential injection at the gateway). When off, agents run on the host
-# bridge and reach a host-side credential proxy directly — egress NETWORK
-# control is disabled, but multi-tenant CREDENTIAL isolation is preserved
-# (the host proxy verifies the same signed identity token and injects the
-# requesting tenant's own key). See docs/16.
-#
-# Replaces the historical overload where CONTAINER_NETWORK_NAME="" doubled
-# as the EC off-switch. That overload is gone: an empty bridge name with
-# EC on is now a hard configuration error (see startup validation), and
-# operators turn EC off with EGRESS_CONTROL_ENABLE=0.
-EGRESS_CONTROL_ENABLE: bool = _env_flag("EGRESS_CONTROL_ENABLE", default=True)
 
 
 # Outbound bridge used by the egress gateway (EC-1). Regular bridge with

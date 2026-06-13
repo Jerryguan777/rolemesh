@@ -10,16 +10,14 @@ the orchestrator has no launch step at all.
 
 Invariants pinned here:
 
-  1. EC on: startup calls verify_infrastructure exactly once, after
+  1. Startup calls verify_infrastructure exactly once, after
      ensure_available and before cleanup_orphans.
-  2. EC on: a verify_infrastructure failure propagates (fail-closed)
+  2. A verify_infrastructure failure propagates (fail-closed)
      and prevents every downstream step — the orchestrator must not
      enter ready state on unverified infrastructure.
   3. ensure_available failure short-circuits everything, including
      verification.
-  4. EC off: verify_infrastructure is NOT called (there is no egress
-     infrastructure to verify); cleanup still runs.
-  5. EC on + empty bridge name is a hard configuration error raised
+  4. An empty bridge name is a hard configuration error raised
      BEFORE any verification.
 
 The runtime is mocked at the ContainerRuntime boundary; correctness of
@@ -43,7 +41,7 @@ def _make_runtime_mock() -> MagicMock:
 
 
 async def test_startup_verifies_infrastructure_in_order() -> None:
-    """EC on: ensure_available → verify_infrastructure → cleanup_orphans,
+    """ensure_available → verify_infrastructure → cleanup_orphans,
     nothing else. Verification must precede orphan cleanup so a broken
     deployment is reported before we start mutating container state."""
     from rolemesh import main as main_module
@@ -83,7 +81,7 @@ async def test_startup_aborts_when_ensure_available_fails() -> None:
 
 
 async def test_startup_fail_closed_when_verification_fails() -> None:
-    """EC on: verify_infrastructure raising must abort startup — the
+    """verify_infrastructure raising must abort startup — the
     orchestrator refuses to run against undeclared/broken infrastructure
     instead of degrading or self-repairing."""
     from rolemesh import main as main_module
@@ -103,40 +101,22 @@ async def test_startup_fail_closed_when_verification_fails() -> None:
     rt.cleanup_orphans.assert_not_awaited()
 
 
-async def test_ec_off_skips_verification() -> None:
-    """EC off (``EGRESS_CONTROL_ENABLE=0``): there is no egress
-    infrastructure to verify; only the version gate and orphan cleanup
-    run."""
+async def test_empty_bridge_name_refuses_to_start() -> None:
+    """An empty bridge name is a hard config error — there's no
+    Internal=true bridge to enforce isolation on, and egress control
+    has no off-switch (docs/21 §1). Raised before any verification
+    attempt so the message points at the config, not at a 'missing
+    network'; cleanup must not run either."""
     from rolemesh import main as main_module
 
     rt = _make_runtime_mock()
 
     with (
-        patch.object(main_module, "EGRESS_CONTROL_ENABLE", False),
-        patch.object(main_module, "get_runtime", return_value=rt),
-    ):
-        await main_module._ensure_container_system_running()
-
-    rt.ensure_available.assert_awaited_once()
-    rt.verify_infrastructure.assert_not_awaited()
-    rt.cleanup_orphans.assert_awaited_once()
-
-
-async def test_ec_on_empty_bridge_name_is_config_error() -> None:
-    """EC on with an empty bridge name is a hard config error — there's
-    no Internal=true bridge to enforce isolation on. Raised before any
-    verification attempt so the message points at the config, not at a
-    'missing network'."""
-    from rolemesh import main as main_module
-
-    rt = _make_runtime_mock()
-
-    with (
-        patch.object(main_module, "EGRESS_CONTROL_ENABLE", True),
         patch.object(main_module, "CONTAINER_NETWORK_NAME", ""),
         patch.object(main_module, "get_runtime", return_value=rt),
-        pytest.raises(RuntimeError, match="EGRESS_CONTROL_ENABLE"),
+        pytest.raises(RuntimeError, match="CONTAINER_NETWORK_NAME"),
     ):
         await main_module._ensure_container_system_running()
 
     rt.verify_infrastructure.assert_not_awaited()
+    rt.cleanup_orphans.assert_not_awaited()

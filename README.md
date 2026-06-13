@@ -97,44 +97,75 @@ RoleMesh is built for that gap:
 
 ## Quick Start
 
-Prerequisites: Python 3.12+, Docker, and [uv](https://github.com/astral-sh/uv).
+Prerequisites: Docker (plus Python 3.12+ and
+[uv](https://github.com/astral-sh/uv) for development and tests).
+
+Everything runs as containers on one network stack — infrastructure
+(Postgres, NATS, egress gateway, both egress-control bridges) and the
+application services (orchestrator, WebUI) are all declared in
+`deploy/compose/compose.yaml` (docs/21 §1). There is no host-process
+mode for the orchestrator.
 
 ```bash
 git clone https://github.com/<TODO>/rolemesh.git
 cd rolemesh
 
-# Install dependencies (default: Claude SDK only)
-uv sync --extra dev
+# Configure .env — see "Configuration" below. Three deployment keys
+# are required in addition to the application config:
 
-# Or include the Pi backend for multi-provider support
-uv sync --extra pi --extra dev
+# Host docker group id — the orchestrator container runs as non-root
+# UID 1000 and gets docker.sock access via this supplemental group.
+echo "DOCKER_GID=$(getent group docker | cut -d: -f3)" >> .env
 
-# Add the eval extra to use rolemesh-eval (Inspect AI based, manual)
-uv sync --extra pi --extra dev --extra eval
+# Host path of the repo's data/ directory (DooD path translation: the
+# orchestrator sees /app/data, but bind sources for agent sandboxes are
+# resolved by the HOST dockerd). Must be absolute — compose interpolates
+# in the caller's environment, so don't rely on the caller's cwd.
+echo "ROLEMESH_HOST_DATA_DIR=$PWD/data" >> .env
 
-# Build the agent and egress-gateway container images
+# WS_TICKET_SECRET must also be set (see Configuration below).
+
+# Build the agent image (spawned by the orchestrator at runtime), then
+# build + start the full stack. --env-file matters: the project
+# directory is deploy/compose, so the repo-root .env is not picked up
+# automatically.
 container/build.sh
-container/build-egress-gateway.sh
-
-# Configure .env — see "Configuration" below
-$EDITOR .env
-
-# Bring up the infrastructure: Postgres, NATS, the egress gateway and
-# both egress-control bridges are all declared by compose. Run this
-# BEFORE the orchestrator — the orchestrator no longer creates networks
-# or launches the gateway; it only verifies them at startup (fail-
-# closed). --env-file matters: it feeds the gateway's
-# EGRESS_TOKEN_SECRET from the repo-root .env.
-docker compose --env-file .env -f deploy/compose/compose.yaml up -d
-
-# Start the orchestrator
-rolemesh
-
-# In a second shell: start the WebUI
-rolemesh-webui
+docker compose --env-file .env -f deploy/compose/compose.yaml up -d --build
 ```
 
 Open <http://localhost:8080> in your browser.
+
+Startup is fail-closed: the orchestrator verifies the declared
+infrastructure (networks, gateway IP/healthz, NATS) and runs a DooD
+loopback self-check — it writes a sentinel under `data/`, binds the
+translated host path into a one-shot probe container and reads it back.
+A misconfigured `ROLEMESH_HOST_DATA_DIR` refuses to start instead of
+silently spawning agents on empty directories.
+
+Development conveniences (both are wrappers in
+`container/orchestrator-entrypoint.sh`):
+
+* **Hot reload** — on by default in compose: `../../src` is bind-mounted
+  over `/app/src` and the entrypoint wraps the orchestrator in
+  `watchfiles` (`ROLEMESH_RELOAD=1`), restarting it on source changes.
+  Set `ROLEMESH_RELOAD=0` in `.env` to disable.
+* **debugpy** — set `DEBUGPY=1` in `.env` (or
+  `DEBUGPY=1 docker compose ... up orchestrator`) and attach your IDE to
+  `localhost:5678`. The listener is only bound to the host loopback.
+  Tip: combined with reload, the debug session dies on each restart;
+  for long debugging sessions set `ROLEMESH_RELOAD=0`.
+
+One-off CLI runs reuse the orchestrator image and override its command:
+
+```bash
+docker compose --env-file .env -f deploy/compose/compose.yaml \
+    run --rm orchestrator rolemesh-eval --help
+```
+
+The operator mount allowlist is bind-mounted read-only from
+`~/.config/rolemesh` (override the host dir with `ROLEMESH_CONFIG_DIR`
+in `.env`). Note: if the directory does not exist, docker creates it
+root-owned on the host.
 
 ---
 
@@ -174,11 +205,10 @@ channel with its bot tokens.
 | Key                          | Purpose                                                                  |
 |------------------------------|--------------------------------------------------------------------------|
 | `ASSISTANT_NAME`             | Display name for your AI coworker.                                       |
-| `EGRESS_CONTROL_ENABLE`      | Master switch for Egress Control. Default **on**. On: agents run on the Internal=true bridge behind the egress gateway (network isolation + forward/DNS proxies + per-tenant credentials). Off (`0`): agents run on the Docker default bridge and reach a host-side credential proxy directly — egress **network** control is disabled, but per-tenant **credential** isolation is preserved. Replaces the old `CONTAINER_NETWORK_NAME=""` off-switch. |
-| `CONTAINER_NETWORK_NAME`     | Name of the EC agent bridge (Internal=true). Defaults to `rolemesh-agent-net`. Only consulted when EC is on; with EC on it must be non-empty (empty → startup error). |
+| `CONTAINER_NETWORK_NAME`     | Name of the EC agent bridge (Internal=true). Defaults to `rolemesh-agent-net` and must match the compose-declared network; must be non-empty (empty → startup error). |
 | `EGRESS_DNS_ALLOWLIST`       | Platform-wide DNS allowlist for the gateway resolver (comma-separated, `exact` or `*.suffix`). Default **empty** — proxied traffic never needs agent-side DNS, so the resolver is a tripwire; see docs/16. |
 | `EGRESS_DNS_MODE`            | `enforce` (default: non-matching names get NXDOMAIN) or `observe` (resolve everything, log would-be blocks; migration aid only). |
-| `EGRESS_TOKEN_SECRET`        | **Required in both EC modes.** Shared HMAC secret (≥16 chars) used to sign and verify agent identity tokens. EC on: the gateway verifies; EC off: the host-side credential proxy verifies (it's how per-tenant credential isolation survives with EC off). Never injected into agent containers. Missing → refuse to boot. |
+| `EGRESS_TOKEN_SECRET`        | **Required.** Shared HMAC secret (≥16 chars) used to sign and verify agent identity tokens; the orchestrator signs, the gateway verifies. Never injected into agent containers. Missing → refuse to boot. |
 | `EGRESS_TOKEN_TTL_SECONDS`   | Max lifetime of an identity token (and thus an agent container before the orchestrator re-mints). Default 7 days. |
 | `ROLEMESH_ENV`               | `development` (default) or `production`. See note below.                 |
 | `ROLEMESH_SEED_ADMIN_EMAIL`  | If set, the WebUI seeds a `platform_admin` with this email at startup.   |
@@ -229,12 +259,13 @@ Two interchangeable runtimes; configurable per-coworker or globally via `ROLEMES
 | **Claude**  | Anthropic                                             | Standard Claude Code workflows; OAuth Max subscription.     |
 | **Pi**      | Anthropic, OpenAI, Google Gemini, AWS Bedrock         | Multi-provider, on-prem Bedrock, model-agnostic strategies. |
 
-Switch backends with:
+Switch backends by setting the keys in `.env` and restarting the
+orchestrator service:
 
 ```bash
-ROLEMESH_AGENT_BACKEND=pi \
-PI_MODEL_ID=amazon-bedrock/us.anthropic.claude-sonnet-4-6 \
-rolemesh
+echo "ROLEMESH_AGENT_BACKEND=pi" >> .env
+echo "PI_MODEL_ID=amazon-bedrock/us.anthropic.claude-sonnet-4-6" >> .env
+docker compose --env-file .env -f deploy/compose/compose.yaml up -d orchestrator
 ```
 
 Details: `docs/switchable-agent-backend.md`.
@@ -245,7 +276,7 @@ Details: `docs/switchable-agent-backend.md`.
 
 | Channel  | Setup                                                                                                |
 |----------|------------------------------------------------------------------------------------------------------|
-| WebUI    | `rolemesh-webui` (defaults to port 8080).                                                            |
+| WebUI    | `webui` compose service (defaults to port 8080).                                                     |
 | Telegram | Bind a coworker via Settings → Channels with a Telegram bot token; the gateway hot-loads on bind.   |
 | Slack    | Bind a coworker via Settings → Channels with `bot_token` + `app_token`.                              |
 | Teams    | Planned — <TODO: link to tracking issue>.                                                            |
@@ -294,7 +325,7 @@ rolemesh-eval --tenant <tenant_uuid> show <run_uuid>
 
 Exit codes: `0` (run completed and thresholds met), `1` (infrastructure / config error), `2` (run completed but at least one threshold violated).
 
-Requires `--extra eval` plus a reachable Postgres + NATS + Docker daemon. Eval reuses the production `ContainerAgentExecutor` rather than rolling a parallel orchestrator, so containers behave identically to real traffic. The orchestrator daemon need not be running (eval bootstraps its own gateway and DNS registration).
+Run it as a one-off container on the orchestrator image (see Quick Start: `docker compose ... run --rm orchestrator rolemesh-eval ...`). The compose infrastructure (Postgres, NATS, egress gateway) must be up; eval verifies it the same fail-closed way the orchestrator does. Eval reuses the production `ContainerAgentExecutor` rather than rolling a parallel orchestrator, so containers behave identically to real traffic. The orchestrator service itself need not be running.
 
 ---
 
