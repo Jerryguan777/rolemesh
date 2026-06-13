@@ -42,14 +42,37 @@ from rolemesh.security.mount_security import validate_additional_mounts
 
 if TYPE_CHECKING:
     from rolemesh.agent.executor import AgentBackendConfig
+    from rolemesh.agent.executor import AgentInput as ContainerInput
+    from rolemesh.agent.executor import AgentOutput as ContainerOutput
     from rolemesh.core.types import Coworker
     from rolemesh.ipc.nats_transport import NatsTransport
 
-# Backward-compat aliases
-from rolemesh.agent.executor import AgentInput as ContainerInput
-from rolemesh.agent.executor import AgentOutput as ContainerOutput
-
 logger = get_logger()
+
+
+def __getattr__(name: str) -> object:
+    """Lazy backward-compat aliases (PEP 562).
+
+    ``ContainerInput``/``ContainerOutput`` moved to
+    ``rolemesh.agent.executor`` (AgentInput/AgentOutput). Resolving them
+    eagerly created an import cycle: this module imported
+    ``rolemesh.agent.executor``, whose package ``__init__`` imports
+    ``container_executor``, which imports back into this module —
+    so ``import rolemesh.container.runner`` as the FIRST rolemesh.agent
+    touch crashed with "partially initialized module" (caught by the
+    container contract-test conftest, which is exactly such a first
+    importer). Production only survived by import-order luck.
+    """
+    if name == "ContainerInput":
+        from rolemesh.agent.executor import AgentInput
+
+        return AgentInput
+    if name == "ContainerOutput":
+        from rolemesh.agent.executor import AgentOutput
+
+        return AgentOutput
+    msg = f"module {__name__!r} has no attribute {name!r}"
+    raise AttributeError(msg)
 
 # Re-export VolumeMount from runtime (it used to live here)
 __all__ = [
