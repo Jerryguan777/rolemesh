@@ -13,7 +13,7 @@ them.
 Lifecycle
 ---------
 
-    startup                    hot reload
+    startup (degraded)         hot reload
     ┌───────┐                  ┌─────────────────────┐
     │ NATS  │                  │ NATS                │
     │ rpc   │                  │ safety.rule.changed │
@@ -27,10 +27,23 @@ Lifecycle
                       ▼
               get_rules_for(tid, cwid)
 
-Seed is fail-closed: a gateway that can't read the current rule set
-refuses to start. The runtime update path is fail-safe (a malformed
-event is logged and dropped) — one bad event must not crash the
-gateway or it becomes a denial-of-service vector.
+The gateway starts *degraded*: it subscribes to rule-change events and
+serves traffic before the snapshot arrives, while a background task
+retries the snapshot RPC. Until ``seed`` succeeds the cache reports
+``seeded == False`` and the safety caller denies every request — an
+unseeded cache and an intentionally empty rule set are different
+states, and the deny must not depend on the accident that both return
+zero rules.
+
+Ordering contract: ``apply_event`` may run before ``seed``. Events
+applied in the degraded window land in the cache normally but cannot
+allow traffic (the ``seeded`` gate above); ``seed`` is the
+authoritative full-replacement snapshot and supersedes anything the
+events wrote. Events after ``seed`` apply incrementally as usual.
+
+The runtime update path is fail-safe (a malformed event is logged and
+dropped) — one bad event must not crash the gateway or it becomes a
+denial-of-service vector.
 """
 
 from __future__ import annotations
@@ -92,6 +105,16 @@ class PolicyCache:
     _rules: dict[str, dict[str | None, list[CachedRule]]] = field(default_factory=dict)
     _by_id: dict[str, CachedRule] = field(default_factory=dict)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # False until the first authoritative snapshot lands. Consumers
+    # (EgressSafetyCaller) must treat an unseeded cache as deny-all;
+    # apply_event deliberately does NOT flip this — a delta stream
+    # without a baseline is not a complete policy.
+    _seeded: bool = field(default=False)
+
+    @property
+    def seeded(self) -> bool:
+        """True once an authoritative snapshot has been applied."""
+        return self._seeded
 
     def _insert_locked(self, rule: CachedRule) -> None:
         """Caller MUST hold ``_lock``. Separated so apply_event can
@@ -124,8 +147,11 @@ class PolicyCache:
     async def seed(self, snapshot: Iterable[dict[str, Any]]) -> None:
         """Replace the entire cache contents from a snapshot.
 
-        Used once at startup; the lock is held for the whole replacement
-        so no hot-path lookup can observe a half-populated cache.
+        The snapshot is authoritative: anything ``apply_event`` wrote
+        before the seed (degraded-startup window) is discarded in favor
+        of the snapshot. The lock is held for the whole replacement so
+        no hot-path lookup can observe a half-populated cache. Marks
+        the cache as seeded, lifting the deny-all degraded state.
         """
         async with self._lock:
             self._rules = {}
@@ -141,6 +167,7 @@ class PolicyCache:
                     continue
                 self._insert_locked(rule)
                 count += 1
+            self._seeded = True
         logger.info("policy_cache: seeded", rule_count=count)
 
     async def apply_event(self, event: dict[str, Any]) -> None:
@@ -250,8 +277,8 @@ async def fetch_snapshot_via_nats(
     persisted and replayed.
 
     Raises ``TimeoutError`` or whatever the NATS client raises on
-    transport failure. The launcher is expected to fail-close on
-    exception.
+    transport failure. The gateway retries on exception (degraded
+    startup) while the unseeded cache keeps the policy plane deny-all.
     """
     response = await nats_client.request(  # type: ignore[attr-defined]
         SNAPSHOT_REQUEST_SUBJECT,

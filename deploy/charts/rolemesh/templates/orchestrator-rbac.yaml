@@ -1,0 +1,68 @@
+{{- /*
+Orchestrator RBAC (docs/21 §10.2, minimal privilege, all namespace-scoped).
+
+Two groups of grants, both confined to the install namespace:
+
+  1. Agent sandbox lifecycle — pods create/delete/get/list/watch +
+     pods/log get. This is exactly the set verify_infrastructure's
+     SelfSubjectAccessReview asserts (k8s_runtime._check_rbac).
+  2. Read-only verify reads — get on networkpolicies, persistentvolume-
+     claims and services. verify_infrastructure reads these infra objects
+     (steps a-c) BEFORE the pod self-check; without get on them it would
+     403 there. get only (no list/watch/write).
+
+There is no ClusterRole: verify does not do a cluster-scoped namespaces/get
+(removed precisely so a namespaced Role suffices — docs/21 §10.2). A missing
+namespace surfaces as a 404 on the first namespaced read instead.
+*/ -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "rolemesh.orchestrator.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rolemesh.labels" . | nindent 4 }}
+    app.kubernetes.io/component: orchestrator
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "rolemesh.orchestrator.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rolemesh.labels" . | nindent 4 }}
+    app.kubernetes.io/component: orchestrator
+rules:
+  # Agent sandbox lifecycle. create/delete/get/list/watch — the exact set
+  # the runtime's SelfSubjectAccessReview asserts (k8s_runtime _check_rbac).
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+  # read_stderr streams the pod log.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  # Read-only verify_infrastructure reads (steps a-c). get only.
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims", "services"]
+    verbs: ["get"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "rolemesh.orchestrator.serviceAccountName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rolemesh.labels" . | nindent 4 }}
+    app.kubernetes.io/component: orchestrator
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "rolemesh.orchestrator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "rolemesh.orchestrator.serviceAccountName" . }}

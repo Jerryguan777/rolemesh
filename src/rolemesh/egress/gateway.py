@@ -17,14 +17,21 @@ and we want agents on the first bridge to reach each listener without
 caring which interface they're on. The actual isolation is enforced by
 the Internal=true flag on agent-net — see docs/egress/deployment.md.
 
-Startup is fail-closed: any subsystem that cannot reach NATS or load
-its initial state raises out of ``main``, which exits with a non-zero
-code and triggers the container's ``restart: unless-stopped`` policy.
-Agents sitting on the internal bridge will simply have no gateway
-during the restart loop — intentional, because running without a
-populated policy cache would mean defaulting every request to allow
-or every request to block, both of which are worse than no gateway
-(agents time out quickly and the operator sees the paging signal).
+Startup is *degraded-but-serving* (docs/21-container-runtime-decoupling
+§5): once NATS is connected, every listener (reverse proxy with
+/healthz, forward proxy, DNS) binds immediately without waiting for the
+rule snapshot. The snapshot responder lives in the orchestrator, and in
+the compose deployment the gateway starts first — blocking on the
+snapshot would deadlock the whole stack. Until the snapshot arrives the
+policy plane is deny-all (an unseeded PolicyCache makes the safety
+caller block every request) and a background task retries the snapshot
+RPC with exponential backoff; /healthz reports
+``{"status": "degraded", "rules_seeded": false}`` in the meantime but
+always returns 200 — health means "NATS connected + listeners bound".
+
+Hard prerequisites stay fail-closed: a NATS that won't connect or a
+missing EGRESS_TOKEN_SECRET raises out of ``main``, exits non-zero,
+and triggers the container's ``restart: unless-stopped`` policy.
 """
 # ruff: noqa: I001
 # Intentional import order: rolemesh.bootstrap MUST run before
@@ -40,9 +47,11 @@ from __future__ import annotations
 import rolemesh.bootstrap  # noqa: F401
 
 import asyncio
+import contextlib
 import os
 import signal
 from contextlib import AsyncExitStack
+from typing import TYPE_CHECKING, Any
 
 from rolemesh.core.config import (
     CREDENTIAL_PROXY_PORT,
@@ -71,6 +80,9 @@ from .reverse_proxy import set_token_vault, start_credential_proxy
 from .safety_call import AuditPublisher, EgressSafetyCaller
 from .token_identity import TokenAuthority
 
+if TYPE_CHECKING:
+    import nats.aio.client
+
 logger = get_logger()
 
 
@@ -81,12 +93,19 @@ logger = get_logger()
 #   authoritative resolver recurses to on allow. Defaults match the
 #   public internet resolvers that respond fastest under typical
 #   workloads.
-# EGRESS_SNAPSHOT_TIMEOUT: how long the gateway waits for the initial
-#   rule snapshot before giving up and failing start.
+# EGRESS_SNAPSHOT_TIMEOUT: per-attempt NATS request-reply timeout for
+#   the rule / MCP snapshot RPCs.
 # EGRESS_DNS_ALLOWLIST / EGRESS_DNS_MODE: platform DNS policy — see
 #   dns_policy.py for semantics and the empty-by-default rationale.
 _UPSTREAM_DNS_DEFAULT = "8.8.8.8,1.1.1.1"
 _SNAPSHOT_TIMEOUT_S = 5.0
+
+# Exponential-backoff schedule for the degraded-startup rule-snapshot
+# retry loop. Deliberately module-level constants, not config.py knobs:
+# the values only matter for how fast the gateway leaves the deny-all
+# window after the orchestrator comes up, and tests patch them directly.
+_SNAPSHOT_RETRY_INITIAL_S = 1.0
+_SNAPSHOT_RETRY_MAX_S = 30.0
 
 
 def _parse_upstream_dns(raw: str) -> list[UpstreamResolver]:
@@ -113,6 +132,53 @@ def _parse_upstream_dns(raw: str) -> list[UpstreamResolver]:
     return out
 
 
+async def _seed_rules_with_retry(
+    nats_client: nats.aio.client.Client,
+    cache: PolicyCache,
+) -> None:
+    """Retry the rule-snapshot RPC until it succeeds, then seed *cache*.
+
+    Runs as a background task for the whole degraded-startup window.
+    Exponential backoff starting at _SNAPSHOT_RETRY_INITIAL_S, capped at
+    _SNAPSHOT_RETRY_MAX_S. Every failure logs a warning (the operator's
+    signal that the orchestrator is not answering yet); success logs an
+    info and ends the task. Cancellation (gateway shutdown) propagates.
+    """
+    delay = _SNAPSHOT_RETRY_INITIAL_S
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            snapshot = await fetch_snapshot_via_nats(
+                nats_client, timeout_s=_SNAPSHOT_TIMEOUT_S
+            )
+        except Exception as exc:  # noqa: BLE001 — any RPC failure means "retry"
+            logger.warning(
+                "gateway: rule snapshot fetch failed — policy plane stays "
+                "default-deny, retrying",
+                attempt=attempt,
+                retry_in_s=delay,
+                error=str(exc),
+            )
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, _SNAPSHOT_RETRY_MAX_S)
+            continue
+        await cache.seed(snapshot)
+        logger.info(
+            "gateway: rule snapshot seeded — leaving degraded mode",
+            attempt=attempt,
+            rule_count=len(snapshot),
+        )
+        return
+
+
+async def _cancel_task(task: asyncio.Task[Any]) -> None:
+    """AsyncExitStack callback: cancel *task* and await it quietly."""
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
 async def main() -> None:
     upstream_dns = _parse_upstream_dns(
         os.environ.get("EGRESS_UPSTREAM_DNS", _UPSTREAM_DNS_DEFAULT)
@@ -120,7 +186,7 @@ async def main() -> None:
 
     # Platform DNS policy. Loaded before any network setup so a config
     # typo (bad EGRESS_DNS_MODE) kills the boot immediately — same
-    # fail-closed posture as the rule-snapshot fetch below.
+    # fail-closed posture as the token-authority secret check below.
     dns_policy = GlobalDnsPolicy.from_env()
 
     # Import nats-py lazily so unit tests importing this module don't
@@ -136,21 +202,27 @@ async def main() -> None:
     async with AsyncExitStack() as stack:
         stack.push_async_callback(nats_client.close)
 
-        # --- Policy cache: snapshot + hot reload ---------------------
+        # --- Policy cache: degraded start + hot reload ---------------
+        # Subscribe to rule changes BEFORE the snapshot seed so there is
+        # no event gap between snapshot generation and subscription.
+        # PolicyCache supports this ordering: events applied in the
+        # degraded window cannot allow traffic (unseeded cache ⇒ the
+        # safety caller denies everything), and seed() is the
+        # authoritative full overwrite once it lands; events after seed
+        # apply incrementally as usual.
         cache = PolicyCache()
-        try:
-            snapshot = await fetch_snapshot_via_nats(
-                nats_client, timeout_s=_SNAPSHOT_TIMEOUT_S
-            )
-        except Exception as exc:
-            logger.error(
-                "gateway: could not load rule snapshot — refusing to start",
-                error=str(exc),
-            )
-            raise
-        await cache.seed(snapshot)
         rule_sub = await subscribe_rule_changes(nats_client, cache)
         stack.push_async_callback(rule_sub.unsubscribe)  # type: ignore[attr-defined]
+
+        # Background snapshot retry (docs/21 §5): the responder lives in
+        # the orchestrator, which starts AFTER the gateway in compose —
+        # blocking here would deadlock the stack. Listeners come up now;
+        # the policy plane stays default-deny until this task seeds.
+        seed_task = asyncio.create_task(
+            _seed_rules_with_retry(nats_client, cache),
+            name="egress-rule-snapshot-seed",
+        )
+        stack.push_async_callback(_cancel_task, seed_task)
 
         # --- Safety caller (audit publish via NATS) ------------------
         audit = AuditPublisher(nats_client=nats_client)
@@ -227,8 +299,10 @@ async def main() -> None:
         # Verifies the signed identity token agents carry in their proxy
         # env. Shares EGRESS_TOKEN_SECRET with the orchestrator (same
         # bind-mounted .env). Fail-closed: a missing secret raises here
-        # and the gateway refuses to boot, same posture as the rule
-        # snapshot. The IP resolver stays wired as the dual-run fallback.
+        # and the gateway refuses to boot — unlike the rule snapshot,
+        # this is pure local config and cannot be retried into
+        # existence. The IP resolver stays wired as the dual-run
+        # fallback.
         token_authority = TokenAuthority.from_env()
 
         # --- Reverse proxy (port 3001) -------------------------------
@@ -238,6 +312,10 @@ async def main() -> None:
             credential_resolver=credential_resolver,
             safety_caller=safety,
             token_authority=token_authority,
+            # /healthz stays 200 while degraded; the body flips from
+            # {"status": "degraded"} to {"status": "ok"} once the
+            # background snapshot retry seeds the cache.
+            rules_seeded=lambda: cache.seeded,
         )
         stack.push_async_callback(reverse_runner.cleanup)
 

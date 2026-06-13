@@ -1,0 +1,149 @@
+{{- if .Values.seed.enabled }}
+{{- /*
+Seed Job (docs/21 §10.2). helm post-install/post-upgrade hook, hook-weight
+"-5" so it runs BEFORE the orchestrator's hook-weight-0 readiness window.
+
+What it does:
+  * Always: create/upgrade the DB schema. init_database() runs _create_schema
+    idempotently; the orchestrator also does this on its own boot, so the Job
+    is a no-op-safe explicit migration hook (operators get one place to gate
+    upgrades and read migration logs).
+  * When seed.adminEmail is set: also seed the initial platform admin via
+    `rolemesh-admin create-admin` (itself idempotent — "Already exists" on
+    re-run).
+
+Runs on the orchestrator image (carries rolemesh-admin + rolemesh.db). Uses
+the same DB env as the orchestrator. Does NOT touch the K8s API, so it needs
+no ServiceAccount/RBAC.
+*/ -}}
+{{- $secretName := .Values.secrets.existingSecret | default (include "rolemesh.secretName" .) -}}
+{{- $tag := default .Chart.AppVersion .Values.orchestrator.image.tag -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "rolemesh.fullname" . }}-seed
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rolemesh.labels" . | nindent 4 }}
+    app.kubernetes.io/component: seed
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 6
+  # Give the bundled Postgres time to become reachable on a cold install.
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        {{- include "rolemesh.labels" . | nindent 8 }}
+        app.kubernetes.io/component: seed
+    spec:
+      restartPolicy: Never
+      {{- with .Values.image.pullSecret }}
+      imagePullSecrets:
+        - name: {{ . }}
+      {{- end }}
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      # Wait for the database to accept TCP before the schema step. A
+      # ClusterIP with zero ready endpoints REJECTS (ConnectionRefused),
+      # so without this the Job races a cold-starting Postgres and burns
+      # its backoffLimit on connection-refused retries. Deterministic
+      # gate instead of relying on retry luck.
+      initContainers:
+        - name: wait-for-db
+          image: "{{ .Values.orchestrator.image.repository }}:{{ $tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          env:
+            - name: DATABASE_URL
+              value: {{ include "rolemesh.databaseUrl" . | quote }}
+          command:
+            - python
+            - -c
+            - |
+              import os, socket, sys, time
+              from urllib.parse import urlparse
+              u = urlparse(os.environ["DATABASE_URL"])
+              host, port = u.hostname, u.port or 5432
+              deadline = time.monotonic() + 300
+              while time.monotonic() < deadline:
+                  try:
+                      with socket.create_connection((host, port), timeout=3):
+                          print(f"[wait-for-db] {host}:{port} reachable")
+                          sys.exit(0)
+                  except OSError as exc:
+                      print(f"[wait-for-db] {host}:{port} not ready ({exc}); retrying")
+                      time.sleep(2)
+              print("[wait-for-db] timed out waiting for the database")
+              sys.exit(1)
+          resources:
+            {{- toYaml .Values.seed.resources | nindent 12 }}
+      containers:
+        - name: seed
+          image: "{{ .Values.orchestrator.image.repository }}:{{ $tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          env:
+            {{- if .Values.postgres.enabled }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: POSTGRES_PASSWORD
+            {{- end }}
+            - name: DATABASE_URL
+              value: {{ include "rolemesh.databaseUrl" . | quote }}
+            - name: ADMIN_DATABASE_URL
+              value: {{ if .Values.postgres.enabled }}{{ include "rolemesh.databaseUrl" . | quote }}{{ else }}{{ .Values.postgres.externalAdminUrl | default .Values.postgres.externalUrl | quote }}{{ end }}
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              {{- if .Values.seed.adminEmail }}
+              echo "[seed] creating schema + initial admin"
+              rolemesh-admin create-admin \
+                --email {{ .Values.seed.adminEmail | quote }} \
+                --role {{ .Values.seed.adminRole | quote }} \
+                {{- if .Values.seed.adminName }}
+                --name {{ .Values.seed.adminName | quote }}
+                {{- end }}
+              {{- else }}
+              echo "[seed] creating schema only (seed.adminEmail unset)"
+              python - <<'PY'
+              import asyncio
+              from rolemesh.db import init_database, close_database
+
+              async def _main() -> None:
+                  await init_database()
+                  await close_database()
+
+              asyncio.run(_main())
+              print("[seed] schema ready")
+              PY
+              {{- end }}
+          resources:
+            {{- toYaml .Values.seed.resources | nindent 12 }}
+{{- end }}

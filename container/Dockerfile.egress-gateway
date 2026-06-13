@@ -4,8 +4,8 @@
 #   * Relocates the credential proxy's reverse-proxy half into its own
 #     container so agent containers on the Internal=true agent bridge
 #     can reach LLM / MCP endpoints through a single auditable hop.
-#   * Exposes /healthz on port 3001 for the orchestrator's readiness
-#     probe (see container/network.py:verify_egress_gateway_reachable).
+#   * Exposes /healthz on port 3001 for the compose healthcheck and the
+#     orchestrator's startup verification (verify_infrastructure).
 #
 # EC-2 will add:
 #   * HTTP CONNECT forward proxy on port 3128
@@ -77,9 +77,11 @@ ENV PYTHONPATH=/app \
     LC_ALL=C.UTF-8 \
     PYTHONUNBUFFERED=1
 
-# Orchestrator owns liveness via verify_egress_gateway_reachable; a
-# separate Docker healthcheck would just add a shell per interval for no
-# value and mask real failures behind "healthy".
+# The deployment layer owns liveness: deploy/compose/compose.yaml
+# declares a service-level healthcheck probing /healthz (which
+# overrides this NONE), and the orchestrator's verify_infrastructure
+# re-checks /healthz at startup. NONE here keeps a bare `docker run`
+# of this image healthcheck-free.
 HEALTHCHECK NONE
 
 ENTRYPOINT ["python", "-m", "rolemesh.egress.gateway"]

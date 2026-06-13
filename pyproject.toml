@@ -33,6 +33,12 @@ rolemesh-admin = "rolemesh.admin.cli:main"
 eval = [
     "inspect-ai>=0.3",
 ]
+# Kubernetes container-runtime backend (CONTAINER_BACKEND=k8s, docs/21 §4.4).
+# Optional so docker-only deployments stay slim; container/k8s_runtime
+# imports it lazily and points at this extra when it is missing.
+k8s = [
+    "kubernetes_asyncio>=32.0",
+]
 pi = [
     "anthropic>=0.49",
     "openai>=1.60",

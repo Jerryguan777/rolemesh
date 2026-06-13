@@ -99,6 +99,43 @@ async def test_malformed_event_does_not_crash_cache() -> None:
     assert len(cache.get_rules_for("tenant-a", "coworker-x")) == 1
 
 
+async def test_new_cache_reports_not_seeded() -> None:
+    """Degraded-startup gate: a fresh cache must be distinguishable from
+    a seeded-but-empty one, or the safety caller cannot deny
+    deterministically before the snapshot lands."""
+    assert PolicyCache().seeded is False
+
+
+async def test_seed_with_empty_snapshot_marks_seeded() -> None:
+    """A tenant fleet with zero egress rules is a valid authoritative
+    state — the gateway must leave degraded mode on it, not stay
+    deny-all forever."""
+    cache = PolicyCache()
+    await cache.seed([])
+    assert cache.seeded is True
+
+
+async def test_apply_event_before_seed_does_not_mark_seeded() -> None:
+    """A delta stream without a baseline is not a complete policy: only
+    the authoritative snapshot may lift the degraded state."""
+    cache = PolicyCache()
+    await cache.apply_event({"action": "created", **_make_rule()})
+    assert cache.seeded is False
+
+
+async def test_seed_supersedes_rules_applied_before_seed() -> None:
+    """Event arrives during the degraded window, then the snapshot lands:
+    the snapshot is authoritative, so a rule absent from it must not
+    survive the seed, while snapshot rules take effect."""
+    cache = PolicyCache()
+    await cache.apply_event(
+        {"action": "created", **_make_rule(id="pre-seed", rule_id="pre-seed")}
+    )
+    await cache.seed([_make_rule(id="from-snap", rule_id="from-snap")])
+    ids = [r.id for r in cache.get_rules_for("tenant-a", "coworker-x")]
+    assert ids == ["from-snap"]
+
+
 async def test_cached_rule_carries_config() -> None:
     cache = PolicyCache()
     await cache.seed(

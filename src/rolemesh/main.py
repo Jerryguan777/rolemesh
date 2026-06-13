@@ -52,18 +52,14 @@ from rolemesh.container.runner import (
     write_tasks_snapshot,
 )
 from rolemesh.container.runtime import (
-    PROXY_BIND_HOST,
     get_runtime,
 )
 from rolemesh.container.scheduler import GroupQueue
 from rolemesh.core.config import (
     AGENT_BACKEND_DEFAULT,
     ASSISTANT_NAME,
-    CONTAINER_EGRESS_NETWORK_NAME,
     CONTAINER_IMAGE,
     CONTAINER_NETWORK_NAME,
-    CREDENTIAL_PROXY_PORT,
-    EGRESS_CONTROL_ENABLE,
     EGRESS_GATEWAY_IMAGE,
     GLOBAL_MAX_CONTAINERS,
     NATS_URL,
@@ -108,9 +104,6 @@ from rolemesh.orchestration.catalog import (
     render_agent_catalog,
 )
 from rolemesh.orchestration.delegation import handle_delegate_request
-from rolemesh.orchestration.remote_control import (
-    restore_remote_control,
-)
 from rolemesh.orchestration.router import format_messages, format_outbound
 from rolemesh.orchestration.task_scheduler import start_scheduler_loop
 from rolemesh.auth.credential_vault import (
@@ -121,11 +114,9 @@ from rolemesh.auth.credential_vault import (
 from rolemesh.channels.admission import admit_telegram_1on1
 from rolemesh.egress.credentials import CredentialResolver
 from rolemesh.egress.token_identity import TokenAuthority
-from rolemesh.security.credential_proxy import register_mcp_server, set_token_vault, start_credential_proxy
+from rolemesh.security.credential_proxy import register_mcp_server, set_token_vault
 
 if TYPE_CHECKING:
-    from aiohttp import web
-
     from rolemesh.container.runtime import ContainerRuntime
     from rolemesh.core.types import (
         ChannelBinding,
@@ -1701,24 +1692,22 @@ async def _recover_pending_messages() -> None:
 
 
 async def _ensure_container_system_running() -> None:
-    """Prepare the container runtime and bridge networks.
+    """Prepare the container runtime and verify the deployment layer.
 
-    Gateway launch used to live here too, but the gateway's first
-    startup step is a NATS request-reply for the rule snapshot — that
-    only gets a responder once ``start_responders`` runs later in
-    ``main()``. Launching the gateway this early produced a chicken-
-    and-egg: gateway crash-loops on ``NoRespondersError`` while the
-    orchestrator is still blocked on its readiness probe. Gateway
-    launch is now ``_launch_egress_gateway_once_ready`` and runs after
-    the responders are registered.
+    Declarative infrastructure (docs/21 §1): networks, gateway and NATS
+    are declared by docker compose (deploy/compose/compose.yaml) and
+    started BEFORE the orchestrator. This function no longer creates
+    networks or launches the gateway — it only verifies the declared
+    invariants and refuses to start when they do not hold.
 
-    Order here is just:
+    Order:
       1. get_runtime() + ensure_available() — dockerd version gate
-      2. ensure_agent_network() — creates the agent bridge with
-         ``Internal=true``; physically removes the default route.
-      3. ensure_egress_network() — creates the outbound bridge.
-      4. cleanup_orphans() — safe to run before the gateway exists;
-         operates only on containers we labeled.
+      2. verify_infrastructure() — read-only, fail-closed check of the
+         compose-declared invariants (agent-net Internal=true,
+         egress-net present, gateway at EGRESS_GATEWAY_DNS_IP with a
+         healthy /healthz, NATS reachable). Retries the gateway/NATS
+         checks within a bounded budget to absorb compose cold start.
+      3. cleanup_orphans() — operates only on containers we labeled.
 
     Fail-closed throughout: any step raising makes the orchestrator
     refuse to enter the ready state.
@@ -1727,31 +1716,13 @@ async def _ensure_container_system_running() -> None:
     _runtime = get_runtime()
     await _runtime.ensure_available()
 
-    # Egress control bridges only exist when EC is on. With EC off the
-    # agent runs on Docker's default bridge and reaches the host-side
-    # credential proxy — no internal/egress bridges, no gateway.
-    if EGRESS_CONTROL_ENABLE:
-        if not CONTAINER_NETWORK_NAME:
-            raise RuntimeError(
-                "EGRESS_CONTROL_ENABLE is on but CONTAINER_NETWORK_NAME is "
-                "empty — egress control needs a named Internal=true bridge. "
-                "Set CONTAINER_NETWORK_NAME, or disable EC with "
-                "EGRESS_CONTROL_ENABLE=0."
-            )
-        if hasattr(_runtime, "ensure_agent_network"):
-            await _runtime.ensure_agent_network(CONTAINER_NETWORK_NAME)
-        if hasattr(_runtime, "ensure_egress_network"):
-            await _runtime.ensure_egress_network(CONTAINER_EGRESS_NETWORK_NAME)
-    elif not CONTAINER_NETWORK_NAME:
-        # Legacy migration aid: CONTAINER_NETWORK_NAME="" used to be the
-        # EC off-switch. It no longer is — EGRESS_CONTROL_ENABLE governs
-        # that. Since EC is already off here this is harmless, but warn
-        # so operators move to the dedicated switch.
-        logger.warning(
-            "CONTAINER_NETWORK_NAME is empty. This no longer disables "
-            "egress control; use EGRESS_CONTROL_ENABLE=0 instead. "
-            "(EC is already off here via EGRESS_CONTROL_ENABLE.)"
+    if not CONTAINER_NETWORK_NAME:
+        raise RuntimeError(
+            "CONTAINER_NETWORK_NAME is empty — egress control needs a "
+            "named Internal=true bridge declared by the deployment layer "
+            "(deploy/compose/compose.yaml). Set CONTAINER_NETWORK_NAME."
         )
+    await _runtime.verify_infrastructure()
 
     # INV-3: name prefix alone is not safe — a foreign container the
     # user happens to name with "rolemesh-" could be killed. The image
@@ -1761,34 +1732,6 @@ async def _ensure_container_system_running() -> None:
         "rolemesh-",
         allowed_images=frozenset({CONTAINER_IMAGE, EGRESS_GATEWAY_IMAGE}),
     )
-
-
-async def _launch_egress_gateway_once_ready() -> None:
-    """Start the egress-gateway container and wait for it to be ready.
-
-    Must be called AFTER ``start_responders`` has registered the NATS
-    rule-snapshot / identity-snapshot responders. The gateway's first
-    action on boot is a request-reply for the snapshot; without a
-    responder it fails-closed and Docker restart-loops the container.
-
-    Gated on:
-      * ``CONTAINER_NETWORK_NAME`` non-empty — operators disable EC
-        with ``CONTAINER_NETWORK_NAME=""`` (rollback mode).
-      * ``hasattr(_runtime, ...)`` — k8s runtime will grow its own
-        gateway pod primitive and should not use this path.
-    """
-    # Idempotent bootstrap: ensure the gateway is running and register
-    # its agent-network IP so ``runner.build_container_spec`` can pin it
-    # as each agent container's DNS resolver. Lives in a shared module
-    # so other entry points that spin up their own ``ContainerRuntime``
-    # (eval CLI, ad-hoc admin scripts) get the same behaviour by
-    # calling one function instead of duplicating this block — the
-    # original inline code led to a real bug where eval-spawned
-    # containers silently fell back to Docker's default DNS resolver
-    # because no one called ``set_egress_gateway_dns_ip``.
-    from rolemesh.egress.bootstrap import ensure_gateway_running_and_register_dns
-
-    await ensure_gateway_running_and_register_dns(_runtime)
 
 
 # ---------------------------------------------------------------------------
@@ -1813,7 +1756,6 @@ async def main() -> None:
             count=cleaned,
         )
     await _load_state()
-    restore_remote_control()
 
     _transport = NatsTransport(NATS_URL)
     try:
@@ -1822,7 +1764,7 @@ async def main() -> None:
         logger.critical(
             "Failed to connect to NATS -- is it running?",
             url=NATS_URL,
-            hint="docker compose -f docker-compose.dev.yml up -d",
+            hint="docker compose --env-file .env -f deploy/compose/compose.yaml up -d",
         )
         sys.exit(1)
 
@@ -1836,10 +1778,8 @@ async def main() -> None:
         # Frontdesk v1.2: the executor injects this for is_frontdesk spawns.
         return render_agent_catalog(_state, tenant_id, exclude=exclude_id)
 
-    # Token-identity: build the shared signing authority once. Required
-    # in BOTH modes — EC=on the gateway verifies with the same secret;
-    # EC=off the host-side credential proxy verifies it to recover the
-    # tenant for per-tenant credential injection. Fail-closes if
+    # Token-identity: build the shared signing authority once. The
+    # gateway verifies tokens with the same secret. Fail-closes if
     # EGRESS_TOKEN_SECRET is unset (see TokenAuthority.from_env).
     _token_authority = TokenAuthority.from_env()
 
@@ -1866,29 +1806,13 @@ async def main() -> None:
     set_credential_vault(create_credential_vault_from_env())
     _credential_resolver = CredentialResolver(get_credential_vault())
 
-    # Host-side credential proxy. Only bound when EC is OFF — that is the
-    # one configuration where agents dial it (on the host bridge, via
-    # host.docker.internal:3001). With EC on, agents reach the gateway
-    # container instead, so binding a host listener here would be dead
-    # weight; the MCP-registry / token-vault wiring below still runs
-    # unconditionally because it populates process globals that feed the
-    # gateway's snapshot RPC in EC=on (register_mcp_server ->
+    # Agents reach the gateway container for credential injection; the
+    # MCP-registry / token-vault wiring below populates process globals
+    # that feed the gateway's snapshot RPC (register_mcp_server ->
     # get_mcp_registry -> fetch_all_mcp_servers).
-    #
-    # The token authority IS wired here so the host proxy verifies the
-    # agent's signed token and injects the requesting tenant's credential
-    # — the per-tenant isolation that keeps working with EC off.
-    proxy_runner: web.AppRunner | None = None
-    if not EGRESS_CONTROL_ENABLE:
-        proxy_runner = await start_credential_proxy(
-            CREDENTIAL_PROXY_PORT,
-            PROXY_BIND_HOST,
-            credential_resolver=_credential_resolver,
-            token_authority=_token_authority,
-        )
 
     # Gateway reachability is already enforced in
-    # _ensure_container_system_running() via wait_for_gateway_ready. No
+    # _ensure_container_system_running() via verify_infrastructure(). No
     # second probe is needed at this point — keeping one here would
     # double the startup latency for no diagnostic gain.
 
@@ -2137,11 +2061,10 @@ async def main() -> None:
     )
     egress_responder_subs.append(run_cancel_sub)
 
-    # Launch the egress gateway now that the snapshot responders are
-    # registered. Moved here from _ensure_container_system_running()
-    # because otherwise the gateway NATS-requests the snapshot before
-    # anyone is listening and crash-loops the container.
-    await _launch_egress_gateway_once_ready()
+    # The egress gateway is compose-managed and already verified healthy
+    # by verify_infrastructure(); it starts degraded (policy plane
+    # default-deny) and seeds its rule snapshot from the responders
+    # registered above via a background retry loop — no launch step.
 
     _queue.set_process_messages_fn(_process_conversation_messages)
     _queue.set_on_queued(_emit_queued_status)
@@ -2180,8 +2103,6 @@ async def main() -> None:
     if _safety_thread_pool is not None:
         with contextlib.suppress(Exception):
             _safety_thread_pool.shutdown(wait=False)  # type: ignore[attr-defined]
-    if proxy_runner is not None:
-        await proxy_runner.cleanup()
     await _queue.shutdown(10000)
     for gw in _gateways.values():
         await gw.shutdown()

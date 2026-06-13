@@ -135,6 +135,20 @@ class EgressSafetyCaller:
             # come from an authenticated coworker.
             return decision
 
+        if not self._cache.seeded:
+            # Degraded startup: the authoritative rule snapshot has not
+            # arrived yet. Deny explicitly instead of relying on the
+            # unseeded cache returning zero rules — rule-change events
+            # may already have populated the cache during the degraded
+            # window, and those deltas without a baseline must not
+            # grant egress.
+            decision = EgressDecision(
+                action="block",
+                reason="Egress policy snapshot not yet loaded (gateway degraded)",
+            )
+            self._publish_audit(identity=identity, request=request, decision=decision)
+            return decision
+
         rules = self._cache.get_rules_for(identity.tenant_id, identity.coworker_id)
         findings: list[dict[str, Any]] = []
         triggered: list[str] = []
@@ -180,16 +194,25 @@ class EgressSafetyCaller:
                 reason=f"No egress allowlist rule matched {request.host}:{request.port}",
             )
 
-        # Audit publish is fire-and-forget. A slow audit sink cannot
-        # be allowed to stall the CONNECT/DNS hot path. Pin the task on
-        # the caller so the GC doesn't reap it mid-publish.
+        self._publish_audit(identity=identity, request=request, decision=decision)
+
+        return decision
+
+    def _publish_audit(
+        self,
+        *,
+        identity: Identity,
+        request: EgressRequest,
+        decision: EgressDecision,
+    ) -> None:
+        """Fire-and-forget audit publish. A slow audit sink cannot be
+        allowed to stall the CONNECT/DNS hot path. Pin the task on the
+        caller so the GC doesn't reap it mid-publish."""
         task = asyncio.create_task(
             self._audit.publish(identity=identity, request=request, decision=decision)
         )
         self._audit_tasks.add(task)
         task.add_done_callback(self._audit_tasks.discard)
-
-        return decision
 
 
 @dataclass

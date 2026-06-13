@@ -87,7 +87,7 @@ class NatsTransport:
         except Exception as exc:  # includes asyncio.TimeoutError (initial connect)
             raise ConnectionError(
                 f"Cannot connect to NATS at {self._url}. "
-                f"Start NATS with: docker compose -f docker-compose.dev.yml up -d"
+                f"Start NATS with: docker compose --env-file .env -f deploy/compose/compose.yaml up -d"
             ) from exc
         self._js = self._nc.jetstream()
 

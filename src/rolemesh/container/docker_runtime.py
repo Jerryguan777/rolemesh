@@ -5,10 +5,17 @@ Replaces all subprocess-based Docker calls with the Docker Engine API.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import dataclasses
 import os
 import re
+import shutil
+import time
+import uuid
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 import aiodocker
 import aiodocker.containers
@@ -30,7 +37,7 @@ class IncompatibleDockerVersionError(RuntimeError):
 _MIN_DOCKERD_VERSION: tuple[int, int] = (20, 10)
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from rolemesh.container.runtime import ContainerSpec, VolumeMount
 
@@ -137,6 +144,252 @@ def _mounts_to_binds(mounts: list[VolumeMount]) -> list[str]:
     return [f"{m.host_path}:{m.container_path}:{'ro' if m.readonly else 'rw'}" for m in mounts]
 
 
+# ---------------------------------------------------------------------------
+# DooD bind-source translation (docs/21 §7.1).
+#
+# When the orchestrator runs inside a container, the bind sources it
+# assembles (DATA_DIR / "tenants/...") are paths in its own filesystem,
+# but the host dockerd that creates the agent sandbox resolves bind
+# sources against the HOST filesystem. ROLEMESH_HOST_DATA_DIR carries the
+# host path that the deployment layer mounted onto DATA_DIR; every bind
+# source under DATA_DIR is rewritten to ROLEMESH_HOST_DATA_DIR/<relpath>
+# before it reaches the Docker API. Empty ROLEMESH_HOST_DATA_DIR (host
+# dev flow, tests) disables translation entirely.
+# ---------------------------------------------------------------------------
+
+
+def _translate_bind_source(
+    host_path: str,
+    *,
+    data_dir: str,
+    host_data_dir: str,
+) -> str:
+    """Translate one orchestrator-visible bind source to a host path.
+
+    Pure function: no filesystem access (the orchestrator container
+    cannot stat host paths anyway). Paths are normalized lexically
+    (``normpath``) before comparison so ``DATA_DIR/x/../../etc`` cannot
+    masquerade as "under DATA_DIR" and escape via the translated root.
+
+    Paths NOT under DATA_DIR (``additional_mounts`` like ``~/projects``)
+    are passed through unchanged: dockerd interprets them against the
+    host, so they keep working — but the orchestrator can no longer
+    check their existence, and dockerd silently creates an empty
+    root-owned directory for a missing bind source. The caller logs a
+    prominent warning for this case (DooD semantics, docs/21 §7.1).
+    """
+    if not host_data_dir:
+        return host_path
+    normalized = Path(os.path.normpath(host_path))
+    data_root = Path(os.path.normpath(data_dir))
+    try:
+        rel = normalized.relative_to(data_root)
+    except ValueError:
+        return host_path
+    return str(Path(host_data_dir) / rel)
+
+
+def _translate_mounts(
+    mounts: list[VolumeMount],
+    *,
+    data_dir: str,
+    host_data_dir: str,
+) -> list[VolumeMount]:
+    """Apply DooD translation to every mount, preserving all other fields.
+
+    Returns the input list unchanged (same objects) when translation is
+    disabled. ``readonly`` and ``container_path`` are never touched —
+    only the bind SOURCE is rewritten.
+    """
+    if not host_data_dir:
+        return mounts
+    translated: list[VolumeMount] = []
+    for m in mounts:
+        new_source = _translate_bind_source(
+            m.host_path, data_dir=data_dir, host_data_dir=host_data_dir
+        )
+        if new_source == m.host_path and not _is_under(m.host_path, data_dir):
+            logger.warning(
+                "DooD: bind source outside DATA_DIR passed through "
+                "untranslated. The host dockerd resolves it against the "
+                "HOST filesystem; the containerized orchestrator cannot "
+                "verify it exists, and dockerd silently creates an empty "
+                "root-owned directory for a missing source.",
+                host_path=m.host_path,
+                container_path=m.container_path,
+            )
+            translated.append(m)
+        else:
+            translated.append(dataclasses.replace(m, host_path=new_source))
+    return translated
+
+
+def _is_under(path: str, root: str) -> bool:
+    """Lexical containment check (mirrors _translate_bind_source)."""
+    try:
+        Path(os.path.normpath(path)).relative_to(Path(os.path.normpath(root)))
+    except ValueError:
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# verify_infrastructure support (declarative-infra design §4.2).
+#
+# Retry budget for the checks that race the deployment layer's cold
+# start: compose starts the gateway before the orchestrator, but a
+# Python container needs a few seconds to finish imports and bind its
+# listeners. ~60s total at 2s intervals absorbs a slow host without
+# masking a genuinely-down service for long. Static checks (network
+# existence/shape) never retry — waiting cannot create a network.
+# ---------------------------------------------------------------------------
+
+_VERIFY_RETRY_BUDGET_S: float = 60.0
+_VERIFY_RETRY_INTERVAL_S: float = 2.0
+
+_COMPOSE_HINT: str = (
+    "Infrastructure is declared by the deployment layer, not created by "
+    "the orchestrator — run: "
+    "docker compose -f deploy/compose/compose.yaml up -d"
+)
+
+
+async def _retry_within_budget(
+    check: Callable[[], Awaitable[None]],
+    *,
+    what: str,
+) -> None:
+    """Run *check* until it passes or the retry budget elapses.
+
+    Budget/interval are read per call so tests can patch the module
+    constants. The final failure re-raises the last check error wrapped
+    with the budget context — the inner message already carries the
+    fix-it hint.
+    """
+    deadline = time.monotonic() + _VERIFY_RETRY_BUDGET_S
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            await check()
+            return
+        except RuntimeError as exc:
+            if time.monotonic() >= deadline:
+                msg = (
+                    f"{what}: still failing after {attempt} attempts "
+                    f"(~{_VERIFY_RETRY_BUDGET_S:.0f}s budget). {exc}"
+                )
+                raise RuntimeError(msg) from exc
+            logger.debug(
+                "verify_infrastructure check not passing yet — retrying",
+                what=what,
+                attempt=attempt,
+                error=str(exc),
+            )
+            await asyncio.sleep(_VERIFY_RETRY_INTERVAL_S)
+
+
+async def _get_network_info(
+    client: aiodocker.Docker, network_name: str
+) -> dict[str, Any] | None:
+    """Inspect a network by name; None when it does not exist."""
+    try:
+        network = await client.networks.get(network_name)
+    except aiodocker.exceptions.DockerError as exc:
+        if exc.status == 404:
+            return None
+        raise
+    info: dict[str, Any] = await network.show()
+    return info
+
+
+async def _check_gateway_ip(
+    client: aiodocker.Docker,
+    *,
+    container_name: str,
+    network_name: str,
+    expected_ip: str,
+) -> None:
+    """Invariant (c): the gateway container sits on the agent network
+    at exactly the configured ``EGRESS_GATEWAY_DNS_IP``.
+
+    Agents get *expected_ip* pinned as their DNS resolver; if the
+    running gateway actually holds a different address every agent
+    spawn would silently lose DNS, so a drifted deployment must refuse
+    to start instead.
+    """
+    try:
+        container = client.containers.container(container_name)
+        info: dict[str, Any] = await container.show()
+    except aiodocker.exceptions.DockerError as exc:
+        raise RuntimeError(
+            f"Egress gateway container {container_name!r} not found. "
+            f"{_COMPOSE_HINT}"
+        ) from exc
+
+    networks = (info.get("NetworkSettings") or {}).get("Networks") or {}
+    attachment = networks.get(network_name)
+    if not attachment:
+        raise RuntimeError(
+            f"Egress gateway container {container_name!r} is not attached "
+            f"to the agent network {network_name!r}. {_COMPOSE_HINT}"
+        )
+    actual_ip = str(attachment.get("IPAddress") or "")
+    if actual_ip != expected_ip:
+        raise RuntimeError(
+            f"Egress gateway agent-net address mismatch: configured "
+            f"EGRESS_GATEWAY_DNS_IP={expected_ip!r} but the running "
+            f"container holds {actual_ip!r}. Align the compose fixed IP "
+            f"with the EGRESS_GATEWAY_DNS_IP env var. {_COMPOSE_HINT}"
+        )
+
+
+async def _check_http_healthz(url: str, *, hint: str) -> None:
+    """Invariant (d): the gateway answers ``GET /healthz`` with 200.
+
+    The orchestrator reaches the bridge subnet directly on a Linux
+    host today and from inside a compose-attached container after
+    S1-2 — same code, both phases.
+    """
+    import aiohttp
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=5)
+        async with (
+            aiohttp.ClientSession(timeout=timeout) as session,
+            session.get(url) as resp,
+        ):
+            status = resp.status
+    except (TimeoutError, aiohttp.ClientError, OSError) as exc:
+        raise RuntimeError(
+            f"Egress gateway healthz not reachable at {url}: {exc}. {hint}"
+        ) from exc
+    if status != 200:
+        raise RuntimeError(
+            f"Egress gateway healthz at {url} returned HTTP {status} "
+            f"(expected 200). {hint}"
+        )
+
+
+async def _check_tcp_reachable(url: str, *, hint: str) -> None:
+    """Invariant (e): a TCP connection to *url*'s host:port succeeds."""
+    parsed = urlparse(url)
+    host = parsed.hostname or "localhost"
+    port = parsed.port or 4222
+    try:
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=5
+        )
+    except (TimeoutError, OSError) as exc:
+        raise RuntimeError(
+            f"NATS not reachable at {host}:{port} (from NATS_URL={url!r}): "
+            f"{exc}. {hint}"
+        ) from exc
+    writer.close()
+    with contextlib.suppress(OSError):
+        await writer.wait_closed()
+
+
 class DockerContainerHandle:
     """Handle to a running Docker container."""
 
@@ -227,9 +480,7 @@ class DockerRuntime:
             msg = (
                 f"dockerd {version_str} is below the hardening floor "
                 f"{_MIN_DOCKERD_VERSION[0]}.{_MIN_DOCKERD_VERSION[1]}. "
-                "Upgrade Docker, or set EGRESS_CONTROL_ENABLE=0 to fall "
-                "back to the default bridge (at the cost of losing custom-"
-                "network isolation and egress control)."
+                "Upgrade Docker."
             )
             raise IncompatibleDockerVersionError(msg)
         logger.info("dockerd version OK", version=version_str)
@@ -242,6 +493,24 @@ class DockerRuntime:
 
     async def run(self, spec: ContainerSpec) -> DockerContainerHandle:
         client = self._ensure_client()
+
+        # DooD translation (docs/21 §7.1): rewrite bind sources under
+        # DATA_DIR to their host-side equivalents before they reach the
+        # host dockerd. No-op when ROLEMESH_HOST_DATA_DIR is empty
+        # (host-process dev flow). Function-level import so tests can
+        # monkeypatch the config module attributes.
+        from rolemesh.core.config import DATA_DIR, ROLEMESH_HOST_DATA_DIR
+
+        if ROLEMESH_HOST_DATA_DIR:
+            spec = dataclasses.replace(
+                spec,
+                mounts=_translate_mounts(
+                    spec.mounts,
+                    data_dir=str(DATA_DIR),
+                    host_data_dir=ROLEMESH_HOST_DATA_DIR,
+                ),
+            )
+
         config = self._spec_to_config(spec)
 
         # Remove existing container with same name (if any)
@@ -315,46 +584,211 @@ class DockerRuntime:
             self._client = None
 
     # -----------------------------------------------------------------
-    # Network hardening hooks (R5 / R5.1). Thin adapters over the pure
-    # functions in container.network so tests can target either layer.
+    # Infrastructure verification (declarative-infra design §4.2).
+    #
+    # The deployment layer (deploy/compose/compose.yaml today, Helm
+    # later) declares networks + gateway + NATS; the orchestrator only
+    # checks the declared invariants here — read-only, fail-closed —
+    # and refuses to start when they do not hold. The old imperative
+    # path (ensure_agent_network / ensure_egress_network /
+    # probe-container reachability checks) is retired.
     # -----------------------------------------------------------------
 
-    async def ensure_agent_network(self, network_name: str) -> None:
-        from rolemesh.container.network import ensure_agent_network
+    async def verify_infrastructure(self) -> None:
+        """Verify the compose-declared infrastructure invariants.
 
-        await ensure_agent_network(self._ensure_client(), network_name)
+        Invariants (in check order):
+          (a) agent network exists and is ``Internal=true``;
+          (b) egress network exists;
+          (c) the gateway container's agent-net address equals
+              ``EGRESS_GATEWAY_DNS_IP`` (the value agents get pinned
+              as their DNS resolver);
+          (d) ``GET http://<EGRESS_GATEWAY_DNS_IP>:<port>/healthz``
+              returns 200. The orchestrator can reach the bridge
+              subnet directly on a Linux host, and equally from inside
+              a compose-attached container after S1-2 — the same code
+              serves both phases;
+          (e) NATS is TCP-reachable at ``NATS_URL``.
 
-    async def ensure_egress_network(self, network_name: str) -> None:
-        from rolemesh.container.network import ensure_egress_network
-
-        await ensure_egress_network(self._ensure_client(), network_name)
-
-    async def verify_egress_gateway_reachable(
-        self,
-        network_name: str,
-        gateway_service_name: str,
-        reverse_proxy_port: int,
-    ) -> None:
-        from rolemesh.container.network import verify_egress_gateway_reachable
-
-        await verify_egress_gateway_reachable(
-            self._ensure_client(),
-            network_name,
-            gateway_service_name,
-            reverse_proxy_port,
+        (c)–(e) race the gateway/NATS cold start (compose starts them
+        before the orchestrator, but "started" != "serving"), so they
+        retry within a bounded budget. (a)/(b) are static — a missing
+        network never heals by waiting — and fail immediately.
+        """
+        from rolemesh.core.config import (
+            CONTAINER_EGRESS_NETWORK_NAME,
+            CONTAINER_NETWORK_NAME,
+            CREDENTIAL_PROXY_PORT,
+            DATA_DIR,
+            EGRESS_GATEWAY_CONTAINER_NAME,
+            EGRESS_GATEWAY_DNS_IP,
+            NATS_URL,
+            ROLEMESH_HOST_DATA_DIR,
         )
 
-    async def verify_nats_reachable(
-        self,
-        network_name: str,
-        nats_url: str,
-    ) -> None:
-        from rolemesh.container.network import verify_nats_reachable
+        client = self._ensure_client()
 
-        await verify_nats_reachable(
-            self._ensure_client(),
-            network_name,
-            nats_url,
+        # (a) agent network: exists + Internal=true.
+        agent_info = await _get_network_info(client, CONTAINER_NETWORK_NAME)
+        if agent_info is None:
+            raise RuntimeError(
+                f"Agent network {CONTAINER_NETWORK_NAME!r} does not exist. "
+                f"{_COMPOSE_HINT}"
+            )
+        if not bool(agent_info.get("Internal", False)):
+            raise RuntimeError(
+                f"Agent network {CONTAINER_NETWORK_NAME!r} exists but is not "
+                "Internal=true — agents would have a direct route to the "
+                "internet, defeating egress control. Recreate it: "
+                f"docker network rm {CONTAINER_NETWORK_NAME}; {_COMPOSE_HINT}"
+            )
+
+        # (b) egress network: exists.
+        if await _get_network_info(client, CONTAINER_EGRESS_NETWORK_NAME) is None:
+            raise RuntimeError(
+                f"Egress network {CONTAINER_EGRESS_NETWORK_NAME!r} does not "
+                f"exist — the gateway has no route out. {_COMPOSE_HINT}"
+            )
+
+        # (c) gateway holds the configured agent-net address.
+        await _retry_within_budget(
+            lambda: _check_gateway_ip(
+                client,
+                container_name=EGRESS_GATEWAY_CONTAINER_NAME,
+                network_name=CONTAINER_NETWORK_NAME,
+                expected_ip=EGRESS_GATEWAY_DNS_IP,
+            ),
+            what="egress gateway agent-net address",
+        )
+
+        # (d) gateway healthz answers 200.
+        healthz_url = (
+            f"http://{EGRESS_GATEWAY_DNS_IP}:{CREDENTIAL_PROXY_PORT}/healthz"
+        )
+        await _retry_within_budget(
+            lambda: _check_http_healthz(healthz_url, hint=_COMPOSE_HINT),
+            what="egress gateway /healthz",
+        )
+
+        # (e) NATS TCP-reachable at the orchestrator-facing URL.
+        await _retry_within_budget(
+            lambda: _check_tcp_reachable(NATS_URL, hint=_COMPOSE_HINT),
+            what="NATS reachability",
+        )
+
+        # (f) DooD loopback self-check — only when path translation is
+        # active (ROLEMESH_HOST_DATA_DIR set, i.e. the orchestrator runs
+        # in a container). Required by the docs/21 §11 risk table: a
+        # misconfigured ROLEMESH_HOST_DATA_DIR would make every agent
+        # spawn bind empty dockerd-created directories instead of the
+        # real data tree, silently. This is the ONE deliberate exception
+        # to "verify_infrastructure never spawns containers": the
+        # invariant under test ("the translated host path and DATA_DIR
+        # name the same directory") is unobservable from inside the
+        # orchestrator container without a probe container.
+        if ROLEMESH_HOST_DATA_DIR:
+            await self._verify_dood_translation(
+                data_dir=str(DATA_DIR),
+                host_data_dir=ROLEMESH_HOST_DATA_DIR,
+            )
+
+        logger.info(
+            "Infrastructure verified",
+            agent_network=CONTAINER_NETWORK_NAME,
+            egress_network=CONTAINER_EGRESS_NETWORK_NAME,
+            gateway_dns_ip=EGRESS_GATEWAY_DNS_IP,
+            dood_translation="on" if ROLEMESH_HOST_DATA_DIR else "off",
+        )
+
+    async def _verify_dood_translation(
+        self,
+        *,
+        data_dir: str,
+        host_data_dir: str,
+    ) -> None:
+        """DooD loopback self-check (docs/21 §11 risk: translation misconfig).
+
+        Write a sentinel with unique content under DATA_DIR, bind the
+        TRANSLATED host path of its directory into a one-shot probe
+        container, and read the content back. A mismatch (or a probe
+        that cannot read the file at all) proves ROLEMESH_HOST_DATA_DIR
+        does not name the host directory actually mounted on DATA_DIR —
+        refuse to start. NetworkMode=none: the probe only reads a file.
+        """
+        from rolemesh.core.config import CONTAINER_IMAGE
+
+        client = self._ensure_client()
+        token = uuid.uuid4().hex
+        probe_dir = Path(data_dir) / f".dood-probe-{token}"
+        # Name carries the "rolemesh-" prefix + an allowed image so a
+        # leaked probe (orchestrator killed mid-check) is reaped by the
+        # next startup's cleanup_orphans.
+        probe_name = f"rolemesh-dood-probe-{token[:12]}"
+        sentinel_container_path = "/dood-probe/sentinel"
+        translated_dir = _translate_bind_source(
+            str(probe_dir), data_dir=data_dir, host_data_dir=host_data_dir
+        )
+
+        container = None
+        try:
+            probe_dir.mkdir(parents=True, exist_ok=False)
+            (probe_dir / "sentinel").write_text(token, encoding="utf-8")
+
+            config: dict[str, Any] = {
+                "Image": CONTAINER_IMAGE,
+                "Entrypoint": ["cat", sentinel_container_path],
+                "HostConfig": {
+                    "Binds": [f"{translated_dir}:/dood-probe:ro"],
+                    "NetworkMode": "none",
+                    "CapDrop": ["ALL"],
+                    "ReadonlyRootfs": True,
+                },
+            }
+            container = await client.containers.create_or_replace(
+                name=probe_name, config=config
+            )
+            await container.start()
+            result: dict[str, Any] = await asyncio.wait_for(
+                container.wait(), timeout=60
+            )
+            exit_code = int(result.get("StatusCode", -1))
+            log_lines = await container.log(stdout=True, stderr=True)
+            output = "".join(
+                line if isinstance(line, str) else line.decode()
+                for line in log_lines
+            ).strip()
+        except (TimeoutError, OSError, aiodocker.exceptions.DockerError) as exc:
+            raise RuntimeError(
+                f"DooD loopback self-check failed to run its probe "
+                f"container: {exc}. Check that CONTAINER_IMAGE "
+                f"({CONTAINER_IMAGE!r}) is built and the docker socket "
+                f"is usable from the orchestrator container."
+            ) from exc
+        finally:
+            if container is not None:
+                with contextlib.suppress(aiodocker.exceptions.DockerError):
+                    await container.delete(force=True)
+            shutil.rmtree(probe_dir, ignore_errors=True)
+
+        if exit_code != 0 or output != token:
+            raise RuntimeError(
+                "DooD path translation self-check FAILED: a probe "
+                f"container bound the translated host path "
+                f"{translated_dir!r} but read "
+                f"{'nothing' if not output else output[:80]!r} instead of "
+                f"the sentinel (probe exit code {exit_code}). "
+                f"ROLEMESH_HOST_DATA_DIR ({host_data_dir!r}) does not "
+                f"name the HOST directory that is bind-mounted onto "
+                f"DATA_DIR ({data_dir!r}). Note: dockerd silently creates "
+                "an empty root-owned directory for a missing bind source, "
+                "so a wrong value fails exactly like this instead of "
+                "erroring at mount time. Fix ROLEMESH_HOST_DATA_DIR in "
+                ".env (absolute host path of the repo's data/ directory)."
+            )
+        logger.info(
+            "DooD loopback self-check passed",
+            host_data_dir=host_data_dir,
+            data_dir=data_dir,
         )
 
     @staticmethod

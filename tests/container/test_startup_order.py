@@ -1,32 +1,28 @@
-"""Startup-sequence invariants across the two startup phases.
+"""Startup contract for ``main._ensure_container_system_running``.
 
-Container-system startup is split between two functions in ``main.py``:
+Declarative infrastructure (docs/21 §1): the deployment layer owns
+networks + gateway + NATS; the orchestrator only VERIFIES them at
+startup via ``ContainerRuntime.verify_infrastructure`` and refuses to
+start when an invariant does not hold. The old contract ("gateway must
+launch after the NATS responders") is gone — the compose-managed
+gateway starts degraded and seeds its snapshot via a retry loop, so
+the orchestrator has no launch step at all.
 
-  * ``_ensure_container_system_running`` — bridge-prep: dockerd version
-    gate, agent-net + egress-net creation, orphan cleanup. Runs early.
-  * ``_launch_egress_gateway_once_ready`` — gateway: launch, readiness
-    probe, DNS-IP discovery. Runs AFTER ``start_responders`` registers
-    the NATS snapshot responders; the gateway's first boot action is a
-    NATS request-reply for the rule snapshot, so launching it earlier
-    crash-loops the container with ``NoRespondersError``.
+Invariants pinned here:
 
-Both bodies are imperative with no type signature pinning order, and a
-future refactor can silently reorder steps or merge the two functions
-back together. These tests pin the invariants for each phase:
+  1. Startup calls verify_infrastructure exactly once, after
+     ensure_available and before cleanup_orphans.
+  2. A verify_infrastructure failure propagates (fail-closed)
+     and prevents every downstream step — the orchestrator must not
+     enter ready state on unverified infrastructure.
+  3. ensure_available failure short-circuits everything, including
+     verification.
+  4. An empty bridge name is a hard configuration error raised
+     BEFORE any verification.
 
-  1. ensure_available() failure must short-circuit the rest.
-  2. ensure_agent_network() failure must prevent every downstream step.
-  3. Happy path of bridge-prep: four steps in order, NO launch/wait.
-  4. launch_egress_gateway() failure must prevent the readiness probe.
-  5. wait_for_gateway_ready() failure must propagate (fail-closed).
-  6. EC off (``EGRESS_CONTROL_ENABLE=0``) skips the egress
-     bridge in phase 1 and the entire launch path in phase 2.
-  7. Backends without the EC-1 hooks (future k8s) fall back to the old
-     surface gracefully — we use hasattr() gates for each hook so a
-     minimal runtime doesn't have to stub them.
-
-We mock the runtime entirely; correctness of each individual method is
-covered by test_docker_runtime.py / test_network.py / test_egress_launcher.py.
+The runtime is mocked at the ContainerRuntime boundary; correctness of
+verify_infrastructure itself is covered by
+test_verify_infrastructure.py.
 """
 
 from __future__ import annotations
@@ -37,52 +33,23 @@ import pytest
 
 
 def _make_runtime_mock() -> MagicMock:
-    """Mock with every EC-1 hook present.
-
-    ``_ensure_client`` is included so the launch path can pull the
-    aiodocker handle; we don't care what it returns because
-    launch_egress_gateway is also mocked.
-    """
     rt = MagicMock()
     rt.ensure_available = AsyncMock()
-    rt.ensure_agent_network = AsyncMock()
-    rt.ensure_egress_network = AsyncMock()
-    rt.verify_egress_gateway_reachable = AsyncMock()
+    rt.verify_infrastructure = AsyncMock()
     rt.cleanup_orphans = AsyncMock(return_value=[])
-
-    # EC-2 P1: after launch/wait, main.py inspects the gateway container
-    # to pull its agent-net IP. The fake here returns a valid shape so
-    # the test doesn't assert on that path — it's covered by the runner
-    # spec test directly.
-    fake_gateway_container = MagicMock()
-    fake_gateway_container.show = AsyncMock(
-        return_value={
-            "NetworkSettings": {
-                "Networks": {"rolemesh-agent-net": {"IPAddress": "172.22.0.2"}},
-            }
-        }
-    )
-    fake_client = MagicMock()
-    fake_client.containers.container = MagicMock(return_value=fake_gateway_container)
-    rt._ensure_client = MagicMock(return_value=fake_client)
     return rt
 
 
-async def test_startup_happy_path_calls_all_steps_in_order() -> None:
-    """``_ensure_container_system_running`` runs the four bridge-prep
-    steps and stops there. Gateway launch + readiness probe were split
-    out into ``_launch_egress_gateway_once_ready`` (called later in
-    ``main()`` after ``start_responders`` registers the NATS snapshot
-    responders) to break a chicken-and-egg deadlock — so they MUST NOT
-    appear in this function's call order.
-    """
+async def test_startup_verifies_infrastructure_in_order() -> None:
+    """ensure_available → verify_infrastructure → cleanup_orphans,
+    nothing else. Verification must precede orphan cleanup so a broken
+    deployment is reported before we start mutating container state."""
     from rolemesh import main as main_module
 
     parent = MagicMock()
     rt = _make_runtime_mock()
     parent.attach_mock(rt.ensure_available, "ensure_available")
-    parent.attach_mock(rt.ensure_agent_network, "ensure_agent_network")
-    parent.attach_mock(rt.ensure_egress_network, "ensure_egress_network")
+    parent.attach_mock(rt.verify_infrastructure, "verify_infrastructure")
     parent.attach_mock(rt.cleanup_orphans, "cleanup_orphans")
 
     with patch.object(main_module, "get_runtime", return_value=rt):
@@ -91,8 +58,7 @@ async def test_startup_happy_path_calls_all_steps_in_order() -> None:
     call_order = [c[0] for c in parent.mock_calls if c[0]]
     assert call_order == [
         "ensure_available",
-        "ensure_agent_network",
-        "ensure_egress_network",
+        "verify_infrastructure",
         "cleanup_orphans",
     ]
 
@@ -110,175 +76,47 @@ async def test_startup_aborts_when_ensure_available_fails() -> None:
     ):
         await main_module._ensure_container_system_running()
 
-    rt.ensure_agent_network.assert_not_awaited()
-    rt.ensure_egress_network.assert_not_awaited()
+    rt.verify_infrastructure.assert_not_awaited()
     rt.cleanup_orphans.assert_not_awaited()
 
 
-async def test_startup_aborts_when_agent_network_fails() -> None:
+async def test_startup_fail_closed_when_verification_fails() -> None:
+    """verify_infrastructure raising must abort startup — the
+    orchestrator refuses to run against undeclared/broken infrastructure
+    instead of degrading or self-repairing."""
     from rolemesh import main as main_module
 
     rt = _make_runtime_mock()
-    rt.ensure_agent_network = AsyncMock(side_effect=RuntimeError("agent net failed"))
-    launch_mock = AsyncMock()
+    rt.verify_infrastructure = AsyncMock(
+        side_effect=RuntimeError("agent network does not exist")
+    )
 
     with (
         patch.object(main_module, "get_runtime", return_value=rt),
-        patch("rolemesh.egress.launcher.launch_egress_gateway", launch_mock),
-        pytest.raises(RuntimeError, match="agent net failed"),
+        pytest.raises(RuntimeError, match="agent network does not exist"),
     ):
         await main_module._ensure_container_system_running()
 
     rt.ensure_available.assert_awaited_once()
-    rt.ensure_egress_network.assert_not_awaited()
-    launch_mock.assert_not_awaited()
     rt.cleanup_orphans.assert_not_awaited()
 
 
-async def test_launch_aborts_when_gateway_launch_fails() -> None:
-    """Gateway-image-not-built and similar errors stop startup — agents
-    without a gateway cannot do their job, so we refuse to enter ready.
-
-    Originally this contract sat next to ``_ensure_container_system_running``
-    when launch was inlined there. Launch was split into a post-responder
-    function to break a NATS chicken-and-egg, but the fail-closed contract
-    still applies: a launch failure must propagate, and the readiness
-    probe MUST NOT run on a container we couldn't start.
-    """
-    from rolemesh import main as main_module
-
-    rt = _make_runtime_mock()
-    launch_mock = AsyncMock(side_effect=RuntimeError("image missing"))
-    wait_mock = AsyncMock()
-
-    with (
-        patch.object(main_module, "_runtime", rt),
-        # bootstrap is imported lazily inside the call below, so patching
-        # the launcher source binds these mocks into bootstrap. The NATS
-        # gate runs first; stub it to a no-op so the launch failure is
-        # what propagates.
-        patch("rolemesh.egress.launcher.wait_for_nats_ready", AsyncMock()),
-        patch("rolemesh.egress.launcher.launch_egress_gateway", launch_mock),
-        patch("rolemesh.egress.launcher.wait_for_gateway_ready", wait_mock),
-        pytest.raises(RuntimeError, match="image missing"),
-    ):
-        await main_module._launch_egress_gateway_once_ready()
-
-    wait_mock.assert_not_awaited()
-
-
-async def test_launch_aborts_when_gateway_readiness_probe_fails() -> None:
-    """Gateway binary up but not serving /healthz within budget → refuse
-    to enter ready. Agents would only produce a cryptic failure later.
-
-    Patches the bootstrap-module references because that's where the
-    launch + wait calls actually live now. ``rolemesh.egress.launcher``
-    is the source-of-truth module but bootstrap captures its imports
-    at module load via ``from launcher import ...``, so a patch on
-    launcher's surface doesn't reach the bootstrap call site.
-    """
-    from rolemesh import main as main_module
-    from rolemesh.egress import bootstrap
-
-    rt = _make_runtime_mock()
-    launch_mock = AsyncMock()
-    wait_mock = AsyncMock(side_effect=RuntimeError("probe exhausted"))
-
-    with (
-        patch.object(main_module, "_runtime", rt),
-        patch.object(bootstrap, "wait_for_nats_ready", AsyncMock()),
-        patch.object(bootstrap, "launch_egress_gateway", launch_mock),
-        patch.object(bootstrap, "wait_for_gateway_ready", wait_mock),
-        pytest.raises(RuntimeError, match="probe exhausted"),
-    ):
-        await main_module._launch_egress_gateway_once_ready()
-
-    launch_mock.assert_awaited_once()
-
-
-async def test_ec_off_skips_both_bridges() -> None:
-    """EC off (``EGRESS_CONTROL_ENABLE=0``): ``_ensure_container_system_running``
-    creates NEITHER bridge — agents run on Docker's default bridge — and
-    only ``cleanup_orphans`` runs alongside the version gate.
-    """
+async def test_empty_bridge_name_refuses_to_start() -> None:
+    """An empty bridge name is a hard config error — there's no
+    Internal=true bridge to enforce isolation on, and egress control
+    has no off-switch (docs/21 §1). Raised before any verification
+    attempt so the message points at the config, not at a 'missing
+    network'; cleanup must not run either."""
     from rolemesh import main as main_module
 
     rt = _make_runtime_mock()
 
     with (
-        patch.object(main_module, "EGRESS_CONTROL_ENABLE", False),
-        patch.object(main_module, "get_runtime", return_value=rt),
-    ):
-        await main_module._ensure_container_system_running()
-
-    rt.ensure_available.assert_awaited_once()
-    rt.ensure_agent_network.assert_not_awaited()
-    rt.ensure_egress_network.assert_not_awaited()
-    rt.cleanup_orphans.assert_awaited_once()
-
-
-async def test_ec_on_empty_bridge_name_is_config_error() -> None:
-    """EC on with an empty bridge name is a hard config error — there's
-    no Internal=true bridge to enforce isolation on."""
-    from rolemesh import main as main_module
-
-    rt = _make_runtime_mock()
-
-    with (
-        patch.object(main_module, "EGRESS_CONTROL_ENABLE", True),
         patch.object(main_module, "CONTAINER_NETWORK_NAME", ""),
         patch.object(main_module, "get_runtime", return_value=rt),
-        pytest.raises(RuntimeError, match="EGRESS_CONTROL_ENABLE"),
+        pytest.raises(RuntimeError, match="CONTAINER_NETWORK_NAME"),
     ):
         await main_module._ensure_container_system_running()
 
-
-async def test_launch_skips_when_egress_control_disabled() -> None:
-    """EC off must short-circuit ``_launch_egress_gateway_once_ready`` so
-    launch + readiness probe + IP discovery are all skipped.
-
-    The EC gate lives in ``bootstrap._ec2_active``, which reads
-    ``EGRESS_CONTROL_ENABLE``, so we patch it on the bootstrap module —
-    patching main's reference no longer reaches the read site.
-    """
-    from rolemesh import main as main_module
-    from rolemesh.egress import bootstrap
-
-    rt = _make_runtime_mock()
-    launch_mock = AsyncMock()
-    wait_mock = AsyncMock()
-
-    with (
-        patch.object(bootstrap, "EGRESS_CONTROL_ENABLE", False),
-        patch.object(main_module, "_runtime", rt),
-        patch.object(bootstrap, "launch_egress_gateway", launch_mock),
-        patch.object(bootstrap, "wait_for_gateway_ready", wait_mock),
-    ):
-        await main_module._launch_egress_gateway_once_ready()
-
-    launch_mock.assert_not_awaited()
-    wait_mock.assert_not_awaited()
-    # IP-discovery path also skipped — would have called rt._ensure_client().
-    rt._ensure_client.assert_not_called()
-
-
-async def test_startup_tolerates_runtime_without_egress_hooks() -> None:
-    """Future k8s backend won't expose ensure_egress_network /
-    verify_egress_gateway_reachable. hasattr() gates skip the EC-1 path
-    and fall back to the pre-EC-1 surface so a minimal runtime still
-    boots."""
-    from rolemesh import main as main_module
-
-    rt = MagicMock(
-        spec=["ensure_available", "ensure_agent_network", "cleanup_orphans"]
-    )
-    rt.ensure_available = AsyncMock()
-    rt.ensure_agent_network = AsyncMock()
-    rt.cleanup_orphans = AsyncMock(return_value=[])
-
-    with patch.object(main_module, "get_runtime", return_value=rt):
-        await main_module._ensure_container_system_running()
-
-    rt.ensure_available.assert_awaited_once()
-    rt.ensure_agent_network.assert_awaited_once()
-    rt.cleanup_orphans.assert_awaited_once()
+    rt.verify_infrastructure.assert_not_awaited()
+    rt.cleanup_orphans.assert_not_awaited()

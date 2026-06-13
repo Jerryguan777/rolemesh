@@ -1,0 +1,32 @@
+{{- /*
+Shared data PVC (docs/21 §7). Name is the contract constant
+ROLEMESH_K8S_DATA_PVC (default "rolemesh-data") — verify_infrastructure
+asserts a PVC of THIS name is Bound. Literal, not release-scoped.
+
+accessModes follow storage.mode:
+  rwx            ReadWriteMany  — orchestrator + agents share from any node
+  rwo-colocated  ReadWriteOnce  — single node; podAffinity pins consumers
+                                  (see orchestrator-deployment.yaml)
+*/ -}}
+{{- $rwx := eq .Values.storage.mode "rwx" -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: rolemesh-data
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rolemesh.labels" . | nindent 4 }}
+    app.kubernetes.io/component: data
+spec:
+  accessModes:
+    {{- if $rwx }}
+    - ReadWriteMany
+    {{- else }}
+    - ReadWriteOnce
+    {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.size }}
+  {{- with .Values.storage.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}

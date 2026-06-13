@@ -194,16 +194,13 @@ async def fetch_all_mcp_servers() -> list[McpEntry]:
     is the authoritative "what has the orchestrator registered" view
     that the live hot-reload publishers keep in lockstep.
 
-    Bug 5 (2026-04-26): rewrite ``localhost`` / ``127.0.0.1`` in each
-    URL to ``host.docker.internal`` BEFORE serialising. The
-    orchestrator stores raw origins (``localhost`` legitimately means
-    the host inside this process), but the gateway running in a
-    container will dial its own loopback if it sees the literal
-    string. Rewrite at the publish boundary so the in-process
-    registry stays useful for the rollback / pre-EC-1 path that
-    proxies through the host's credential proxy.
+    URLs are serialised VERBATIM: the orchestrator and the gateway
+    share one network stack (docs/21 §1 — both are compose/K8s
+    services), so a URL that resolves for one resolves for the other.
+    Operator-entered MCP URLs must use service names; the launcher-era
+    loopback rewrite at this boundary is gone with the host-process
+    orchestrator that needed it.
     """
-    from rolemesh.container.runtime import rewrite_loopback_to_host_gateway
     from rolemesh.egress.reverse_proxy import get_mcp_registry
 
     out: list[McpEntry] = []
@@ -211,7 +208,7 @@ async def fetch_all_mcp_servers() -> list[McpEntry]:
         out.append(
             McpEntry(
                 name=name,
-                url=rewrite_loopback_to_host_gateway(url),
+                url=url,
                 headers=dict(headers),
                 auth_mode=auth_mode,
             )

@@ -5,7 +5,7 @@ env var — never two. Pick by consumer scope:
 
 1. Read by MULTIPLE modules, non-sensitive, no parse-time validation
    beyond a cast → module-level constant HERE (ports, image names,
-   bridge names, mode switches like EGRESS_CONTROL_ENABLE).
+   bridge names).
 
 2. Read by ONE component, or needs construction-time validation /
    fail-closed semantics, or is a SECRET → a ``from_env()`` on that
@@ -49,10 +49,31 @@ SCHEDULER_POLL_INTERVAL: float = 60.0  # seconds
 PROJECT_ROOT: Path = Path.cwd()
 HOME_DIR: Path = Path.home()
 
-MOUNT_ALLOWLIST_PATH: Path = HOME_DIR / ".config" / "rolemesh" / "mount-allowlist.json"
+# Mount allowlist location. Default (host dev flow): the operator's
+# ~/.config/rolemesh. ROLEMESH_MOUNT_ALLOWLIST overrides it for the
+# containerized orchestrator, where the deployment layer bind-mounts the
+# operator's config dir to a fixed in-container path (compose) or ships
+# it as a ConfigMap (K8s) — see deploy/compose/compose.yaml.
+_MOUNT_ALLOWLIST_ENV: str = os.environ.get("ROLEMESH_MOUNT_ALLOWLIST", "")
+MOUNT_ALLOWLIST_PATH: Path = (
+    Path(_MOUNT_ALLOWLIST_ENV)
+    if _MOUNT_ALLOWLIST_ENV
+    else HOME_DIR / ".config" / "rolemesh" / "mount-allowlist.json"
+)
 STORE_DIR: Path = PROJECT_ROOT / "store"
 GROUPS_DIR: Path = PROJECT_ROOT / "groups"
 DATA_DIR: Path = PROJECT_ROOT / "data"
+
+# DooD path translation (docs/21 §7.1). When the orchestrator itself runs
+# in a container, the bind sources it assembles (DATA_DIR / ...) are paths
+# in ITS OWN filesystem, but the host dockerd that spawns agent sandboxes
+# interprets bind sources against the HOST filesystem. This variable holds
+# the host path that the deployment layer bind-mounted onto DATA_DIR
+# (compose: ../../data -> /app/data), and DockerRuntime.run() rewrites
+# every bind source under DATA_DIR to ROLEMESH_HOST_DATA_DIR/<relpath>.
+# Empty (the default) = translation disabled — the host-process dev flow
+# and the test suite keep their unchanged semantics.
+ROLEMESH_HOST_DATA_DIR: str = os.environ.get("ROLEMESH_HOST_DATA_DIR", "")
 
 DATABASE_URL: str = os.environ.get("DATABASE_URL", "postgresql://rolemesh:rolemesh@localhost:5432/rolemesh")
 # RLS rollout (PR-B): a separate pool for cross-tenant maintenance,
@@ -95,20 +116,47 @@ MAX_CONCURRENT_CONTAINERS: int = max(1, int(os.environ.get("MAX_CONCURRENT_CONTA
 GLOBAL_MAX_CONTAINERS: int = max(1, int(os.environ.get("GLOBAL_MAX_CONTAINERS", "20")))
 
 # Runtime-abstraction backend selector: "docker" | "k8s" (not OCI runtime).
-# Pairs with CONTAINER_OCI_RUNTIME below: BACKEND picks "which Python client
-# talks to which orchestrator", OCI_RUNTIME picks "which binary actually
-# runs the container process".
-CONTAINER_BACKEND: str = os.environ.get("CONTAINER_BACKEND", "docker")
+# Pairs with CONTAINER_OCI_RUNTIME below: ROLEMESH_CONTAINER_RUNTIME picks
+# "which Python client talks to which orchestrator", OCI_RUNTIME picks "which
+# binary actually runs the container process".
+ROLEMESH_CONTAINER_RUNTIME: str = os.environ.get("ROLEMESH_CONTAINER_RUNTIME", "docker")
+
+# Kubernetes backend settings (ROLEMESH_CONTAINER_RUNTIME=k8s; docs/21 §4.1).
+# Category 1 of the module-docstring rules: non-sensitive deployment-shape
+# values with no parse-time validation, read by container/k8s_runtime and
+# by the contract suite's k8s Topology (tests/container/contract). The
+# Helm chart declares the actual objects; these only tell the orchestrator
+# where to find them.
+#
+#   ROLEMESH_K8S_NAMESPACE        namespace holding all RoleMesh objects
+#   ROLEMESH_K8S_DATA_PVC         PVC bound to DATA_DIR (subPath translation,
+#                                 docs/21 §7.1)
+#   ROLEMESH_K8S_IMAGE_PULL_SECRET  optional imagePullSecrets name for agent
+#                                 pods (private registries); empty = none
+#   ROLEMESH_K8S_IMAGE_PULL_POLICY  imagePullPolicy for spawned agent pods.
+#                                 Default "IfNotPresent" works for both
+#                                 kind-loaded local images (no registry to
+#                                 pull from — "Always" would ImagePullBackOff)
+#                                 and registries with explicit tags.
+#   ROLEMESH_K8S_RUNTIME_CLASS    RuntimeClass used when a spec asks for the
+#                                 gVisor OCI runtime (spec.runtime="runsc");
+#                                 empty = the conventional name "gvisor"
+ROLEMESH_K8S_NAMESPACE: str = os.environ.get("ROLEMESH_K8S_NAMESPACE", "rolemesh")
+ROLEMESH_K8S_DATA_PVC: str = os.environ.get("ROLEMESH_K8S_DATA_PVC", "rolemesh-data")
+ROLEMESH_K8S_IMAGE_PULL_SECRET: str = os.environ.get("ROLEMESH_K8S_IMAGE_PULL_SECRET", "")
+ROLEMESH_K8S_IMAGE_PULL_POLICY: str = os.environ.get(
+    "ROLEMESH_K8S_IMAGE_PULL_POLICY", "IfNotPresent"
+)
+ROLEMESH_K8S_RUNTIME_CLASS: str = os.environ.get("ROLEMESH_K8S_RUNTIME_CLASS", "")
 
 # OCI runtime selection (R1). "runc" is the default; "runsc" enables gVisor
 # syscall-level sandboxing and requires runsc to be registered in
 # /etc/docker/daemon.json on the host. Per-coworker overrides live in
 # ContainerConfig.runtime.
 #
-# Named OCI to disambiguate from CONTAINER_BACKEND (docker vs k8s). A
-# shorter name like CONTAINER_RUNTIME would collide with the old meaning
-# of that variable (runtime-abstraction selector) and confuse anyone who
-# saw both in an env file.
+# Named OCI to disambiguate from ROLEMESH_CONTAINER_RUNTIME (docker vs k8s):
+# this variable selects the OCI runtime binary (runc/runsc), not the
+# runtime-abstraction backend.
 CONTAINER_OCI_RUNTIME: str = os.environ.get("CONTAINER_OCI_RUNTIME", "runc")
 
 # Per-container resource ceilings (R7). Overrides come from ContainerConfig
@@ -119,52 +167,16 @@ CONTAINER_PIDS_LIMIT: int = int(os.environ.get("CONTAINER_PIDS_LIMIT", "512"))
 CONTAINER_MAX_MEMORY: str = os.environ.get("CONTAINER_MAX_MEMORY", "8g")
 CONTAINER_MAX_CPU: float = float(os.environ.get("CONTAINER_MAX_CPU", "4.0"))
 
-# Custom bridge network for agent containers (R5). Setting this to the
-# empty string falls back to Docker's default bridge (loses ICC isolation
-# and metadata-blackhole scope; use only when custom networks are
-# unsupported on the host).
+# Custom bridge network for agent containers (R5).
 #
 # Egress Control V1 (EC-1) turns this network into a Docker --internal
 # bridge. Containers on it physically cannot route to the public internet
 # — all outbound traffic must flow through the egress gateway which sits
 # on a second bridge (CONTAINER_EGRESS_NETWORK_NAME) with a real default
-# route. This name is ONLY a bridge name now; whether egress control is
-# active is governed by EGRESS_CONTROL_ENABLE below.
+# route. Egress control is always on (docs/21 §1: the EC=off runtime
+# branch was removed); an empty value is a hard configuration error at
+# startup.
 CONTAINER_NETWORK_NAME: str = os.environ.get("CONTAINER_NETWORK_NAME", "rolemesh-agent-net")
-
-
-def _env_flag(name: str, default: bool) -> bool:
-    """Parse a boolean env var. Accepts 1/0, true/false, yes/no, on/off
-    (case-insensitive). Unset → *default*; an unrecognised value raises
-    so a typo fails the boot loudly rather than silently flipping a
-    security-relevant switch."""
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    val = raw.strip().lower()
-    if val in ("1", "true", "yes", "on"):
-        return True
-    if val in ("0", "false", "no", "off"):
-        return False
-    raise ValueError(
-        f"{name} must be a boolean (1/0, true/false, yes/no, on/off), got {raw!r}"
-    )
-
-
-# Master switch for Egress Control (EC-1/2/3). The single authoritative
-# knob: when on, agents run on the Internal=true bridge behind the egress
-# gateway (network-layer enforcement + forward/DNS proxies + per-tenant
-# credential injection at the gateway). When off, agents run on the host
-# bridge and reach a host-side credential proxy directly — egress NETWORK
-# control is disabled, but multi-tenant CREDENTIAL isolation is preserved
-# (the host proxy verifies the same signed identity token and injects the
-# requesting tenant's own key). See docs/16.
-#
-# Replaces the historical overload where CONTAINER_NETWORK_NAME="" doubled
-# as the EC off-switch. That overload is gone: an empty bridge name with
-# EC on is now a hard configuration error (see startup validation), and
-# operators turn EC off with EGRESS_CONTROL_ENABLE=0.
-EGRESS_CONTROL_ENABLE: bool = _env_flag("EGRESS_CONTROL_ENABLE", default=True)
 
 
 # Outbound bridge used by the egress gateway (EC-1). Regular bridge with
@@ -184,6 +196,18 @@ EGRESS_GATEWAY_CONTAINER_NAME: str = os.environ.get(
 )
 EGRESS_GATEWAY_IMAGE: str = os.environ.get(
     "EGRESS_GATEWAY_IMAGE", "rolemesh-egress-gateway:latest"
+)
+# Static address of the egress gateway on the agent bridge. The
+# deployment layer declares it (compose ipam fixed IP today; K8s
+# Service ClusterIP later) and the orchestrator only VERIFIES it at
+# startup (ContainerRuntime.verify_infrastructure) — replacing the old
+# runtime discovery via docker-inspect after gateway launch. The
+# default matches the compose subnet in deploy/compose/compose.yaml
+# (agent-net 172.28.100.0/24); override the env var if you override
+# the subnet. Consumers: runner (pins it as each agent's DNS resolver)
+# and docker_runtime (verifies the gateway actually holds this IP).
+EGRESS_GATEWAY_DNS_IP: str = os.environ.get(
+    "EGRESS_GATEWAY_DNS_IP", "172.28.100.53"
 )
 # HTTP forward-proxy port (CONNECT) — agents see this via HTTPS_PROXY env.
 # EC-2 wires the CONNECT handler; EC-1 ships the port as a placeholder so

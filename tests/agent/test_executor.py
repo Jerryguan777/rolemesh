@@ -258,12 +258,12 @@ class TestPiExtraEnvBedrock:
         # Architectural pin: ``BEDROCK_BASE_URL`` belongs in
         # ``container.runner.build_container_spec`` alongside the
         # other base URLs (Anthropic / OpenAI / Google) because it
-        # depends on the per-spawn ``proxy_base`` decision (EC-2 →
-        # ``egress-gateway``; rollback → ``host.docker.internal``).
-        # Setting it from ``_pi_extra_env`` (module-load time) baked
-        # the rollback-path host into a per-spawn value and made the
-        # Bedrock path silently broken under EC-2. This test pins the
-        # invariant so a future refactor doesn't put it back.
+        # depends on the per-spawn ``proxy_base`` decision (the
+        # ``egress-gateway`` service name). Setting it from
+        # ``_pi_extra_env`` (module-load time) baked a stale host into
+        # a per-spawn value and made the Bedrock path silently broken
+        # under EC-2. This test pins the invariant so a future
+        # refactor doesn't put it back.
         monkeypatch.setenv("PI_MODEL_ID", "amazon-bedrock/anything")
         monkeypatch.setenv("BEDROCK_BASE_URL", "http://localhost:9999/wrong")
         env = _pi_extra_env()
