@@ -1,0 +1,160 @@
+{{- /*
+Orchestrator Deployment (docs/21 §10.2).
+
+Single stateful replica, strategy Recreate (rev4): in-memory state must NOT
+overlap during a rollout. replicas is hard-coded to 1, NOT a knob.
+
+Runs under the pods-only ServiceAccount; verify_infrastructure self-checks
+that RBAC at startup. Carries app.kubernetes.io/component: orchestrator so
+orchestrator-policy selects it.
+
+env mirrors the compose orchestrator service, translated to k8s:
+  * ROLEMESH_CONTAINER_RUNTIME=k8s selects the K8sRuntime backend.
+  * ROLEMESH_K8S_* tell the runtime where the chart-declared objects are.
+  * CONTAINER_NETWORK_NAME stays non-empty: main._ensure_container_system_running
+    fail-closes on an empty value even in k8s mode (the K8s pod mapping
+    ignores the field, but the startup guard reads it). Defaulted here.
+  * NO docker.sock mount — agents are spawned via the K8s API.
+*/ -}}
+{{- $tag := default .Chart.AppVersion .Values.orchestrator.image.tag -}}
+{{- $secretName := .Values.secrets.existingSecret | default (include "rolemesh.secretName" .) -}}
+{{- $rwo := eq .Values.storage.mode "rwo-colocated" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rolemesh.fullname" . }}-orchestrator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rolemesh.labels" . | nindent 4 }}
+    app.kubernetes.io/component: orchestrator
+spec:
+  # Single stateful replica — see header. Do not parameterize.
+  replicas: 1
+  strategy:
+    # Recreate: the old pod is fully terminated before the new one starts,
+    # so two orchestrators never run against the same state concurrently.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: orchestrator
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "rolemesh.labels" . | nindent 8 }}
+        app.kubernetes.io/component: orchestrator
+    spec:
+      serviceAccountName: {{ include "rolemesh.orchestrator.serviceAccountName" . }}
+      # The orchestrator NEEDS its SA token (it talks to the API server to
+      # spawn agent pods), unlike agent pods which set automount false.
+      automountServiceAccountToken: true
+      {{- with .Values.image.pullSecret }}
+      imagePullSecrets:
+        - name: {{ . }}
+      {{- end }}
+      {{- if $rwo }}
+      # rwo-colocated (docs/21 §7.2): the data PVC is ReadWriteOnce. The
+      # orchestrator mounts it directly, so the scheduler already pins this
+      # pod to the PVC's node — no extra affinity needed here. The agent
+      # pods the orchestrator spawns mount the SAME RWO PVC and are placed
+      # in this namespace; an RWO volume is only attachable on its current
+      # node, so they co-locate with the orchestrator automatically (a
+      # second node attempting to attach blocks with "Multi-Attach error").
+      # When that co-location must be SCHEDULED rather than merely enforced
+      # by the volume (e.g. to surface a clear pending reason instead of a
+      # Multi-Attach error), set agent.podAffinity in the orchestrator's
+      # agent-spawn config — that is runtime config, not a chart template,
+      # because this chart does not template agent pods.
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: orchestrator
+          image: "{{ .Values.orchestrator.image.repository }}:{{ $tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          env:
+            - name: ROLEMESH_CONTAINER_RUNTIME
+              value: "k8s"
+            - name: ROLEMESH_K8S_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: ROLEMESH_K8S_DATA_PVC
+              value: "rolemesh-data"
+            - name: ROLEMESH_K8S_IMAGE_PULL_SECRET
+              value: {{ .Values.image.pullSecret | quote }}
+            - name: ROLEMESH_K8S_RUNTIME_CLASS
+              value: {{ .Values.orchestrator.runtimeClass | quote }}
+            # Startup guard (main._ensure_container_system_running) reads
+            # this even in k8s mode; the pod mapping ignores it. Keep
+            # non-empty.
+            - name: CONTAINER_NETWORK_NAME
+              value: "rolemesh-agent-net"
+            # Agent sandbox image the runtime spawns.
+            - name: CONTAINER_IMAGE
+              value: "{{ .Values.agent.image.repository }}:{{ .Values.agent.image.tag }}"
+            - name: NATS_URL
+              value: {{ include "rolemesh.natsUrl" . | quote }}
+            {{- if .Values.postgres.enabled }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: POSTGRES_PASSWORD
+            {{- end }}
+            - name: DATABASE_URL
+              value: {{ include "rolemesh.databaseUrl" . | quote }}
+            - name: ADMIN_DATABASE_URL
+              value: {{ if .Values.postgres.enabled }}{{ include "rolemesh.databaseUrl" . | quote }}{{ else }}{{ .Values.postgres.externalAdminUrl | default .Values.postgres.externalUrl | quote }}{{ end }}
+            # EGRESS_GATEWAY_DNS_IP == the gateway Service ClusterIP; agents
+            # get it pinned as their resolver and verify asserts the match.
+            - name: EGRESS_GATEWAY_DNS_IP
+              value: {{ required "egressGateway.clusterIP is required" .Values.egressGateway.clusterIP | quote }}
+            # Gateway service name (informational; the runner reads
+            # EGRESS_GATEWAY_CONTAINER_NAME which defaults to this).
+            - name: EGRESS_GATEWAY_HOST
+              value: "egress-gateway"
+            - name: EGRESS_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: EGRESS_TOKEN_SECRET
+            - name: ROLEMESH_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: ROLEMESH_TOKEN_SECRET
+            {{- if .Values.secrets.credentialVaultKey }}
+            - name: CREDENTIAL_VAULT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: CREDENTIAL_VAULT_KEY
+            {{- end }}
+            {{- range $k, $v := .Values.orchestrator.extraEnv }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+          # No HTTP port; verify_infrastructure is the readiness gate.
+          # A simple TCP/exec probe is omitted — the orchestrator has no
+          # liveness endpoint and the process exits on fatal startup errors.
+          resources:
+            {{- toYaml .Values.orchestrator.resources | nindent 12 }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: rolemesh-data

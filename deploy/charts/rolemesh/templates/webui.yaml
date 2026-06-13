@@ -1,0 +1,114 @@
+{{- /*
+WebUI: Deployment + Service (docs/21 §4.5). Stateless FastAPI process
+serving the SPA. Reaches NATS + Postgres by Service name; needs no agent
+network membership and is not selected by any agent NetworkPolicy.
+WS_TICKET_SECRET is mandatory (webui WS chat fails closed without it).
+*/ -}}
+{{- $tag := default .Chart.AppVersion .Values.webui.image.tag -}}
+{{- $secretName := .Values.secrets.existingSecret | default (include "rolemesh.secretName" .) -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "rolemesh.fullname" . }}-webui
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rolemesh.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webui
+spec:
+  type: {{ .Values.webui.service.type }}
+  selector:
+    app.kubernetes.io/component: webui
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: http
+      port: {{ .Values.webui.service.port }}
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rolemesh.fullname" . }}-webui
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rolemesh.labels" . | nindent 4 }}
+    app.kubernetes.io/component: webui
+spec:
+  replicas: {{ .Values.webui.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: webui
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "rolemesh.labels" . | nindent 8 }}
+        app.kubernetes.io/component: webui
+    spec:
+      {{- with .Values.image.pullSecret }}
+      imagePullSecrets:
+        - name: {{ . }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: webui
+          image: "{{ .Values.webui.image.repository }}:{{ $tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          env:
+            - name: NATS_URL
+              value: {{ include "rolemesh.natsUrl" . | quote }}
+            {{- if .Values.postgres.enabled }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: POSTGRES_PASSWORD
+            {{- end }}
+            - name: DATABASE_URL
+              value: {{ include "rolemesh.databaseUrl" . | quote }}
+            - name: ADMIN_DATABASE_URL
+              value: {{ if .Values.postgres.enabled }}{{ include "rolemesh.databaseUrl" . | quote }}{{ else }}{{ .Values.postgres.externalAdminUrl | default .Values.postgres.externalUrl | quote }}{{ end }}
+            - name: WS_TICKET_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: WS_TICKET_SECRET
+            - name: ROLEMESH_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: ROLEMESH_TOKEN_SECRET
+            {{- if .Values.secrets.credentialVaultKey }}
+            - name: CREDENTIAL_VAULT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: CREDENTIAL_VAULT_KEY
+            {{- end }}
+            {{- range $k, $v := .Values.webui.extraEnv }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            tcpSocket:
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.webui.resources | nindent 12 }}

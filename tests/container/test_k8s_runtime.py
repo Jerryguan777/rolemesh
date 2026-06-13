@@ -464,6 +464,25 @@ def test_image_pull_secret_mapped_when_set() -> None:
     assert "imagePullSecrets" not in _manifest(spec)["spec"]
 
 
+def test_image_pull_policy_default_and_override() -> None:
+    """Default IfNotPresent, else the configured policy.
+
+    Mutation caught: omitting imagePullPolicy lets K8s default a :latest
+    tag to Always, which ImagePullBackOffs against kind-loaded local
+    images (no registry to pull from) — exactly the failure the kind
+    integration hit. Asserting the field is present guards the fix.
+    """
+    container = _manifest(ContainerSpec(name="a", image="img:latest"))["spec"][
+        "containers"
+    ][0]
+    assert container["imagePullPolicy"] == "IfNotPresent"
+
+    pulled = _manifest(
+        ContainerSpec(name="a", image="img:latest"), image_pull_policy="Always"
+    )["spec"]["containers"][0]
+    assert pulled["imagePullPolicy"] == "Always"
+
+
 def test_resource_limits_memory_and_cpu() -> None:
     """memory '512m' -> bytes quantity; cpu 1.5 -> millicores.
 
@@ -981,20 +1000,13 @@ class _VerifyCore:
     def __init__(
         self,
         *,
-        namespace_ok: bool = True,
         pvc_phase: str = "Bound",
         pvc_missing: bool = False,
         service_cluster_ip: str = "10.0.0.5",
     ) -> None:
-        self._namespace_ok = namespace_ok
         self._pvc_phase = pvc_phase
         self._pvc_missing = pvc_missing
         self._service_cluster_ip = service_cluster_ip
-
-    async def read_namespace(self, _name: str) -> Any:
-        if not self._namespace_ok:
-            raise _api_exc(404)
-        return k8s_client.V1Namespace(metadata=k8s_client.V1ObjectMeta(name=_name))
 
     async def read_namespaced_persistent_volume_claim(self, _name: str, _ns: str) -> Any:
         if self._pvc_missing:
@@ -1213,12 +1225,26 @@ async def test_verify_fails_when_rbac_denies_a_verb(monkeypatch: pytest.MonkeyPa
 
 @pytest.mark.asyncio
 async def test_verify_fails_when_namespace_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing namespace surfaces via the first namespaced read.
+
+    verify deliberately does NOT do a cluster-scoped namespaces/get
+    (it would need RBAC a namespaced Role cannot grant — docs/21
+    §10.2). When the namespace is absent every namespaced read 404s;
+    the NetworkPolicy check is first, and its error must name the
+    namespace-missing case so the operator is not sent hunting for a
+    policy in a namespace that does not exist.
+
+    Mutation caught: if someone re-adds a cluster-scoped namespace probe
+    requiring namespaces/get, the pods-only RBAC would no longer be
+    sufficient and this manifestation path would change.
+    """
     monkeypatch.setattr("rolemesh.core.config.EGRESS_GATEWAY_DNS_IP", "10.0.0.5")
     rt = K8sRuntime()
     _wire_verify(
         rt,
-        core=_VerifyCore(namespace_ok=False),
-        net=_VerifyNet(dict(_GOOD_POLICIES)),
+        core=_VerifyCore(),
+        # Namespace gone => every namespaced policy read 404s.
+        net=_VerifyNet({}),
         auth=_VerifyAuth(),
     )
     with pytest.raises(RuntimeError, match="does not exist"):

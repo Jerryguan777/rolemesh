@@ -1,0 +1,74 @@
+{{- /*
+helm test deny probe (docs/21 §4.2, §11). A pod carrying the agent role
+label that ATTEMPTS to reach the public internet — it MUST be blocked by
+the agent-default-deny + agent-allow-egress NetworkPolicies. If the
+connection SUCCEEDS the CNI is silently ignoring NetworkPolicy (a false
+green this guards against); the probe exits non-zero and `helm test` fails.
+
+This is the deny check that verify_infrastructure intentionally does NOT
+run at every startup (pod scheduling + image pull cost, §4.2) — it lives
+here, once per install, and in contract case T-NET.
+
+Mechanism: try a TCP connect to a public address that is NOT the gateway
+and NOT NATS. The pinned agent resolver (gateway) is unreachable for
+arbitrary names anyway, so we connect to a bare IP to take DNS out of the
+picture and test the egress policy directly. A blocked connect raises
+(timeout / unreachable) -> probe PASSES. A successful connect -> the policy
+is not enforced -> probe FAILS.
+*/ -}}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "rolemesh.fullname" . }}-deny-probe
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rolemesh.labels" . | nindent 4 }}
+    # CRITICAL: this label is what subjects the probe to the agent
+    # NetworkPolicies. It MUST match AGENT_ROLE_LABEL/VALUE.
+    rolemesh.io/role: agent
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: "{{ .Values.agent.image.repository }}:{{ .Values.agent.image.tag }}"
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        capabilities:
+          drop:
+            - ALL
+        seccompProfile:
+          type: RuntimeDefault
+      command:
+        - python
+        - -c
+        - |
+          import socket, sys
+          # A public, well-known anycast address — NOT the gateway, NOT
+          # NATS. default-deny + gateway-only egress must block this.
+          target = ("1.1.1.1", 443)
+          try:
+              with socket.create_connection(target, timeout=8):
+                  pass
+          except OSError as exc:
+              print(f"PASS: egress to {target} blocked as required ({exc})")
+              sys.exit(0)
+          print(
+              f"FAIL: egress to {target} SUCCEEDED — the CNI is not "
+              "enforcing the agent NetworkPolicies (false green). Agent "
+              "isolation is NOT in force.",
+              file=sys.stderr,
+          )
+          sys.exit(1)

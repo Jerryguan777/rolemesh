@@ -1,0 +1,215 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- /*
+The four NetworkPolicies (docs/21 §6.1). Object NAMES and selectors are a
+HARD CONTRACT with src/rolemesh/container/k8s_runtime.py:
+  NETPOL_* constants            -> the four metadata.name values below
+  AGENT_ROLE_LABEL/VALUE        -> rolemesh.io/role: agent
+verify_infrastructure asserts:
+  * agent-default-deny / agent-allow-egress podSelector.matchLabels has
+    rolemesh.io/role=agent (plain matchLabels, NO matchExpressions — the
+    verify treats matchExpressions as "not provably matching");
+  * gateway-policy / orchestrator-policy podSelectors do NOT match agent
+    pods (they select app.kubernetes.io/component, a label agent pods do
+    NOT carry). NetworkPolicies are additive: a component policy that also
+    caught agents would grant them its wider egress and defeat default-deny.
+DO NOT template these names or the agent selector off the release name.
+*/ -}}
+{{- $natsSvc := include "rolemesh.natsServiceName" . -}}
+{{- $kubeDnsNs := .Values.networkPolicy.kubeDns.namespace -}}
+---
+# 1. agent-default-deny: every agent pod, all ingress + egress denied.
+#    Standalone so the "default deny" invariant is independently verifiable.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-default-deny
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rolemesh.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      rolemesh.io/role: agent
+  policyTypes:
+    - Ingress
+    - Egress
+  # No ingress/egress rules == deny all.
+---
+# 2. agent-allow-egress: agent -> gateway (53 udp+tcp, 3001, 3128) and
+#    agent -> NATS (4222) ONLY. kube-dns is deliberately NOT allowed:
+#    agents resolve every name through the gateway resolver (docs/21 §6.3).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-allow-egress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rolemesh.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      rolemesh.io/role: agent
+  policyTypes:
+    - Egress
+  egress:
+    # -> egress gateway: DNS (53 udp+tcp -> Service maps to container 1053),
+    #    credential proxy / healthz (3001), forward proxy (3128).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: egress-gateway
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+        - { protocol: TCP, port: 3001 }
+        - { protocol: TCP, port: 3128 }
+    # -> NATS (4222): agent lifecycle + protocol traffic rides NATS.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: nats
+      ports:
+        - { protocol: TCP, port: 4222 }
+---
+# 3. gateway-policy: selects the gateway component (NOT agents). Ingress
+#    from agents + orchestrator; egress to NATS (4222: credential RPC +
+#    snapshot), DNS (kube-dns), and external 80/443 for upstream LLM/MCP.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway-policy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rolemesh.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: egress-gateway
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              rolemesh.io/role: agent
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: orchestrator
+      ports:
+        - { protocol: UDP, port: 1053 }
+        - { protocol: TCP, port: 1053 }
+        - { protocol: TCP, port: 3001 }
+        - { protocol: TCP, port: 3128 }
+  egress:
+    # -> NATS (rule snapshot RPC, credential RPC, safety events).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: nats
+      ports:
+        - { protocol: TCP, port: 4222 }
+    {{- if .Values.networkPolicy.kubeDns.enabled }}
+    # -> kube-dns: the gateway's recursive upstream (forwards internal
+    #    service names; docs/21 §6.3). Namespace-scoped to kube-system.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $kubeDnsNs }}
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    {{- end }}
+    # -> external HTTP/HTTPS for upstream LLM/MCP endpoints.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.169.254/32   # cloud IMDS — never the gateway's business
+      ports:
+        - { protocol: TCP, port: 80 }
+        - { protocol: TCP, port: 443 }
+    {{- with .Values.networkPolicy.gatewayExtraEgress }}
+    {{- range . }}
+    - to:
+        - ipBlock:
+            cidr: {{ .cidr }}
+      ports:
+        {{- toYaml .ports | nindent 8 }}
+    {{- end }}
+    {{- end }}
+---
+# 4. orchestrator-policy: selects the orchestrator component (NOT agents).
+#    Egress to the K8s API, Postgres, NATS, the gateway, kube-dns, and
+#    external HTTPS (its own LLM safety calls). Ingress from webui (REST).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: orchestrator-policy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rolemesh.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: orchestrator
+  policyTypes:
+    - Egress
+  egress:
+    # -> NATS.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: nats
+      ports:
+        - { protocol: TCP, port: 4222 }
+    {{- if .Values.postgres.enabled }}
+    # -> bundled Postgres.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: postgres
+      ports:
+        - { protocol: TCP, port: 5432 }
+    {{- end }}
+    # -> egress gateway healthz (verify) + the gateway's own ports.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: egress-gateway
+      ports:
+        - { protocol: TCP, port: 3001 }
+        - { protocol: TCP, port: 3128 }
+        - { protocol: UDP, port: 1053 }
+        - { protocol: TCP, port: 1053 }
+    {{- if .Values.networkPolicy.kubeDns.enabled }}
+    # -> kube-dns (resolve Service names: gateway, postgres, K8s API).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $kubeDnsNs }}
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    {{- end }}
+    # -> K8s API server + external HTTPS (LLM safety calls). The API server
+    #    address varies per cluster; allowing 443 cluster-wide covers it.
+    #    Narrow with networkPolicy.orchestratorExtraEgress if you pin it.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.169.254/32
+      ports:
+        - { protocol: TCP, port: 443 }
+        - { protocol: TCP, port: 6443 }
+    {{- with .Values.networkPolicy.orchestratorExtraEgress }}
+    {{- range . }}
+    - to:
+        - ipBlock:
+            cidr: {{ .cidr }}
+      ports:
+        {{- toYaml .ports | nindent 8 }}
+    {{- end }}
+    {{- end }}
+{{- end }}

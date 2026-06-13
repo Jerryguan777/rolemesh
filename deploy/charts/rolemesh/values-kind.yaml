@@ -1,0 +1,116 @@
+# RoleMesh on local kind (docs/21 §10.3). Use with deploy/kind/up.sh.
+#
+#   helm upgrade --install rolemesh deploy/charts/rolemesh \
+#     -n rolemesh --create-namespace \
+#     -f deploy/charts/rolemesh/values-kind.yaml
+#
+# Assumptions baked in here:
+#   * kind's default Service CIDR is 10.96.0.0/12, so the gateway static
+#     ClusterIP 10.96.0.53 is valid (kube-dns sits at 10.96.0.10).
+#   * Images are `kind load`-ed locally (single-arch amd64) -> Never pull.
+#   * Single node -> local-path RWO storage is sufficient.
+#   * Calico is installed by up.sh (kindnet has no NetworkPolicy).
+
+image:
+  # Images live only in the kind node (loaded by up.sh); never reach for a
+  # registry.
+  pullPolicy: Never
+
+# Local images are built/tagged :latest by container/build.sh.
+orchestrator:
+  image:
+    tag: "latest"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+webui:
+  image:
+    tag: "latest"
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+egressGateway:
+  image:
+    tag: "latest"
+  # Inside kind's default Service CIDR (10.96.0.0/12). kube-dns is .10;
+  # .53 is free and mnemonic (DNS port). MUST match EGRESS_GATEWAY_DNS_IP.
+  clusterIP: "10.96.0.53"
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+agent:
+  image:
+    repository: rolemesh-agent
+    tag: "latest"
+
+nats:
+  enabled: true
+  resources:
+    requests:
+      cpu: 25m
+      memory: 32Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  persistence:
+    enabled: false
+
+postgres:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  persistence:
+    enabled: true
+    size: 2Gi
+    # kind ships the rancher.io/local-path provisioner as the default
+    # StorageClass; leave empty to use it.
+    storageClass: ""
+
+storage:
+  # Single node: local-path is RWO. The chart's "rwx" mode only changes
+  # the requested accessMode; on a single-node kind cluster RWO and the
+  # de-facto single attach are equivalent, and local-path only does RWO.
+  mode: rwo-colocated
+  size: 2Gi
+  storageClass: ""
+
+secrets:
+  create: true
+  egressTokenSecret: "dev-only-egress-token-secret"
+  wsTicketSecret: "dev-only-ws-ticket-secret"
+  credentialVaultKey: "dev-only-credential-vault-key"
+  rolemeshTokenSecret: "dev-only-rolemesh-token-secret"
+  postgresPassword: "rolemesh"
+
+seed:
+  enabled: true
+  # Seed a local dev admin so the UI is usable immediately.
+  adminEmail: "admin@example.com"
+  adminRole: "platform_admin"
+  adminName: "Local Admin"
+
+networkPolicy:
+  enabled: true
+  kubeDns:
+    enabled: true
+    namespace: "kube-system"

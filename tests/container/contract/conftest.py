@@ -119,6 +119,32 @@ class Topology:
     metadata_extra_hosts: dict[str, str] = field(default_factory=dict)
 
 
+# Agent image ENV layer baked by container/Dockerfile + the python base
+# image. GPG_KEY is the python release-signing PUBLIC key fingerprint —
+# not a secret despite the name. Shared by both runtime topologies: the
+# image is identical, only the runtime-injected extras differ.
+_AGENT_IMAGE_ENV_KEYS: frozenset[str] = frozenset({
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "PYTHONPATH",
+    "PYTHONUNBUFFERED",
+    "PYTHON_VERSION",
+    "PYTHON_SHA256",
+    "GPG_KEY",
+})
+
+# Production metadata blackhole (runner._METADATA_BLACKHOLE). compute_egress_
+# routing injects it identically on both runtimes — on docker as ExtraHosts,
+# on k8s as pod hostAliases — so the agent-visible /etc/hosts content (and
+# this Topology field) is the same. Literal, not an import, so the suite
+# FAILS if the product constant drifts.
+_METADATA_EXTRA_HOSTS: dict[str, str] = {
+    "metadata.google.internal": "127.0.0.1",
+    "169.254.169.254": "127.0.0.1",
+}
+
+
 def _build_topology(runtime_name: str) -> Topology:
     from rolemesh.core.config import (
         CONTAINER_IMAGE,
@@ -130,54 +156,83 @@ def _build_topology(runtime_name: str) -> Topology:
         EGRESS_GATEWAY_FORWARD_PORT,
     )
 
-    if runtime_name != "docker":  # pragma: no cover — P2 fills this in
-        msg = f"Topology for runtime {runtime_name!r} not defined yet"
-        raise NotImplementedError(msg)
-
-    return Topology(
-        agent_image=CONTAINER_IMAGE,
-        agent_network=CONTAINER_NETWORK_NAME,
-        dns_servers=(EGRESS_GATEWAY_DNS_IP,),
-        gateway_host=EGRESS_GATEWAY_CONTAINER_NAME,
-        forward_port=EGRESS_GATEWAY_FORWARD_PORT,
-        reverse_port=CREDENTIAL_PROXY_PORT,
-        nats_host="nats",
-        data_dir=DATA_DIR,
+    # Fields shared verbatim by both backends: the agent image, the gateway
+    # DNS resolver IP (compose fixed IP / Service ClusterIP — one config
+    # knob), the gateway service name (compose container / k8s Service —
+    # one config knob), and the proxy ports. The product reads the same
+    # config on both runtimes, so the suite and the orchestrator cannot
+    # disagree about where the gateway/NATS live.
+    common = {
+        "agent_image": CONTAINER_IMAGE,
+        "dns_servers": (EGRESS_GATEWAY_DNS_IP,),
+        "gateway_host": EGRESS_GATEWAY_CONTAINER_NAME,
+        "forward_port": EGRESS_GATEWAY_FORWARD_PORT,
+        "reverse_port": CREDENTIAL_PROXY_PORT,
+        "data_dir": DATA_DIR,
         # The unprivileged user baked into the agent image
-        # (container/Dockerfile `useradd -u 1000`). Deliberately a
-        # literal, not an import of runner.AGENT_UID: the suite asserts
-        # the published contract, and must FAIL — not silently follow —
-        # if the product constant drifts.
-        agent_uid=1000,
-        agent_gid=1000,
-        # The gateway image is guaranteed present once
-        # verify_infrastructure passed (the gateway container is running
-        # from it) — no registry pull needed.
-        foreign_image="rolemesh-egress-gateway:latest",
-        injected_env_keys=frozenset({
-            # Runtime-injected (docker).
-            "HOSTNAME",
-            "HOME",
-            # Agent image ENV layer (container/Dockerfile + python base
-            # image). GPG_KEY is the python release-signing PUBLIC key
-            # fingerprint baked by the upstream python image — not a
-            # secret despite the name.
-            "PATH",
-            "LANG",
-            "LC_ALL",
-            "PYTHONPATH",
-            "PYTHONUNBUFFERED",
-            "PYTHON_VERSION",
-            "PYTHON_SHA256",
-            "GPG_KEY",
-        }),
-        # Production metadata blackhole (runner._METADATA_BLACKHOLE).
-        # Same literal-not-import rationale as agent_uid above.
-        metadata_extra_hosts={
-            "metadata.google.internal": "127.0.0.1",
-            "169.254.169.254": "127.0.0.1",
-        },
-    )
+        # (container/Dockerfile `useradd -u 1000`; k8s securityContext
+        # runAsUser 1000). Deliberately a literal, not an import of
+        # runner.AGENT_UID: the suite asserts the published contract and
+        # must FAIL — not silently follow — if the product constant drifts.
+        "agent_uid": 1000,
+        "agent_gid": 1000,
+        # nats is reachable by the bare name `nats` on BOTH runtimes:
+        # compose names the service `nats`; the Helm chart exposes a
+        # Service named literally `nats` (not release-scoped) for exactly
+        # this parity. Agents resolve it through the gateway resolver.
+        "nats_host": "nats",
+        "metadata_extra_hosts": dict(_METADATA_EXTRA_HOSTS),
+    }
+
+    if runtime_name == "docker":
+        return Topology(
+            agent_network=CONTAINER_NETWORK_NAME,
+            # The gateway image is guaranteed present once
+            # verify_infrastructure passed (the gateway container is
+            # running from it) — no registry pull needed.
+            foreign_image="rolemesh-egress-gateway:latest",
+            injected_env_keys=frozenset({
+                # Runtime-injected by docker.
+                "HOSTNAME",
+                "HOME",
+            })
+            | _AGENT_IMAGE_ENV_KEYS,
+            **common,  # type: ignore[arg-type]
+        )
+
+    if runtime_name == "k8s":
+        return Topology(
+            # K8s has no per-pod "agent network" — isolation is the chart's
+            # NetworkPolicies selecting the agent role label, not a named
+            # bridge. spec_to_pod_manifest ignores ContainerSpec.network_name
+            # outright (k8s_runtime docstring). Empty string is the sentinel:
+            # make_spec passes it through harmlessly and no k8s object keys
+            # off it.
+            agent_network="",
+            # An image present in the cluster that is NOT an agent image, to
+            # prove cleanup_orphans's allowlist refuses to reap foreign pods.
+            # The egress-gateway Deployment runs from this image and the
+            # chart `kind load`s it, so it is guaranteed pullable/present.
+            foreign_image="rolemesh-egress-gateway:latest",
+            # On k8s the agent pod sets enableServiceLinks:false (no
+            # *_SERVICE_HOST/PORT injection) and automountServiceAccountToken
+            # :false, so the only env beyond spec.env is the image's own ENV
+            # layer. K8s does not auto-inject HOSTNAME/HOME the way docker
+            # does; they are listed anyway because injected_env_keys is used
+            # as an ALLOW set (extras - injected_env_keys must be empty), so
+            # a superset can only relax the leak assertion, never mask a real
+            # leak — every forbidden key/value is checked separately in
+            # test_env_security regardless of this set.
+            injected_env_keys=frozenset({
+                "HOSTNAME",
+                "HOME",
+            })
+            | _AGENT_IMAGE_ENV_KEYS,
+            **common,  # type: ignore[arg-type]
+        )
+
+    msg = f"Topology for runtime {runtime_name!r} not defined"
+    raise NotImplementedError(msg)
 
 
 @pytest.fixture(scope="session")
@@ -379,21 +434,60 @@ def fast_verify(monkeypatch: pytest.MonkeyPatch, runtime_name: str) -> None:
 
         monkeypatch.setattr(docker_runtime, "_VERIFY_RETRY_BUDGET_S", 0.3)
         monkeypatch.setattr(docker_runtime, "_VERIFY_RETRY_INTERVAL_S", 0.05)
-    else:  # pragma: no cover — P2 adds the k8s knob here
+    elif runtime_name == "k8s":
+        # Same knobs, separate module: k8s_runtime duplicates (does not
+        # import) the retry constants so each backend's budget is patchable
+        # independently (see its _retry_within_budget docstring). Only the
+        # racing checks (gateway healthz, NATS) honour the budget; static
+        # object checks (policies, PVC, Service) fail immediately regardless.
+        from rolemesh.container import k8s_runtime
+
+        monkeypatch.setattr(k8s_runtime, "_VERIFY_RETRY_BUDGET_S", 0.3)
+        monkeypatch.setattr(k8s_runtime, "_VERIFY_RETRY_INTERVAL_S", 0.05)
+    else:  # pragma: no cover
         msg = f"fast_verify not wired for runtime {runtime_name!r}"
         raise NotImplementedError(msg)
 
 
 @pytest.fixture
-def host_mount_dir(topology: Topology) -> Iterator[Path]:
+def host_mount_dir(topology: Topology, runtime_name: str) -> Iterator[Path]:
     """Host-side scratch directory under DATA_DIR for VolumeMount tests.
 
-    Lives under DATA_DIR because that subtree is the storage contract
-    both runtimes translate (docs/21 §7.1); the session gate already
-    asserted translation is off/identity for this host-run process.
-    World-writable so the container's non-root uid can create files
-    regardless of whether it matches the invoking user's uid.
+    DOCKER: lives under DATA_DIR because that subtree is the storage
+    contract both runtimes translate (docs/21 §7.1); the session gate
+    already asserted translation is off/identity for this host-run
+    process. World-writable so the container's non-root uid can create
+    files regardless of whether it matches the invoking user's uid. The
+    test asserts the host can SEE what the container wrote (and vice
+    versa) at this path — which holds because the bind source IS this
+    host path.
+
+    K8S: this fixture cannot work unchanged. The agent pod mounts the
+    `rolemesh-data` PVC by subPath, not a host path; the suite runs
+    OUTSIDE the cluster, so a path on the suite's local filesystem is NOT
+    the bytes the agent pod sees. The host<->container visibility
+    assertion T-FS relies on therefore has no host side here.
+
+    Disposition (k8s, NOT yet runnable — flagged for the kind run, docs/21
+    §7.2): the kind cluster maps `./data` into the node via the cluster
+    config's extraMounts and a hostPath/local-path PV backs the PVC, so a
+    path under DATA_DIR on the host DOES surface in the PVC. To make T-FS
+    pass on kind the fixture must (1) create the scratch dir at the same
+    relative subPath the agent pod will mount, and (2) translate between
+    the suite's view of DATA_DIR and the node's mount point if they
+    differ. Until that mapping is wired and validated on a live kind
+    cluster, the k8s branch skips rather than silently testing the wrong
+    directory — exactly the failure mode the docker session gate guards
+    against. Wiring it is a kind-validation task (the user runs the
+    cluster); the docker path is untouched.
     """
+    if runtime_name == "k8s":
+        pytest.skip(
+            "host_mount_dir is not wired for k8s yet: the suite runs "
+            "outside the cluster, so a local path is not the PVC bytes the "
+            "agent pod sees. Needs the kind extraMounts<->PVC subPath "
+            "mapping (docs/21 §7.2), validated on a live kind cluster."
+        )
     base = topology.data_dir / "contract-tests" / uuid.uuid4().hex[:12]
     base.mkdir(parents=True, exist_ok=False)
     base.chmod(0o777)

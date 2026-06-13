@@ -1,0 +1,144 @@
+{{- /*
+Egress gateway: Deployment + Service (docs/21 §6.3, §4.2).
+
+HARD CONTRACT with verify_infrastructure:
+  * Service NAME == EGRESS_GATEWAY_CONTAINER_NAME (default "egress-gateway").
+    NOT release-scoped — agents reach it by this service name and the
+    orchestrator reads the Service by this exact name. Keep it literal.
+  * Service has a STATIC clusterIP == EGRESS_GATEWAY_DNS_IP
+    (.Values.egressGateway.clusterIP). verify compares the two and refuses
+    to start on drift.
+  * healthz lives at clusterIP:3001 (CREDENTIAL_PROXY_PORT).
+The pod carries app.kubernetes.io/component: egress-gateway so the
+gateway-policy NetworkPolicy selects it (and the agent/orchestrator
+policies reference it as a peer).
+*/ -}}
+{{- $tag := default .Chart.AppVersion .Values.egressGateway.image.tag -}}
+{{- $dnsPort := .Values.egressGateway.dnsContainerPort | int -}}
+apiVersion: v1
+kind: Service
+metadata:
+  # Literal contract name — verify_infrastructure reads it as
+  # EGRESS_GATEWAY_CONTAINER_NAME.
+  name: egress-gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rolemesh.labels" . | nindent 4 }}
+    app.kubernetes.io/component: egress-gateway
+spec:
+  type: ClusterIP
+  # Static ClusterIP == EGRESS_GATEWAY_DNS_IP. Must be inside the cluster
+  # Service CIDR and free. See values.yaml egressGateway.clusterIP.
+  clusterIP: {{ required "egressGateway.clusterIP is REQUIRED (= EGRESS_GATEWAY_DNS_IP, a free address in the cluster Service CIDR). See values.yaml." .Values.egressGateway.clusterIP | quote }}
+  selector:
+    app.kubernetes.io/component: egress-gateway
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    # DNS: well-known 53 in front, container listens on 1053 (PSA
+    # restricted forbids binding 53). Both UDP and TCP.
+    - name: dns-udp
+      protocol: UDP
+      port: 53
+      targetPort: {{ $dnsPort }}
+    - name: dns-tcp
+      protocol: TCP
+      port: 53
+      targetPort: {{ $dnsPort }}
+    # Credential proxy + healthz.
+    - name: credential-proxy
+      protocol: TCP
+      port: 3001
+      targetPort: 3001
+    # HTTP CONNECT forward proxy.
+    - name: forward-proxy
+      protocol: TCP
+      port: 3128
+      targetPort: 3128
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rolemesh.fullname" . }}-egress-gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rolemesh.labels" . | nindent 4 }}
+    app.kubernetes.io/component: egress-gateway
+spec:
+  replicas: {{ .Values.egressGateway.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: egress-gateway
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "rolemesh.labels" . | nindent 8 }}
+        app.kubernetes.io/component: egress-gateway
+    spec:
+      {{- with .Values.image.pullSecret }}
+      imagePullSecrets:
+        - name: {{ . }}
+      {{- end }}
+      # PSA restricted: pod-level seccomp + non-root (docs/21 §6.3).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gateway
+          image: "{{ .Values.egressGateway.image.repository }}:{{ $tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # PSA restricted, mirrors the docker hardening (docs/21 §6.3):
+          # no NET_BIND_SERVICE because the resolver listens on 1053.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          env:
+            - name: NATS_URL
+              value: {{ include "rolemesh.natsUrl" . | quote }}
+            # K8s side listens for DNS on 1053; the Service maps 53 -> 1053
+            # (docs/21 §6.3). config default is 53 (docker) so this MUST be
+            # set here for the K8s binding to be correct.
+            - name: EGRESS_GATEWAY_DNS_PORT
+              value: {{ $dnsPort | quote }}
+            - name: EGRESS_TOKEN_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secrets.existingSecret | default (include "rolemesh.secretName" .) }}
+                  key: EGRESS_TOKEN_SECRET
+            {{- range $k, $v := .Values.egressGateway.extraEnv }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          ports:
+            - { name: dns-udp, protocol: UDP, containerPort: {{ $dnsPort }} }
+            - { name: dns-tcp, protocol: TCP, containerPort: {{ $dnsPort }} }
+            - { name: cred-proxy, containerPort: 3001 }
+            - { name: forward, containerPort: 3128 }
+          readinessProbe:
+            # healthz is 200 once NATS is connected (degraded startup,
+            # docs/21 §5). The orchestrator's verify retries this too.
+            httpGet:
+              path: /healthz
+              port: 3001
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 3001
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.egressGateway.resources | nindent 12 }}

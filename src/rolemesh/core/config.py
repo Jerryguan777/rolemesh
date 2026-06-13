@@ -133,12 +133,20 @@ ROLEMESH_CONTAINER_RUNTIME: str = os.environ.get("ROLEMESH_CONTAINER_RUNTIME", "
 #                                 docs/21 §7.1)
 #   ROLEMESH_K8S_IMAGE_PULL_SECRET  optional imagePullSecrets name for agent
 #                                 pods (private registries); empty = none
+#   ROLEMESH_K8S_IMAGE_PULL_POLICY  imagePullPolicy for spawned agent pods.
+#                                 Default "IfNotPresent" works for both
+#                                 kind-loaded local images (no registry to
+#                                 pull from — "Always" would ImagePullBackOff)
+#                                 and registries with explicit tags.
 #   ROLEMESH_K8S_RUNTIME_CLASS    RuntimeClass used when a spec asks for the
 #                                 gVisor OCI runtime (spec.runtime="runsc");
 #                                 empty = the conventional name "gvisor"
 ROLEMESH_K8S_NAMESPACE: str = os.environ.get("ROLEMESH_K8S_NAMESPACE", "rolemesh")
 ROLEMESH_K8S_DATA_PVC: str = os.environ.get("ROLEMESH_K8S_DATA_PVC", "rolemesh-data")
 ROLEMESH_K8S_IMAGE_PULL_SECRET: str = os.environ.get("ROLEMESH_K8S_IMAGE_PULL_SECRET", "")
+ROLEMESH_K8S_IMAGE_PULL_POLICY: str = os.environ.get(
+    "ROLEMESH_K8S_IMAGE_PULL_POLICY", "IfNotPresent"
+)
 ROLEMESH_K8S_RUNTIME_CLASS: str = os.environ.get("ROLEMESH_K8S_RUNTIME_CLASS", "")
 
 # OCI runtime selection (R1). "runc" is the default; "runsc" enables gVisor

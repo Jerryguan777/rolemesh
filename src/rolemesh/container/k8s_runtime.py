@@ -220,6 +220,7 @@ def spec_to_pod_manifest(
     data_dir: str,
     data_pvc: str,
     image_pull_secret: str = "",
+    image_pull_policy: str = "IfNotPresent",
     runtime_class: str = "",
 ) -> dict[str, Any]:
     """Map a ContainerSpec to a bare-Pod manifest (docs/21 §4.4).
@@ -275,6 +276,11 @@ def spec_to_pod_manifest(
     container: dict[str, Any] = {
         "name": "agent",
         "image": spec.image,
+        # Default IfNotPresent: kind-loaded local images have no registry to
+        # pull from, so the K8s default of "Always" for :latest tags would
+        # ImagePullBackOff. IfNotPresent also works behind a registry with
+        # explicit tags (docs/21 §10.3).
+        "imagePullPolicy": image_pull_policy,
         "env": [{"name": k, "value": v} for k, v in spec.env.items()],
         "securityContext": _security_context(spec),
     }
@@ -648,6 +654,7 @@ class K8sRuntime:
         from rolemesh.core.config import (
             DATA_DIR,
             ROLEMESH_K8S_DATA_PVC,
+            ROLEMESH_K8S_IMAGE_PULL_POLICY,
             ROLEMESH_K8S_IMAGE_PULL_SECRET,
             ROLEMESH_K8S_NAMESPACE,
             ROLEMESH_K8S_RUNTIME_CLASS,
@@ -659,6 +666,7 @@ class K8sRuntime:
             data_dir=str(DATA_DIR),
             data_pvc=ROLEMESH_K8S_DATA_PVC,
             image_pull_secret=ROLEMESH_K8S_IMAGE_PULL_SECRET,
+            image_pull_policy=ROLEMESH_K8S_IMAGE_PULL_POLICY,
             runtime_class=ROLEMESH_K8S_RUNTIME_CLASS,
         )
 
@@ -764,19 +772,25 @@ class K8sRuntime:
         """Verify the chart-declared infrastructure invariants.
 
         Invariants (in check order):
-          (a) the namespace exists and is readable;
-          (b) the four NetworkPolicies exist; the agent-* ones select the
+          (a) the four NetworkPolicies exist; the agent-* ones select the
               agent pod label, the component ones do NOT select agent pods;
-          (c) the data PVC is Bound;
-          (d) the gateway Service exists and its ClusterIP equals
+          (b) the data PVC is Bound;
+          (c) the gateway Service exists and its ClusterIP equals
               ``EGRESS_GATEWAY_DNS_IP`` (the value agents get pinned as
               their resolver);
-          (e) the gateway answers healthz through that Service IP;
-          (f) NATS is TCP-reachable at ``NATS_URL``;
-          (g) RBAC self-check: pods create/delete/get/list/watch and
+          (d) the gateway answers healthz through that Service IP;
+          (e) NATS is TCP-reachable at ``NATS_URL``;
+          (f) RBAC self-check: pods create/delete/get/list/watch and
               pods/log get are allowed (SelfSubjectAccessReview).
 
-        (e)/(f) race the deployment cold start and retry within a budget;
+        There is deliberately no separate "namespace exists" probe: that
+        would need a cluster-scoped ``namespaces/get`` a namespaced Role
+        cannot grant, which fights the pods-only RBAC the design calls
+        for (docs/21 §10.2). A missing namespace surfaces as the first
+        namespaced read (the NetworkPolicy check) returning 404 with
+        chart-install guidance.
+
+        (d)/(e) race the deployment cold start and retry within a budget;
         everything else is a static object check and fails immediately.
         The deny PROBE (an actual pod whose egress must fail) is NOT here:
         it lives in ``helm test`` and contract case T-NET (§4.2 — pod
@@ -795,7 +809,6 @@ class K8sRuntime:
         self._ensure_core()
         namespace = ROLEMESH_K8S_NAMESPACE
 
-        await self._check_namespace(namespace)
         await self._check_network_policies(namespace)
         await self._check_pvc_bound(namespace, ROLEMESH_K8S_DATA_PVC)
         # The gateway Service shares its name with the docker-side
@@ -827,26 +840,6 @@ class K8sRuntime:
             data_pvc=ROLEMESH_K8S_DATA_PVC,
             gateway_cluster_ip=EGRESS_GATEWAY_DNS_IP,
         )
-
-    async def _check_namespace(self, namespace: str) -> None:
-        from kubernetes_asyncio.client.exceptions import ApiException
-
-        try:
-            await self._core.read_namespace(namespace)
-        except ApiException as exc:
-            if _api_status(exc) == 404:
-                msg = (
-                    f"Namespace {namespace!r} does not exist. {_HELM_HINT}"
-                )
-                raise RuntimeError(msg) from exc
-            if _api_status(exc) == 403:
-                msg = (
-                    f"Namespace {namespace!r} is not readable by the "
-                    "orchestrator's ServiceAccount (HTTP 403). Grant "
-                    "namespaces/get in the chart's Role/RoleBinding."
-                )
-                raise RuntimeError(msg) from exc
-            raise
 
     @staticmethod
     def _selector_matches_agent_pods(policy: Any) -> bool:
@@ -880,8 +873,9 @@ class K8sRuntime:
                 if _api_status(exc) == 404:
                     msg = (
                         f"NetworkPolicy {policy_name!r} is missing in "
-                        f"namespace {namespace!r} — agent isolation is not "
-                        f"in force. {_HELM_HINT}"
+                        f"namespace {namespace!r} (or the namespace itself "
+                        f"does not exist) — agent isolation is not in force. "
+                        f"{_HELM_HINT}"
                     )
                     raise RuntimeError(msg) from exc
                 raise

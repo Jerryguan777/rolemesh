@@ -1,0 +1,82 @@
+RoleMesh has been installed as release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+================================================================================
+ POST-INSTALL CHECKS — read these, the chart fail-closes on several of them.
+================================================================================
+
+1. CNI MUST ENFORCE NetworkPolicy.
+   Agent isolation (no direct egress; gateway-only) is entirely
+   NetworkPolicy-based. kindnet, flannel (without a policy plugin), and a
+   few cloud "none" CNIs silently ACCEPT NetworkPolicy objects and ignore
+   them — a false green. Verify enforcement now:
+
+     helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
+
+   The deny probe pod (labeled rolemesh.io/role=agent) tries to reach the
+   public internet and MUST be blocked. If `helm test` fails, your CNI is
+   not enforcing policy — DO NOT run real agents. Use Calico/Cilium.
+
+   NOTE (docs/21 §4.2): swapping the CNI AFTER install is unguarded — the
+   startup verify checks policy OBJECTS exist, not that they are enforced.
+   Re-run `helm test` after any CNI change.
+
+2. EGRESS_GATEWAY_DNS_IP / Service ClusterIP contract.
+{{- if not .Values.egressGateway.clusterIP }}
+   *** egressGateway.clusterIP is UNSET. The install template should have
+   *** failed — if you see this, something is wrong. Set it to a free
+   *** address inside the cluster Service CIDR.
+{{- else }}
+   The gateway Service holds the static ClusterIP {{ .Values.egressGateway.clusterIP }}.
+   The orchestrator's verify_infrastructure asserts this equals
+   EGRESS_GATEWAY_DNS_IP and refuses to start on drift. If you change the
+   Service CIDR or the value, keep the two in lockstep.
+{{- end }}
+
+3. pids limit is NODE-LEVEL (docs/21 §8/§11).
+   Pod-level pids limits are a kubelet setting (podPidsLimit), NOT a pod
+   field — this chart cannot set it. A fork-bomb in one agent can exhaust
+   the node's pid space. On RKE2, set podPidsLimit in the kubelet config
+   (see the RKE2 doc: deploy/charts/rolemesh/README or docs). The
+   orchestrator logs a startup warning about this.
+
+4. Namespace MUST be PodSecurity `restricted` (docs/21 §6.3).
+   The gateway/webui/orchestrator securityContexts are written for it.
+   Label the namespace if not already:
+
+     kubectl label ns {{ .Release.Namespace }} \
+       pod-security.kubernetes.io/enforce=restricted --overwrite
+
+{{- if .Values.postgres.enabled }}
+
+   WARNING: bundled Postgres (postgres.enabled=true) is NOT compatible with
+   PSA restricted out of the box. For a restricted namespace use an external
+   Postgres (postgres.enabled=false + postgres.externalUrl) or a
+   restricted-compatible image. Bundled Postgres is a dev/PoC convenience.
+{{- end }}
+
+5. RBAC note.
+   The orchestrator ServiceAccount gets one namespaced Role: pods
+   create/delete/get/list/watch + pods/log get (agent lifecycle), plus
+   get-only on networkpolicies/persistentvolumeclaims/services (the
+   objects verify_infrastructure inspects). No ClusterRole, no
+   cluster-wide grant.
+
+--------------------------------------------------------------------------------
+ Reach the WebUI
+--------------------------------------------------------------------------------
+
+  kubectl -n {{ .Release.Namespace }} port-forward \
+    svc/{{ include "rolemesh.fullname" . }}-webui {{ .Values.webui.service.port }}:{{ .Values.webui.service.port }}
+
+  then open http://localhost:{{ .Values.webui.service.port }}
+
+--------------------------------------------------------------------------------
+ Watch startup
+--------------------------------------------------------------------------------
+
+  kubectl -n {{ .Release.Namespace }} get pods -w
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "rolemesh.fullname" . }}-orchestrator -f
+
+  The orchestrator fail-closes if any infrastructure invariant is unmet;
+  its log line "Infrastructure verified" means the deployment layer matched
+  the contract.

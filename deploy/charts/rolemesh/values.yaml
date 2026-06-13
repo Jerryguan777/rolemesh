@@ -1,0 +1,255 @@
+# RoleMesh Helm chart — default (production-leaning) values.
+#
+# Three value files ship with the chart:
+#   values.yaml              this file — production-leaning defaults
+#   values-kind.yaml         local kind single-node loop (docs/21 §10.3)
+#   values-rwo-colocated.yaml RWO storage + podAffinity (docs/21 §7.2)
+#
+# HARD CONTRACT (docs/21 §4.2, src/rolemesh/container/k8s_runtime.py):
+# the orchestrator's verify_infrastructure() reads several object names and
+# the gateway Service ClusterIP by EXACT value. Those names are fixed in
+# the templates and NOT exposed as knobs; the one value you MUST set per
+# cluster is `egressGateway.clusterIP` (= EGRESS_GATEWAY_DNS_IP). See below.
+
+# -- Namespace ---------------------------------------------------------------
+# All RoleMesh objects live in one namespace (docs/21: single namespace to
+# start). This MUST equal the orchestrator's ROLEMESH_K8S_NAMESPACE; the
+# chart injects it from .Release.Namespace, so install with
+# `-n <namespace> --create-namespace` and the two stay in lockstep.
+#
+# The namespace MUST be PodSecurity `restricted` (docs/21 §6.3): the gateway
+# and agent securityContexts are written to satisfy it. Label the namespace:
+#   pod-security.kubernetes.io/enforce: restricted
+# (kind/RKE2 docs in deploy/kind/README and the RKE2 doc show how.)
+
+# -- Images ------------------------------------------------------------------
+# tag "" falls back to Chart.appVersion (see _helpers rolemesh.imageTag).
+image:
+  pullPolicy: IfNotPresent
+  # Optional imagePullSecrets name for private registries. Injected into the
+  # orchestrator env as ROLEMESH_K8S_IMAGE_PULL_SECRET so agent pods (spawned
+  # by the orchestrator, NOT templated by this chart) can pull too.
+  pullSecret: ""
+
+orchestrator:
+  image:
+    repository: rolemesh-orchestrator
+    tag: ""
+  # Single stateful replica with Recreate strategy (docs/21 §10.2 rev4):
+  # the orchestrator holds in-memory state and must NOT overlap during a
+  # rollout. replicas is intentionally NOT a knob.
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+  # gVisor RuntimeClass name used when a coworker spec asks for runsc.
+  # Empty = the runtime's conventional "gvisor". The class must be
+  # registered on the cluster (RKE2 doc); kind cannot run gVisor.
+  runtimeClass: ""
+  # Extra env passthrough (LLM keys are better delivered via Secret refs;
+  # see secrets.extra). Plain map of name->value, merged last.
+  extraEnv: {}
+
+webui:
+  image:
+    repository: rolemesh-webui
+    tag: ""
+  replicas: 1
+  service:
+    type: ClusterIP
+    port: 8080
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  extraEnv: {}
+
+egressGateway:
+  image:
+    repository: rolemesh-egress-gateway
+    tag: ""
+  replicas: 1
+  # ----------------------------------------------------------------------
+  # EGRESS_GATEWAY_DNS_IP CONTRACT (docs/21 §4.2):
+  # verify_infrastructure asserts the gateway Service's ClusterIP EQUALS
+  # this value, and the orchestrator pins it as every agent pod's DNS
+  # resolver. A drift silently kills agent DNS, so it must be a STATIC
+  # ClusterIP inside the cluster's Service CIDR.
+  #
+  # There is no safe universal default: a value outside the cluster's
+  # Service CIDR is rejected by the API server at apply time. You MUST set
+  # this to a free address in your cluster's Service CIDR. Discover it with:
+  #   kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}'
+  # (kube-dns sits in the Service CIDR; pick a nearby unused address.)
+  # kind's default Service CIDR is 10.96.0.0/12 -> see values-kind.yaml.
+  # ----------------------------------------------------------------------
+  clusterIP: ""  # REQUIRED — e.g. "10.96.0.53"
+  # K8s listens for DNS on 1053 (PSA restricted forbids NET_BIND_SERVICE,
+  # so the privileged port 53 is unreachable inside the pod). The Service
+  # maps the well-known 53 -> 1053. Do not change without changing both.
+  dnsContainerPort: 1053
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  # Egress gateway extra env (DNS allowlist/mode, upstream base URLs).
+  # These mirror the compose pass-through set.
+  extraEnv: {}
+    # EGRESS_UPSTREAM_DNS: "8.8.8.8"
+    # EGRESS_DNS_ALLOWLIST: "api.anthropic.com,api.openai.com"
+    # EGRESS_DNS_MODE: "allowlist"
+    # ANTHROPIC_BASE_URL: ""
+    # OPENAI_BASE_URL: ""
+    # GOOGLE_BASE_URL: ""
+
+# -- Agent sandbox image -----------------------------------------------------
+# Agent pods are spawned by the orchestrator at runtime, NOT templated by
+# this chart; the orchestrator reads CONTAINER_IMAGE. Set the tag agents run.
+agent:
+  image:
+    repository: rolemesh-agent
+    tag: "latest"
+
+# -- Bundled NATS ------------------------------------------------------------
+nats:
+  enabled: true
+  image: "nats:alpine"
+  externalUrl: ""  # used only when enabled=false
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  # JetStream store. Ephemeral by default (emptyDir); set persistence.enabled
+  # for a PVC in production.
+  persistence:
+    enabled: false
+    size: 1Gi
+    storageClass: ""
+
+# -- Bundled Postgres --------------------------------------------------------
+postgres:
+  enabled: true
+  image: "postgres:16"
+  database: "rolemesh"
+  user: "rolemesh"
+  # Password is taken from the Secret (secrets.postgresPassword). Never put
+  # the password in a plain values field that lands in the Deployment env.
+  externalUrl: ""        # business pool DSN when enabled=false
+  externalAdminUrl: ""   # BYPASSRLS pool DSN when enabled=false (defaults to externalUrl)
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  persistence:
+    enabled: true
+    size: 5Gi
+    storageClass: ""
+
+# -- Shared data PVC (docs/21 §7) --------------------------------------------
+# Name is fixed to ROLEMESH_K8S_DATA_PVC (default "rolemesh-data"); the
+# orchestrator's verify asserts it is Bound. Mounted into the orchestrator
+# at /app/data and subPath-mounted into agent pods.
+storage:
+  # mode:
+  #   rwx            single PVC, ReadWriteMany — orchestrator and agents
+  #                  share it from any node (Longhorn RWX / NFS). DEFAULT.
+  #   rwo-colocated  ReadWriteOnce PVC + podAffinity pins the orchestrator
+  #                  (and agents, via the orchestrator's scheduling) to the
+  #                  PVC's node. Use when no RWX class exists (docs/21 §7.2).
+  #                  Set via values-rwo-colocated.yaml.
+  mode: rwx
+  size: 10Gi
+  # Empty = cluster default StorageClass. For RWX you typically name the
+  # Longhorn-RWX / NFS class explicitly.
+  storageClass: ""
+
+# -- Secrets -----------------------------------------------------------------
+# These land in a single Secret. The dev defaults below let a fresh install
+# boot; ROTATE every one of them for anything beyond a throwaway cluster.
+# Set create=false and reference an existing Secret (existingSecret) to
+# manage secrets out-of-band (e.g. sealed-secrets / external-secrets).
+secrets:
+  create: true
+  existingSecret: ""  # when set, create=false is implied; keys must match
+  # Shared HMAC secret for agent identity tokens. MUST be identical on the
+  # orchestrator and the gateway (the chart injects the same Secret key into
+  # both). Token TTL must cover K8s cold start (docs/21 §6.2).
+  egressTokenSecret: "dev-only-egress-token-secret"
+  # WebUI WS handshake signing key (webui fails closed without it).
+  wsTicketSecret: "dev-only-ws-ticket-secret"
+  # Master secret for the per-tenant LLM credential vault. The orchestrator
+  # AND the webui both fail closed at startup without it, so a dev default
+  # ships (like the secrets above). It is hashed into a Fernet key
+  # (auth/encryption.derive_fernet_key), so any non-empty string works —
+  # use a long random value in production.
+  credentialVaultKey: "dev-only-credential-vault-key"
+  # Token-plane identity secret (HTTP-plane signed tokens).
+  rolemeshTokenSecret: "dev-only-rolemesh-token-secret"
+  # Bundled-Postgres password (ignored when postgres.enabled=false).
+  postgresPassword: "rolemesh"
+  # Arbitrary extra secret env injected into the orchestrator (LLM keys,
+  # OAuth tokens). Map of ENV_NAME -> value.
+  extra: {}
+    # ANTHROPIC_API_KEY: ""
+    # CLAUDE_CODE_OAUTH_TOKEN: ""
+
+# -- Seed Job ----------------------------------------------------------------
+# Post-install/upgrade Job that runs schema creation + the initial admin
+# seed (rolemesh-admin create-admin). hook-weight orders it BEFORE the
+# orchestrator becomes ready (the orchestrator also init_database()s the
+# schema on its own startup, so the Job is idempotent; its real value is
+# the admin seed and giving operators an explicit migration hook).
+seed:
+  enabled: true
+  # When set, the Job seeds an initial admin user. Leave email empty to run
+  # schema-create only (no admin seeded).
+  adminEmail: ""
+  adminRole: "platform_admin"
+  adminName: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+
+# -- NetworkPolicy egress allowances (docs/21 §6.1) --------------------------
+# The four NetworkPolicy NAMES and the agent selector are a hard contract
+# and are NOT configurable. These knobs only widen the component policies'
+# egress where a cluster needs it (e.g. an external Postgres / NATS on a
+# specific CIDR). Agent egress is locked to gateway + NATS and is never
+# widened here.
+networkPolicy:
+  # Set false only on a CNI you have separately confirmed enforces policy
+  # via another mechanism. Disabling removes agent isolation — never do this
+  # in production.
+  enabled: true
+  # The cluster's DNS service IP+port for the gateway-policy/orchestrator
+  # egress to kube-dns (the gateway forwards recursive queries upstream).
+  kubeDns:
+    enabled: true
+    # Empty = allow egress to 53/udp+tcp cluster-wide for the gateway and
+    # orchestrator (simplest, still tight because only those two components
+    # are selected). Set to the kube-dns ClusterIP to narrow further.
+    namespace: "kube-system"
+  # Extra CIDR blocks the orchestrator may reach (external Postgres, the K8s
+  # API server endpoint if outside the pod network, etc.). Each item:
+  #   - cidr: 10.0.0.0/8
+  #     ports: [{port: 5432, protocol: TCP}]
+  orchestratorExtraEgress: []
+  # Extra CIDR blocks the gateway may reach for upstream LLM/MCP egress
+  # beyond the default 80/443. Same shape as above.
+  gatewayExtraEgress: []

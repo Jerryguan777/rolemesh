@@ -1,0 +1,22 @@
+apiVersion: v2
+name: rolemesh
+description: |
+  RoleMesh multi-tenant AI Coworker orchestration (docs/21 §10.2).
+  Deploys the orchestrator (k8s container-runtime backend), webui, the
+  dual-faced egress gateway, the four agent/component NetworkPolicies, the
+  shared data PVC, and optionally bundled NATS + Postgres.
+type: application
+
+# Chart version is independent of the app; bump on chart-shape changes.
+version: 0.1.0
+
+# appVersion tracks pyproject `version` (0.1.0). Keep in lockstep: the
+# image tags default to appVersion (see values .image.tag = "").
+appVersion: "0.1.0"
+
+# NATS and Postgres are NOT declared as subchart dependencies on purpose:
+# this environment cannot reach a chart registry to pull them, and the
+# design (docs/21 §10.2) lets them be switched to external instances. They
+# are shipped as in-chart templates gated by `nats.enabled` /
+# `postgres.enabled` (default true); set either to false and provide the
+# corresponding URL in values to point at an external instance.

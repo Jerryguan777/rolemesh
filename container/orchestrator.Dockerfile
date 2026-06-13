@@ -38,11 +38,13 @@ COPY --chown=orchestrator:orchestrator src/ ./src/
 
 USER orchestrator
 
-# Extras mirror the README dev flow minus dev/eval: `pi` for the
-# multi-provider backend. No dev extra — tests run on the host or in CI,
-# not in this image. watchfiles (hot reload) ships with the base deps
-# via uvicorn[standard], so no extra install is needed for reload.
-RUN uv sync --frozen --extra pi --no-dev
+# Extras: `pi` for the multi-provider backend, `k8s` for the Kubernetes
+# container runtime (kubernetes_asyncio). The same image runs under both
+# ROLEMESH_CONTAINER_RUNTIME backends — k8s mode imports the K8sRuntime at
+# startup, so the dependency must be present here, not optional; in docker
+# mode the extra libs are simply unused. No dev extra — tests run on the
+# host or in CI. watchfiles (hot reload) ships with uvicorn[standard].
+RUN uv sync --frozen --extra pi --extra k8s --no-dev
 
 # debugpy is NOT a project dependency (it would only ever be used here).
 # Baking it into the image (~5 MB) buys "set DEBUGPY=1 and attach"
