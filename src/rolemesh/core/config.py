@@ -185,6 +185,18 @@ EGRESS_GATEWAY_CONTAINER_NAME: str = os.environ.get(
 EGRESS_GATEWAY_IMAGE: str = os.environ.get(
     "EGRESS_GATEWAY_IMAGE", "rolemesh-egress-gateway:latest"
 )
+# Static address of the egress gateway on the agent bridge. The
+# deployment layer declares it (compose ipam fixed IP today; K8s
+# Service ClusterIP later) and the orchestrator only VERIFIES it at
+# startup (ContainerRuntime.verify_infrastructure) — replacing the old
+# runtime discovery via docker-inspect after gateway launch. The
+# default matches the compose subnet in deploy/compose/compose.yaml
+# (agent-net 172.28.100.0/24); override the env var if you override
+# the subnet. Consumers: runner (pins it as each agent's DNS resolver)
+# and docker_runtime (verifies the gateway actually holds this IP).
+EGRESS_GATEWAY_DNS_IP: str = os.environ.get(
+    "EGRESS_GATEWAY_DNS_IP", "172.28.100.53"
+)
 # HTTP forward-proxy port (CONNECT) — agents see this via HTTPS_PROXY env.
 # EC-2 wires the CONNECT handler; EC-1 ships the port as a placeholder so
 # the gateway container declaration is complete.

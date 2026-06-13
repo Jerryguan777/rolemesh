@@ -318,7 +318,6 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     # so we only pay the Docker import when actually running. The CLI's
     # other subcommands (list / show) don't need this.
     from rolemesh.container.runtime import get_runtime
-    from rolemesh.egress.bootstrap import ensure_gateway_running_and_register_dns
     from rolemesh.evaluation.inspect_glue import build_eval_task
     from rolemesh.evaluation.runner import EvalRunner
     from rolemesh.ipc.nats_transport import NatsTransport
@@ -326,16 +325,16 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     runtime = get_runtime()
     await runtime.ensure_available()
 
-    # In EC-2 mode the agent containers want their DNS pointed at the
-    # egress gateway so DNS-exfil filtering applies. The orchestrator
-    # daemon registers the gateway IP at startup; when eval runs as a
-    # standalone CLI process it has its own runner module and would
-    # otherwise spawn containers with Docker's default resolver,
-    # silently losing DNS-level egress protection. The helper is
-    # idempotent — reuses a running gateway, only relaunches if none
-    # exists — so calling it alongside a live orchestrator is safe.
-    # Returns None silently when EC-2 isn't active (rollback mode).
-    await ensure_gateway_running_and_register_dns(runtime)
+    # The egress infrastructure (networks + gateway) is declared by the
+    # deployment layer and must already be up; the eval CLI — like the
+    # orchestrator — only verifies the invariants and fails closed.
+    # Agent DNS pinning is config-driven (EGRESS_GATEWAY_DNS_IP), so no
+    # per-process gateway-IP registration is needed anymore. With EC
+    # off there is no egress infrastructure to verify.
+    from rolemesh.core.config import EGRESS_CONTROL_ENABLE
+
+    if EGRESS_CONTROL_ENABLE:
+        await runtime.verify_infrastructure()
 
     transport = NatsTransport(NATS_URL)
     try:

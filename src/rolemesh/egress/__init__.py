@@ -9,10 +9,11 @@ Module boundaries:
 
     gateway.py    — container ENTRYPOINT module. Runs inside the
                     gateway container, binds listeners, wires the
-                    safety pipeline, reads .env secrets.
-    launcher.py   — orchestrator-side. Creates and starts the gateway
-                    container attached to both the internal agent
-                    bridge and the egress bridge.
+                    safety pipeline, reads env secrets. The container
+                    itself is declared and started by the deployment
+                    layer (deploy/compose/compose.yaml); the
+                    orchestrator only verifies it at startup via
+                    ``ContainerRuntime.verify_infrastructure``.
 
 Anything that could be mistaken for a second implementation of the
 reverse-proxy logic during PR-1 lives in

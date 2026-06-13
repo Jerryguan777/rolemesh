@@ -102,6 +102,67 @@ async def test_matching_rule_allows() -> None:
     assert decision.triggered_rule_ids == ["r1"]
 
 
+async def test_unseeded_cache_blocks_even_with_matching_rule() -> None:
+    """Degraded startup: before the authoritative snapshot is seeded the
+    pipeline must deny deterministically — including when a rule-change
+    event already inserted a rule whose check would match. Relying on
+    the empty-cache accident is not acceptable (an unseeded cache is
+    not the same state as a tenant with zero rules)."""
+    async def _always_match(
+        request: EgressRequest, config: dict[str, Any]
+    ) -> tuple[bool, list[dict[str, Any]]]:
+        return True, []
+
+    nc = _FakeNats(published=[])
+    cache = PolicyCache()  # never seeded
+    await cache.apply_event(
+        {
+            "action": "created",
+            "rule_id": "r1",
+            "tenant_id": "tenant-a",
+            "coworker_id": "coworker-x",
+            "stage": "egress_request",
+            "check_id": "egress.domain_rule",
+            "config": {},
+            "priority": 100,
+            "enabled": True,
+        }
+    )
+    caller = EgressSafetyCaller(
+        cache=cache,
+        checks={"egress.domain_rule": _always_match},
+        audit_publisher=AuditPublisher(nats_client=nc),  # type: ignore[arg-type]
+    )
+    decision = await caller.decide(
+        identity=_identity(),
+        request=EgressRequest(host="api.anthropic.com", port=443, mode="forward"),
+    )
+    assert decision.action == "block"
+    assert "not yet loaded" in decision.reason
+
+
+async def test_unseeded_block_is_still_audited() -> None:
+    """Every decision writes an audit row — the degraded-window denials
+    must be visible to operators, not silent."""
+    nc = _FakeNats(published=[])
+    caller = EgressSafetyCaller(
+        cache=PolicyCache(),  # never seeded
+        checks={},
+        audit_publisher=AuditPublisher(nats_client=nc),  # type: ignore[arg-type]
+    )
+    await caller.decide(
+        identity=_identity(),
+        request=EgressRequest(host="api.anthropic.com", port=443, mode="forward"),
+    )
+    for _ in range(50):
+        await asyncio.sleep(0.02)
+        if nc.published:
+            break
+    assert nc.published, "degraded-window block was not audited"
+    _, payload = nc.published[-1]
+    assert payload["verdict_action"] == "block"
+
+
 async def test_unknown_identity_always_blocks() -> None:
     """Unknown source IP must never default to any tenant."""
     nc = _FakeNats(published=[])

@@ -1,0 +1,178 @@
+# RoleMesh infrastructure (S1-1: declarative infrastructure).
+#
+# This file declares the STATIC infrastructure only: networks, NATS,
+# Postgres, and the egress gateway. The orchestrator still runs on the
+# host in this step (S1-2 moves it in here) and only VERIFIES these
+# declarations at startup (ContainerRuntime.verify_infrastructure) —
+# it no longer creates networks or launches the gateway itself.
+#
+# Run from the repo root:
+#
+#   docker compose --env-file .env -f deploy/compose/compose.yaml up -d
+#
+# --env-file matters: the project directory is deploy/compose, so the
+# repo-root .env is NOT picked up automatically. Without it the
+# ${VAR:-default} interpolations below fall back to dev defaults and
+# the gateway's EGRESS_TOKEN_SECRET will not match the orchestrator's.
+#
+# Migration note: if a pre-S1-1 rolemesh-agent-net exists (created by
+# the old docker-compose.dev.yml or by the orchestrator), its config
+# does not carry the fixed subnet below — remove it once:
+#   docker network rm rolemesh-agent-net rolemesh-egress-net
+
+name: rolemesh
+
+services:
+  nats:
+    # alpine variant (not the scratch-based default image) because the
+    # healthcheck below needs a shell + wget inside the container.
+    image: nats:alpine
+    ports:
+      - "4222:4222"   # Client — the host orchestrator dials this
+      - "8222:8222"   # Monitoring (/healthz lives here)
+    # --http_port enables the monitoring endpoint the healthcheck probes.
+    command: ["--jetstream", "--store_dir=/data", "--http_port=8222"]
+    volumes:
+      - nats-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    # Dual-homed on purpose:
+    #   * default     — keeps the host port mappings above, so the
+    #                   orchestrator (runs on the host) and all test code
+    #                   keep reaching NATS at nats://localhost:4222.
+    #   * agent-net   — agent containers and the egress gateway sit on an
+    #                   Internal=true bridge with no route to the host;
+    #                   they dial NATS by the ``nats`` service name,
+    #                   which Docker's embedded DNS resolves only if the
+    #                   nats container is attached to that same bridge.
+    networks:
+      - default
+      - agent-net
+
+  postgres:
+    image: postgres:16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: rolemesh
+      POSTGRES_USER: rolemesh
+      POSTGRES_PASSWORD: rolemesh
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  egress-gateway:
+    build:
+      # Context must be the repo root so src/rolemesh/** COPY paths
+      # in the Dockerfile resolve.
+      context: ../..
+      dockerfile: container/Dockerfile.egress-gateway
+    image: rolemesh-egress-gateway:latest
+    # Fixed container name = EGRESS_GATEWAY_CONTAINER_NAME (config.py).
+    # verify_infrastructure inspects the container by this name, and it
+    # must NOT carry the "rolemesh-" prefix or the orchestrator's
+    # orphan cleanup (prefix + image allowlist) would reap it.
+    container_name: egress-gateway
+    restart: unless-stopped
+    # NET_BIND_SERVICE only: the gateway runs as a non-root user and
+    # needs to bind the authoritative DNS resolver on port 53
+    # (design §6.3 — the Docker side keeps port 53 + this single cap;
+    # the K8s side will listen on 1053 instead).
+    cap_add:
+      - NET_BIND_SERVICE
+    # Gateway depends only on NATS (startup contract, design §5): it
+    # starts degraded (healthz 200 once NATS is connected, policy plane
+    # default-deny) and retries the rule snapshot until the host
+    # orchestrator's responders come up. depends_on the orchestrator
+    # would deadlock that contract.
+    depends_on:
+      nats:
+        condition: service_healthy
+    environment:
+      # Service name instead of the launcher-era loopback rewrite
+      # (rewrite_loopback_to_host_gateway): nats resolves on agent-net.
+      NATS_URL: nats://nats:4222
+      # Shared HMAC secret for agent identity tokens. Must equal the
+      # orchestrator's value (repo-root .env via --env-file, see header).
+      # The dev default exists so a fresh checkout boots; rotate it for
+      # anything beyond local dev.
+      EGRESS_TOKEN_SECRET: ${EGRESS_TOKEN_SECRET:-dev-only-egress-token-secret}
+      # Conditional pass-through (null = forwarded only when set in the
+      # invoking environment / --env-file) — mirrors the launcher's
+      # forward-only allowlist plus the values it used to deliver via
+      # the /app/.env bind mount. Secrets (LLM API keys) are deliberately
+      # absent: the gateway fetches per-tenant credentials over NATS RPC.
+      EGRESS_TOKEN_TTL_SECONDS:
+      EGRESS_UPSTREAM_DNS:
+      EGRESS_DNS_ALLOWLIST:
+      EGRESS_DNS_MODE:
+      ANTHROPIC_BASE_URL:
+      OPENAI_BASE_URL:
+      GOOGLE_BASE_URL:
+    # Launcher parity while the orchestrator still runs on the host:
+    # lets *_BASE_URL overrides that point at a host-local listener keep
+    # working. Scheduled for deletion in S1-2 (single network stack).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      agent-net:
+        # Static IP = EGRESS_GATEWAY_DNS_IP (config.py). Agents get this
+        # pinned as their DNS resolver; verify_infrastructure refuses to
+        # start the orchestrator if the running gateway's address drifts
+        # from the configured value.
+        ipv4_address: 172.28.100.53
+        # Alias = EGRESS_GATEWAY_CONTAINER_NAME so agents resolve the
+        # gateway by service name (container_name already provides this;
+        # the explicit alias documents the contract).
+        aliases:
+          - egress-gateway
+      egress-net:
+    # The image itself ships HEALTHCHECK NONE; the deployment layer owns
+    # liveness. python urllib because the slim image has no curl/wget.
+    # /healthz is 200 as soon as NATS is connected (degraded startup) —
+    # it does NOT imply the rule snapshot has been seeded.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:3001/healthz', timeout=3).status == 200 else 1)"
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+networks:
+  # Compose owns both egress-control bridges now. The orchestrator no
+  # longer creates networks — verify_infrastructure only checks that
+  # these exist with the declared invariants and refuses to start
+  # otherwise. Names MUST equal CONTAINER_NETWORK_NAME /
+  # CONTAINER_EGRESS_NETWORK_NAME (config.py defaults).
+  agent-net:
+    name: rolemesh-agent-net
+    driver: bridge
+    # Internal=true: no default route out — an agent that bypasses the
+    # injected proxy env still hits EHOSTUNREACH, not the open internet.
+    # verify_infrastructure fail-closes on this invariant.
+    internal: true
+    # Uncommon range to avoid collisions with existing docker bridges;
+    # the .53 host address inside it is the gateway's fixed IP. If you
+    # override this subnet, override EGRESS_GATEWAY_DNS_IP to match.
+    ipam:
+      config:
+        - subnet: 172.28.100.0/24
+    # enable_icc is intentionally left at the bridge default (true):
+    # ICC is required for the agent<->gateway and gateway<->NATS paths.
+  egress-net:
+    name: rolemesh-egress-net
+    driver: bridge
+    # Only the gateway attaches here; ICC=false keeps any accidental
+    # neighbour from reaching the gateway directly.
+    driver_opts:
+      com.docker.network.bridge.enable_icc: "false"
+
+volumes:
+  nats-data:
+  pgdata:

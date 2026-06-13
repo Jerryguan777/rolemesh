@@ -7,7 +7,7 @@
 # Dockerfile.
 #
 # Prereqs:
-#   - orchestrator running (docker compose -f docker-compose.dev.yml up -d)
+#   - orchestrator running (docker compose --env-file .env -f deploy/compose/compose.yaml up -d)
 #   - at least one agent container up (start a conversation from WebUI)
 #   - jq installed
 #

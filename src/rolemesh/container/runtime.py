@@ -128,6 +128,19 @@ class ContainerRuntime(Protocol):
 
     async def ensure_available(self) -> None: ...
 
+    async def verify_infrastructure(self) -> None:
+        """Verify the deployment layer's promises (design §4.2).
+
+        Static infrastructure (networks, gateway, NATS) is declared by
+        the deployment layer (docker compose / Helm), never created by
+        application code. This check is strictly READ-ONLY and
+        fail-closed: any missing invariant raises with a message that
+        tells the operator how to fix the deployment; the orchestrator
+        then refuses to start. No degradation, no self-bootstrap, no
+        repair.
+        """
+        ...
+
     async def run(self, spec: ContainerSpec) -> ContainerHandle: ...
 
     async def stop(self, name: str, timeout: int = 1) -> None: ...

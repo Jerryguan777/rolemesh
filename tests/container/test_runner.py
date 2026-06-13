@@ -190,23 +190,24 @@ class TestBuildContainerSpec:
         assert spec.extra_hosts["169.254.169.254"] == "127.0.0.1"
         assert spec.extra_hosts["metadata.google.internal"] == "127.0.0.1"
 
-    def test_spec_dns_pinned_to_registered_gateway_ip(self) -> None:
+    def test_spec_dns_pinned_to_configured_gateway_ip(self) -> None:
         """EC-2 P1 regression: build_container_spec must copy the
-        registered egress gateway IP into ContainerSpec.dns so agent
-        containers actually use the authoritative resolver. Pre-fix
-        the field didn't exist and Docker fell back to 127.0.0.11 —
-        the DNS exfil protection was dead code."""
+        configured egress gateway address (EGRESS_GATEWAY_DNS_IP — a
+        static value declared by the deployment layer) into
+        ContainerSpec.dns so agent containers actually use the
+        authoritative resolver. Pre-fix the field didn't exist and
+        Docker fell back to 127.0.0.11 — the DNS exfil protection was
+        dead code."""
         from rolemesh.container import runner
 
-        runner.set_egress_gateway_dns_ip("172.22.0.2")
-        try:
-            with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
-                spec = build_container_spec([], "c", "j")
-            assert spec.dns == ["172.22.0.2"], (
-                f"agent spec must pin gateway IP as DNS; got {spec.dns!r}"
-            )
-        finally:
-            runner.set_egress_gateway_dns_ip(None)
+        with (
+            patch.object(runner, "EGRESS_GATEWAY_DNS_IP", "172.22.0.2"),
+            patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"),
+        ):
+            spec = build_container_spec([], "c", "j")
+        assert spec.dns == ["172.22.0.2"], (
+            f"agent spec must pin gateway IP as DNS; got {spec.dns!r}"
+        )
 
     def test_rollback_mode_restores_pre_ec_routing(self) -> None:
         """``EGRESS_CONTROL_ENABLE=0`` routes agents at the host-side
@@ -287,26 +288,18 @@ class TestBuildContainerSpec:
         assert "HTTP_PROXY" not in spec.env
         assert "HTTPS_PROXY" not in spec.env
 
-    def test_spec_dns_empty_when_gateway_ip_unregistered(self) -> None:
-        """Without the registered IP, build_container_spec falls back
-        to an empty Dns list (Docker keeps its embedded resolver). A
-        structured WARN tells operators this gap is present."""
-        from rolemesh.container import runner
+    def test_spec_dns_never_empty_under_ec(self) -> None:
+        """Config-driven DNS: EGRESS_GATEWAY_DNS_IP has a default, so
+        the EC=on spawn path can never silently fall back to Docker's
+        embedded resolver (the pre-declarative fail-open gap where a
+        forgotten runtime registration left ``dns == []`` and DNS exfil
+        protection dead). Default config must already pin the gateway."""
+        from rolemesh.core.config import EGRESS_GATEWAY_DNS_IP
 
-        runner.set_egress_gateway_dns_ip(None)
-        with patch("rolemesh.container.runner.logger") as mock_logger, \
-             patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
+        with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
             spec = build_container_spec([], "c", "j")
-        assert spec.dns == []
-        # WARN fires because EC is on by default (EGRESS_CONTROL_ENABLE)
-        # but the gateway IP isn't registered.
-        warn_calls = [
-            call for call in mock_logger.warning.call_args_list
-            if "egress gateway DNS IP" in str(call)
-            or "DNS exfil" in str(call)
-            or "embedded resolver" in str(call)
-        ]
-        assert warn_calls, "missing gateway-IP warning was not logged"
+        assert spec.dns == [EGRESS_GATEWAY_DNS_IP]
+        assert spec.dns != []
 
 
 class TestBackwardCompatAliases:
@@ -584,7 +577,7 @@ class TestComputeEgressRouting:
 
         with (
             patch.object(runner, "EGRESS_CONTROL_ENABLE", True),
-            patch.object(runner, "_EGRESS_GATEWAY_DNS_IP", "172.20.0.2"),
+            patch.object(runner, "EGRESS_GATEWAY_DNS_IP", "172.20.0.2"),
         ):
             r = compute_egress_routing("TOK")
 
@@ -594,23 +587,20 @@ class TestComputeEgressRouting:
         assert r.proxy_env["HTTPS_PROXY"] == "http://job:TOK@egress-gateway:3128"
         assert r.network_name == "rolemesh-agent-net"
         assert r.dns_servers == ["172.20.0.2"]
-        assert r.warn_missing_dns is False
         assert r.mcp_proxy_host == "egress-gateway"
         assert "host.docker.internal" not in r.extra_hosts
 
-    def test_ec_on_without_token_or_dns_ip(self) -> None:
+    def test_ec_on_without_token(self) -> None:
         from rolemesh.container import runner
+        from rolemesh.core.config import EGRESS_GATEWAY_DNS_IP
 
-        with (
-            patch.object(runner, "EGRESS_CONTROL_ENABLE", True),
-            patch.object(runner, "_EGRESS_GATEWAY_DNS_IP", None),
-        ):
+        with patch.object(runner, "EGRESS_CONTROL_ENABLE", True):
             r = compute_egress_routing(None)
 
         assert r.provider_prefix == "/proxy"  # no token segment
         assert r.proxy_env["HTTP_PROXY"] == "http://egress-gateway:3128"  # no userinfo
-        assert r.dns_servers == []
-        assert r.warn_missing_dns is True  # EC on but no gateway DNS IP
+        # Static config drives DNS — never empty under EC=on.
+        assert r.dns_servers == [EGRESS_GATEWAY_DNS_IP]
 
     def test_ec_off_with_token(self) -> None:
         from rolemesh.container import runner
@@ -636,7 +626,6 @@ class TestComputeEgressRouting:
         assert r.proxy_env == {}  # no forward proxy off the gateway
         assert r.network_name is None  # default bridge
         assert r.dns_servers == []
-        assert r.warn_missing_dns is False
         assert r.mcp_proxy_host == "host.docker.internal"
         # EC off merges the platform helper's host-gateway entry on top
         # of the always-present metadata blackhole.

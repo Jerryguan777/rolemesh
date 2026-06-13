@@ -61,7 +61,7 @@ def _nats_reachable(url: str) -> bool:
 if not _nats_reachable(_NATS_URL):
     pytest.skip(
         f"NATS not reachable at {_NATS_URL}; skip RPC E2E. "
-        "Start with: docker compose -f docker-compose.dev.yml up -d",
+        "Start with: docker compose --env-file .env -f deploy/compose/compose.yaml up -d",
         allow_module_level=True,
     )
 

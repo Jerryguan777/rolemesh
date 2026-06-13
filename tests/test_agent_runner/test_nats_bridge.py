@@ -1,6 +1,6 @@
 """Integration tests for the NATS bridge (agent_runner/main.py).
 
-Uses a REAL NATS server (from docker-compose.dev.yml) and a FakeBackend
+Uses a REAL NATS server (from deploy/compose/compose.yaml) and a FakeBackend
 that simulates agent behavior without Claude SDK or Pi. This tests all
 6 NATS channels end-to-end:
 
@@ -23,7 +23,7 @@ import nats
 import pytest
 from nats.js.api import StreamConfig
 
-# Hard dependency: a real NATS server on NATS_URL (docker-compose.dev.yml).
+# Hard dependency: a real NATS server on NATS_URL (deploy/compose/compose.yaml).
 # Without integration marker the suite hangs in CI on `nats.connect()`
 # because the connect retries indefinitely instead of erroring out. The
 # project-wide ``addopts = "-m 'not integration'"`` deselects this file

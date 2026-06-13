@@ -8,7 +8,11 @@ Routes:
                               -> tenant_model_credentials lookup.
     /mcp-proxy/{name}/{path}  MCP server proxy with per-user OIDC token
                               forwarding.
-    /healthz                  Liveness probe (returns 200 "ok").
+    /healthz                  Liveness probe. Always 200 once the listener
+                              is bound ("healthy" = NATS connected +
+                              listeners up); the JSON body carries the
+                              degraded-startup indicator:
+                              {"status": "ok"|"degraded", "rules_seeded": bool}.
 
 Credential resolution is fail-closed by design:
 
@@ -39,6 +43,8 @@ from .credentials import CredentialResolverProtocol, MissingCredentialError
 from .safety_call import EgressRequest
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from .safety_call import EgressSafetyCaller
     from .token_identity import Identity, TokenAuthority
 
@@ -280,8 +286,18 @@ async def start_credential_proxy(
     credential_resolver: CredentialResolverProtocol,
     safety_caller: EgressSafetyCaller | None = None,
     token_authority: TokenAuthority | None = None,
+    rules_seeded: Callable[[], bool] | None = None,
 ) -> web.AppRunner:
     """Start the reverse-proxy HTTP server on ``(host, port)``.
+
+    ``rules_seeded`` feeds the /healthz degraded indicator: it is polled
+    per probe and reflects whether the gateway's policy cache has been
+    seeded with the authoritative rule snapshot. ``None`` (host-side
+    deployments without the degraded-startup machinery) reports "ok".
+    The HTTP status is 200 either way — health means "NATS connected and
+    listeners bound", and orchestration must not restart-loop a gateway
+    that is merely waiting for the orchestrator to answer the snapshot
+    RPC (that would recreate the startup deadlock this exists to fix).
 
     ``credential_resolver`` is required: every caller must supply a
     real :class:`CredentialResolver` so credential injection has a
@@ -512,7 +528,11 @@ async def start_credential_proxy(
             return web.Response(status=502, text="MCP proxy: Bad Gateway")
 
     async def handle_healthz(_request: web.Request) -> web.Response:
-        return web.Response(status=200, text="ok")
+        seeded = rules_seeded() if rules_seeded is not None else True
+        return web.json_response(
+            {"status": "ok" if seeded else "degraded", "rules_seeded": seeded},
+            status=200,
+        )
 
     app = web.Application()
     app.router.add_get("/healthz", handle_healthz)

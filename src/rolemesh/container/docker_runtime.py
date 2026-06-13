@@ -5,10 +5,13 @@ Replaces all subprocess-based Docker calls with the Docker Engine API.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import re
+import time
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 import aiodocker
 import aiodocker.containers
@@ -30,7 +33,7 @@ class IncompatibleDockerVersionError(RuntimeError):
 _MIN_DOCKERD_VERSION: tuple[int, int] = (20, 10)
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from rolemesh.container.runtime import ContainerSpec, VolumeMount
 
@@ -135,6 +138,163 @@ def _mounts_to_binds(mounts: list[VolumeMount]) -> list[str]:
             )
             raise ValueError(msg)
     return [f"{m.host_path}:{m.container_path}:{'ro' if m.readonly else 'rw'}" for m in mounts]
+
+
+# ---------------------------------------------------------------------------
+# verify_infrastructure support (declarative-infra design §4.2).
+#
+# Retry budget for the checks that race the deployment layer's cold
+# start: compose starts the gateway before the orchestrator, but a
+# Python container needs a few seconds to finish imports and bind its
+# listeners. ~60s total at 2s intervals absorbs a slow host without
+# masking a genuinely-down service for long. Static checks (network
+# existence/shape) never retry — waiting cannot create a network.
+# ---------------------------------------------------------------------------
+
+_VERIFY_RETRY_BUDGET_S: float = 60.0
+_VERIFY_RETRY_INTERVAL_S: float = 2.0
+
+_COMPOSE_HINT: str = (
+    "Infrastructure is declared by the deployment layer, not created by "
+    "the orchestrator — run: "
+    "docker compose -f deploy/compose/compose.yaml up -d"
+)
+
+
+async def _retry_within_budget(
+    check: Callable[[], Awaitable[None]],
+    *,
+    what: str,
+) -> None:
+    """Run *check* until it passes or the retry budget elapses.
+
+    Budget/interval are read per call so tests can patch the module
+    constants. The final failure re-raises the last check error wrapped
+    with the budget context — the inner message already carries the
+    fix-it hint.
+    """
+    deadline = time.monotonic() + _VERIFY_RETRY_BUDGET_S
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            await check()
+            return
+        except RuntimeError as exc:
+            if time.monotonic() >= deadline:
+                msg = (
+                    f"{what}: still failing after {attempt} attempts "
+                    f"(~{_VERIFY_RETRY_BUDGET_S:.0f}s budget). {exc}"
+                )
+                raise RuntimeError(msg) from exc
+            logger.debug(
+                "verify_infrastructure check not passing yet — retrying",
+                what=what,
+                attempt=attempt,
+                error=str(exc),
+            )
+            await asyncio.sleep(_VERIFY_RETRY_INTERVAL_S)
+
+
+async def _get_network_info(
+    client: aiodocker.Docker, network_name: str
+) -> dict[str, Any] | None:
+    """Inspect a network by name; None when it does not exist."""
+    try:
+        network = await client.networks.get(network_name)
+    except aiodocker.exceptions.DockerError as exc:
+        if exc.status == 404:
+            return None
+        raise
+    info: dict[str, Any] = await network.show()
+    return info
+
+
+async def _check_gateway_ip(
+    client: aiodocker.Docker,
+    *,
+    container_name: str,
+    network_name: str,
+    expected_ip: str,
+) -> None:
+    """Invariant (c): the gateway container sits on the agent network
+    at exactly the configured ``EGRESS_GATEWAY_DNS_IP``.
+
+    Agents get *expected_ip* pinned as their DNS resolver; if the
+    running gateway actually holds a different address every agent
+    spawn would silently lose DNS, so a drifted deployment must refuse
+    to start instead.
+    """
+    try:
+        container = client.containers.container(container_name)
+        info: dict[str, Any] = await container.show()
+    except aiodocker.exceptions.DockerError as exc:
+        raise RuntimeError(
+            f"Egress gateway container {container_name!r} not found. "
+            f"{_COMPOSE_HINT}"
+        ) from exc
+
+    networks = (info.get("NetworkSettings") or {}).get("Networks") or {}
+    attachment = networks.get(network_name)
+    if not attachment:
+        raise RuntimeError(
+            f"Egress gateway container {container_name!r} is not attached "
+            f"to the agent network {network_name!r}. {_COMPOSE_HINT}"
+        )
+    actual_ip = str(attachment.get("IPAddress") or "")
+    if actual_ip != expected_ip:
+        raise RuntimeError(
+            f"Egress gateway agent-net address mismatch: configured "
+            f"EGRESS_GATEWAY_DNS_IP={expected_ip!r} but the running "
+            f"container holds {actual_ip!r}. Align the compose fixed IP "
+            f"with the EGRESS_GATEWAY_DNS_IP env var. {_COMPOSE_HINT}"
+        )
+
+
+async def _check_http_healthz(url: str, *, hint: str) -> None:
+    """Invariant (d): the gateway answers ``GET /healthz`` with 200.
+
+    The orchestrator reaches the bridge subnet directly on a Linux
+    host today and from inside a compose-attached container after
+    S1-2 — same code, both phases.
+    """
+    import aiohttp
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=5)
+        async with (
+            aiohttp.ClientSession(timeout=timeout) as session,
+            session.get(url) as resp,
+        ):
+            status = resp.status
+    except (TimeoutError, aiohttp.ClientError, OSError) as exc:
+        raise RuntimeError(
+            f"Egress gateway healthz not reachable at {url}: {exc}. {hint}"
+        ) from exc
+    if status != 200:
+        raise RuntimeError(
+            f"Egress gateway healthz at {url} returned HTTP {status} "
+            f"(expected 200). {hint}"
+        )
+
+
+async def _check_tcp_reachable(url: str, *, hint: str) -> None:
+    """Invariant (e): a TCP connection to *url*'s host:port succeeds."""
+    parsed = urlparse(url)
+    host = parsed.hostname or "localhost"
+    port = parsed.port or 4222
+    try:
+        _reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(host, port), timeout=5
+        )
+    except (TimeoutError, OSError) as exc:
+        raise RuntimeError(
+            f"NATS not reachable at {host}:{port} (from NATS_URL={url!r}): "
+            f"{exc}. {hint}"
+        ) from exc
+    writer.close()
+    with contextlib.suppress(OSError):
+        await writer.wait_closed()
 
 
 class DockerContainerHandle:
@@ -315,46 +475,101 @@ class DockerRuntime:
             self._client = None
 
     # -----------------------------------------------------------------
-    # Network hardening hooks (R5 / R5.1). Thin adapters over the pure
-    # functions in container.network so tests can target either layer.
+    # Infrastructure verification (declarative-infra design §4.2).
+    #
+    # The deployment layer (deploy/compose/compose.yaml today, Helm
+    # later) declares networks + gateway + NATS; the orchestrator only
+    # checks the declared invariants here — read-only, fail-closed —
+    # and refuses to start when they do not hold. The old imperative
+    # path (ensure_agent_network / ensure_egress_network /
+    # probe-container reachability checks) is retired.
     # -----------------------------------------------------------------
 
-    async def ensure_agent_network(self, network_name: str) -> None:
-        from rolemesh.container.network import ensure_agent_network
+    async def verify_infrastructure(self) -> None:
+        """Verify the compose-declared infrastructure invariants.
 
-        await ensure_agent_network(self._ensure_client(), network_name)
+        Invariants (in check order):
+          (a) agent network exists and is ``Internal=true``;
+          (b) egress network exists;
+          (c) the gateway container's agent-net address equals
+              ``EGRESS_GATEWAY_DNS_IP`` (the value agents get pinned
+              as their DNS resolver);
+          (d) ``GET http://<EGRESS_GATEWAY_DNS_IP>:<port>/healthz``
+              returns 200. The orchestrator can reach the bridge
+              subnet directly on a Linux host, and equally from inside
+              a compose-attached container after S1-2 — the same code
+              serves both phases;
+          (e) NATS is TCP-reachable at ``NATS_URL``.
 
-    async def ensure_egress_network(self, network_name: str) -> None:
-        from rolemesh.container.network import ensure_egress_network
-
-        await ensure_egress_network(self._ensure_client(), network_name)
-
-    async def verify_egress_gateway_reachable(
-        self,
-        network_name: str,
-        gateway_service_name: str,
-        reverse_proxy_port: int,
-    ) -> None:
-        from rolemesh.container.network import verify_egress_gateway_reachable
-
-        await verify_egress_gateway_reachable(
-            self._ensure_client(),
-            network_name,
-            gateway_service_name,
-            reverse_proxy_port,
+        (c)–(e) race the gateway/NATS cold start (compose starts them
+        before the orchestrator, but "started" != "serving"), so they
+        retry within a bounded budget. (a)/(b) are static — a missing
+        network never heals by waiting — and fail immediately.
+        """
+        from rolemesh.core.config import (
+            CONTAINER_EGRESS_NETWORK_NAME,
+            CONTAINER_NETWORK_NAME,
+            CREDENTIAL_PROXY_PORT,
+            EGRESS_GATEWAY_CONTAINER_NAME,
+            EGRESS_GATEWAY_DNS_IP,
+            NATS_URL,
         )
 
-    async def verify_nats_reachable(
-        self,
-        network_name: str,
-        nats_url: str,
-    ) -> None:
-        from rolemesh.container.network import verify_nats_reachable
+        client = self._ensure_client()
 
-        await verify_nats_reachable(
-            self._ensure_client(),
-            network_name,
-            nats_url,
+        # (a) agent network: exists + Internal=true.
+        agent_info = await _get_network_info(client, CONTAINER_NETWORK_NAME)
+        if agent_info is None:
+            raise RuntimeError(
+                f"Agent network {CONTAINER_NETWORK_NAME!r} does not exist. "
+                f"{_COMPOSE_HINT}"
+            )
+        if not bool(agent_info.get("Internal", False)):
+            raise RuntimeError(
+                f"Agent network {CONTAINER_NETWORK_NAME!r} exists but is not "
+                "Internal=true — agents would have a direct route to the "
+                "internet, defeating egress control. Recreate it: "
+                f"docker network rm {CONTAINER_NETWORK_NAME}; {_COMPOSE_HINT}"
+            )
+
+        # (b) egress network: exists.
+        if await _get_network_info(client, CONTAINER_EGRESS_NETWORK_NAME) is None:
+            raise RuntimeError(
+                f"Egress network {CONTAINER_EGRESS_NETWORK_NAME!r} does not "
+                f"exist — the gateway has no route out. {_COMPOSE_HINT}"
+            )
+
+        # (c) gateway holds the configured agent-net address.
+        await _retry_within_budget(
+            lambda: _check_gateway_ip(
+                client,
+                container_name=EGRESS_GATEWAY_CONTAINER_NAME,
+                network_name=CONTAINER_NETWORK_NAME,
+                expected_ip=EGRESS_GATEWAY_DNS_IP,
+            ),
+            what="egress gateway agent-net address",
+        )
+
+        # (d) gateway healthz answers 200.
+        healthz_url = (
+            f"http://{EGRESS_GATEWAY_DNS_IP}:{CREDENTIAL_PROXY_PORT}/healthz"
+        )
+        await _retry_within_budget(
+            lambda: _check_http_healthz(healthz_url, hint=_COMPOSE_HINT),
+            what="egress gateway /healthz",
+        )
+
+        # (e) NATS TCP-reachable at the orchestrator-facing URL.
+        await _retry_within_budget(
+            lambda: _check_tcp_reachable(NATS_URL, hint=_COMPOSE_HINT),
+            what="NATS reachability",
+        )
+
+        logger.info(
+            "Infrastructure verified",
+            agent_network=CONTAINER_NETWORK_NAME,
+            egress_network=CONTAINER_EGRESS_NETWORK_NAME,
+            gateway_dns_ip=EGRESS_GATEWAY_DNS_IP,
         )
 
     @staticmethod

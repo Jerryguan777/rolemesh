@@ -112,19 +112,20 @@ uv sync --extra pi --extra dev
 # Add the eval extra to use rolemesh-eval (Inspect AI based, manual)
 uv sync --extra pi --extra dev --extra eval
 
-# Bring up Postgres + NATS (also creates the EC-2 agent bridge and
-# attaches NATS to it). Run this BEFORE the orchestrator: compose owns
-# the rolemesh-agent-net network in dev and the orchestrator reuses it.
-# If the orchestrator starts first it creates the network itself and a
-# later `compose up` fails on a label mismatch.
-docker compose -f docker-compose.dev.yml up -d
-
 # Build the agent and egress-gateway container images
 container/build.sh
 container/build-egress-gateway.sh
 
 # Configure .env — see "Configuration" below
 $EDITOR .env
+
+# Bring up the infrastructure: Postgres, NATS, the egress gateway and
+# both egress-control bridges are all declared by compose. Run this
+# BEFORE the orchestrator — the orchestrator no longer creates networks
+# or launches the gateway; it only verifies them at startup (fail-
+# closed). --env-file matters: it feeds the gateway's
+# EGRESS_TOKEN_SECRET from the repo-root .env.
+docker compose --env-file .env -f deploy/compose/compose.yaml up -d
 
 # Start the orchestrator
 rolemesh
