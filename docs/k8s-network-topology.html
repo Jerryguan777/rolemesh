@@ -1,8 +1,8 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>RoleMesh · Kubernetes 部署网络拓扑（rev4）</title>
+<title>RoleMesh · Kubernetes Deployment Network Topology (rev4)</title>
 <style>
   :root{
     --blue:#2563eb; --blue-bg:#eff6ff;
@@ -13,13 +13,13 @@
     --ink:#0f172a;
   }
   *{box-sizing:border-box}
-  body{margin:0;background:#f1f5f9;font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;color:var(--ink)}
+  body{margin:0;background:#f1f5f9;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:var(--ink)}
   .wrap{max-width:1760px;margin:0 auto;padding:28px 32px 48px}
   h1{font-size:26px;margin:0 0 4px}
   .sub{color:var(--gray);font-size:14px;margin-bottom:18px}
   .canvas{background:#fff;border-radius:18px;box-shadow:0 8px 30px rgba(15,23,42,.08);padding:8px}
   svg{display:block;width:100%;height:auto}
-  svg text{font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif}
+  svg text{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
   .panel{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:18px}
   .card{background:#fff;border-radius:12px;padding:14px 16px;box-shadow:0 4px 14px rgba(15,23,42,.06);border-top:4px solid var(--blue)}
   .card h3{margin:0 0 6px;font-size:14px}
@@ -36,8 +36,8 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>RoleMesh · Kubernetes 部署网络拓扑</h1>
-  <div class="sub">Rancher RKE2 · 单 namespace <code>rolemesh</code> · 声明式基础设施（Helm）+ verify-only 启动 · 设计稿 rev4</div>
+  <h1>RoleMesh · Kubernetes Deployment Network Topology</h1>
+  <div class="sub">Rancher RKE2 · single namespace <code>rolemesh</code> · declarative infrastructure (Helm) + verify-only startup · design rev4</div>
 
   <div class="canvas">
   <svg viewBox="0 0 1680 960" xmlns="http://www.w3.org/2000/svg">
@@ -54,101 +54,101 @@
         <path d="M1,1 L9,9 M9,1 L1,9" stroke="#dc2626" stroke-width="2" fill="none"/></marker>
     </defs>
 
-    <!-- ============ 集群边界 ============ -->
+    <!-- ============ cluster boundary ============ -->
     <rect x="230" y="70" width="1140" height="850" rx="18" fill="#f8fafc" stroke="#94a3b8" stroke-width="1.6" stroke-dasharray="8 6"/>
-    <text x="252" y="100" font-size="16" font-weight="700" fill="#475569">Kubernetes 集群（Rancher RKE2）</text>
-    <text x="252" y="120" font-size="12.5" fill="#94a3b8">namespace: rolemesh · PSA restricted · CNI: Canal/Calico（NetworkPolicy 强制）</text>
+    <text x="252" y="100" font-size="16" font-weight="700" fill="#475569">Kubernetes Cluster (Rancher RKE2)</text>
+    <text x="252" y="120" font-size="12.5" fill="#94a3b8">namespace: rolemesh · PSA restricted · CNI: Canal/Calico (NetworkPolicy enforced)</text>
 
-    <!-- ============ 集群外：用户 ============ -->
+    <!-- ============ outside: user ============ -->
     <rect x="20" y="190" width="160" height="64" rx="10" fill="#fff" stroke="#64748b" stroke-width="1.5"/>
-    <text x="100" y="217" font-size="14" font-weight="700" text-anchor="middle">用户 / 浏览器</text>
+    <text x="100" y="217" font-size="14" font-weight="700" text-anchor="middle">User / Browser</text>
     <text x="100" y="237" font-size="11.5" fill="#64748b" text-anchor="middle">HTTPS</text>
 
-    <!-- ============ 集群外：Internet ============ -->
+    <!-- ============ outside: Internet ============ -->
     <rect x="1450" y="440" width="210" height="170" rx="22" fill="#fff" stroke="#64748b" stroke-width="1.5"/>
     <text x="1555" y="482" font-size="15" font-weight="700" text-anchor="middle">Internet</text>
-    <text x="1555" y="506" font-size="12" fill="#475569" text-anchor="middle">LLM APIs（Anthropic /</text>
-    <text x="1555" y="524" font-size="12" fill="#475569" text-anchor="middle">OpenAI / Bedrock …）</text>
-    <text x="1555" y="542" font-size="12" fill="#475569" text-anchor="middle">外部 MCP · 软件源</text>
-    <text x="1555" y="578" font-size="11" fill="#94a3b8" text-anchor="middle">唯一出口 = egress gateway</text>
+    <text x="1555" y="506" font-size="12" fill="#475569" text-anchor="middle">LLM APIs (Anthropic /</text>
+    <text x="1555" y="524" font-size="12" fill="#475569" text-anchor="middle">OpenAI / Bedrock …)</text>
+    <text x="1555" y="542" font-size="12" fill="#475569" text-anchor="middle">external MCP · mirrors</text>
+    <text x="1555" y="578" font-size="11" fill="#94a3b8" text-anchor="middle">sole egress = gateway</text>
 
     <!-- ============ webui ============ -->
     <rect x="470" y="160" width="215" height="104" rx="12" fill="var(--blue-bg)" stroke="#2563eb" stroke-width="1.8"/>
     <text x="577" y="186" font-size="14.5" font-weight="700" text-anchor="middle" fill="#1e40af">webui</text>
     <text x="577" y="206" font-size="11.5" fill="#475569" text-anchor="middle">Deployment · FastAPI :8080</text>
-    <text x="577" y="224" font-size="11.5" fill="#475569" text-anchor="middle">管理控制台 / 聊天入口</text>
+    <text x="577" y="224" font-size="11.5" fill="#475569" text-anchor="middle">admin console / chat entry</text>
     <text x="577" y="242" font-size="11.5" fill="#475569" text-anchor="middle">→ Postgres / NATS</text>
 
     <!-- ============ Postgres ============ -->
     <rect x="905" y="150" width="195" height="76" rx="12" fill="var(--gray-bg)" stroke="#64748b" stroke-width="1.8"/>
     <text x="1002" y="180" font-size="14" font-weight="700" text-anchor="middle">Postgres :5432</text>
-    <text x="1002" y="200" font-size="11.5" fill="#64748b" text-anchor="middle">凭证密文（Fernet）· 业务数据</text>
-    <text x="1002" y="216" font-size="11" fill="#94a3b8" text-anchor="middle">chart 依赖 / 可切外部实例</text>
+    <text x="1002" y="200" font-size="11.5" fill="#64748b" text-anchor="middle">encrypted credentials · app data</text>
+    <text x="1002" y="216" font-size="11" fill="#94a3b8" text-anchor="middle">chart dependency / external option</text>
 
     <!-- ============ orchestrator ============ -->
     <rect x="470" y="350" width="285" height="196" rx="12" fill="var(--blue-bg)" stroke="#2563eb" stroke-width="2.2"/>
     <text x="612" y="378" font-size="15" font-weight="700" text-anchor="middle" fill="#1e40af">orchestrator</text>
     <text x="612" y="396" font-size="11" fill="#64748b" text-anchor="middle">Deployment ×1 · strategy: Recreate</text>
-    <text x="488" y="420" font-size="11.5" fill="#334155">• verify_infrastructure（fail-closed）</text>
+    <text x="488" y="420" font-size="11.5" fill="#334155">• verify_infrastructure (fail-closed)</text>
     <text x="488" y="439" font-size="11.5" fill="#334155">• scheduler + container_executor</text>
-    <text x="488" y="458" font-size="11.5" fill="#334155">• 签发 agent 身份 token（HMAC）</text>
-    <text x="488" y="477" font-size="11.5" fill="#334155">• 凭证解析 RPC responder（NATS）</text>
-    <text x="488" y="496" font-size="11.5" fill="#334155">• 规则/MCP 快照 responder</text>
-    <text x="488" y="520" font-size="11" fill="#1e40af" font-weight="600">出站：Postgres · NATS · gateway</text>
+    <text x="488" y="458" font-size="11.5" fill="#334155">• mints agent identity tokens (HMAC)</text>
+    <text x="488" y="477" font-size="11.5" fill="#334155">• credential-resolve RPC responder</text>
+    <text x="488" y="496" font-size="11.5" fill="#334155">• rules / MCP snapshot responders</text>
+    <text x="488" y="520" font-size="11" fill="#1e40af" font-weight="600">egress: Postgres · NATS · gateway</text>
 
     <!-- ============ NATS ============ -->
     <rect x="905" y="370" width="200" height="104" rx="12" fill="var(--gray-bg)" stroke="#64748b" stroke-width="2"/>
     <text x="1005" y="400" font-size="14.5" font-weight="700" text-anchor="middle">NATS JetStream</text>
     <text x="1005" y="420" font-size="12" fill="#475569" text-anchor="middle">:4222</text>
-    <text x="1005" y="440" font-size="11" fill="#64748b" text-anchor="middle">agent IPC · 凭证 RPC</text>
-    <text x="1005" y="456" font-size="11" fill="#64748b" text-anchor="middle">规则/MCP 快照 + 热更新</text>
+    <text x="1005" y="440" font-size="11" fill="#64748b" text-anchor="middle">agent IPC · credential RPC</text>
+    <text x="1005" y="456" font-size="11" fill="#64748b" text-anchor="middle">rule/MCP snapshots + hot reload</text>
 
     <!-- ============ egress gateway ============ -->
     <rect x="1130" y="420" width="225" height="300" rx="12" fill="var(--green-bg)" stroke="#059669" stroke-width="2.2"/>
     <text x="1242" y="448" font-size="15" font-weight="700" text-anchor="middle" fill="#065f46">egress-gateway</text>
-    <text x="1242" y="466" font-size="10.5" fill="#64748b" text-anchor="middle">Deployment + Service（ClusterIP 稳定）</text>
+    <text x="1242" y="466" font-size="10.5" fill="#64748b" text-anchor="middle">Deployment + Service (stable ClusterIP)</text>
     <rect x="1146" y="480" width="193" height="40" rx="7" fill="#fff" stroke="#059669"/>
-    <text x="1242" y="497" font-size="11.5" font-weight="600" text-anchor="middle" fill="#065f46">DNS resolver :1053（Svc 53）</text>
-    <text x="1242" y="512" font-size="10" fill="#64748b" text-anchor="middle">平台级域名白名单 · 拒答→NXDOMAIN</text>
+    <text x="1242" y="497" font-size="11.5" font-weight="600" text-anchor="middle" fill="#065f46">DNS resolver :1053 (Svc 53)</text>
+    <text x="1242" y="512" font-size="10" fill="#64748b" text-anchor="middle">domain allowlist · deny → NXDOMAIN</text>
     <rect x="1146" y="528" width="193" height="40" rx="7" fill="#fff" stroke="#059669"/>
-    <text x="1242" y="545" font-size="11.5" font-weight="600" text-anchor="middle" fill="#065f46">反向代理 :3001</text>
-    <text x="1242" y="560" font-size="10" fill="#64748b" text-anchor="middle">/proxy/&lt;token&gt;/… 验签→注入凭证</text>
+    <text x="1242" y="545" font-size="11.5" font-weight="600" text-anchor="middle" fill="#065f46">reverse proxy :3001</text>
+    <text x="1242" y="560" font-size="10" fill="#64748b" text-anchor="middle">/proxy/&lt;token&gt;/… verify → inject creds</text>
     <rect x="1146" y="576" width="193" height="40" rx="7" fill="#fff" stroke="#059669"/>
-    <text x="1242" y="593" font-size="11.5" font-weight="600" text-anchor="middle" fill="#065f46">正向代理 :3128（CONNECT）</text>
-    <text x="1242" y="608" font-size="10" fill="#64748b" text-anchor="middle">Proxy-Auth 验签 · 无 token → 407</text>
-    <text x="1242" y="640" font-size="10.5" fill="#065f46" text-anchor="middle" font-weight="600">降级启动：NATS 连通即 healthz=200</text>
-    <text x="1242" y="656" font-size="10.5" fill="#065f46" text-anchor="middle">规则快照就绪前 default-deny</text>
-    <text x="1242" y="680" font-size="10.5" fill="#64748b" text-anchor="middle">无状态验签 · 不含 db/auth 模块</text>
-    <text x="1242" y="696" font-size="10.5" fill="#64748b" text-anchor="middle">镜像内无任何密钥</text>
+    <text x="1242" y="593" font-size="11.5" font-weight="600" text-anchor="middle" fill="#065f46">forward proxy :3128 (CONNECT)</text>
+    <text x="1242" y="608" font-size="10" fill="#64748b" text-anchor="middle">Proxy-Auth verified · no token → 407</text>
+    <text x="1242" y="640" font-size="10.5" fill="#065f46" text-anchor="middle" font-weight="600">degraded start: healthz=200 on NATS up,</text>
+    <text x="1242" y="656" font-size="10.5" fill="#065f46" text-anchor="middle">default-deny until rule snapshot arrives</text>
+    <text x="1242" y="680" font-size="10.5" fill="#64748b" text-anchor="middle">stateless verification · no db/auth code</text>
+    <text x="1242" y="696" font-size="10.5" fill="#64748b" text-anchor="middle">no secrets baked into the image</text>
 
-    <!-- ============ agent 沙箱区 ============ -->
+    <!-- ============ agent sandbox zone ============ -->
     <rect x="258" y="600" width="585" height="268" rx="14" fill="var(--amber-bg)" stroke="#d97706" stroke-width="2" stroke-dasharray="10 6"/>
-    <text x="278" y="628" font-size="14" font-weight="700" fill="#92400e">agent Pods（按 job 动态创建 / 销毁）</text>
-    <text x="278" y="646" font-size="11" fill="#b45309">label rolemesh.io/role=agent → 命中 default-deny NetworkPolicy</text>
+    <text x="278" y="628" font-size="14" font-weight="700" fill="#92400e">agent Pods (created / destroyed per job)</text>
+    <text x="278" y="646" font-size="11" fill="#b45309">label rolemesh.io/role=agent → matched by default-deny NetworkPolicy</text>
 
     <rect x="348" y="684" width="300" height="176" rx="10" fill="#fffdf7" stroke="#f59e0b" stroke-width="1.3" opacity=".75"/>
     <rect x="334" y="672" width="300" height="176" rx="10" fill="#fffdf7" stroke="#f59e0b" stroke-width="1.5" opacity=".9"/>
     <rect x="320" y="660" width="300" height="176" rx="10" fill="#fff" stroke="#d97706" stroke-width="1.8"/>
-    <text x="470" y="684" font-size="13" font-weight="700" text-anchor="middle" fill="#92400e">agent Pod（裸 Pod · Never）</text>
+    <text x="470" y="684" font-size="13" font-weight="700" text-anchor="middle" fill="#92400e">agent Pod (bare Pod · restart Never)</text>
     <text x="338" y="706" font-size="10.8" fill="#334155">• runtimeClassName: gvisor</text>
-    <text x="338" y="723" font-size="10.8" fill="#334155">• readOnlyRootFilesystem · 非 root(1000)</text>
-    <text x="338" y="740" font-size="10.8" fill="#334155">• capabilities drop ALL · 无 SA token</text>
+    <text x="338" y="723" font-size="10.8" fill="#334155">• readOnlyRootFilesystem · non-root (1000)</text>
+    <text x="338" y="740" font-size="10.8" fill="#334155">• capabilities drop ALL · no SA token</text>
     <text x="338" y="757" font-size="10.8" fill="#334155">• dnsPolicy: None → nameserver = gateway</text>
     <text x="338" y="774" font-size="10.8" fill="#334155">• tmpfs → emptyDir(Memory, sizeLimit)</text>
-    <text x="338" y="791" font-size="10.8" fill="#334155">• 持自己的签名 token（带内出示）</text>
-    <text x="338" y="814" font-size="10.8" fill="#92400e" font-weight="600">出站仅: gateway(53/3001/3128) · NATS(4222)</text>
+    <text x="338" y="791" font-size="10.8" fill="#334155">• carries its own signed token (in-band)</text>
+    <text x="338" y="814" font-size="10.8" fill="#92400e" font-weight="600">egress only: gateway(53/3001/3128) · NATS(4222)</text>
 
-    <!-- ================= 箭头 ================= -->
-    <!-- 用户 → webui -->
+    <!-- ================= arrows ================= -->
+    <!-- user → webui -->
     <path d="M180,222 C320,222 360,214 470,212" fill="none" stroke="#2563eb" stroke-width="2.2" marker-end="url(#m-blue)"/>
     <text x="322" y="206" font-size="11" fill="#2563eb" text-anchor="middle">HTTPS</text>
     <!-- webui→postgres / NATS -->
     <path d="M685,192 C790,184 820,186 905,188" fill="none" stroke="#2563eb" stroke-width="1.6" marker-end="url(#m-blue)"/>
     <path d="M685,242 C800,270 850,350 905,386" fill="none" stroke="#2563eb" stroke-width="1.4" opacity=".75" marker-end="url(#m-blue)"/>
-    <!-- orch → agent 沙箱区（创建/销毁） -->
+    <!-- orch → agent zone (create/destroy) -->
     <path d="M520,546 C470,570 440,580 420,600" fill="none" stroke="#64748b" stroke-width="1.8" stroke-dasharray="6 5" marker-end="url(#m-gray)"/>
-    <text x="300" y="576" font-size="11" fill="#64748b">创建 / 销毁 agent Pod</text>
-    <text x="300" y="592" font-size="10.5" fill="#94a3b8">（注入 token · env 白名单 · 挂载）</text>
+    <text x="282" y="576" font-size="11" fill="#64748b">create / destroy agent Pods</text>
+    <text x="282" y="592" font-size="10.5" fill="#94a3b8">(inject token · env allowlist · mounts)</text>
     <!-- orch↔NATS -->
     <path d="M755,422 L905,410" fill="none" stroke="#2563eb" stroke-width="2.2" marker-end="url(#m-blue)"/>
     <path d="M905,436 L755,450" fill="none" stroke="#64748b" stroke-width="1.6" marker-end="url(#m-gray)"/>
@@ -157,57 +157,57 @@
     <path d="M720,350 C800,290 850,240 920,226" fill="none" stroke="#2563eb" stroke-width="1.8" marker-end="url(#m-blue)"/>
     <!-- orch→gateway healthz -->
     <path d="M755,510 C950,530 1040,510 1130,490" fill="none" stroke="#2563eb" stroke-width="1.8" stroke-dasharray="2 4" marker-end="url(#m-blue)"/>
-    <text x="930" y="502" font-size="10.5" fill="#2563eb" text-anchor="middle">verify: healthz（超时重试）</text>
+    <text x="930" y="502" font-size="10.5" fill="#2563eb" text-anchor="middle">verify: healthz (retry w/ timeout)</text>
     <!-- agent→NATS -->
     <path d="M648,700 C780,610 860,510 920,474" fill="none" stroke="#d97706" stroke-width="2.2" marker-end="url(#m-amber)"/>
-    <text x="826" y="576" font-size="11" fill="#b45309" transform="rotate(-37 826 576)">:4222 初始化 KV · 结果流</text>
-    <!-- agent→gateway（三面合一） -->
+    <text x="826" y="576" font-size="11" fill="#b45309" transform="rotate(-37 826 576)">:4222 init KV · result stream</text>
+    <!-- agent→gateway (all three planes) -->
     <path d="M843,696 C990,680 1060,630 1130,590" fill="none" stroke="#d97706" stroke-width="2.6" marker-end="url(#m-amber)"/>
-    <text x="968" y="660" font-size="11" font-weight="600" fill="#b45309" transform="rotate(-17 968 660)">DNS :53 · 反代 :3001 · CONNECT :3128</text>
-    <text x="985" y="678" font-size="10" fill="#b45309" transform="rotate(-17 985 678)">token 带内出示（path / Proxy-Auth）</text>
+    <text x="968" y="660" font-size="11" font-weight="600" fill="#b45309" transform="rotate(-17 968 660)">DNS :53 · reverse :3001 · CONNECT :3128</text>
+    <text x="985" y="678" font-size="10" fill="#b45309" transform="rotate(-17 985 678)">token presented in-band (path / Proxy-Auth)</text>
     <!-- gateway→internet -->
     <path d="M1355,550 L1450,538" fill="none" stroke="#059669" stroke-width="2.6" marker-end="url(#m-green)"/>
-    <text x="1402" y="528" font-size="10.5" fill="#059669" text-anchor="middle">白名单放行</text>
+    <text x="1402" y="528" font-size="10.5" fill="#059669" text-anchor="middle">allowlisted</text>
     <!-- gateway→NATS -->
     <path d="M1130,458 C1110,450 1095,442 1106,436" stroke="#059669" stroke-width="2" fill="none" marker-end="url(#m-green)"/>
-    <text x="1078" y="490" font-size="10.5" fill="#059669" text-anchor="end">凭证 RPC</text>
-    <text x="1078" y="505" font-size="10.5" fill="#059669" text-anchor="end">规则快照/热更新</text>
+    <text x="1078" y="490" font-size="10.5" fill="#059669" text-anchor="end">credential RPC</text>
+    <text x="1078" y="505" font-size="10.5" fill="#059669" text-anchor="end">rule snapshot / hot reload</text>
     <!-- agent ✗ internet -->
     <path d="M843,810 C1100,870 1350,750 1470,610" fill="none" stroke="#dc2626" stroke-width="2" stroke-dasharray="7 6" marker-end="url(#m-red)"/>
-    <text x="1130" y="836" font-size="11.5" font-weight="700" fill="#dc2626" text-anchor="middle">✗ 直接出网（default-deny NetworkPolicy）</text>
+    <text x="1130" y="836" font-size="11.5" font-weight="700" fill="#dc2626" text-anchor="middle">✗ direct egress (default-deny NetworkPolicy)</text>
   </svg>
   </div>
 
   <div class="legend">
-    <span><i class="sw"></i>平台面流量（orchestrator / webui）</span>
-    <span><i class="sw a"></i>agent 受控流量（仅两个去向）</span>
-    <span><i class="sw g"></i>gateway 流量（白名单出网 / NATS RPC）</span>
-    <span><i class="sw r"></i>被 NetworkPolicy 拒绝</span>
-    <span><i class="sw k"></i>控制面动作</span>
+    <span><i class="sw"></i>Platform traffic (orchestrator / webui)</span>
+    <span><i class="sw a"></i>Agent traffic (only two destinations)</span>
+    <span><i class="sw g"></i>Gateway traffic (allowlisted egress / NATS RPC)</span>
+    <span><i class="sw r"></i>Denied by NetworkPolicy</span>
+    <span><i class="sw k"></i>Control-plane action</span>
   </div>
 
   <div class="panel">
     <div class="card np1">
       <h3>① agent-default-deny</h3>
-      <p>selector: <code>role=agent</code>，Ingress + Egress 全拒、零规则。Docker <code>Internal=true</code> 网桥的等价物，独立存在以便启动校验单独验证"默认拒绝"不变量。</p>
+      <p>Selector <code>role=agent</code>; all ingress + egress denied, zero rules. The equivalent of Docker's <code>Internal=true</code> bridge — kept as its own policy so startup verification can check the "default deny" invariant in isolation.</p>
     </div>
     <div class="card np2">
       <h3>② agent-allow-egress</h3>
-      <p>仅放行 agent → gateway（53 / 3001 / 3128）与 → NATS（4222）。<b>不放行集群 DNS</b>：域名解析只能经 gateway 白名单 resolver，DNS 防外渗。</p>
+      <p>Allows only agent → gateway (53 / 3001 / 3128) and → NATS (4222). Cluster DNS is <b>not</b> allowed: name resolution goes only through the gateway's allowlist resolver (DNS-exfiltration control).</p>
     </div>
     <div class="card np3">
       <h3>③ gateway-policy</h3>
-      <p>入站仅来自 agent / orchestrator；出站放行 NATS（4222，凭证 RPC 必需）、53/80/443 及 values 声明端口。应用层另有域名白名单，双保险。</p>
+      <p>Ingress only from agents / orchestrator; egress allows NATS (4222, required for credential RPC), 53/80/443 plus ports declared in values. An app-level domain allowlist sits on top — defense in depth.</p>
     </div>
     <div class="card np4">
       <h3>④ orchestrator-policy</h3>
-      <p>出站仅 → K8s API、Postgres、NATS、gateway、外网 HTTPS（自身 LLM 调用）。RBAC 限定为本 namespace 的 pods 增删查 watch/log。</p>
+      <p>Egress only → K8s API, Postgres, NATS, gateway, and external HTTPS (its own LLM calls). RBAC is limited to pods create/delete/watch/log within this namespace.</p>
     </div>
   </div>
 
   <div class="foot">
-    身份模型：orchestrator 在 spawn 时签发 HMAC token 注入 agent，token 随每个请求带内出示（反代路径段 / Proxy-Authorization），gateway 用共享 Secret 无状态验签——与网络拓扑无关，Docker / K8s 两个 runtime 同一机制。
-    &nbsp;|&nbsp; 来源：docs/container-runtime-decoupling-design.md（rev4，2026-06-12）
+    Identity model: the orchestrator mints an HMAC token at spawn time and injects it into the agent; the token travels in-band with every request (reverse-proxy path segment / Proxy-Authorization) and the gateway verifies it statelessly against a shared secret — independent of network topology, identical across the Docker and K8s runtimes.
+    &nbsp;|&nbsp; Source: docs/container-runtime-decoupling-design.md (rev4, 2026-06-12)
   </div>
 </div>
 </body>
