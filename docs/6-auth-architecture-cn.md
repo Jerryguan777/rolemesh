@@ -112,6 +112,15 @@ OIDC_AUTO_ASSIGN_TO_ALL=true                    # new users get all coworkers
 ROLEMESH_TOKEN_SECRET=<any-secret>              # Fernet encryption key derivation
 ```
 
+> **两个进程都需要 OIDC env。** `create_vault_from_env()` 在 orchestrator
+> 和 webui 两个进程里都会跑，缺 `OIDC_DISCOVERY_URL` + `OIDC_CLIENT_ID`
+> 时返回 `None`。如果只给 webui 配，orchestrator 就永远不会订阅
+> `egress.token.access.request` 这个 responder，gateway 的
+> `RemoteTokenVault` RPC 会拿到 "no responders"，于是每个 user-mode MCP
+> 请求转发出去的 `Authorization` 头都是空的。务必把
+> `OIDC_DISCOVERY_URL` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET`（以及
+> `ROLEMESH_TOKEN_SECRET`）同时配到这两个服务上。
+
 OIDC 模式下角色解析的优先级：直接角色 claim → 分组映射 → 作用域映射 → 兜底为 "member"。
 
 ### Builtin 模式（占位实现）

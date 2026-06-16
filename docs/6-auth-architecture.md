@@ -112,6 +112,15 @@ OIDC_AUTO_ASSIGN_TO_ALL=true                    # new users get all coworkers
 ROLEMESH_TOKEN_SECRET=<any-secret>              # Fernet encryption key derivation
 ```
 
+> **Both processes need the OIDC env.** `create_vault_from_env()` runs in
+> the orchestrator *and* the webui process, and returns `None` without
+> `OIDC_DISCOVERY_URL` + `OIDC_CLIENT_ID`. If only webui gets them, the
+> orchestrator never subscribes the `egress.token.access.request`
+> responder, the gateway's `RemoteTokenVault` RPC gets "no responders",
+> and every user-mode MCP request forwards an empty `Authorization` header.
+> Wire `OIDC_DISCOVERY_URL` / `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` (and
+> `ROLEMESH_TOKEN_SECRET`) into both services.
+
 OIDC mode role resolution priority: direct role claim → group mapping → scope mapping → fallback "member".
 
 ### Builtin Mode (Stub)
