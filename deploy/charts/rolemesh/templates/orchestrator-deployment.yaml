@@ -88,8 +88,18 @@ spec:
           env:
             - name: ROLEMESH_CONTAINER_RUNTIME
               value: "k8s"
+            # Sourced from the Downward API rather than templated so the
+            # agent pods the orchestrator spawns (and their DNS search
+            # domains, built from this) always track the pod's REAL
+            # namespace — it cannot drift from the install namespace.
             - name: ROLEMESH_K8S_NAMESPACE
-              value: {{ .Release.Namespace | quote }}
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Cluster DNS domain for agent pod search domains (matches the
+            # FQDNs the gateway DNS allowlist is keyed on, below).
+            - name: ROLEMESH_K8S_CLUSTER_DOMAIN
+              value: {{ .Values.clusterDomain | default "cluster.local" | quote }}
             - name: ROLEMESH_K8S_DATA_PVC
               value: "rolemesh-data"
             - name: ROLEMESH_K8S_IMAGE_PULL_SECRET

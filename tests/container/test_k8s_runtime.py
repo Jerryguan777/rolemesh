@@ -422,6 +422,40 @@ def test_dns_forces_resolver_via_dnspolicy_none() -> None:
     assert pod_spec["dnsConfig"]["nameservers"] == ["172.28.100.53"]
 
 
+def test_dns_config_carries_cluster_search_domains() -> None:
+    """dnsPolicy None must supply search domains + ndots itself.
+
+    dnsPolicy: None carries NO default search path, so a short Service
+    name like "nats" is sent bare and kube-dns NXDOMAINs it — the agent
+    then cannot reach NATS at all. The manifest must mirror kubelet's
+    ClusterFirst search list (<ns>.svc.<domain>, svc.<domain>, <domain>)
+    + ndots=5 so getaddrinfo("nats") expands to the FQDN.
+
+    Mutation caught: omitting searches/options (the original bug) leaves
+    every short-name lookup failing; this asserts both are present and
+    namespace/cluster-domain-templated.
+    """
+    spec = ContainerSpec(name="a", image="img", dns=["172.28.100.53"])
+    dns_config = _manifest(spec, namespace="troposai", cluster_domain="cluster.local")[
+        "spec"
+    ]["dnsConfig"]
+    assert dns_config["searches"] == [
+        "troposai.svc.cluster.local",
+        "svc.cluster.local",
+        "cluster.local",
+    ]
+    assert {"name": "ndots", "value": "5"} in dns_config["options"]
+
+
+def test_dns_search_honours_custom_cluster_domain() -> None:
+    """A non-default cluster domain flows into every search entry."""
+    spec = ContainerSpec(name="a", image="img", dns=["10.0.0.10"])
+    searches = _manifest(spec, namespace="ns1", cluster_domain="k8s.internal")["spec"][
+        "dnsConfig"
+    ]["searches"]
+    assert searches == ["ns1.svc.k8s.internal", "svc.k8s.internal", "k8s.internal"]
+
+
 def test_no_dns_keeps_cluster_default() -> None:
     """Empty spec.dns must NOT pin dnsPolicy None (would break the gateway pod).
 

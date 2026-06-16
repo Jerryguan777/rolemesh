@@ -222,6 +222,7 @@ def spec_to_pod_manifest(
     image_pull_secret: str = "",
     image_pull_policy: str = "IfNotPresent",
     runtime_class: str = "",
+    cluster_domain: str = "cluster.local",
 ) -> dict[str, Any]:
     """Map a ContainerSpec to a bare-Pod manifest (docs/21 §4.4).
 
@@ -314,7 +315,22 @@ def spec_to_pod_manifest(
     # default (kube-dns) — appropriate only for non-agent pods.
     if spec.dns:
         pod_spec["dnsPolicy"] = "None"
-        pod_spec["dnsConfig"] = {"nameservers": list(spec.dns)}
+        dns_config: dict[str, Any] = {"nameservers": list(spec.dns)}
+        # dnsPolicy: None carries NO default search domains. Without them a
+        # short Service name like "nats" (NATS_URL is nats://nats:4222,
+        # byte-identical to compose) is sent to the gateway resolver bare
+        # and kube-dns NXDOMAINs it. Mirror kubelet's ClusterFirst search
+        # path + ndots=5 so getaddrinfo("nats") expands to the FQDN
+        # nats.<ns>.svc.<domain> before it leaves the pod — which the
+        # gateway's DNS allowlist (chart-templated) is keyed on.
+        if namespace and cluster_domain:
+            dns_config["searches"] = [
+                f"{namespace}.svc.{cluster_domain}",
+                f"svc.{cluster_domain}",
+                cluster_domain,
+            ]
+            dns_config["options"] = [{"name": "ndots", "value": "5"}]
+        pod_spec["dnsConfig"] = dns_config
 
     # extra_hosts -> hostAliases. On K8s the metadata blackhole duty is
     # carried by the default-deny NetworkPolicy, but the mapping is kept
@@ -653,6 +669,7 @@ class K8sRuntime:
         core = self._ensure_core()
         from rolemesh.core.config import (
             DATA_DIR,
+            ROLEMESH_K8S_CLUSTER_DOMAIN,
             ROLEMESH_K8S_DATA_PVC,
             ROLEMESH_K8S_IMAGE_PULL_POLICY,
             ROLEMESH_K8S_IMAGE_PULL_SECRET,
@@ -668,6 +685,7 @@ class K8sRuntime:
             image_pull_secret=ROLEMESH_K8S_IMAGE_PULL_SECRET,
             image_pull_policy=ROLEMESH_K8S_IMAGE_PULL_POLICY,
             runtime_class=ROLEMESH_K8S_RUNTIME_CLASS,
+            cluster_domain=ROLEMESH_K8S_CLUSTER_DOMAIN,
         )
 
         await self._delete_and_wait_gone(spec.name, ROLEMESH_K8S_NAMESPACE)

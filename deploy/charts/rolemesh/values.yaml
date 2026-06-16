@@ -22,6 +22,14 @@
 #   pod-security.kubernetes.io/enforce: restricted
 # (kind/RKE2 docs in deploy/kind/README and the RKE2 doc show how.)
 
+# -- Cluster DNS domain ------------------------------------------------------
+# The cluster's DNS domain. Feeds BOTH the agent pod DNS search domains
+# (orchestrator ROLEMESH_K8S_CLUSTER_DOMAIN) and the gateway's internal DNS
+# allowlist FQDNs, so the names agents query equal the names allowlisted.
+# Default fits stock clusters (kind/EKS/GKE/RKE2); override only if your
+# cluster was built with a custom domain.
+clusterDomain: cluster.local
+
 # -- Images ------------------------------------------------------------------
 # tag "" falls back to Chart.appVersion (see _helpers rolemesh.imageTag).
 image:
@@ -94,6 +102,18 @@ egressGateway:
   # so the privileged port 53 is unreachable inside the pod). The Service
   # maps the well-known 53 -> 1053. Do not change without changing both.
   dnsContainerPort: 1053
+  # Recursive DNS upstream for the gateway resolver. REQUIRED on K8s: set
+  # to the cluster's kube-dns ClusterIP so cluster-internal Service names
+  # (nats, the gateway) resolve. The source default (8.8.8.8,1.1.1.1) is
+  # public and cannot see internal names. Discover it with:
+  #   kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}'
+  # Typically the Service CIDR's .10 (kind: 10.96.0.10; EKS: 10.100.0.10).
+  upstreamDns: ""  # REQUIRED — e.g. "10.96.0.10"
+  # Extra DNS allowlist entries appended to the chart-templated internal
+  # Service FQDNs (nats, gateway). Exact names or "*.suffix". Tenant-custom
+  # egress destinations the agent must resolve directly go here; MCP/LLM
+  # upstreams are resolved by the gateway, not the agent, so they do NOT.
+  dnsAllowlistExtra: []
   resources:
     requests:
       cpu: 100m
@@ -101,12 +121,12 @@ egressGateway:
     limits:
       cpu: "1"
       memory: 512Mi
-  # Egress gateway extra env (DNS allowlist/mode, upstream base URLs).
-  # These mirror the compose pass-through set.
+  # Egress gateway extra env (provider base-URL overrides etc.), mirroring
+  # the compose pass-through set. NOTE: EGRESS_UPSTREAM_DNS and
+  # EGRESS_DNS_ALLOWLIST are first-class knobs above (upstreamDns /
+  # dnsAllowlistExtra) — set those, not extraEnv, so the chart keeps them
+  # consistent with the agent search domains.
   extraEnv: {}
-    # EGRESS_UPSTREAM_DNS: "8.8.8.8"
-    # EGRESS_DNS_ALLOWLIST: "api.anthropic.com,api.openai.com"
-    # EGRESS_DNS_MODE: "allowlist"
     # ANTHROPIC_BASE_URL: ""
     # OPENAI_BASE_URL: ""
     # GOOGLE_BASE_URL: ""

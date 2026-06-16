@@ -16,6 +16,12 @@ DO NOT template these names or the agent selector off the release name.
 */ -}}
 {{- $natsSvc := include "rolemesh.natsServiceName" . -}}
 {{- $kubeDnsNs := .Values.networkPolicy.kubeDns.namespace -}}
+{{- /* Single source of truth for the gateway's DNS container port: the
+       same value the Service targetPort and the container env use
+       (egress-gateway.yaml). NetworkPolicy egress matches the POST-DNAT
+       backend container port, NOT the Service port — so this MUST be the
+       container port (1053), not 53. */ -}}
+{{- $gwDnsPort := .Values.egressGateway.dnsContainerPort | int -}}
 ---
 # 1. agent-default-deny: every agent pod, all ingress + egress denied.
 #    Standalone so the "default deny" invariant is independently verifiable.
@@ -52,15 +58,18 @@ spec:
   policyTypes:
     - Egress
   egress:
-    # -> egress gateway: DNS (53 udp+tcp -> Service maps to container 1053),
-    #    credential proxy / healthz (3001), forward proxy (3128).
+    # -> egress gateway: DNS (container port {{ $gwDnsPort }} — the
+    #    Service maps 53 -> {{ $gwDnsPort }}, but NetworkPolicy matches the
+    #    backend container port post-DNAT, so this MUST be {{ $gwDnsPort }}
+    #    not 53; mirrors gateway-policy's ingress below), credential proxy
+    #    / healthz (3001), forward proxy (3128).
     - to:
         - podSelector:
             matchLabels:
               app.kubernetes.io/component: egress-gateway
       ports:
-        - { protocol: UDP, port: 53 }
-        - { protocol: TCP, port: 53 }
+        - { protocol: UDP, port: {{ $gwDnsPort }} }
+        - { protocol: TCP, port: {{ $gwDnsPort }} }
         - { protocol: TCP, port: 3001 }
         - { protocol: TCP, port: 3128 }
     # -> NATS (4222): agent lifecycle + protocol traffic rides NATS.
@@ -97,8 +106,8 @@ spec:
             matchLabels:
               app.kubernetes.io/component: orchestrator
       ports:
-        - { protocol: UDP, port: 1053 }
-        - { protocol: TCP, port: 1053 }
+        - { protocol: UDP, port: {{ $gwDnsPort }} }
+        - { protocol: TCP, port: {{ $gwDnsPort }} }
         - { protocol: TCP, port: 3001 }
         - { protocol: TCP, port: 3128 }
   egress:

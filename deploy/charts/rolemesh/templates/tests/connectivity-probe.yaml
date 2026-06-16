@@ -1,0 +1,126 @@
+{{- /*
+helm test connectivity probe — the POSITIVE counterpart to deny-probe.
+
+deny-probe proves an agent CANNOT reach the public internet. It does not
+exercise the path an agent actually needs to WORK: resolve the short name
+`nats` through the gateway resolver and connect to NATS. That path was a
+false-green for a long time (helm test + "Infrastructure verified" both
+passed while agents could not resolve `nats` at all), because it depends
+on four things lining up that nothing tested together:
+
+  * agent-allow-egress allowing the gateway's DNS CONTAINER port (1053),
+    not the Service port 53 (NetworkPolicy matches the backend port);
+  * the gateway DNS allowlist containing nats's internal FQDN;
+  * the gateway's recursive upstream being kube-dns, not public DNS;
+  * the agent pod carrying cluster DNS search domains so `nats` expands
+    to its FQDN under dnsPolicy: None.
+
+This probe reproduces the REAL agent DNS setup (a helm-test pod defaults
+to dnsPolicy: ClusterFirst and would resolve via kube-dns directly,
+testing none of the above), so it must hard-code the same dnsConfig the
+orchestrator's K8sRuntime stamps on agent pods: dnsPolicy None +
+nameservers=[gateway ClusterIP] + the cluster search domains. Labeled
+role=agent so it is subject to the agent NetworkPolicies.
+
+It resolves the SHORT name `nats` (exercising the search domains) and
+reads the NATS INFO banner (proving it really reached NATS at the
+protocol level, not just opened a TCP port). A failure here fails
+`helm test` with a message pointing at which link broke.
+*/ -}}
+{{- $clusterDomain := .Values.clusterDomain | default "cluster.local" -}}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "rolemesh.fullname" . }}-connectivity-probe
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rolemesh.labels" . | nindent 4 }}
+    # Subjects the probe to the agent NetworkPolicies — must match
+    # AGENT_ROLE_LABEL/VALUE, exactly like a real agent pod.
+    rolemesh.io/role: agent
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  # Mirror K8sRuntime's agent dnsConfig (src/rolemesh/container/
+  # k8s_runtime.py spec_to_pod_manifest): force resolution through the
+  # gateway and supply the cluster search domains short names need.
+  dnsPolicy: None
+  dnsConfig:
+    nameservers:
+      - {{ required "egressGateway.clusterIP is required" .Values.egressGateway.clusterIP | quote }}
+    searches:
+      - {{ printf "%s.svc.%s" .Release.Namespace $clusterDomain | quote }}
+      - {{ printf "svc.%s" $clusterDomain | quote }}
+      - {{ $clusterDomain | quote }}
+    options:
+      - { name: ndots, value: "5" }
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: "{{ .Values.agent.image.repository }}:{{ .Values.agent.image.tag }}"
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        capabilities:
+          drop:
+            - ALL
+        seccompProfile:
+          type: RuntimeDefault
+      command:
+        - python
+        - -c
+        - |
+          import socket, sys
+
+          # 1. Resolve the SHORT name. glibc appends the search domains
+          #    (dnsConfig above) and asks the gateway resolver, which must
+          #    allowlist the FQDN and forward to kube-dns. This is the link
+          #    the old false-green missed.
+          try:
+              infos = socket.getaddrinfo("nats", 4222, type=socket.SOCK_STREAM)
+              addr = infos[0][4]
+          except OSError as exc:
+              print(
+                  "FAIL: could not resolve short name 'nats' via the gateway "
+                  f"resolver ({exc}). Check: agent-allow-egress DNS port == "
+                  "gateway container port (not 53); EGRESS_DNS_ALLOWLIST has "
+                  "the nats FQDN; EGRESS_UPSTREAM_DNS points at kube-dns; "
+                  "agent dnsConfig has search domains.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          print(f"resolved nats -> {addr}")
+
+          # 2. Connect and read the NATS INFO banner — proves we reached
+          #    NATS at the protocol level (agent-allow-egress :4222), not
+          #    just any open port.
+          try:
+              with socket.create_connection(addr, timeout=10) as sock:
+                  sock.settimeout(10)
+                  banner = sock.recv(64)
+          except OSError as exc:
+              print(
+                  f"FAIL: resolved nats but could not connect to {addr} "
+                  f"({exc}). Check agent-allow-egress allows :4222 to NATS.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          if not banner.startswith(b"INFO"):
+              print(
+                  f"FAIL: connected to {addr} but it did not speak NATS "
+                  f"(banner={banner!r}).",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+          print("PASS: agent resolved 'nats' via the gateway and reached NATS.")
+          sys.exit(0)

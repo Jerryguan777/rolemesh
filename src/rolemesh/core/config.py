@@ -141,6 +141,11 @@ ROLEMESH_CONTAINER_RUNTIME: str = os.environ.get("ROLEMESH_CONTAINER_RUNTIME", "
 #   ROLEMESH_K8S_RUNTIME_CLASS    RuntimeClass used when a spec asks for the
 #                                 gVisor OCI runtime (spec.runtime="runsc");
 #                                 empty = the conventional name "gvisor"
+#   ROLEMESH_K8S_CLUSTER_DOMAIN   cluster DNS domain (default "cluster.local").
+#                                 Used to build the agent pod's DNS search
+#                                 domains so short Service names (e.g. "nats")
+#                                 resolve under dnsPolicy: None (see
+#                                 k8s_runtime.spec_to_pod_manifest).
 ROLEMESH_K8S_NAMESPACE: str = os.environ.get("ROLEMESH_K8S_NAMESPACE", "rolemesh")
 ROLEMESH_K8S_DATA_PVC: str = os.environ.get("ROLEMESH_K8S_DATA_PVC", "rolemesh-data")
 ROLEMESH_K8S_IMAGE_PULL_SECRET: str = os.environ.get("ROLEMESH_K8S_IMAGE_PULL_SECRET", "")
@@ -148,6 +153,9 @@ ROLEMESH_K8S_IMAGE_PULL_POLICY: str = os.environ.get(
     "ROLEMESH_K8S_IMAGE_PULL_POLICY", "IfNotPresent"
 )
 ROLEMESH_K8S_RUNTIME_CLASS: str = os.environ.get("ROLEMESH_K8S_RUNTIME_CLASS", "")
+ROLEMESH_K8S_CLUSTER_DOMAIN: str = os.environ.get(
+    "ROLEMESH_K8S_CLUSTER_DOMAIN", "cluster.local"
+)
 
 # OCI runtime selection (R1). "runc" is the default; "runsc" enables gVisor
 # syscall-level sandboxing and requires runsc to be registered in

@@ -45,6 +45,9 @@ egressGateway:
   # Inside kind's default Service CIDR (10.96.0.0/12). kube-dns is .10;
   # .53 is free and mnemonic (DNS port). MUST match EGRESS_GATEWAY_DNS_IP.
   clusterIP: "10.96.0.53"
+  # kind's kube-dns ClusterIP — the gateway's recursive upstream, so
+  # agents can resolve nats / the gateway (and external names) through it.
+  upstreamDns: "10.96.0.10"
   resources:
     requests:
       cpu: 50m

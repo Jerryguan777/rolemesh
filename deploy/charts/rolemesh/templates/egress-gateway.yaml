@@ -15,6 +15,17 @@ policies reference it as a peer).
 */ -}}
 {{- $tag := default .Chart.AppVersion .Values.egressGateway.image.tag -}}
 {{- $dnsPort := .Values.egressGateway.dnsContainerPort | int -}}
+{{- /* Cluster DNS domain shared with the orchestrator's
+       ROLEMESH_K8S_CLUSTER_DOMAIN (agent search domains), so the FQDNs
+       agents query equal the ones allowlisted here. */ -}}
+{{- $clusterDomain := .Values.clusterDomain | default "cluster.local" -}}
+{{- /* Internal Service FQDNs an agent legitimately resolves: NATS (it
+       dials nats://nats:4222) and the gateway itself (HTTP(S)_PROXY /
+       MCP proxy host). Agents resolve short names that glibc expands to
+       these FQDNs via the search domains; the resolver's allowlist is
+       keyed on the FQDN. Merged with any operator-supplied extras. */ -}}
+{{- $internalDns := list (printf "%s.%s.svc.%s" (include "rolemesh.natsServiceName" .) .Release.Namespace $clusterDomain) (printf "egress-gateway.%s.svc.%s" .Release.Namespace $clusterDomain) -}}
+{{- $dnsAllow := concat $internalDns (.Values.egressGateway.dnsAllowlistExtra | default list) -}}
 apiVersion: v1
 kind: Service
 metadata:
@@ -109,6 +120,19 @@ spec:
             # set here for the K8s binding to be correct.
             - name: EGRESS_GATEWAY_DNS_PORT
               value: {{ $dnsPort | quote }}
+            # Recursive DNS upstream. On K8s this MUST be the cluster's
+            # kube-dns ClusterIP — the source default (8.8.8.8,1.1.1.1) is
+            # public and cannot resolve cluster-internal Service names, so
+            # agent -> nats resolution would NXDOMAIN. Required (no safe
+            # universal default; kube-dns IP is per-cluster, see values).
+            - name: EGRESS_UPSTREAM_DNS
+              value: {{ required "egressGateway.upstreamDns is REQUIRED on K8s — set it to your cluster's kube-dns ClusterIP (kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}'). See values.yaml." .Values.egressGateway.upstreamDns | quote }}
+            # Platform DNS allowlist: the internal Service FQDNs agents
+            # resolve, chart-templated so operators never hand-copy them.
+            # Without this the resolver default-denies (empty allowlist +
+            # enforce mode) and every agent lookup NXDOMAINs.
+            - name: EGRESS_DNS_ALLOWLIST
+              value: {{ join "," $dnsAllow | quote }}
             - name: EGRESS_TOKEN_SECRET
               valueFrom:
                 secretKeyRef:
