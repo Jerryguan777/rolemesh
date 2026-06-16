@@ -242,6 +242,15 @@ services:
       CREDENTIAL_VAULT_KEY:
       AUTH_MODE:
       ROLEMESH_TOKEN_SECRET:
+      # OIDC discovery + client creds. The orchestrator needs these (not
+      # just webui): create_vault_from_env() returns None without a
+      # discovery URL + client_id, so under AUTH_MODE=oidc the orchestrator
+      # would never subscribe the egress.token.access.request responder and
+      # the gateway's RemoteTokenVault RPC would get "no responders" — every
+      # user-mode MCP request then forwards an empty Authorization header.
+      OIDC_DISCOVERY_URL:
+      OIDC_CLIENT_ID:
+      OIDC_CLIENT_SECRET:
       ROLEMESH_ENV:
       BOOTSTRAP_USERS:
       WEBUI_BASE_URL:
