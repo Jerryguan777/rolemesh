@@ -324,6 +324,132 @@ async def test_forward_mode_audit_does_not_redact() -> None:
     assert "***" not in payload["context_summary"]
 
 
+async def test_platform_allow_short_circuits_to_allow() -> None:
+    """A known provider host is allowed by the platform layer without any
+    tenant rule — BYOK works without a hand-configured egress allowlist."""
+    nc = _FakeNats(published=[])
+    cache = PolicyCache()
+    await cache.seed([])  # tenant has zero egress rules
+    caller = EgressSafetyCaller(
+        cache=cache,
+        checks={},
+        audit_publisher=AuditPublisher(nats_client=nc),  # type: ignore[arg-type]
+        platform_allow=lambda host, port: host == "api.anthropic.com" and port == 443,
+    )
+    decision = await caller.decide(
+        identity=_identity(),
+        request=EgressRequest(host="api.anthropic.com", port=443, mode="reverse"),
+    )
+    assert decision.action == "allow"
+    assert decision.reason == "Platform-managed provider allowlist"
+    assert decision.findings[0]["code"] == "EGRESS.PLATFORM_PROVIDER_ALLOWED"
+
+
+async def test_platform_allow_works_during_degraded_startup() -> None:
+    """Provider egress must not depend on the tenant rule snapshot: a known
+    host is allowed even before the cache is seeded (degraded startup)."""
+    nc = _FakeNats(published=[])
+    caller = EgressSafetyCaller(
+        cache=PolicyCache(),  # never seeded
+        checks={},
+        audit_publisher=AuditPublisher(nats_client=nc),  # type: ignore[arg-type]
+        platform_allow=lambda host, port: True,
+    )
+    decision = await caller.decide(
+        identity=_identity(),
+        request=EgressRequest(host="api.openai.com", port=443, mode="reverse"),
+    )
+    assert decision.action == "allow"
+    assert decision.reason == "Platform-managed provider allowlist"
+
+
+async def test_platform_allow_miss_falls_through_to_tenant_rules() -> None:
+    """A non-provider host (e.g. an MCP server) is NOT short-circuited; it
+    falls through to the tenant allowlist, which default-denies when empty."""
+    nc = _FakeNats(published=[])
+    cache = PolicyCache()
+    await cache.seed([])
+    caller = EgressSafetyCaller(
+        cache=cache,
+        checks={},
+        audit_publisher=AuditPublisher(nats_client=nc),  # type: ignore[arg-type]
+        platform_allow=lambda host, port: host == "api.anthropic.com" and port == 443,
+    )
+    decision = await caller.decide(
+        identity=_identity(),
+        request=EgressRequest(host="mcp.example.com", port=443, mode="reverse"),
+    )
+    assert decision.action == "block"
+    assert "No egress allowlist rule matched" in decision.reason
+
+
+async def test_platform_allow_decision_is_audited() -> None:
+    """Platform-allowed egress still writes an audit row (allow verdict)."""
+    nc = _FakeNats(published=[])
+    cache = PolicyCache()
+    await cache.seed([])
+    caller = EgressSafetyCaller(
+        cache=cache,
+        checks={},
+        audit_publisher=AuditPublisher(nats_client=nc),  # type: ignore[arg-type]
+        platform_allow=lambda host, port: True,
+    )
+    await caller.decide(
+        identity=_identity(),
+        request=EgressRequest(host="api.anthropic.com", port=443, mode="reverse"),
+    )
+    for _ in range(50):
+        await asyncio.sleep(0.02)
+        if nc.published:
+            break
+    assert nc.published, "platform-allow decision was not audited"
+    _, payload = nc.published[-1]
+    assert payload["verdict_action"] == "allow"
+
+
+async def test_platform_allow_does_not_apply_to_forward_proxy() -> None:
+    """Platform-allow is scoped to the reverse (credential) proxy. On the
+    forward proxy the host is the agent's CONNECT target — agent-controlled
+    — so a known provider host must still go through the tenant allowlist
+    and default-deny, NOT be short-circuited."""
+    nc = _FakeNats(published=[])
+    cache = PolicyCache()
+    await cache.seed([])  # tenant has zero egress rules
+    caller = EgressSafetyCaller(
+        cache=cache,
+        checks={},
+        audit_publisher=AuditPublisher(nats_client=nc),  # type: ignore[arg-type]
+        platform_allow=lambda host, port: True,  # would allow everything
+    )
+    decision = await caller.decide(
+        identity=_identity(),
+        request=EgressRequest(
+            host="api.anthropic.com", port=443, mode="forward", method="CONNECT"
+        ),
+    )
+    assert decision.action == "block"
+    assert "No egress allowlist rule matched" in decision.reason
+
+
+async def test_platform_allow_does_not_apply_to_dns() -> None:
+    """Same scope guarantee for the DNS resolver path: the queried name is
+    agent-controlled, so platform-allow must not short-circuit it."""
+    nc = _FakeNats(published=[])
+    cache = PolicyCache()
+    await cache.seed([])
+    caller = EgressSafetyCaller(
+        cache=cache,
+        checks={},
+        audit_publisher=AuditPublisher(nats_client=nc),  # type: ignore[arg-type]
+        platform_allow=lambda host, port: True,
+    )
+    decision = await caller.decide(
+        identity=_identity(),
+        request=EgressRequest(host="api.anthropic.com", port=443, mode="dns", qtype="A"),
+    )
+    assert decision.action == "block"
+
+
 async def test_unknown_check_id_is_skipped() -> None:
     """A rule referencing a check_id we don't have is a config error —
     skip it rather than treating it as a hit (which would silently

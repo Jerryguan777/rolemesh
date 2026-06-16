@@ -31,6 +31,7 @@ hidden code path where credentials come from somewhere else.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 from urllib.parse import urlparse
@@ -191,6 +192,73 @@ def _bedrock_upstream(cred: dict[str, Any]) -> str:
         region = str(extras.get("region") or "")
     region = region or BEDROCK_DEFAULT_REGION
     return f"https://bedrock-runtime.{region}.amazonaws.com"
+
+
+# ---------------------------------------------------------------------------
+# Platform-managed provider allowlist
+# ---------------------------------------------------------------------------
+#
+# Known LLM-provider upstreams the platform always allows egress to, so a
+# tenant's BYOK credential works without anyone hand-configuring an
+# ``egress.domain_rule``. The gateway consumes ``is_known_provider_host``
+# as its platform-allow layer (see ``EgressSafetyCaller.decide``); the
+# per-tenant ``safety_rules`` allowlist is left for everything else (MCP,
+# tenant-custom egress).
+#
+# Hosts are derived from the SAME routing source the reverse proxy dials —
+# ``_provider_upstream`` / ``_anthropic_upstream`` — so deployment
+# ``*_BASE_URL`` overrides are honoured automatically and the allow set
+# never drifts from where requests actually go. Bedrock is region-templated
+# (the region travels with the tenant credential), so it is matched by
+# shape rather than enumerated.
+
+# bedrock-runtime.<region>.amazonaws.com — region segment is a non-empty
+# AWS-region token. Anchored so it cannot be a suffix of an attacker host.
+_BEDROCK_HOST_RE = re.compile(r"^bedrock-runtime\.[a-z0-9-]+\.amazonaws\.com$")
+
+
+def _upstream_host_port(upstream: str) -> tuple[str, int] | None:
+    """Parse ``(host, port)`` from an upstream URL using the same default
+    port rule the proxy applies when it dials (443 for https, 80 for http)."""
+    up = urlparse(upstream)
+    host = up.hostname
+    if not host:
+        return None
+    port = up.port or (443 if up.scheme == "https" else 80)
+    return host.lower(), port
+
+
+def known_provider_endpoints() -> set[tuple[str, int]]:
+    """Static provider ``(host, port)`` endpoints the platform allows.
+
+    Recomputed from the routing helpers (and thus the live ``*_BASE_URL``
+    env overrides) rather than cached, keeping it correct without a
+    process restart. Bedrock is excluded here and handled by shape in
+    :func:`is_known_provider_host`.
+    """
+    out: set[tuple[str, int]] = set()
+    for upstream in (
+        _anthropic_upstream(),
+        *(_provider_upstream(t) for t in _PROVIDER_TEMPLATES.values()),
+    ):
+        hp = _upstream_host_port(upstream)
+        if hp is not None:
+            out.add(hp)
+    return out
+
+
+def is_known_provider_host(host: str, port: int) -> bool:
+    """True when ``host:port`` is a platform-vetted LLM provider endpoint.
+
+    Used by the egress gateway as a platform-managed allow layer so BYOK
+    LLM calls work out of the box. Bedrock matches by region-templated
+    shape on the standard HTTPS port; everything else must match a
+    derived ``(host, port)`` endpoint exactly.
+    """
+    h = host.lower().rstrip(".")
+    if (h, port) in known_provider_endpoints():
+        return True
+    return port == 443 and bool(_BEDROCK_HOST_RE.match(h))
 
 
 # ---------------------------------------------------------------------------
