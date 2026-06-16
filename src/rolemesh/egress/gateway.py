@@ -76,7 +76,12 @@ from .policy_cache import (
 )
 from .remote_credentials import RemoteCredentialResolver
 from .remote_token_vault import RemoteTokenVault
-from .reverse_proxy import set_token_vault, start_credential_proxy
+from .reverse_proxy import (
+    is_known_provider_host,
+    known_provider_endpoints,
+    set_token_vault,
+    start_credential_proxy,
+)
 from .safety_call import AuditPublisher, EgressSafetyCaller
 from .token_identity import TokenAuthority
 
@@ -245,10 +250,20 @@ async def main() -> None:
                 "(expected until EC-3 lands) — all requests will be blocked"
             )
 
+        # Platform-managed provider allow layer: known LLM-provider hosts
+        # are always permitted egress so a tenant's BYOK credential works
+        # without hand-configuring an egress allowlist. Per-tenant rules in
+        # the policy cache still govern MCP and any custom egress.
         safety = EgressSafetyCaller(
             cache=cache,
             checks=check_map,
             audit_publisher=audit,
+            platform_allow=is_known_provider_host,
+        )
+        logger.info(
+            "gateway: platform provider allowlist active",
+            endpoints=sorted(f"{h}:{p}" for h, p in known_provider_endpoints()),
+            bedrock="bedrock-runtime.<region>.amazonaws.com:443",
         )
 
         # --- MCP server registry: snapshot + hot reload --------------

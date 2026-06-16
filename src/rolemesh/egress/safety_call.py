@@ -40,6 +40,8 @@ from typing import TYPE_CHECKING, Any, Literal
 from rolemesh.core.logger import get_logger
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import nats.aio.client
 
     from .policy_cache import PolicyCache
@@ -105,10 +107,16 @@ class EgressSafetyCaller:
         cache: PolicyCache,
         checks: dict[str, CheckFunc],
         audit_publisher: AuditPublisher,
+        platform_allow: Callable[[str, int], bool] | None = None,
     ) -> None:
         self._cache = cache
         self._checks = checks
         self._audit = audit_publisher
+        # Platform-managed allow layer: a host/port predicate that short-
+        # circuits to ALLOW for known LLM-provider endpoints, so BYOK works
+        # without a per-tenant egress allowlist. ``None`` disables it (the
+        # gateway always wires it; unit tests opt in).
+        self._platform_allow = platform_allow
         self._audit_tasks: set[asyncio.Task[None]] = set()
 
     async def decide(
@@ -133,6 +141,33 @@ class EgressSafetyCaller:
             # writing to a "system" tenant) matches the multi-tenant
             # isolation guarantee in subscriber.py: every row must
             # come from an authenticated coworker.
+            return decision
+
+        # Platform-managed provider allow. Deliberately ahead of the
+        # ``seeded`` gate: known LLM-provider egress is a platform-level
+        # fact that does not depend on the tenant rule snapshot, so BYOK
+        # keeps working during the degraded-startup window. MCP and any
+        # tenant-custom egress still fall through to the tenant allowlist
+        # below.
+        if self._platform_allow is not None and self._platform_allow(
+            request.host, request.port
+        ):
+            decision = EgressDecision(
+                action="allow",
+                reason="Platform-managed provider allowlist",
+                findings=[
+                    {
+                        "code": "EGRESS.PLATFORM_PROVIDER_ALLOWED",
+                        "severity": "info",
+                        "message": (
+                            f"platform-managed provider host "
+                            f"{request.host}:{request.port}"
+                        ),
+                        "metadata": {"host": request.host, "port": request.port},
+                    }
+                ],
+            )
+            self._publish_audit(identity=identity, request=request, decision=decision)
             return decision
 
         if not self._cache.seeded:
