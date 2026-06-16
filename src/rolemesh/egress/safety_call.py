@@ -143,14 +143,21 @@ class EgressSafetyCaller:
             # come from an authenticated coworker.
             return decision
 
-        # Platform-managed provider allow. Deliberately ahead of the
-        # ``seeded`` gate: known LLM-provider egress is a platform-level
-        # fact that does not depend on the tenant rule snapshot, so BYOK
-        # keeps working during the degraded-startup window. MCP and any
-        # tenant-custom egress still fall through to the tenant allowlist
-        # below.
-        if self._platform_allow is not None and self._platform_allow(
-            request.host, request.port
+        # Platform-managed provider allow — scoped to the reverse
+        # (credential) proxy ONLY. That path's host is server-derived from
+        # the matched provider template, so allowing known LLM endpoints
+        # there lets BYOK work without a per-tenant rule. The forward proxy
+        # and DNS resolver carry an agent-CONTROLLED host (the CONNECT
+        # target / queried name), so they must NOT be short-circuited —
+        # they fall through to the tenant allowlist + default-deny below,
+        # preserving that guarantee for these hosts on the agent-controlled
+        # paths. Deliberately ahead of the ``seeded`` gate: known-provider
+        # egress is a platform fact independent of the tenant snapshot, so
+        # BYOK keeps working during the degraded-startup window.
+        if (
+            request.mode == "reverse"
+            and self._platform_allow is not None
+            and self._platform_allow(request.host, request.port)
         ):
             decision = EgressDecision(
                 action="allow",

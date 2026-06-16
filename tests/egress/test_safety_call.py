@@ -407,6 +407,49 @@ async def test_platform_allow_decision_is_audited() -> None:
     assert payload["verdict_action"] == "allow"
 
 
+async def test_platform_allow_does_not_apply_to_forward_proxy() -> None:
+    """Platform-allow is scoped to the reverse (credential) proxy. On the
+    forward proxy the host is the agent's CONNECT target — agent-controlled
+    — so a known provider host must still go through the tenant allowlist
+    and default-deny, NOT be short-circuited."""
+    nc = _FakeNats(published=[])
+    cache = PolicyCache()
+    await cache.seed([])  # tenant has zero egress rules
+    caller = EgressSafetyCaller(
+        cache=cache,
+        checks={},
+        audit_publisher=AuditPublisher(nats_client=nc),  # type: ignore[arg-type]
+        platform_allow=lambda host, port: True,  # would allow everything
+    )
+    decision = await caller.decide(
+        identity=_identity(),
+        request=EgressRequest(
+            host="api.anthropic.com", port=443, mode="forward", method="CONNECT"
+        ),
+    )
+    assert decision.action == "block"
+    assert "No egress allowlist rule matched" in decision.reason
+
+
+async def test_platform_allow_does_not_apply_to_dns() -> None:
+    """Same scope guarantee for the DNS resolver path: the queried name is
+    agent-controlled, so platform-allow must not short-circuit it."""
+    nc = _FakeNats(published=[])
+    cache = PolicyCache()
+    await cache.seed([])
+    caller = EgressSafetyCaller(
+        cache=cache,
+        checks={},
+        audit_publisher=AuditPublisher(nats_client=nc),  # type: ignore[arg-type]
+        platform_allow=lambda host, port: True,
+    )
+    decision = await caller.decide(
+        identity=_identity(),
+        request=EgressRequest(host="api.anthropic.com", port=443, mode="dns", qtype="A"),
+    )
+    assert decision.action == "block"
+
+
 async def test_unknown_check_id_is_skipped() -> None:
     """A rule referencing a check_id we don't have is a config error —
     skip it rather than treating it as a hit (which would silently
