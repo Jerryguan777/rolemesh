@@ -29,9 +29,15 @@ from rolemesh.db import (
     upsert_tenant_credential,
 )
 from webui.dependencies import require_action
-from webui.schemas_v1 import CredentialResponse, CredentialUpsert, ModelProvider
+from webui.schemas_v1 import (
+    CredentialResponse,
+    CredentialUpsert,
+    CredentialValidationResult,
+    ModelProvider,
+)
 from webui.v1 import coworker_events
 from webui.v1._log_sanitize import sanitize_for_log
+from webui.v1.credential_probe import probe_credential
 from webui.v1.errors import raise_error_response
 
 if TYPE_CHECKING:
@@ -131,6 +137,38 @@ async def put_credential_endpoint(
     )
 
     return _credential_to_response(row)
+
+
+@router.post("/{provider}/validate", response_model=CredentialValidationResult)
+async def validate_credential_endpoint(
+    provider: ModelProvider,
+    body: CredentialUpsert,
+    user: AuthenticatedUser = Depends(require_action("credential.byok.manage")),
+) -> CredentialValidationResult:
+    """Test a candidate credential against the provider before saving.
+
+    The SPA calls this with the same body it would ``PUT`` so the operator
+    learns a key is bad *before* it is stored and a coworker fails closed
+    at runtime. A rejected key is a successful test (HTTP 200 with
+    ``ok=false``), not a transport error — the only 4xx here is auth on
+    the endpoint itself. The plaintext is run through the probe and then
+    dropped; it is never persisted by this call and never echoed back.
+    """
+    logger.info(
+        "POST credential validate",
+        tenant_id=user.tenant_id,
+        provider=provider,
+        body=sanitize_for_log(body.model_dump()),
+    )
+
+    cred: dict[str, object] = {"api_key": body.api_key, "extras": body.extras or {}}
+    result = await probe_credential(provider, cred)
+    return CredentialValidationResult(
+        ok=result.ok,
+        level=result.level,  # type: ignore[arg-type]
+        provider=provider,
+        detail=result.detail,
+    )
 
 
 @router.put("/{provider}/pool", response_model=CredentialResponse)

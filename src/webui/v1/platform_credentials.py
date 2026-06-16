@@ -32,10 +32,12 @@ from rolemesh.db import (
 from webui.dependencies import require_action
 from webui.schemas_v1 import (
     CredentialUpsert,
+    CredentialValidationResult,
     ModelProvider,
     PlatformCredentialResponse,
 )
 from webui.v1._log_sanitize import sanitize_for_log
+from webui.v1.credential_probe import probe_credential
 from webui.v1.errors import raise_error_response
 
 if TYPE_CHECKING:
@@ -89,6 +91,33 @@ async def put_platform_credential_endpoint(
     blob = vault.encrypt_json(payload)
     row = await upsert_platform_credential(provider=provider, credential_data=blob)
     return _to_response(row)
+
+
+@router.post("/{provider}/validate", response_model=CredentialValidationResult)
+async def validate_platform_credential_endpoint(
+    provider: ModelProvider,
+    body: CredentialUpsert,
+    user: AuthenticatedUser = Depends(require_action("credential.pool.manage")),
+) -> CredentialValidationResult:
+    """Test a candidate pool key against the provider before saving.
+
+    Same posture as the tenant ``validate`` path: a rejected key is a
+    successful test (200 with ``ok=false``), the plaintext is probed and
+    dropped, never persisted by this call nor echoed back.
+    """
+    logger.info(
+        "POST platform credential validate",
+        provider=provider,
+        body=sanitize_for_log(body.model_dump()),
+    )
+    cred: dict[str, object] = {"api_key": body.api_key, "extras": body.extras or {}}
+    result = await probe_credential(provider, cred)
+    return CredentialValidationResult(
+        ok=result.ok,
+        level=result.level,  # type: ignore[arg-type]
+        provider=provider,
+        detail=result.detail,
+    )
 
 
 @router.delete("/{provider}", status_code=204)

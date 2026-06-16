@@ -27,17 +27,49 @@ interface PutCall {
   body: { api_key: string; extras: Record<string, unknown> | null };
 }
 
+interface ValidateCall {
+  url: string;
+  body: { api_key: string; extras: Record<string, unknown> | null };
+}
+
 interface Stub {
   restore: () => void;
   calls: PutCall[];
+  validateCalls: ValidateCall[];
   shouldFail: { status: number; message: string } | null;
+  /** Body the faked /validate endpoint returns. Defaults to a verified
+   *  pass; tests override it to simulate a rejected key. */
+  validateResult: { ok: boolean; level: string; provider: string; detail: string } | null;
 }
 
 function installFetch(): Stub {
   const original = globalThis.fetch;
-  const stub: Stub = { restore: () => {}, calls: [], shouldFail: null };
+  const stub: Stub = {
+    restore: () => {},
+    calls: [],
+    validateCalls: [],
+    shouldFail: null,
+    validateResult: null,
+  };
   globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
+    const v = /\/api\/v1\/credentials\/(\w+)\/validate$/.exec(url);
+    if (v && init?.method === 'POST') {
+      const body = JSON.parse(init.body as string);
+      stub.validateCalls.push({ url, body });
+      const result = stub.validateResult ?? {
+        ok: true,
+        level: 'verified',
+        provider: v[1],
+        detail: 'Credential accepted by the provider.',
+      };
+      return Promise.resolve(
+        new Response(JSON.stringify(result), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+    }
     const m = /\/api\/v1\/credentials\/(\w+)$/.exec(url);
     if (m && init?.method === 'PUT') {
       const body = JSON.parse(init.body as string);
@@ -240,6 +272,56 @@ describe('<rm-credential-dialog>', () => {
     el.open = true;
     await settle(el);
     expect(el.querySelector<HTMLInputElement>('input')!.value).toBe('');
+  });
+
+  it('Test connection posts to /validate and renders a verified pass', async () => {
+    const el = mount();
+    el.provider = 'anthropic';
+    el.open = true;
+    await settle(el);
+    const key = el.querySelector<HTMLInputElement>('input')!;
+    key.value = 'sk-fake';
+    key.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle(el);
+    const testBtn = [...el.querySelectorAll<HTMLButtonElement>('button')].find(
+      (b) => b.textContent?.includes('Test'),
+    )!;
+    testBtn.click();
+    await settle(el);
+    // Hit the validate route with the same body shape as save, and no PUT.
+    expect(stub!.validateCalls).toHaveLength(1);
+    expect(stub!.validateCalls[0]!.body).toEqual({ api_key: 'sk-fake', extras: null });
+    expect(stub!.calls).toHaveLength(0);
+    expect(el.textContent).toContain('Credential accepted by the provider.');
+  });
+
+  it('Test connection surfaces a rejected key without saving', async () => {
+    stub!.validateResult = {
+      ok: false,
+      level: 'verified',
+      provider: 'anthropic',
+      detail: 'Provider rejected the API key (401 Unauthorized).',
+    };
+    const el = mount();
+    el.provider = 'anthropic';
+    el.open = true;
+    await settle(el);
+    const key = el.querySelector<HTMLInputElement>('input')!;
+    key.value = 'bad';
+    key.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle(el);
+    const testBtn = [...el.querySelectorAll<HTMLButtonElement>('button')].find(
+      (b) => b.textContent?.includes('Test'),
+    )!;
+    testBtn.click();
+    await settle(el);
+    expect(el.textContent).toContain('401 Unauthorized');
+    expect(stub!.calls).toHaveLength(0); // never persisted
+    // Editing the key clears the stale verdict.
+    key.value = 'better';
+    key.dispatchEvent(new Event('input', { bubbles: true }));
+    await settle(el);
+    expect(el.textContent).not.toContain('401 Unauthorized');
   });
 
   it('surfaces server error inline and keeps the form open', async () => {

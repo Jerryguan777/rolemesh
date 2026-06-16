@@ -685,6 +685,44 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /api/v1/credentials/{provider}/validate:
+    parameters:
+      - in: path
+        name: provider
+        required: true
+        schema: { $ref: '#/components/schemas/ModelProvider' }
+    post:
+      tags: [Credentials]
+      operationId: validateTenantCredential
+      summary: Test a candidate credential against the provider
+      description: |
+        Probes a credential with the same body shape as `PUT` so the
+        operator learns a key is bad *before* it is stored and a coworker
+        fails closed at runtime. Runs control-plane-side and dials the
+        same upstream + auth header the egress reverse proxy injects, so a
+        `verified` pass means the agent path resolves to a working key.
+
+        A rejected key is a successful test: `200` with `ok=false`, not a
+        4xx. The plaintext is probed and dropped — never persisted by this
+        call, never echoed back. Bedrock reports `reachable` (region +
+        endpoint checked; the key itself is not exercised).
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CredentialUpsert' }
+      responses:
+        '200':
+          description: Validation result (a bad key is `ok=false`, still 200).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CredentialValidationResult' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+
   /api/v1/platform/credentials:
     get:
       tags: [Platform]
@@ -764,6 +802,40 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+
+  /api/v1/platform/credentials/{provider}/validate:
+    parameters:
+      - in: path
+        name: provider
+        required: true
+        schema: { $ref: '#/components/schemas/ModelProvider' }
+    post:
+      tags: [Platform]
+      operationId: validatePlatformCredential
+      summary: Test a candidate platform pool key against the provider
+      description: |
+        Platform-plane only (`credential.pool.manage`). Same posture as
+        the tenant `validate` path: a rejected key is `200` with
+        `ok=false`, the plaintext is probed and dropped, never persisted
+        by this call nor echoed back.
+      security: [ { bearerAuth: [] } ]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CredentialUpsert' }
+      responses:
+        '200':
+          description: Validation result (a bad key is `ok=false`, still 200).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CredentialValidationResult' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
 
   /api/v1/platform/tenants:
     get:
@@ -3096,6 +3168,33 @@ components:
           nullable: true
           description: |
             Provider-specific extras (e.g. `api_base`, `region`).
+
+    CredentialValidationResult:
+      type: object
+      required: [ok, level, provider, detail]
+      description: |
+        Result of `POST .../validate`. A test result, not an error
+        envelope — a bad key is `ok=false` with HTTP 200. Never carries
+        the plaintext key.
+      properties:
+        ok:
+          type: boolean
+          description: |
+            Whether the credential is usable. For `level=verified` this is
+            authoritative (the provider accepted/rejected the key). For
+            `level=reachable` it means the endpoint answered and the
+            config is well-formed; the key itself was not exercised.
+        level:
+          type: string
+          enum: [verified, reachable, unsupported]
+          description: |
+            Depth of the probe: `verified` (live authenticated read),
+            `reachable` (endpoint reached, key not exercised — Bedrock),
+            or `unsupported` (no probe wired for this provider).
+        provider: { $ref: '#/components/schemas/ModelProvider' }
+        detail:
+          type: string
+          description: Human-readable outcome for inline display. No secrets.
             Schema intentionally open — the credential proxy reads
             whatever shape the provider needs.
 

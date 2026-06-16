@@ -30,7 +30,11 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import './dialog.js';
 import { ApiError, getApiClient } from '../api/client.js';
-import type { CredentialUpsert, ModelProvider } from '../api/client.js';
+import type {
+  CredentialUpsert,
+  CredentialValidationResult,
+  ModelProvider,
+} from '../api/client.js';
 
 /** Per-provider field shape. The `extras_keys` list pins which keys
  *  flow into `extras: {...}`. `optional_extras_keys` are not validated
@@ -131,6 +135,12 @@ export class CredentialDialog extends LitElement {
   @state() private extras: Record<string, string> = {};
   @state() private busy = false;
   @state() private err: string | null = null;
+  /** Live "Test connection" state. `testing` disables the form while a
+   *  probe is in flight; `testResult` carries the last verdict for inline
+   *  display. Cleared whenever a field changes so a stale green tick can
+   *  never imply a key the user has since edited is still valid. */
+  @state() private testing = false;
+  @state() private testResult: CredentialValidationResult | null = null;
   /** When `provider` prop is null, the user picks one here. */
   @state() private pickedProvider: ModelProvider = 'anthropic';
 
@@ -146,11 +156,23 @@ export class CredentialDialog extends LitElement {
       this.apiKey = '';
       this.err = null;
       this.busy = false;
+      this.testing = false;
+      this.testResult = null;
       this.extras = this.buildDefaultExtras(this.currentProvider());
     }
     if (changed.has('provider') && this.provider) {
       this.pickedProvider = this.provider;
       this.extras = this.buildDefaultExtras(this.provider);
+    }
+    // A prior verdict must not outlive the inputs it was about: editing
+    // the key/region/provider invalidates the last test.
+    if (
+      this.testResult !== null &&
+      (changed.has('apiKey') ||
+        changed.has('extras') ||
+        changed.has('pickedProvider'))
+    ) {
+      this.testResult = null;
     }
   }
 
@@ -167,23 +189,26 @@ export class CredentialDialog extends LitElement {
     return out;
   }
 
-  private async save(): Promise<void> {
+  /** Validate the form and assemble the `CredentialUpsert` body shared by
+   *  Save and Test. Returns null (and sets `this.err`) on a client-side
+   *  validation miss so callers can bail without duplicating the checks. */
+  private buildBody(): CredentialUpsert | null {
     const provider = this.currentProvider();
     const schema = schemaFor(provider);
     if (this.apiKey.trim() === '') {
       this.err = `${schema.apiKey.label} is required.`;
-      return;
+      return null;
     }
     // Required extras must be non-empty.
     for (const e of schema.requiredExtras) {
       const v = (this.extras[e.key] ?? '').trim();
       if (v === '') {
         this.err = `${e.label} is required.`;
-        return;
+        return null;
       }
     }
-    // Build the body. Strip optional keys whose values are empty so
-    // we do not POST `extras: { aws_session_token: '' }`.
+    // Strip optional keys whose values are empty so we do not POST
+    // `extras: { aws_session_token: '' }`.
     const extras: Record<string, string> = {};
     for (const e of schema.requiredExtras) {
       extras[e.key] = (this.extras[e.key] ?? '').trim();
@@ -192,10 +217,38 @@ export class CredentialDialog extends LitElement {
       const v = (this.extras[e.key] ?? '').trim();
       if (v !== '') extras[e.key] = v;
     }
-    const body: CredentialUpsert = {
+    return {
       api_key: this.apiKey.trim(),
       extras: Object.keys(extras).length ? extras : null,
     };
+  }
+
+  /** Probe the credential against the provider without saving. A bad key
+   *  comes back as a 200 with `ok=false`, so we render the verdict from
+   *  the result rather than the catch (which is for transport faults). */
+  private async validate(): Promise<void> {
+    this.err = null;
+    this.testResult = null;
+    const body = this.buildBody();
+    if (body === null) return;
+    const provider = this.currentProvider();
+    this.testing = true;
+    try {
+      this.testResult = await this.api.validateCredential(provider, body);
+    } catch (err) {
+      this.err =
+        err instanceof ApiError
+          ? err.body?.message ?? `${err.status}`
+          : (err as Error).message;
+    } finally {
+      this.testing = false;
+    }
+  }
+
+  private async save(): Promise<void> {
+    const provider = this.currentProvider();
+    const body = this.buildBody();
+    if (body === null) return;
 
     this.busy = true;
     this.err = null;
@@ -311,6 +364,8 @@ export class CredentialDialog extends LitElement {
             >${this.err}</div>`
           : nothing}
 
+        ${this.renderTestResult()}
+
         <div slot="footer" style="display: flex; gap: 8px; justify-content: flex-end;">
           <button
             type="button"
@@ -320,13 +375,37 @@ export class CredentialDialog extends LitElement {
           >Cancel</button>
           <button
             type="button"
+            class="rm-btn rm-btn--secondary"
+            ?disabled=${this.busy || this.testing}
+            @click=${() => void this.validate()}
+          >${this.testing ? 'Testing…' : 'Test connection'}</button>
+          <button
+            type="button"
             class="rm-btn rm-btn--primary"
-            ?disabled=${this.busy}
+            ?disabled=${this.busy || this.testing}
             @click=${() => void this.save()}
           >${this.busy ? 'Saving…' : 'Save credential'}</button>
         </div>
       </rm-dialog>
     `;
+  }
+
+  /** Inline verdict from the last "Test connection". Green when the key
+   *  is usable, amber when the endpoint is only reachable (Bedrock — key
+   *  not exercised), red when rejected/unreachable. */
+  private renderTestResult() {
+    const r = this.testResult;
+    if (r === null) return nothing;
+    const tone = r.ok
+      ? r.level === 'reachable'
+        ? 'text-amber-600 dark:text-amber-300'
+        : 'text-green-600 dark:text-green-300'
+      : 'text-red-600 dark:text-red-300';
+    const icon = r.ok ? (r.level === 'reachable' ? '⚠' : '✓') : '✕';
+    return html`<div
+      class="text-[12.5px] ${tone} mt-2"
+      role="status"
+    >${icon} ${r.detail}</div>`;
   }
 
   private renderProviderPicker() {

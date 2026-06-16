@@ -46,6 +46,8 @@ export type Model = components['schemas']['Model'];
 export type ModelProvider = components['schemas']['ModelProvider'];
 export type CredentialResponse = components['schemas']['CredentialResponse'];
 export type CredentialUpsert = components['schemas']['CredentialUpsert'];
+export type CredentialValidationResult =
+  components['schemas']['CredentialValidationResult'];
 export type MCPServer = components['schemas']['MCPServer'];
 export type MCPServerCreate = components['schemas']['MCPServerCreate'];
 export type MCPServerUpdate = components['schemas']['MCPServerUpdate'];
@@ -400,6 +402,27 @@ export class ApiClient {
       { method: 'DELETE', headers: this.headers() },
     );
     if (!resp.ok) throw await this.parseError(resp);
+  }
+
+  /** Test a candidate credential against the provider before saving.
+   *  Same body shape as putCredential. A bad key is a 200 with
+   *  `ok=false`, so callers branch on the result rather than catching. */
+  async validateCredential(
+    provider: ModelProvider,
+    body: CredentialUpsert,
+  ): Promise<CredentialValidationResult> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/credentials/${encodeURIComponent(
+        provider,
+      )}/validate`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(body),
+      },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as CredentialValidationResult;
   }
 
   // ------------------------------------------------------------------

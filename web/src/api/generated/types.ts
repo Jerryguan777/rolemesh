@@ -456,6 +456,37 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/credentials/{provider}/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                provider: components["schemas"]["ModelProvider"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test a candidate credential against the provider
+         * @description Probes a credential with the same body shape as `PUT` so the
+         *     operator learns a key is bad *before* it is stored and a coworker
+         *     fails closed at runtime. Runs control-plane-side and dials the
+         *     same upstream + auth header the egress reverse proxy injects, so a
+         *     `verified` pass means the agent path resolves to a working key.
+         *
+         *     A rejected key is a successful test: `200` with `ok=false`, not a
+         *     4xx. The plaintext is probed and dropped — never persisted by this
+         *     call, never echoed back. Bedrock reports `reachable` (region +
+         *     endpoint checked; the key itself is not exercised).
+         */
+        post: operations["validateTenantCredential"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/platform/credentials": {
         parameters: {
             query?: never;
@@ -507,6 +538,31 @@ export interface paths {
          *     pool key existed.
          */
         delete: operations["deletePlatformCredential"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/platform/credentials/{provider}/validate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                provider: components["schemas"]["ModelProvider"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test a candidate platform pool key against the provider
+         * @description Platform-plane only (`credential.pool.manage`). Same posture as
+         *     the tenant `validate` path: a rejected key is `200` with
+         *     `ok=false`, the plaintext is probed and dropped, never persisted
+         *     by this call nor echoed back.
+         */
+        post: operations["validatePlatformCredential"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1895,14 +1951,34 @@ export interface components {
              *     on any subsequent GET (design §8.1).
              */
             api_key: string;
-            /**
-             * @description Provider-specific extras (e.g. `api_base`, `region`).
-             *     Schema intentionally open — the credential proxy reads
-             *     whatever shape the provider needs.
-             */
+            /** @description Provider-specific extras (e.g. `api_base`, `region`). */
             extras?: {
                 [key: string]: unknown;
             } | null;
+        };
+        /**
+         * @description Result of `POST .../validate`. A test result, not an error
+         *     envelope — a bad key is `ok=false` with HTTP 200. Never carries
+         *     the plaintext key.
+         */
+        CredentialValidationResult: {
+            /**
+             * @description Whether the credential is usable. For `level=verified` this is
+             *     authoritative (the provider accepted/rejected the key). For
+             *     `level=reachable` it means the endpoint answered and the
+             *     config is well-formed; the key itself was not exercised.
+             */
+            ok: boolean;
+            /**
+             * @description Depth of the probe: `verified` (live authenticated read),
+             *     `reachable` (endpoint reached, key not exercised — Bedrock),
+             *     or `unsupported` (no probe wired for this provider).
+             * @enum {string}
+             */
+            level: "verified" | "reachable" | "unsupported";
+            provider: components["schemas"]["ModelProvider"];
+            /** @description Human-readable outcome for inline display. No secrets. Schema intentionally open — the credential proxy reads whatever shape the provider needs. */
+            detail: string;
         };
         CoworkerMCPBindingResponse: {
             /** Format: uuid */
@@ -3807,6 +3883,34 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
         };
     };
+    validateTenantCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                provider: components["schemas"]["ModelProvider"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CredentialUpsert"];
+            };
+        };
+        responses: {
+            /** @description Validation result (a bad key is `ok=false`, still 200). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialValidationResult"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            422: components["responses"]["Unprocessable"];
+        };
+    };
     listPlatformCredentials: {
         parameters: {
             query?: never;
@@ -3880,6 +3984,35 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    validatePlatformCredential: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                provider: components["schemas"]["ModelProvider"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CredentialUpsert"];
+            };
+        };
+        responses: {
+            /** @description Validation result (a bad key is `ok=false`, still 200). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CredentialValidationResult"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            422: components["responses"]["Unprocessable"];
         };
     };
     listPlatformTenants: {

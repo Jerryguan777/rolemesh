@@ -424,6 +424,39 @@ class CredentialUpsert(BaseModel):
     extras: dict[str, object] | None = None
 
 
+# Depth of a credential validation probe:
+#   ``verified``    — a live authenticated read hit the provider and the
+#                     key was accepted (or explicitly rejected); ``ok``
+#                     is authoritative.
+#   ``reachable``   — the upstream endpoint answered but the key itself
+#                     was not exercised (Bedrock has no cheap read verb);
+#                     ``ok`` means "reachable + well-formed", not "key good".
+#   ``unsupported`` — no probe is wired for this provider; ``ok`` is false.
+CredentialProbeLevel = Literal["verified", "reachable", "unsupported"]
+
+
+class CredentialValidationResult(BaseModel):
+    """``POST /api/v1/credentials/{provider}/validate`` result.
+
+    A *test result*, not an error envelope: a bad key returns ``200``
+    with ``ok=false`` so the SPA can render an inline "invalid key"
+    message without treating it as a transport failure. The plaintext
+    key is never echoed back — only the human-readable ``detail``.
+
+    The probe runs control-plane-side (the webui already holds the
+    plaintext) and dials the SAME upstream + auth header the egress
+    reverse proxy would inject, so a ``verified`` pass means the agent
+    path will resolve to a working credential.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    ok: bool
+    level: CredentialProbeLevel
+    provider: ModelProvider
+    detail: str
+
+
 # ---------------------------------------------------------------------------
 # MCP servers (design §2.1 / §3 Phase 2)
 # ---------------------------------------------------------------------------
