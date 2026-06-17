@@ -314,6 +314,31 @@ build infrastructure — that is itself a test of "declarative".
 Acceptance: all green on local Ubuntu docker (incl. runsc); all green on kind
 (Calico) on the same machine; one suite, zero runtime branches.
 
+The positive K8s golden path (internal names resolve through the gateway
+exemption AND the agent reaches the bus) has a second, in-cluster home: the
+`connectivity-probe` helm test (paired with `deny-probe`). Unlike the pytest
+contract suite — whose `verify_infrastructure` pre-flight hits the gateway
+ClusterIP:3001 from the test process and so cannot run from OUTSIDE the
+cluster (a host route to the Service CIDR is a non-portable hack, not a
+fix) — the probe runs as a pod, reaches ClusterIPs natively, and gives a
+repeatable regression guard on kind and RKE2 alike. It resolves
+`nats`/`egress-gateway` and TCP-connects to nats:4222 + gateway:3001 (the
+53-vs-1053 NetworkPolicy bug proved resolution ≠ reachability — connect,
+don't just resolve), and confirms an external name stays blocked.
+
+### Known limitations
+
+- **Internal SRV/TXT stay refused.** The internal-name exemption runs after
+  the A/AAAA/CNAME qtype gate, so SRV/TXT for internal names are still
+  REFUSED. Sufficient today (NATS dials an A record); revisit only if an
+  internal flow genuinely needs SRV.
+- **The pytest contract suite's k8s mode needs cluster-network reach.** Its
+  `verify_infrastructure` pre-flight assumes the runner can reach the
+  gateway ClusterIP, true on an in-cluster/RKE2 node but not from a kind
+  host. Until that pre-flight grows an in-cluster mode, the `helm test`
+  connectivity-probe is the portable positive-path guard. (Tracked as a
+  follow-up; not blocking.)
+
 ## 10. Deployment
 
 ### 10.1 Local: `deploy/compose/compose.yaml` (replaces process-style README)

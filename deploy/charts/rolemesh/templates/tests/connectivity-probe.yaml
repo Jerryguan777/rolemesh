@@ -1,0 +1,136 @@
+{{- /*
+helm test connectivity probe (docs/21 §6.3) — the POSITIVE-path partner of
+deny-probe.yaml. deny-probe proves the CNI BLOCKS what it must; this proves
+it PASSES what it must, end-to-end, on the real cluster.
+
+It is the permanent, repeatable closure of the "T-NET-3 never runs on real
+infra" false-green: a pod carrying the agent role label + the exact agent
+dnsConfig (dnsPolicy None, resolver pinned at the gateway, cluster search +
+ndots:5 — mirrors k8s_runtime.spec_to_pod_manifest, whose output is locked
+by tests/container/test_k8s_runtime.py) that:
+
+  1. RESOLVES internal names (nats, egress-gateway) — short names complete
+     via the search list and route through the gateway's internal-name
+     exemption to kube-dns (egress/dns_internal.py).
+  2. CONNECTS to nats:4222 and the gateway:3001. Resolution is not reach:
+     these are separate NetworkPolicy egress rules, and the 53-vs-1053 bug
+     proved a YAML port that "looks right" can still be dropped by the CNI.
+     A bare gethostbyname would not have caught it; a real TCP connect does.
+  3. Confirms the DNS-exfil tripwire still bites — a non-allowlisted
+     external name must NOT resolve.
+
+Runs in-cluster, so it reaches ClusterIPs natively (no host route hack) and
+is portable to kind and RKE2 alike. Any failure exits non-zero -> helm test
+fails. Host-search-domain pollution (an exfil-class regression) is
+environment-specific and is locked by the dns_internal unit tests instead.
+*/ -}}
+{{- $clusterDomain := .Values.clusterDomain | default "cluster.local" -}}
+{{- $gwIP := required "egressGateway.clusterIP is REQUIRED for the connectivity probe (= EGRESS_GATEWAY_DNS_IP)." .Values.egressGateway.clusterIP -}}
+{{- $nats := include "rolemesh.natsServiceName" . -}}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "rolemesh.fullname" . }}-connectivity-probe
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rolemesh.labels" . | nindent 4 }}
+    # Subjects the probe to the agent NetworkPolicies, exactly like a real
+    # agent. MUST match AGENT_ROLE_LABEL/VALUE.
+    rolemesh.io/role: agent
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  # Mirrors k8s_runtime.spec_to_pod_manifest: dnsPolicy None pins the agent
+  # resolver at the gateway and supplies the cluster search list + ndots:5,
+  # so a short `nats` completes to its FQDN and routes through the gateway
+  # exemption. If these drift from the runtime's output, the probe's
+  # resolution stops matching real agents — and test_k8s_runtime guards the
+  # runtime side.
+  dnsPolicy: None
+  dnsConfig:
+    nameservers:
+      - {{ $gwIP | quote }}
+    searches:
+      - {{ printf "%s.svc.%s" .Release.Namespace $clusterDomain | quote }}
+      - {{ printf "svc.%s" $clusterDomain | quote }}
+      - {{ $clusterDomain | quote }}
+    options:
+      - name: ndots
+        value: "5"
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: probe
+      image: "{{ .Values.agent.image.repository }}:{{ .Values.agent.image.tag }}"
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        capabilities:
+          drop:
+            - ALL
+        seccompProfile:
+          type: RuntimeDefault
+      env:
+        - name: NATS_HOST
+          value: {{ $nats | quote }}
+      command:
+        - python
+        - -c
+        - |
+          import json, os, socket, sys
+
+          results = {}
+          ok = True
+
+          def expect_resolves(name):
+              global ok
+              try:
+                  results["resolve " + name] = socket.gethostbyname(name)
+              except OSError as exc:
+                  results["resolve " + name] = "FAILED (%s)" % type(exc).__name__
+                  ok = False
+
+          def expect_connects(host, port):
+              global ok
+              try:
+                  with socket.create_connection((host, port), timeout=8):
+                      results["connect %s:%d" % (host, port)] = "OK"
+              except OSError as exc:
+                  results["connect %s:%d" % (host, port)] = "FAILED (%s)" % type(exc).__name__
+                  ok = False
+
+          def expect_blocked(name):
+              global ok
+              try:
+                  ip = socket.gethostbyname(name)
+                  results["resolve " + name] = "RESOLVED %s (should be blocked!)" % ip
+                  ok = False
+              except OSError:
+                  results["resolve " + name] = "blocked as required"
+
+          nats = os.environ["NATS_HOST"]
+          # 1. internal names resolve via gateway exemption -> kube-dns.
+          expect_resolves(nats)
+          expect_resolves("egress-gateway")
+          # 2. and the agent actually REACHES them — separate NetworkPolicy
+          #    egress rules, proven on the real CNI, not just resolved.
+          expect_connects(nats, 4222)
+          expect_connects("egress-gateway", 3001)
+          # 3. the DNS-exfil tripwire still bites.
+          expect_blocked("contract-denied.example.com")
+
+          print(json.dumps(results, indent=2))
+          if not ok:
+              print("FAIL: golden-path connectivity probe", file=sys.stderr)
+              sys.exit(1)
+          print("PASS: internal names resolve + reachable (NATS, gateway); "
+                "external blocked")
