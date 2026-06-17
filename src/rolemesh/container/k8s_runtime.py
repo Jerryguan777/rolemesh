@@ -77,6 +77,19 @@ REQUIRED_COMPONENT_NETWORK_POLICIES: tuple[str, ...] = (
 # different name.
 _DEFAULT_GVISOR_RUNTIME_CLASS = "gvisor"
 
+# Cluster DNS domain (docs/21 §6.3). Agents run with dnsPolicy None, which
+# drops the kubelet-injected resolv.conf entirely, so the agent pod must
+# carry the cluster search domains itself or a short name like ``nats``
+# is never completed to ``nats.<ns>.svc.cluster.local``. Overridable for
+# clusters that customised --cluster-domain.
+_CLUSTER_DOMAIN = os.environ.get("ROLEMESH_K8S_CLUSTER_DOMAIN", "cluster.local")
+
+# Matches the kubelet ClusterFirst default. Names with fewer than this many
+# dots get the search list appended before being tried absolute — so a
+# 1-dot internal name resolves via search, and only genuinely-qualified
+# external names skip it.
+_NDOTS = "5"
+
 _INSTALL_HINT = (
     "The Kubernetes container backend requires the optional "
     "kubernetes_asyncio dependency. Install it with: uv sync --extra k8s"
@@ -312,9 +325,25 @@ def spec_to_pod_manifest(
     # DNS forced through the gateway resolver (docs/21 §3): dnsPolicy None
     # replaces docker's HostConfig.Dns. Empty spec.dns keeps the cluster
     # default (kube-dns) — appropriate only for non-agent pods.
+    #
+    # dnsPolicy None drops the kubelet resolv.conf wholesale, so the search
+    # domains + ndots must be supplied here. Without them a short internal
+    # name (``nats``) is sent absolute and never completes to its FQDN; the
+    # gateway resolver, in turn, routes anything under cluster.local to
+    # kube-dns (the internal-name exemption — egress/dns_internal.py). The
+    # two are partners: searches turn ``nats`` into a cluster.local FQDN,
+    # the exemption then forwards that FQDN to kube-dns.
     if spec.dns:
         pod_spec["dnsPolicy"] = "None"
-        pod_spec["dnsConfig"] = {"nameservers": list(spec.dns)}
+        pod_spec["dnsConfig"] = {
+            "nameservers": list(spec.dns),
+            "searches": [
+                f"{namespace}.svc.{_CLUSTER_DOMAIN}",
+                f"svc.{_CLUSTER_DOMAIN}",
+                _CLUSTER_DOMAIN,
+            ],
+            "options": [{"name": "ndots", "value": _NDOTS}],
+        }
 
     # extra_hosts -> hostAliases. On K8s the metadata blackhole duty is
     # carried by the default-deny NetworkPolicy, but the mapping is kept

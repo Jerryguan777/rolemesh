@@ -216,12 +216,29 @@ the §3 mapping philosophy each side uses its own mechanism:
 - K8s: container listens on 1053, Service maps 53 -> 1053; the namespace is
   fully PSA `restricted`.
 
-Upstream policy (rev4 addition, P2 work item): agents resolve internal
-service names (`nats`, `egress-gateway`) through the gateway resolver too.
-Its recursive upstream differs: Docker forwards to Docker embedded DNS
-(127.0.0.11); K8s forwards to kube-dns (read from the gateway's own
-resolv.conf — the gateway keeps the default dnsPolicy). Contract case T-NET
-locks: agent resolves `nats` via gateway; non-allowlisted domains NXDOMAIN.
+Internal-name resolution (rev5). Internal names (`nats`, `egress-gateway`,
+and `*.cluster.local` on K8s) resolve via the platform's own resolver, by
+different routes per runtime:
+
+- Docker: the agent's resolver is the embedded DNS (127.0.0.11), which
+  answers container names locally and forwards only external names to the
+  gateway. Internal names never reach the gateway resolver — no exemption
+  needed. (This is why the empty-allowlist default works on Docker but
+  broke on K8s when tropos first ran a full agent round-trip there.)
+- K8s: `dnsPolicy: None` pins the agent's resolver straight at the gateway,
+  so the gateway itself EXEMPTS internal names from the allowlist and
+  forwards them to kube-dns. It reads both the internal-name set and the
+  kube-dns address from its OWN `/etc/resolv.conf` (the gateway keeps the
+  default ClusterFirst dnsPolicy), so the same code is correct on both
+  runtimes with no docker/k8s fork — `src/rolemesh/egress/dns_internal.py`.
+  Only suffixes within the cluster domain are exempt; an inherited host
+  search domain is not, or it would reopen the exfil channel. The exemption
+  is the partner of the agent pod's `dnsConfig` search domains + `ndots:5`
+  (§3): the search list turns a short `nats` into
+  `nats.<ns>.svc.cluster.local`, which the exemption then routes to kube-dns.
+
+Contract case T-NET-3 locks the behaviour: the agent resolves `nats` and the
+gateway, while a non-allowlisted external domain NXDOMAINs.
 
 ### 6.4 gVisor
 

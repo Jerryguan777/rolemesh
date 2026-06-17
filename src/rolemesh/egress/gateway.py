@@ -61,8 +61,9 @@ from rolemesh.core.config import (
 )
 from rolemesh.core.logger import get_logger
 
+from .dns_internal import build_internal_exemption, parse_resolv_conf
 from .dns_policy import GlobalDnsPolicy
-from .dns_resolver import DnsServer, UpstreamResolver
+from .dns_resolver import DnsServer, InternalMatcher, UpstreamResolver
 from .forward_proxy import ForwardProxy
 from .mcp_cache import (
     apply_snapshot_to_registry,
@@ -113,6 +114,55 @@ _SNAPSHOT_RETRY_INITIAL_S = 1.0
 _SNAPSHOT_RETRY_MAX_S = 30.0
 
 
+def _derive_internal_exemption(
+    resolv_path: str = "/etc/resolv.conf",
+) -> tuple[InternalMatcher | None, list[UpstreamResolver] | None]:
+    """Build the internal-name DNS exemption from the gateway's own
+    resolv.conf (egress/dns_internal.py — runtime-agnostic: kube-dns on
+    K8s, 127.0.0.11 on Docker).
+
+    Returns ``(None, None)`` — exemption disabled, every name stays on the
+    allowlist path — when resolv.conf is unreadable or yields nothing
+    internal. That is fail-closed but degraded: internal names like
+    ``nats`` will NXDOMAIN, so the failure is logged at WARNING with the
+    parsed contents for an operator to diagnose.
+    """
+    try:
+        with open(resolv_path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError as exc:
+        logger.warning(
+            "dns: cannot read resolv.conf for internal-name exemption — "
+            "agents may fail to resolve internal services (nats)",
+            path=resolv_path,
+            error=str(exc),
+        )
+        return None, None
+
+    resolv = parse_resolv_conf(text)
+    # Same knob the orchestrator stamps the agent pod search domains with
+    # (k8s_runtime._CLUSTER_DOMAIN), so the two cannot disagree about what
+    # "internal" means.
+    cluster_domain = os.environ.get("ROLEMESH_K8S_CLUSTER_DOMAIN", "cluster.local")
+    exemption = build_internal_exemption(resolv, cluster_domain=cluster_domain)
+    if exemption is None:
+        logger.warning(
+            "dns: no internal-name exemption derived from resolv.conf — "
+            "agents may fail to resolve internal services (nats)",
+            nameservers=list(resolv.nameservers),
+            search=list(resolv.search),
+        )
+        return None, None
+
+    matcher, internal_upstreams = exemption
+    logger.info(
+        "dns: internal-name exemption active",
+        internal_upstreams=[f"{u.host}:{u.port}" for u in internal_upstreams],
+        cluster_domain=cluster_domain,
+    )
+    return matcher, internal_upstreams
+
+
 def _parse_upstream_dns(raw: str) -> list[UpstreamResolver]:
     """Split "8.8.8.8,1.1.1.1:5353" into UpstreamResolver records.
 
@@ -154,13 +204,10 @@ async def _seed_rules_with_retry(
     while True:
         attempt += 1
         try:
-            snapshot = await fetch_snapshot_via_nats(
-                nats_client, timeout_s=_SNAPSHOT_TIMEOUT_S
-            )
+            snapshot = await fetch_snapshot_via_nats(nats_client, timeout_s=_SNAPSHOT_TIMEOUT_S)
         except Exception as exc:  # noqa: BLE001 — any RPC failure means "retry"
             logger.warning(
-                "gateway: rule snapshot fetch failed — policy plane stays "
-                "default-deny, retrying",
+                "gateway: rule snapshot fetch failed — policy plane stays default-deny, retrying",
                 attempt=attempt,
                 retry_in_s=delay,
                 error=str(exc),
@@ -185,14 +232,18 @@ async def _cancel_task(task: asyncio.Task[Any]) -> None:
 
 
 async def main() -> None:
-    upstream_dns = _parse_upstream_dns(
-        os.environ.get("EGRESS_UPSTREAM_DNS", _UPSTREAM_DNS_DEFAULT)
-    )
+    upstream_dns = _parse_upstream_dns(os.environ.get("EGRESS_UPSTREAM_DNS", _UPSTREAM_DNS_DEFAULT))
 
     # Platform DNS policy. Loaded before any network setup so a config
     # typo (bad EGRESS_DNS_MODE) kills the boot immediately — same
     # fail-closed posture as the token-authority secret check below.
     dns_policy = GlobalDnsPolicy.from_env()
+
+    # Internal-name exemption: internal service names (nats, the gateway,
+    # *.cluster.local) bypass the allowlist and forward to the platform's
+    # own resolver. Derived from the gateway's own resolv.conf so the same
+    # code is correct on Docker and K8s (egress/dns_internal.py).
+    internal_matcher, internal_upstreams = _derive_internal_exemption()
 
     # Import nats-py lazily so unit tests importing this module don't
     # require the dependency. The gateway Dockerfile pins it, so
@@ -277,15 +328,12 @@ async def main() -> None:
         # instead of crash-looping the gateway over a transient NATS
         # blip on the orchestrator side.
         try:
-            mcp_entries = await fetch_mcp_snapshot_via_nats(
-                nats_client, timeout_s=_SNAPSHOT_TIMEOUT_S
-            )
+            mcp_entries = await fetch_mcp_snapshot_via_nats(nats_client, timeout_s=_SNAPSHOT_TIMEOUT_S)
             apply_snapshot_to_registry(mcp_entries)
             logger.info("gateway: MCP registry seeded", count=len(mcp_entries))
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "gateway: MCP snapshot fetch failed — continuing with empty "
-                "registry; live change events will refill",
+                "gateway: MCP snapshot fetch failed — continuing with empty registry; live change events will refill",
                 error=str(exc),
             )
         mcp_sub = await subscribe_mcp_changes(nats_client)
@@ -353,6 +401,8 @@ async def main() -> None:
         dns = DnsServer(
             policy=dns_policy,
             upstreams=upstream_dns,
+            internal_matcher=internal_matcher,
+            internal_upstreams=internal_upstreams,
         )
         await dns.serve("0.0.0.0", EGRESS_GATEWAY_DNS_PORT)
 

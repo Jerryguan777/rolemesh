@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -73,6 +74,15 @@ class UpstreamResolver:
     port: int = 53
 
 
+# Predicate over a (trailing-dot-stripped) qname. True for an "internal"
+# name — one the platform's own resolver is authoritative for and will
+# never forward to a public upstream (Kubernetes ``*.cluster.local``,
+# Docker single-label container names). Internal names bypass the
+# allowlist tripwire and are forwarded to ``internal_upstreams`` instead.
+# Derived from the gateway's own /etc/resolv.conf; see ``dns_internal``.
+InternalMatcher = Callable[[str], bool]
+
+
 class DnsServer:
     """Asyncio UDP server that evaluates each query against the platform policy.
 
@@ -86,11 +96,23 @@ class DnsServer:
         *,
         policy: GlobalDnsPolicy,
         upstreams: list[UpstreamResolver],
+        internal_matcher: InternalMatcher | None = None,
+        internal_upstreams: list[UpstreamResolver] | None = None,
     ) -> None:
         if not upstreams:
             raise ValueError("DnsServer requires at least one upstream resolver")
+        # The internal-name exemption is all-or-nothing: a matcher with no
+        # upstream to forward to (or an upstream with no matcher) is a
+        # wiring bug, not a degraded mode — fail loud at boot rather than
+        # silently NXDOMAIN every internal name. Both unset (the default)
+        # disables the exemption: every name flows through the allowlist,
+        # the original fail-closed behaviour.
+        if bool(internal_matcher) != bool(internal_upstreams):
+            raise ValueError("internal_matcher and internal_upstreams must be set together")
         self._policy = policy
         self._upstreams = list(upstreams)
+        self._internal_matcher = internal_matcher
+        self._internal_upstreams = list(internal_upstreams or ())
         self._transport: asyncio.DatagramTransport | None = None
 
     async def serve(self, host: str, port: int) -> None:
@@ -155,6 +177,31 @@ class DnsServer:
             respond(_build_error(query, _RCODE_REFUSED))
             return
 
+        # Internal-name exemption (docs/16 "DNS plane"). Names the
+        # platform's own resolver is authoritative for — Kubernetes
+        # ``*.cluster.local``, Docker single-label container names — skip
+        # the allowlist tripwire entirely and forward to that resolver.
+        # This is not an exfil channel: the internal resolver never
+        # forwards these names to a public upstream, so an attacker's
+        # nameserver can never receive them. Without it an agent cannot
+        # resolve ``nats`` to reach the bus. The qtype gate above still
+        # applies, so internal SRV/TXT stay refused. Logged at DEBUG: with
+        # ndots:5 every external lookup first probes the search domains, so
+        # this path is high-volume and must not flood the tripwire's logs.
+        if self._internal_matcher is not None and self._internal_matcher(qname):
+            logger.debug(
+                "dns: internal name forwarded to platform resolver",
+                source=source_addr[0],
+                qname=qname,
+                qtype=qtype,
+            )
+            response_data = await self._resolve_internal(data)
+            if response_data is None:
+                respond(_build_error(query, _RCODE_SERVFAIL))
+                return
+            respond(response_data)
+            return
+
         # Platform-wide policy: same answer for every source. The qname
         # is redacted in logs past the registered domain — exfil
         # attempts put the payload in the leftmost labels, and this
@@ -196,19 +243,26 @@ class DnsServer:
         respond(response_data)
 
     async def _resolve_upstream(self, data: bytes) -> bytes | None:
-        """Forward the raw query to the first upstream that responds.
+        """Forward an allowlisted external query to the public upstreams."""
+        return await self._forward(data, self._upstreams)
+
+    async def _resolve_internal(self, data: bytes) -> bytes | None:
+        """Forward an internal-name query to the platform's own resolver."""
+        return await self._forward(data, self._internal_upstreams)
+
+    async def _forward(self, data: bytes, upstreams: list[UpstreamResolver]) -> bytes | None:
+        """Forward the raw query to the first of *upstreams* that responds.
 
         Run resolvers in parallel with a 2-second budget. Raw-packet
         forwarding preserves client flags (EDNS0, CD, AD) verbatim.
         """
+
         async def _query(up: UpstreamResolver) -> bytes:
             return await _udp_query(up.host, up.port, data, timeout_s=2.0)
 
-        tasks = [asyncio.create_task(_query(up)) for up in self._upstreams]
+        tasks = [asyncio.create_task(_query(up)) for up in upstreams]
         try:
-            done, _pending = await asyncio.wait(
-                tasks, return_when=asyncio.FIRST_COMPLETED, timeout=2.5
-            )
+            done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED, timeout=2.5)
         finally:
             for t in tasks:
                 if not t.done():

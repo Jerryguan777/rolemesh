@@ -231,9 +231,26 @@ Why platform-level is sufficient — and why the list stays empty:
   the **gateway** resolves it on its own egress-side resolver path,
   which this policy does not touch. Per-tenant access control happens
   at the CONNECT / reverse-proxy layer, unchanged.
-- Container names (`nats`, `egress-gateway`) are answered locally by
-  Docker's embedded DNS (127.0.0.11); only external names are
-  forwarded to the gateway resolver.
+- Internal names (`nats`, `egress-gateway`, and on Kubernetes anything
+  under `*.cluster.local`) are resolved by the platform's own resolver,
+  not the gateway's allowlist. The two runtimes reach the same outcome by
+  different routes:
+  - **Docker**: the agent's resolver is the embedded DNS (`127.0.0.11`),
+    which answers container names locally and forwards only external names
+    to the gateway (its configured upstream). Internal names never reach
+    the gateway resolver.
+  - **Kubernetes**: pods have no per-container embedded DNS — `dnsPolicy:
+    None` pins the agent's resolver straight at the gateway — so the
+    gateway itself **exempts** internal names from the allowlist and
+    forwards them to kube-dns. It derives the internal-name set and that
+    resolver from its OWN `/etc/resolv.conf`, so the same code is correct
+    on both runtimes with no per-runtime branching
+    (`src/rolemesh/egress/dns_internal.py`).
+
+  Either way it is **not** an exfil channel: the platform resolver is
+  authoritative for these names and never forwards them to a public
+  upstream, so an attacker's DNS server can never receive them. Only
+  external names are evaluated against `EGRESS_DNS_ALLOWLIST`.
 - Therefore every query that reaches this resolver comes from code
   bypassing the proxy convention — a tool missing proxy config, or a
   DNS-exfiltration attempt. Allowing a name here rescues no legitimate
@@ -373,7 +390,7 @@ If item 1 fails = EC-1 as a whole is pointless.
 - **Business logic** moves to `src/rolemesh/egress/reverse_proxy.py`
 - `credential_proxy.py` keeps a thin re-export, **all public APIs (`start_credential_proxy / register_mcp_server / set_token_vault`, etc.) retain their paths** — external imports unchanged
 - The Gateway process is containerized, listening on the same 3001 port (inside the Gateway container)
-- Agents access it via `http://egress-gateway:3001/...` (Docker's built-in DNS resolves the container name)
+- Agents access it via `http://egress-gateway:3001/...`; the container name `egress-gateway` is resolved by the platform resolver (Docker embedded DNS / kube-dns), not the allowlist — see "DNS plane" above
 
 **Migrate, not rewrite** — business logic (credential selection, provider registration, token vault) is preserved as-is.
 

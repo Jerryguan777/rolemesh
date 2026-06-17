@@ -422,6 +422,25 @@ def test_dns_forces_resolver_via_dnspolicy_none() -> None:
     assert pod_spec["dnsConfig"]["nameservers"] == ["172.28.100.53"]
 
 
+def test_dns_config_carries_cluster_search_and_ndots() -> None:
+    """dnsPolicy None drops the kubelet resolv.conf, so the agent pod must
+    bring the cluster search domains + ndots:5 itself — without them a short
+    name like ``nats`` is sent absolute and never completes to its FQDN, so
+    the gateway's cluster.local exemption never fires (docs/21 §6.3).
+
+    Mutation caught: omitting searches, or dropping ndots below the search
+    depth, silently breaks internal-name resolution.
+    """
+    spec = ContainerSpec(name="a", image="img", dns=["172.28.100.53"])
+    dns_config = _manifest(spec, namespace="team-x")["spec"]["dnsConfig"]
+    assert dns_config["searches"] == [
+        "team-x.svc.cluster.local",
+        "svc.cluster.local",
+        "cluster.local",
+    ]
+    assert {"name": "ndots", "value": "5"} in dns_config["options"]
+
+
 def test_no_dns_keeps_cluster_default() -> None:
     """Empty spec.dns must NOT pin dnsPolicy None (would break the gateway pod).
 
