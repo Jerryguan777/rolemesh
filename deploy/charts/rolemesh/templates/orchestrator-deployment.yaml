@@ -96,6 +96,12 @@ spec:
               value: {{ .Values.image.pullSecret | quote }}
             - name: ROLEMESH_K8S_RUNTIME_CLASS
               value: {{ .Values.orchestrator.runtimeClass | quote }}
+            # Single source of truth for the cluster DNS domain: the agent
+            # pod search domains (here, via k8s_runtime), the gateway's
+            # internal-name exemption suffix, and the connectivity-probe
+            # search domains all derive from .Values.clusterDomain.
+            - name: ROLEMESH_K8S_CLUSTER_DOMAIN
+              value: {{ .Values.clusterDomain | default "cluster.local" | quote }}
             # Startup guard (main._ensure_container_system_running) reads
             # this even in k8s mode; the pod mapping ignores it. Keep
             # non-empty.

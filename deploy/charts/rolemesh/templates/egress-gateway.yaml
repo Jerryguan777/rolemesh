@@ -109,6 +109,11 @@ spec:
             # set here for the K8s binding to be correct.
             - name: EGRESS_GATEWAY_DNS_PORT
               value: {{ $dnsPort | quote }}
+            # Cluster DNS domain for the internal-name exemption suffix
+            # (egress/dns_internal.py). Single source of truth shared with
+            # the orchestrator and the connectivity-probe: .Values.clusterDomain.
+            - name: ROLEMESH_K8S_CLUSTER_DOMAIN
+              value: {{ .Values.clusterDomain | default "cluster.local" | quote }}
             - name: EGRESS_TOKEN_SECRET
               valueFrom:
                 secretKeyRef:
