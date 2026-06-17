@@ -16,6 +16,7 @@ DO NOT template these names or the agent selector off the release name.
 */ -}}
 {{- $natsSvc := include "rolemesh.natsServiceName" . -}}
 {{- $kubeDnsNs := .Values.networkPolicy.kubeDns.namespace -}}
+{{- $dnsPort := .Values.egressGateway.dnsContainerPort | int -}}
 ---
 # 1. agent-default-deny: every agent pod, all ingress + egress denied.
 #    Standalone so the "default deny" invariant is independently verifiable.
@@ -35,7 +36,7 @@ spec:
     - Egress
   # No ingress/egress rules == deny all.
 ---
-# 2. agent-allow-egress: agent -> gateway (53 udp+tcp, 3001, 3128) and
+# 2. agent-allow-egress: agent -> gateway (DNS, 3001, 3128) and
 #    agent -> NATS (4222) ONLY. kube-dns is deliberately NOT allowed:
 #    agents resolve every name through the gateway resolver (docs/21 §6.3).
 apiVersion: networking.k8s.io/v1
@@ -52,8 +53,17 @@ spec:
   policyTypes:
     - Egress
   egress:
-    # -> egress gateway: DNS (53 udp+tcp -> Service maps to container 1053),
-    #    credential proxy / healthz (3001), forward proxy (3128).
+    # -> egress gateway: DNS, credential proxy / healthz (3001), forward
+    #    proxy (3128).
+    #
+    # DNS: the agent's nameserver is the gateway Service ClusterIP:53,
+    # which DNATs to the gateway pod's dnsContainerPort ({{ $dnsPort }};
+    # PSA restricted forbids binding 53). A NetworkPolicy port is the
+    # DESTINATION POD port, so CNIs that evaluate egress post-DNAT (Calico,
+    # Cilium) see {{ $dnsPort }} while pre-DNAT ones see 53. Allow BOTH so
+    # agent DNS works regardless of the CNI's DNAT ordering — the
+    # gateway-policy ingress (below) admits only {{ $dnsPort }}, so the
+    # gateway is reached on its real port either way.
     - to:
         - podSelector:
             matchLabels:
@@ -61,6 +71,8 @@ spec:
       ports:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
+        - { protocol: UDP, port: {{ $dnsPort }} }
+        - { protocol: TCP, port: {{ $dnsPort }} }
         - { protocol: TCP, port: 3001 }
         - { protocol: TCP, port: 3128 }
     # -> NATS (4222): agent lifecycle + protocol traffic rides NATS.

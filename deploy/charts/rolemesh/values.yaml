@@ -22,6 +22,16 @@
 #   pod-security.kubernetes.io/enforce: restricted
 # (kind/RKE2 docs in deploy/kind/README and the RKE2 doc show how.)
 
+# -- Cluster DNS domain ------------------------------------------------------
+# The cluster's DNS domain (kubeadm/kind/RKE2 default "cluster.local"). SINGLE
+# SOURCE OF TRUTH: the chart injects it as ROLEMESH_K8S_CLUSTER_DOMAIN into the
+# orchestrator (which stamps agent pod search domains) and the gateway (the
+# internal-name exemption suffix), and the connectivity-probe helm test builds
+# its search domains from it — so all three stay consistent. Override only on a
+# cluster whose kubelet sets --cluster-domain to something other than
+# cluster.local.
+clusterDomain: cluster.local
+
 # -- Images ------------------------------------------------------------------
 # tag "" falls back to Chart.appVersion (see _helpers rolemesh.imageTag).
 image:
