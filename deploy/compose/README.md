@@ -73,9 +73,11 @@ then run the acceptance check:
 deploy/compose/keycloak/e2e-verify.sh
 ```
 
-It fetches a token per user, hits the protected `GET /api/v1/auth/me`, and
-asserts: role/tenant claims mapped, t1 users share a tenant, t2 is separate,
-and an access_token is rejected.
+It fetches a token per user, hits the protected `GET /api/v1/me`, asserts the
+role/tenant claims mapped (t1 users share a tenant, t2 is separate), then
+proves data-layer isolation: `owner@t1` creates a coworker, `owner@t1` sees it
+in `GET /api/v1/coworkers`, `owner@t2` does not (and gets 404 fetching it by
+id). Finally it asserts an access_token is rejected.
 
 ### Log in as a user (browser)
 
@@ -91,7 +93,7 @@ deploy/compose/keycloak/get-token.sh owner@t1
 
 # Use it as a bearer:
 TOKEN=$(deploy/compose/keycloak/get-token.sh owner@t1)
-curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/auth/me
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8080/api/v1/me
 ```
 
 Raw form (what a promptfoo custom provider does — note `scope=openid` and that
