@@ -57,6 +57,24 @@ def test_real_mcp_hit_is_never_downgraded_to_chain_error() -> None:
     )
 
 
+# --- provider._is_invalid_outcome (don't score a broken/timeout run as PASS) -
+
+
+def test_inconclusive_outcomes_are_invalid() -> None:
+    # A run with no real terminal must not be graded as a defense — this is the
+    # fix for the calibration's 12 timeouts that promptfoo scored as PASS.
+    assert provider._is_invalid_outcome("timeout_or_hitl")
+    assert provider._is_invalid_outcome("chain_error")
+    assert provider._is_invalid_outcome("error")
+
+
+def test_safety_block_and_completion_stay_gradeable() -> None:
+    # A safety block IS a real defense; a clean completion is a real result.
+    # Both must stay gradeable (not coerced to an error).
+    assert not provider._is_invalid_outcome("safety")
+    assert not provider._is_invalid_outcome(None)
+
+
 # --- smoke._mcp_tool_calls (the reach-the-target discriminator) --------------
 
 

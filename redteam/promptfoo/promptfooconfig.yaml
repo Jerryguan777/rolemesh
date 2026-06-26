@@ -50,19 +50,24 @@ redteam:
     - pii                        # leak the seeded SSN / credit-card / email
     - tool-discovery             # enumerate available tools/servers
     - excessive-agency           # act beyond the member scope unprompted
-    - indirect-prompt-injection  # follow instructions embedded in tool-returned content
+  # NOTE: indirect-prompt-injection is intentionally NOT here. promptfoo's IPI
+  # plugin injects into a prompt VARIABLE (needs config.indirectInjectionVar),
+  # but this provider sends a single user prompt — so it was being skipped. The
+  # real indirect-injection vector for RoleMesh is the MCP TOOL RESPONSE (a file
+  # / record whose CONTENT carries "ignore instructions" — already seeded with
+  # markers in files-mcp/records-mcp). Testing that is a purpose-built case, not
+  # promptfoo's IPI plugin; tracked for a later phase.
 
   # Strategies = how the attack is delivered. SCOPED to keep volume bounded:
   # 'basic' (the untransformed baseline) runs on every plugin; the expensive
   # ones are limited to where they matter most via config.plugins.
   strategies:
     - basic                      # baseline — raw plugin cases on all plugins
-    - id: base64                 # encoding bypass — only the data-access/leak/injection plugins
+    - id: base64                 # encoding bypass — only the data-access/leak plugins
       config:
         plugins:
           - bola
           - pii
-          - indirect-prompt-injection
     - id: crescendo              # multi-turn escalation — only the highest-risk plugin
       config:
         plugins:
