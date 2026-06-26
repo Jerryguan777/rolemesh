@@ -29,6 +29,13 @@ Terminal-frame -> verdict bucket (the §6 three-way split from the plan):
     reversibility / HITL approval guard pausing a destructive (irreversible)
     tool with no auto-approver — distinct from a safety block.
 
+There is a fourth, off-band outcome that is NOT an agent decision at all: a
+backend/credential failure. agent-runner folds such an error into a *completed*
+run whose body is the error text, with no structured signal. ``blocked_by`` is
+then set to ``chain_error`` here (see ``_looks_like_chain_error``) so the smoke
+gate — and a future P2 assertion — never read "the agent never ran" as "the
+agent refused / behaved safely".
+
 ``output`` is the agent's reply text (what promptfoo's grader judges).
 ``metadata`` carries ``tool_calls`` / ``blocked`` / ``blocked_by`` /
 ``stage`` / ``rule_id`` so a human (and a future P2 assertion) can tell which
@@ -46,8 +53,18 @@ import uuid
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-# ``websockets`` is the only non-stdlib dependency (see requirements.txt).
-import websockets
+# ``websockets`` is the only non-stdlib dependency (see requirements.txt). It is
+# imported lazily so the pure classification helpers (_looks_like_chain_error
+# etc.) can be imported and unit-tested without installing it — only the live
+# WS path (_drive_run) actually needs it.
+try:
+    import websockets
+    from websockets.exceptions import WebSocketException as _WSError
+except ImportError:  # pragma: no cover - websockets is a runtime-only dep
+    websockets = None  # type: ignore[assignment]
+
+    class _WSError(Exception):  # type: ignore[no-redef]
+        """Stand-in so ``call_api``'s except clause is valid without the dep."""
 
 # --- Configuration (all via env so nothing is hardcoded) --------------------
 
@@ -58,6 +75,34 @@ RUN_TIMEOUT_S = float(os.environ.get("REDTEAM_RUN_TIMEOUT", "120"))
 # Staging guard escape hatch — must be set explicitly to point anywhere that
 # is not localhost / a host with "staging" in it.
 ALLOW_NONLOCAL = os.environ.get("REDTEAM_ALLOW_NONLOCAL", "") == "1"
+
+# Substrings that mark an agent reply as an infrastructure/credential failure
+# rather than a real agent turn. agent-runner folds a backend error into a
+# *completed* run whose body is the error text (no structured signal), so the
+# smoke gate would otherwise read "the agent never ran" as "the agent refused".
+# Applied only when no mcp__* tool was called (see _looks_like_chain_error).
+_CHAIN_ERROR_SIGNATURES = (
+    "MISSING_CREDENTIAL",
+    "CREDENTIAL_LOOKUP_FAILED",
+    "UNKNOWN_SOURCE",
+    "API Error: 401",
+    "API Error: 403",
+    "API Error: 5",  # 5xx
+)
+
+
+def _looks_like_chain_error(output: str, tool_calls: list[dict[str, str]]) -> bool:
+    """True when a completed run is actually an infra/credential failure.
+
+    Guarded on "no ``mcp__*`` tool call": if the run genuinely reached an MCP
+    target, a stray error-like phrase in the agent's narrative must NOT
+    downgrade a real hit to a chain error. The asymmetry is deliberate — a
+    false chain-error just makes the operator re-verify (cheap), whereas a
+    false "reached the target" would burn promptfoo budget on a broken rig.
+    """
+    if any(c.get("tool", "").startswith("mcp__") for c in tool_calls):
+        return False
+    return any(sig in output for sig in _CHAIN_ERROR_SIGNATURES)
 
 
 class ProviderError(RuntimeError):
@@ -124,6 +169,8 @@ async def _drive_run(conversation_id: str, ticket: str, prompt: str) -> dict[str
         "run_status": "unknown",
     }
 
+    if websockets is None:
+        raise ProviderError("websockets not installed (pip install -r requirements.txt)")
     url = _ws_url(conversation_id, ticket)
     async with websockets.connect(url, open_timeout=30, max_size=4 * 1024 * 1024) as ws:
         await ws.send(
@@ -148,7 +195,7 @@ async def _drive_run(conversation_id: str, ticket: str, prompt: str) -> dict[str
                 break
             try:
                 raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             try:
                 frame = json.loads(raw)
@@ -183,6 +230,13 @@ async def _drive_run(conversation_id: str, ticket: str, prompt: str) -> dict[str
 
     result["output"] = "".join(text_parts).strip()
     result["tool_calls"] = tool_calls
+
+    # A completed run whose body is a backend/credential error is a broken
+    # chain, not an agent decision. Re-label it so the smoke gate (and P2
+    # assertions) don't credit it as the agent refusing or behaving safely.
+    if not result["blocked"] and _looks_like_chain_error(result["output"], tool_calls):
+        result["blocked"] = True
+        result["blocked_by"] = "chain_error"
     return result
 
 
@@ -209,7 +263,7 @@ def call_api(prompt: str, options: dict[str, Any] | None = None,
         result = asyncio.run(_drive_run(conversation_id, ticket, prompt))
     except ProviderError as exc:
         return {"error": str(exc)}
-    except (OSError, websockets.WebSocketException, KeyError) as exc:
+    except (OSError, _WSError, KeyError) as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
 
     return {
