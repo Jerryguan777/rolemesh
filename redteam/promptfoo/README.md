@@ -44,7 +44,9 @@ still hold?" regression net). Findings here that land should be back-filled into
 | Var | Meaning |
 |---|---|
 | `ROLEMESH_API_BASE` | default `http://localhost:8080/api/v1` |
-| `ROLEMESH_OIDC_TOKEN` | owner@t1 **id_token** from `get-token.sh` (NOT an access_token — RoleMesh rejects those) |
+| `ROLEMESH_OIDC_TOKEN` | owner@t1 **id_token** from `get-token.sh` (NOT an access_token — RoleMesh rejects those). Static; wins over self-renewal. |
+| `ROLEMESH_KC_USERNAME` / `ROLEMESH_KC_PASSWORD` | enable **self-renewal**: the provider mints/renews its own id_token via ROPG so a long serial run never 401s on a 30-min token. Leave the static token unset to use this. |
+| `ROLEMESH_KC_BASE_URL` / `ROLEMESH_KC_REALM` / `ROLEMESH_KC_CLIENT_ID` / `ROLEMESH_KC_CLIENT_SECRET` | ROPG endpoint config; defaults mirror `get-token.sh` (`http://localhost:8081`, `rolemesh`, `rolemesh-web`, dev secret). |
 | `REDTEAM_COWORKER_ID` | the coworker id printed by `redteam/seed.py` |
 | `REDTEAM_RUN_TIMEOUT` | per-run deadline seconds (default 120) |
 | `REDTEAM_ALLOW_NONLOCAL` | set `1` only to target a non-local disposable host |
@@ -76,12 +78,24 @@ verified in code but had not been exercised by a live agent run.
 ```bash
 cd redteam/promptfoo
 python ../../redteam/seed.py                 # RE-SEED first (see below)
-export ROLEMESH_OIDC_TOKEN="$(../../deploy/compose/keycloak/get-token.sh owner@t1)"
 export REDTEAM_COWORKER_ID=<id-from-seed>
 export OPENAI_API_KEY=sk-...                  # promptfoo's generator/grader
+
+# Token — pick ONE:
+#  (a) Self-renewal (recommended for any run > ~25 min, e.g. numTests=8 serial):
+export ROLEMESH_KC_USERNAME=owner@t1
+export ROLEMESH_KC_PASSWORD='Passw0rd!'      # staging test cred
+#  (b) Static one-shot (fine for the calibration run; expires in 30 min):
+# export ROLEMESH_OIDC_TOKEN="$(../../deploy/compose/keycloak/get-token.sh owner@t1)"
+
 npx promptfoo@latest redteam run -c promptfooconfig.yaml
 npx promptfoo@latest redteam report          # OWASP LLM Top 10 dashboard
 ```
+
+With (a) the provider mints its own id_token and renews it before expiry, so a
+multi-hour serial run never 401s mid-flight (each ROPG is a fresh auth, not
+bound by the IdP's 10 h session cap). The provider then holds the staging test
+password via env — **staging only**.
 
 **RE-SEED before every run.** `records-mcp` (`delete_record`) and `files-mcp`
 (`write_file`) are mutating tools — a scan can delete/overwrite seeded fixtures.

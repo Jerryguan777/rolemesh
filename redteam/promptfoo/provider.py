@@ -12,7 +12,9 @@ is asynchronous over a WebSocket (``request.run`` frame in, a stream of
 built-in provider cannot collect the streamed reply or the tool-call signal.
 
 The end-to-end path (all contracts verified against src/webui/v1):
-  1. id_token (OIDC) from ``ROLEMESH_OIDC_TOKEN``  — owner@t1 via get-token.sh.
+  1. id_token (OIDC) — static ``ROLEMESH_OIDC_TOKEN`` (owner@t1 via get-token.sh)
+     OR self-minted/renewed via ROPG when ``ROLEMESH_KC_USERNAME``/``_PASSWORD``
+     are set, so a long serial run never 401s on a 30-min token mid-flight.
   2. POST /api/v1/coworkers/{id}/conversations      -> conversation_id
   3. POST /api/v1/auth/ws-ticket {conversation_id}  -> short-lived ws ticket
   4. WS  /api/v1/conversations/{id}/stream?ticket=  -> open the run channel
@@ -47,11 +49,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 import uuid
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 # ``websockets`` is the only non-stdlib dependency (see requirements.txt). It is
 # imported lazily so the pure classification helpers (_looks_like_chain_error
@@ -69,7 +72,21 @@ except ImportError:  # pragma: no cover - websockets is a runtime-only dep
 # --- Configuration (all via env so nothing is hardcoded) --------------------
 
 API_BASE = os.environ.get("ROLEMESH_API_BASE", "http://localhost:8080/api/v1").rstrip("/")
+# Auth: either a static id_token (ROLEMESH_OIDC_TOKEN) OR self-renewal via ROPG
+# when the test user's credentials are set. Self-renewal keeps a long serial run
+# from 401-ing when a 30-min token expires mid-run — each ROPG is a fresh
+# authentication, so it is NOT bound by the IdP session max-lifespan.
 OIDC_TOKEN = os.environ.get("ROLEMESH_OIDC_TOKEN", "")
+# ROPG config (defaults mirror deploy/compose/keycloak/get-token.sh). Self-renewal
+# is OPT-IN: it only engages when ROLEMESH_KC_USERNAME is set and no static token.
+KC_BASE_URL = os.environ.get("ROLEMESH_KC_BASE_URL", "http://localhost:8081").rstrip("/")
+KC_REALM = os.environ.get("ROLEMESH_KC_REALM", "rolemesh")
+KC_CLIENT_ID = os.environ.get("ROLEMESH_KC_CLIENT_ID", "rolemesh-web")
+KC_CLIENT_SECRET = os.environ.get("ROLEMESH_KC_CLIENT_SECRET", "rolemesh-web-dev-secret")
+KC_USERNAME = os.environ.get("ROLEMESH_KC_USERNAME", "")
+KC_PASSWORD = os.environ.get("ROLEMESH_KC_PASSWORD", "")
+# Re-mint when fewer than this many seconds remain on the cached token.
+_TOKEN_REFRESH_SKEW_S = 300
 COWORKER_ID = os.environ.get("REDTEAM_COWORKER_ID", "")
 RUN_TIMEOUT_S = float(os.environ.get("REDTEAM_RUN_TIMEOUT", "120"))
 # Staging guard escape hatch — must be set explicitly to point anywhere that
@@ -125,6 +142,70 @@ def _assert_staging() -> None:
         )
 
 
+# Cached self-minted token: {token, monotonic deadline}. Module-level so it
+# survives across call_api() invocations within one promptfoo run.
+_token_cache: dict[str, Any] = {"token": "", "deadline": 0.0}
+
+
+def _should_refresh(now: float, deadline: float) -> bool:
+    """True when the cached token is missing or within the refresh skew of
+    expiry. Pure (clock injected) so it is unit-testable without time/network."""
+    return now >= deadline - _TOKEN_REFRESH_SKEW_S
+
+
+def _mint_token() -> tuple[str, float]:
+    """ROPG against Keycloak -> (id_token, expires_in_seconds).
+
+    Ports get-token.sh: grant_type=password, scope=openid. Returns the id_token
+    (the bearer RoleMesh validates; a Keycloak access_token has aud=account and
+    is rejected). Each call is a fresh authentication, so renewal is unbounded
+    by the IdP session max-lifespan.
+    """
+    data = urlencode(
+        {
+            "grant_type": "password",
+            "scope": "openid",
+            "client_id": KC_CLIENT_ID,
+            "client_secret": KC_CLIENT_SECRET,
+            "username": KC_USERNAME,
+            "password": KC_PASSWORD,
+        }
+    ).encode()
+    url = f"{KC_BASE_URL}/realms/{KC_REALM}/protocol/openid-connect/token"
+    req = urllib.request.Request(url, data=data, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            payload = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode(errors="replace")
+        raise ProviderError(f"ROPG token mint -> {exc.code}: {detail}") from exc
+    token = payload.get("id_token")
+    if not token:
+        raise ProviderError("ROPG response had no id_token (check directAccessGrants).")
+    return token, float(payload.get("expires_in", 0))
+
+
+def _get_token() -> str:
+    """Return a usable id_token, self-renewing when ROPG creds are configured.
+
+    A static ``ROLEMESH_OIDC_TOKEN`` always wins (Phase 0 / manual use). Else,
+    if ``ROLEMESH_KC_USERNAME`` is set, mint via ROPG and cache it, re-minting
+    within the refresh skew of expiry so a long serial run never 401s mid-way.
+    """
+    if OIDC_TOKEN:
+        return OIDC_TOKEN
+    if not KC_USERNAME:
+        raise ProviderError(
+            "no token: set ROLEMESH_OIDC_TOKEN, or ROLEMESH_KC_USERNAME + "
+            "ROLEMESH_KC_PASSWORD to enable ROPG self-renewal."
+        )
+    if _should_refresh(time.monotonic(), _token_cache["deadline"]):
+        token, expires_in = _mint_token()
+        _token_cache["token"] = token
+        _token_cache["deadline"] = time.monotonic() + expires_in
+    return _token_cache["token"]
+
+
 def _post_json(path: str, body: dict[str, Any]) -> dict[str, Any]:
     """POST a JSON body with the OIDC bearer; return the parsed response."""
     req = urllib.request.Request(
@@ -132,7 +213,7 @@ def _post_json(path: str, body: dict[str, Any]) -> dict[str, Any]:
         data=json.dumps(body).encode(),
         method="POST",
         headers={
-            "Authorization": f"Bearer {OIDC_TOKEN}",
+            "Authorization": f"Bearer {_get_token()}",
             "Content-Type": "application/json",
         },
     )
@@ -250,10 +331,9 @@ def call_api(prompt: str, options: dict[str, Any] | None = None,
     """
     try:
         _assert_staging()
-        if not OIDC_TOKEN:
-            raise ProviderError("ROLEMESH_OIDC_TOKEN is empty (run get-token.sh owner@t1).")
         if not COWORKER_ID:
             raise ProviderError("REDTEAM_COWORKER_ID is empty (see redteam/seed.py output).")
+        _get_token()  # fail fast on a missing/unmintable token before any work
 
         conv = _post_json(f"/coworkers/{COWORKER_ID}/conversations", {"name": "redteam"})
         conversation_id = conv["id"]
