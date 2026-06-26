@@ -298,6 +298,25 @@ def get_mcp_registry() -> dict[str, tuple[str, dict[str, str], str]]:
     return dict(_mcp_registry)
 
 
+def _collapse_trailing_slash(path: str) -> str:
+    """Drop a redundant trailing slash from an MCP upstream path.
+
+    FastMCP/Starlette mount the MCP app at ``/mcp`` and 307-redirect
+    ``/mcp/`` → ``/mcp``. A server registered with a trailing slash (the
+    common case — see ``redteam/seed.py``) therefore triggers a redirect
+    on *every* call. Collapsing the redundant slash here serves the
+    request directly and removes that round-trip at the source. The
+    redirect-follow in ``_stream_upstream`` remains the general safety
+    net for any *other* redirect a server may emit.
+
+    The root path ``/`` is preserved — stripping it would change the
+    request target rather than just normalising a spurious slash.
+    """
+    if len(path) > 1 and path.endswith("/"):
+        return path.rstrip("/") or "/"
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Safety hook
 # ---------------------------------------------------------------------------
@@ -405,9 +424,21 @@ async def start_credential_proxy(
         target_url: str,
         headers: dict[str, str],
         body: bytes,
+        *,
+        follow_redirects: bool = False,
     ) -> web.StreamResponse:
+        # ``follow_redirects`` is opt-in per route. The LLM provider path
+        # leaves it False: those endpoints are exact and a 3xx there is
+        # suspicious, so we pass the redirect straight back. The MCP path
+        # turns it on (see ``handle_mcp_proxy``) so that the per-server
+        # ``extra_headers`` we inject — Authorization / X-Actor-* — are
+        # re-sent on the redirected hop instead of being lost. aiohttp
+        # preserves those headers across a *same-origin* redirect (it only
+        # drops Authorization when the origin changes), which is exactly
+        # the FastMCP ``/mcp/`` → ``/mcp`` case.
         async with session.request(
-            method, target_url, headers=headers, data=body or None, allow_redirects=False,
+            method, target_url, headers=headers, data=body or None,
+            allow_redirects=follow_redirects,
         ) as upstream_resp:
             resp_headers = {k: v for k, v in upstream_resp.headers.items() if k.lower() not in _SKIP_RESPONSE_HEADERS}
             response = web.StreamResponse(status=upstream_resp.status, headers=resp_headers)
@@ -548,7 +579,11 @@ async def start_credential_proxy(
         rest = request.match_info.get("path_info", "")
         identity, server_name, upstream_path = _resolve(request, first_seg, rest)
 
-        remaining_path = "/" + upstream_path
+        # Collapse a redundant trailing slash (``/mcp/`` → ``/mcp``) so the
+        # FastMCP/Starlette 307 redirect never fires in the common case;
+        # _stream_upstream still follows any other redirect with the
+        # injected headers re-sent.
+        remaining_path = _collapse_trailing_slash("/" + upstream_path)
         if request.query_string:
             remaining_path += "?" + request.query_string
 
@@ -590,7 +625,10 @@ async def start_credential_proxy(
         body = await request.read()
 
         try:
-            return await _stream_upstream(request, request.method, target_url, fwd_headers, body)
+            return await _stream_upstream(
+                request, request.method, target_url, fwd_headers, body,
+                follow_redirects=True,
+            )
         except (ConnectionResetError, OSError, RuntimeError, ValueError) as exc:
             logger.error("MCP proxy upstream error", server=server_name, error=str(exc))
             return web.Response(status=502, text="MCP proxy: Bad Gateway")
