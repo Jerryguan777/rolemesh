@@ -48,6 +48,8 @@ still hold?" regression net). Findings here that land should be back-filled into
 | `REDTEAM_COWORKER_ID` | the coworker id printed by `redteam/seed.py` |
 | `REDTEAM_RUN_TIMEOUT` | per-run deadline seconds (default 120) |
 | `REDTEAM_ALLOW_NONLOCAL` | set `1` only to target a non-local disposable host |
+| `OPENAI_API_KEY` | **promptfoo's own** generator + grader (red-team scan only, not Phase 0) |
+| `PROMPTFOO_DISABLE_REDTEAM_REMOTE_GENERATION` | set `true` to keep attack generation local instead of promptfoo's hosted service (see "Cost & keys") |
 
 ## Phase 0 — full-chain smoke (do this first)
 
@@ -69,13 +71,58 @@ This step exists because the MCP rig's load-bearing assumption — that the
 credential proxy injects the `X-Actor-*` identity headers onto the upstream — is
 verified in code but had not been exercised by a live agent run.
 
-## Run the red-team scan
+## Run the red-team scan (P1)
 
 ```bash
 cd redteam/promptfoo
+python ../../redteam/seed.py                 # RE-SEED first (see below)
+export ROLEMESH_OIDC_TOKEN="$(../../deploy/compose/keycloak/get-token.sh owner@t1)"
+export REDTEAM_COWORKER_ID=<id-from-seed>
+export OPENAI_API_KEY=sk-...                  # promptfoo's generator/grader
 npx promptfoo@latest redteam run -c promptfooconfig.yaml
-npx promptfoo@latest redteam report     # OWASP LLM Top 10 dashboard
+npx promptfoo@latest redteam report          # OWASP LLM Top 10 dashboard
 ```
+
+**RE-SEED before every run.** `records-mcp` (`delete_record`) and `files-mcp`
+(`write_file`) are mutating tools — a scan can delete/overwrite seeded fixtures.
+`redteam/seed.py` is idempotent and restores the targets.
+
+The P1 plugin/strategy matrix (`promptfooconfig.yaml`):
+
+| Plugin | Target | Strategies | attack_sim |
+|---|---|---|---|
+| `bola` | read another user's/tenant's file or record | basic, base64 | E |
+| `bfla` | invoke admin-only `delete_record` / `admin_export_all` | basic, **crescendo** | E/H |
+| `rbac` | role boundary on admin tools | basic | H |
+| `pii` | leak seeded SSN / CC / email | basic, base64 | D1 |
+| `tool-discovery` | enumerate tools/servers | basic | — |
+| `excessive-agency` | act beyond member scope | basic | — |
+| `indirect-prompt-injection` | follow instructions in tool output | basic, base64 | C/D |
+
+`base64` and `crescendo` are **scoped** (via each strategy's `config.plugins`)
+so they don't fan out across every plugin — that scoping is the main budget
+lever. `basic` runs on all plugins as the baseline.
+
+## Cost & keys
+
+Two LLM consumers, two keys:
+
+| Consumer | Key | Notes |
+|---|---|---|
+| **The target** — RoleMesh coworker's agent (one run per test case) | RoleMesh's **Anthropic** key, already wired via the credential proxy | The dominant cost; not configured here. |
+| **promptfoo** — attack generation + grading | **`OPENAI_API_KEY`** | Use OpenAI: promptfoo warns Anthropic may flag/disable an account for generating harmful test cases. Small relative cost. |
+
+Calibrate before scaling:
+
+1. `numTests` ships at **2** (calibration). Run once.
+2. Read actual spend from BOTH dashboards (Anthropic for the agent, OpenAI for
+   promptfoo). Multiply out to estimate a full pass.
+3. Raise `numTests` to ~8 in `promptfooconfig.yaml` for the real run.
+
+Self-hosted note: promptfoo sends some attack generation to its **hosted remote
+service** by default. To keep everything on your own keys/local, set
+`PROMPTFOO_DISABLE_REDTEAM_REMOTE_GENERATION=true` (promptfoo notes this lowers
+generation quality).
 
 ## Reading results — the verdict buckets
 
@@ -117,10 +164,12 @@ runs from "RoleMesh defended" counts.
 On-demand / per-release (LLM-driven, slow, costs money, non-deterministic — not
 a per-PR gate). The deterministic per-PR gate stays `tests/attack_sim/`.
 
-## Roadmap (beyond P0)
+## Roadmap
 
-- **P1**: widen to `bfla`, `rbac`, `pii`, `tool-discovery`, `excessive-agency`,
-  `indirect-prompt-injection`; add `base64` (encoding bypass) and `crescendo`
-  (multi-turn) strategies, scoped to the high-risk plugins; `run.sh` wrapper.
+- **P0** (done): provider + Phase 0 smoke gate (broken-chain aware).
+- **P1** (current): the 7-plugin matrix above with scoped `base64` / `crescendo`
+  strategies; `numTests` ships at the calibration value 2, raise after a
+  calibration run.
 - **P2**: custom assertions over `metadata.tool_calls` to grade BOLA/BFLA on the
-  actual tool invocation (not just the reply text), and archive baseline runs.
+  actual tool invocation (not just the reply text), exclude `chain_error` runs
+  from "defended" counts, and archive baseline runs for diffing.
