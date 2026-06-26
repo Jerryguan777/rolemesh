@@ -1,0 +1,113 @@
+# RoleMesh + Keycloak OIDC override (dev/test only).
+#
+# Layers a Keycloak IdP onto the base stack and flips webui + orchestrator
+# into AUTH_MODE=oidc. The base compose.yaml is unchanged and still defaults
+# to AUTH_MODE=external, so this file is purely additive — omit it to get the
+# original stack back.
+#
+# Run from the repo root (note BOTH -f flags, base first):
+#
+#   docker compose --env-file .env \
+#     -f deploy/compose/compose.yaml \
+#     -f deploy/compose/compose.keycloak.yaml up -d
+#
+# Then wait ~20s for the realm import and run:
+#   deploy/compose/keycloak/e2e-verify.sh
+#
+# ── Why the hostname settings below matter (the classic Keycloak-in-docker
+#    trap) ──────────────────────────────────────────────────────────────────
+# The browser reaches Keycloak at http://localhost:8081 (published port) while
+# the webui/orchestrator containers reach it at http://keycloak:8080 (service
+# name). If issuer/jwks_uri were host-dependent, tokens minted for the browser
+# (iss=localhost:8081) would fail validation against a discovery doc fetched at
+# keycloak:8080 — login would break.
+#
+# Fix (Keycloak 25 / hostname v1):
+#   * KC_HOSTNAME + KC_HOSTNAME_PORT pin the FRONTEND issuer/authorize URLs to
+#     http://localhost:8081 — stable for both browser and backchannel.
+#   * KC_HOSTNAME_STRICT_BACKCHANNEL=false (the load-bearing line) lets the
+#     BACKCHANNEL endpoints (jwks_uri, token_endpoint) follow the request host,
+#     so a container fetching discovery at keycloak:8080 gets jwks_uri =
+#     http://keycloak:8080/...  — reachable from inside the network.
+#
+# Hard coupling: OIDC_DISCOVERY_URL below MUST stay http://keycloak:8080/...
+# Do NOT "fix" it to localhost:8081 to match iss — iss already matches (pinned
+# above), and pointing discovery at localhost:8081 would make jwks_uri
+# unreachable from the containers and break ALL token validation.
+
+services:
+  keycloak:
+    # Pinned to 25.0: the hostname env vars below are the v1 option names.
+    # Keycloak 26 removed KC_HOSTNAME_PORT / KC_HOSTNAME_STRICT_BACKCHANNEL
+    # (hostname v2) — do NOT bump the tag without switching to v2 syntax
+    # (KC_HOSTNAME=http://localhost:8081, KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true).
+    image: quay.io/keycloak/keycloak:25.0
+    container_name: rolemesh-keycloak
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_HOSTNAME: localhost
+      KC_HOSTNAME_PORT: "8081"
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_BACKCHANNEL: "false"
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      # 8081 on the host (8080 is taken by webui). Container still listens on
+      # 8080, which is the address the other services use (keycloak:8080).
+      - "8081:8080"
+    volumes:
+      - ./keycloak/rolemesh-realm.json:/opt/keycloak/data/import/rolemesh-realm.json:ro
+    networks:
+      - default
+    healthcheck:
+      # UBI9 /bin/sh is bash, so /dev/tcp works. Probes the management health
+      # port (9000, enabled by KC_HEALTH_ENABLED). Best-effort: dependents use
+      # service_started (the RoleMesh OIDC provider fetches discovery lazily on
+      # first login, so they need not wait for Keycloak to be ready to boot).
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q UP <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 24
+      start_period: 20s
+
+  webui:
+    depends_on:
+      keycloak:
+        condition: service_started
+    environment:
+      AUTH_MODE: oidc
+      # Containers reach Keycloak by service name; see the coupling note above.
+      OIDC_DISCOVERY_URL: http://keycloak:8080/realms/rolemesh/.well-known/openid-configuration
+      OIDC_CLIENT_ID: rolemesh-web
+      OIDC_CLIENT_SECRET: rolemesh-web-dev-secret
+      # Audience left empty -> defaults to client_id. Keycloak id_token aud is
+      # the client_id, so it validates with zero extra mappers.
+      OIDC_AUDIENCE: ""
+      # redirect_uri is browser-facing -> the host-published webui address.
+      OIDC_REDIRECT_URI: http://localhost:8080/oauth2/callback
+      # offline_access is requested so the browser flow gets a refresh_token
+      # (webui silent-refresh / session continuity). Not needed by promptfoo.
+      OIDC_SCOPES: "openid profile email offline_access"
+      # Flat top-level String claims emitted by the realm's user-attribute
+      # mappers. These names MUST match claim.name in rolemesh-realm.json.
+      OIDC_CLAIM_TENANT_ID: tenant_id
+      OIDC_CLAIM_ROLE: role
+      # Dev is plain HTTP -> the refresh cookie cannot be Secure or the
+      # browser silently drops it.
+      OIDC_COOKIE_SECURE: "false"
+      OIDC_COOKIE_SAMESITE: lax
+
+  orchestrator:
+    depends_on:
+      keycloak:
+        condition: service_started
+    environment:
+      # The orchestrator needs the OIDC config too: without a discovery URL +
+      # client_id it never subscribes the egress token responder (see the base
+      # compose comment on the orchestrator OIDC_* block).
+      AUTH_MODE: oidc
+      OIDC_DISCOVERY_URL: http://keycloak:8080/realms/rolemesh/.well-known/openid-configuration
+      OIDC_CLIENT_ID: rolemesh-web
+      OIDC_CLIENT_SECRET: rolemesh-web-dev-secret

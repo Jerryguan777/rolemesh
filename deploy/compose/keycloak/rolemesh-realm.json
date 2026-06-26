@@ -1,0 +1,131 @@
+{
+  "realm": "rolemesh",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "accessTokenLifespan": 1800,
+  "accessTokenLifespanForImplicitFlow": 1800,
+  "ssoSessionIdleTimeout": 3600,
+  "ssoSessionMaxLifespan": 36000,
+  "components": {
+    "org.keycloak.userprofile.UserProfileProvider": [
+      {
+        "name": "Declarative User Profile",
+        "providerId": "declarative-user-profile",
+        "subComponents": {},
+        "config": {
+          "kc.user.profile.config": [
+            "{\"unmanagedAttributePolicy\":\"ENABLED\"}"
+          ]
+        }
+      }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "rolemesh-web",
+      "name": "RoleMesh WebUI",
+      "description": "Confidential client for RoleMesh: browser PKCE login + ROPG for programmatic (promptfoo) token issuance.",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "rolemesh-web-dev-secret",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://localhost:8080/oauth2/callback"
+      ],
+      "webOrigins": [
+        "http://localhost:8080"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://localhost:8080/*"
+      },
+      "protocolMappers": [
+        {
+          "name": "tenant_id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "tenant_id",
+            "claim.name": "tenant_id",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "multivalued": "false"
+          }
+        },
+        {
+          "name": "role",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "role",
+            "claim.name": "role",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "true",
+            "multivalued": "false"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "owner@t1",
+      "email": "owner@t1.example.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Owner",
+      "lastName": "TenantOne",
+      "attributes": {
+        "tenant_id": ["t1"],
+        "role": ["owner"]
+      },
+      "credentials": [
+        { "type": "password", "value": "Passw0rd!", "temporary": false }
+      ]
+    },
+    {
+      "username": "member@t1",
+      "email": "member@t1.example.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Member",
+      "lastName": "TenantOne",
+      "attributes": {
+        "tenant_id": ["t1"],
+        "role": ["member"]
+      },
+      "credentials": [
+        { "type": "password", "value": "Passw0rd!", "temporary": false }
+      ]
+    },
+    {
+      "username": "owner@t2",
+      "email": "owner@t2.example.com",
+      "emailVerified": true,
+      "enabled": true,
+      "firstName": "Owner",
+      "lastName": "TenantTwo",
+      "attributes": {
+        "tenant_id": ["t2"],
+        "role": ["owner"]
+      },
+      "credentials": [
+        { "type": "password", "value": "Passw0rd!", "temporary": false }
+      ]
+    }
+  ]
+}
