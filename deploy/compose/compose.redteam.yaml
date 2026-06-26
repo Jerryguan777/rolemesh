@@ -1,0 +1,109 @@
+# Red-team sandbox MCP overlay (TEST / RED-TEAM ONLY — NOT FOR PRODUCTION).
+#
+# Adds three deliberately-vulnerable MCP target servers used by the
+# promptfoo red-teaming stage, plus the isolated bridge they live on.
+# Layer it on top of the base stack:
+#
+#   docker compose --env-file .env \
+#     -f deploy/compose/compose.yaml \
+#     -f deploy/compose/compose.redteam.yaml up -d
+#
+# Topology (see redteam/mcp/README.md → "Network placement"):
+#   * The three MCP servers sit on `redteam-mcp-net`, a NORMAL bridge.
+#   * The egress-gateway is ALSO attached to `redteam-mcp-net` (this file
+#     merges a third network onto the base gateway service). That is the
+#     only reachability that matters: the gateway forwards an agent's
+#     `mcp-proxy/<name>/...` request to the MCP origin, resolving the
+#     service name over this shared net.
+#   * Agent containers are NOT on this net. They reach the MCP only via
+#     the credential proxy at egress-gateway:3001 — the "container cannot
+#     reach the MCP directly" isolation property (docs/7) is preserved.
+#   * Because `redteam-mcp-net` is a normal bridge with a default route,
+#     fetch-mcp's outbound GETs can leave the box — by design, for the
+#     SSRF/tool-abuse scenario. This does NOT route agent traffic.
+#
+# This overlay does not modify the base agent-net / egress-net invariants,
+# so `verify_infrastructure` (which only checks those two) is unaffected.
+
+name: rolemesh
+
+services:
+  # Merge a third NIC onto the base gateway so it can resolve+reach the
+  # MCP services by name. Compose merges this `networks` map with the
+  # base service's (agent-net + egress-net stay intact).
+  egress-gateway:
+    networks:
+      redteam-mcp-net:
+
+  files-mcp:
+    build:
+      context: ../..
+      dockerfile: redteam/mcp/Dockerfile
+    image: rolemesh-redteam-mcp:latest
+    container_name: rolemesh-redteam-files-mcp
+    restart: unless-stopped
+    command: ["python", "files_mcp.py"]
+    networks:
+      - redteam-mcp-net
+    healthcheck:
+      # The server has no unauthenticated route; a bare TCP connect to the
+      # listening port is enough to prove it is up.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket,sys; s=socket.socket(); s.settimeout(3); s.connect(('127.0.0.1',9101)); sys.exit(0)"
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  records-mcp:
+    image: rolemesh-redteam-mcp:latest
+    container_name: rolemesh-redteam-records-mcp
+    restart: unless-stopped
+    command: ["python", "records_mcp.py"]
+    # Reuse the image built by files-mcp; declaring build on one service is
+    # enough, but depends_on keeps the build ordering explicit.
+    depends_on:
+      - files-mcp
+    networks:
+      - redteam-mcp-net
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket,sys; s=socket.socket(); s.settimeout(3); s.connect(('127.0.0.1',9102)); sys.exit(0)"
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  fetch-mcp:
+    image: rolemesh-redteam-mcp:latest
+    container_name: rolemesh-redteam-fetch-mcp
+    restart: unless-stopped
+    command: ["python", "fetch_mcp.py"]
+    depends_on:
+      - files-mcp
+    networks:
+      - redteam-mcp-net
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket,sys; s=socket.socket(); s.settimeout(3); s.connect(('127.0.0.1',9103)); sys.exit(0)"
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+networks:
+  # Isolated bridge for the red-team targets. Normal bridge (NOT internal):
+  # the gateway reaches the MCPs here, and fetch-mcp can make real outbound
+  # requests for the SSRF scenario. Agents are never attached.
+  redteam-mcp-net:
+    name: rolemesh-redteam-mcp-net
+    driver: bridge

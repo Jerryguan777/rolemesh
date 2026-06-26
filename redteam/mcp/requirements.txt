@@ -1,0 +1,6 @@
+# Runtime deps for the red-team sandbox MCP servers (TEST/RED-TEAM ONLY).
+# Versions mirror the project's `pi` extra so behaviour matches the rest
+# of the stack. starlette is pulled in transitively by mcp.
+mcp>=1.6
+uvicorn[standard]>=0.34
+httpx>=0.27
