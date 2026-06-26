@@ -22,13 +22,16 @@
 # (iss=localhost:8081) would fail validation against a discovery doc fetched at
 # keycloak:8080 — login would break.
 #
-# Fix (Keycloak 25 / hostname v1):
-#   * KC_HOSTNAME + KC_HOSTNAME_PORT pin the FRONTEND issuer/authorize URLs to
-#     http://localhost:8081 — stable for both browser and backchannel.
-#   * KC_HOSTNAME_STRICT_BACKCHANNEL=false (the load-bearing line) lets the
+# Fix (Keycloak hostname v2 — the default on 25.0.6, which the floating ":25.0"
+# tag resolves to; the older v1 options KC_HOSTNAME_PORT /
+# KC_HOSTNAME_STRICT_BACKCHANNEL are ignored here and must NOT be used):
+#   * KC_HOSTNAME = full FRONTEND URL http://localhost:8081 — pins the
+#     issuer/authorize URLs, stable for both browser and backchannel.
+#   * KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true (the load-bearing line) lets the
 #     BACKCHANNEL endpoints (jwks_uri, token_endpoint) follow the request host,
 #     so a container fetching discovery at keycloak:8080 gets jwks_uri =
-#     http://keycloak:8080/...  — reachable from inside the network.
+#     http://keycloak:8080/...  — reachable from inside the network. Without it,
+#     jwks_uri stays http://localhost:8081 and is unreachable from containers.
 #
 # Hard coupling: OIDC_DISCOVERY_URL below MUST stay http://keycloak:8080/...
 # Do NOT "fix" it to localhost:8081 to match iss — iss already matches (pinned
@@ -37,20 +40,20 @@
 
 services:
   keycloak:
-    # Pinned to 25.0: the hostname env vars below are the v1 option names.
-    # Keycloak 26 removed KC_HOSTNAME_PORT / KC_HOSTNAME_STRICT_BACKCHANNEL
-    # (hostname v2) — do NOT bump the tag without switching to v2 syntax
-    # (KC_HOSTNAME=http://localhost:8081, KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true).
-    image: quay.io/keycloak/keycloak:25.0
+    # Pinned to an EXACT patch (not the floating ":25.0", which resolves to
+    # 25.0.6 and defaults to hostname v2). The env vars below are v2 syntax;
+    # keep tag and syntax in lockstep when bumping. On 26.x the same v2 vars
+    # apply, but re-verify the user-profile import (rolemesh-realm.json).
+    image: quay.io/keycloak/keycloak:25.0.6
     container_name: rolemesh-keycloak
     command: ["start-dev", "--import-realm"]
     environment:
       KEYCLOAK_ADMIN: admin
       KEYCLOAK_ADMIN_PASSWORD: admin
-      KC_HOSTNAME: localhost
-      KC_HOSTNAME_PORT: "8081"
+      # Hostname v2: full frontend URL + dynamic backchannel (see header note).
+      KC_HOSTNAME: http://localhost:8081
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
       KC_HOSTNAME_STRICT: "false"
-      KC_HOSTNAME_STRICT_BACKCHANNEL: "false"
       KC_HTTP_ENABLED: "true"
       KC_HEALTH_ENABLED: "true"
     ports:

@@ -95,7 +95,9 @@ pass "owner@t2 is a separate tenant $T2"
 echo "==> 5. Data-layer (RLS) isolation via /api/v1/coworkers"
 # Unique-ish folder per run so a re-run doesn't collide on UNIQUE(tenant_id,folder).
 FOLDER="e2e-iso-$$"
-CREATE=$(api POST "$ID_OWNER_T1" /coworkers "{\"name\":\"e2e-iso\",\"folder\":\"${FOLDER}\"}")
+# agent_backend is a required CoworkerCreate field (Literal["claude","pi"]) and
+# the schema is extra="forbid", so name+folder alone returns 422.
+CREATE=$(api POST "$ID_OWNER_T1" /coworkers "{\"name\":\"e2e-iso\",\"folder\":\"${FOLDER}\",\"agent_backend\":\"claude\"}")
 [ "$(code "$CREATE")" = 201 ] || fail "owner@t1 create coworker -> $(code "$CREATE") (want 201); body: $(json "$CREATE")"
 CW_ID=$(jq -r .id <<<"$(json "$CREATE")")
 pass "owner@t1 created coworker $CW_ID"

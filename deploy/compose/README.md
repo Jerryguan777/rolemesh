@@ -130,13 +130,14 @@ docker compose --env-file .env -f deploy/compose/compose.yaml up -d
 These are pre-solved in `compose.keycloak.yaml` / `rolemesh-realm.json`; listed
 so you don't undo them:
 
-- **Image is pinned to `keycloak:25.0`.** The hostname env vars use the v1
-  option names. Keycloak 26 (hostname v2) removed `KC_HOSTNAME_PORT` /
-  `KC_HOSTNAME_STRICT_BACKCHANNEL`; bumping the tag without switching to v2
-  syntax (`KC_HOSTNAME=http://localhost:8081`,
-  `KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true`) breaks startup.
+- **Image is pinned to the exact patch `keycloak:25.0.6`** (not the floating
+  `:25.0`). The hostname env vars use **v2 syntax** (`KC_HOSTNAME` = a full URL
+  + `KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true`), which is the default on 25.0.6 /
+  26.x. The older v1 options (`KC_HOSTNAME_PORT`,
+  `KC_HOSTNAME_STRICT_BACKCHANNEL`) are silently ignored here — do not
+  reintroduce them. Keep the tag and the syntax in lockstep when bumping.
 - **`OIDC_DISCOVERY_URL` must stay `http://keycloak:8080/...`** (the in-network
-  name). `KC_HOSTNAME_STRICT_BACKCHANNEL=false` makes Keycloak return
+  name). `KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true` makes Keycloak return
   backchannel endpoints (`jwks_uri`, `token_endpoint`) on the request host, so
   containers fetch keys from a reachable address while `iss` stays the fixed
   frontend URL. Pointing discovery at `localhost:8081` to "match iss" would
