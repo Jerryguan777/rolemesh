@@ -16,12 +16,21 @@ if TYPE_CHECKING:
 def pg_url() -> Generator[str, None, None]:
     """Start a PostgreSQL container for the test session.
 
-    Durability is turned off (fsync / synchronous_commit / full_page_writes).
-    This is a throwaway container — nothing survives the session, so there is
-    nothing to make crash-safe — and the fsync per commit/TRUNCATE otherwise
-    dominates runtime: it makes the per-test TRUNCATE ~90x slower (≈1.7s → 20ms)
-    and adds an fsync to every INSERT the tests do.
+    Local-dev escape hatch: if ``RM_TEST_PG_URL`` is set (e.g. a hand-started
+    cluster on a Docker-less box), use it directly and skip testcontainers.
+
+    Otherwise a throwaway container with durability turned off (fsync /
+    synchronous_commit / full_page_writes). Nothing survives the session, so
+    there is nothing to make crash-safe — and the fsync per commit/TRUNCATE
+    otherwise dominates runtime (per-test TRUNCATE ~90x slower, ≈1.7s → 20ms,
+    plus an fsync on every INSERT the tests do).
     """
+    import os
+
+    if os.environ.get("RM_TEST_PG_URL"):
+        yield os.environ["RM_TEST_PG_URL"]
+        return
+
     with PostgresContainer("postgres:16").with_command(
         "postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off"
     ) as pg:
