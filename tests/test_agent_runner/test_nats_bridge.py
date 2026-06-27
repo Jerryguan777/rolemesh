@@ -387,13 +387,14 @@ class TestChannel4CloseSignal:
 class TestChannel5And6ToolPublishes:
     async def test_send_message_tool_publishes_to_nats(self, nats_conn: tuple) -> None:
         """send_message tool publishes to agent.{id}.messages via real NATS."""
-        _nc, js = nats_conn
+        nc, js = nats_conn
         job_id = _unique_job_id()
 
         sub = await js.subscribe(f"agent.{job_id}.messages")
 
         ctx = ToolContext(
             js=js,
+            nc=nc,
             job_id=job_id,
             chat_jid="chat-1",
             group_folder="grp",
@@ -418,13 +419,14 @@ class TestChannel5And6ToolPublishes:
 
     async def test_schedule_task_tool_publishes_to_nats(self, nats_conn: tuple) -> None:
         """schedule_task tool publishes to agent.{id}.tasks via real NATS."""
-        _nc, js = nats_conn
+        nc, js = nats_conn
         job_id = _unique_job_id()
 
         sub = await js.subscribe(f"agent.{job_id}.tasks")
 
         ctx = ToolContext(
             js=js,
+            nc=nc,
             job_id=job_id,
             chat_jid="chat-1",
             group_folder="grp",

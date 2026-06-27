@@ -52,7 +52,13 @@ async def test_startup_verifies_infrastructure_in_order() -> None:
     parent.attach_mock(rt.verify_infrastructure, "verify_infrastructure")
     parent.attach_mock(rt.cleanup_orphans, "cleanup_orphans")
 
-    with patch.object(main_module, "get_runtime", return_value=rt):
+    # Pin the bridge name: a developer .env with an empty
+    # CONTAINER_NETWORK_NAME leaks into os.environ via rolemesh.bootstrap
+    # and would otherwise trip the empty-value guard before verification.
+    with (
+        patch.object(main_module, "CONTAINER_NETWORK_NAME", "rolemesh-agent-net"),
+        patch.object(main_module, "get_runtime", return_value=rt),
+    ):
         await main_module._ensure_container_system_running()
 
     call_order = [c[0] for c in parent.mock_calls if c[0]]
@@ -91,7 +97,10 @@ async def test_startup_fail_closed_when_verification_fails() -> None:
         side_effect=RuntimeError("agent network does not exist")
     )
 
+    # Pin the bridge name so the empty-value guard doesn't fire before
+    # verify_infrastructure (developer-.env pollution; see module siblings).
     with (
+        patch.object(main_module, "CONTAINER_NETWORK_NAME", "rolemesh-agent-net"),
         patch.object(main_module, "get_runtime", return_value=rt),
         pytest.raises(RuntimeError, match="agent network does not exist"),
     ):
