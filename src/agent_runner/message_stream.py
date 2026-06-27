@@ -40,6 +40,17 @@ class MessageStream:
         self._done = True
         self._event.set()
 
+    def has_pending(self) -> bool:
+        """True while user messages are queued but not yet consumed by the SDK.
+
+        Used by the backend to decide whether a turn is fully answered: after a
+        ResultMessage, an empty queue means there is no follow-up to keep the
+        multi-turn stream open for, so the input can be ended. ``__aiter__``
+        drains the queue before honoring ``end()``, so a follow-up that races
+        in right after this check is still delivered, never lost.
+        """
+        return bool(self._queue)
+
     async def __aiter__(self) -> AsyncIterator[dict[str, Any]]:
         while True:
             while self._queue:
