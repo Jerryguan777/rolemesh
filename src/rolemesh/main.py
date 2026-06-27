@@ -90,12 +90,17 @@ from rolemesh.db import (
     init_database,
     list_coworker_mcp_configs,
     set_session,
+    tenant_conn,
     update_conversation_last_invocation,
     update_conversation_user_id,
     update_tenant_message_cursor,
 )
 from rolemesh.db import (
     store_message as db_store_message,
+)
+from rolemesh.runs import (
+    terminate_run_via_ws_completed,
+    terminate_run_via_ws_error,
 )
 from rolemesh.ipc.nats_transport import NatsTransport
 from rolemesh.ipc.task_handler import process_task_ipc
@@ -953,6 +958,37 @@ async def _handle_incoming(
 # ---------------------------------------------------------------------------
 
 
+async def _terminate_run_safe(
+    run_id: str | None,
+    tenant_id: str,
+    *,
+    success: bool,
+    usage: dict[str, object] | None = None,
+    error: dict[str, object] | None = None,
+) -> None:
+    """Write a run's terminal status server-side (INV-6 path 1/2), suppressing
+    errors so a DB hiccup never crashes the processing loop. No-op when there is
+    no run_id (IM channels, or a turn with no associated run)."""
+    if not run_id:
+        return
+    try:
+        async with tenant_conn(tenant_id) as conn:
+            if success:
+                await terminate_run_via_ws_completed(run_id=run_id, usage=usage, conn=conn)
+            else:
+                await terminate_run_via_ws_error(
+                    run_id=run_id,
+                    error=error or {"code": "AGENT_ERROR", "message": "agent run failed"},
+                    conn=conn,
+                )
+    except Exception:  # noqa: BLE001 — terminal write must never crash the loop
+        logger.warning(
+            "orchestrator-side run terminator failed (run stays 'running')",
+            run_id=run_id,
+            exc_info=True,
+        )
+
+
 async def _process_conversation_messages(conversation_id: str) -> bool:
     """Process all pending messages for a conversation (identified by conversation_id)."""
     found = _state.get_conversation(conversation_id)
@@ -972,6 +1008,17 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
         return True
 
     prompt = format_messages(missed_messages, TIMEZONE)
+
+    # INV-6 path 1/2 (server-side): the run this turn answers. Web sends carry a
+    # run_id on the inbound message; the most recent one is the active run (same
+    # single-active-run model as ws_stream). Writing the terminal status here, at
+    # is_final/error, means a browser that disconnected mid-turn no longer
+    # strands the row at 'running'. Idempotent with the WS-side writer via the
+    # lifecycle helper's WHERE status='running' guard. (Limitation: follow-ups
+    # piped into a warm container via send_message are not threaded here, so
+    # their runs still rely on the WS path / reaper — the dominant
+    # disconnect-mid-cold-start case is covered.)
+    active_run_id = next((m.run_id for m in reversed(missed_messages) if m.run_id), None)
 
     previous_cursor = conv_state.last_agent_timestamp
     conv_state.last_agent_timestamp = missed_messages[-1].timestamp
@@ -1050,6 +1097,17 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
             _reset_idle_timer()
             if result.is_final:
                 _queue.notify_idle(conversation_id)
+                await _terminate_run_safe(
+                    active_run_id,
+                    conv.tenant_id,
+                    success=False,
+                    error={
+                        "code": "SAFETY_BLOCKED",
+                        "message": reason,
+                        "stage": stage,
+                        "rule_id": rule_id if isinstance(rule_id, str) else None,
+                    },
+                )
             return
         if result.result:
             raw = result.result
@@ -1138,6 +1196,13 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
             # can race with scheduled-task preemption.
             if result.is_final:
                 _queue.notify_idle(conversation_id)
+                usage_dict = result.metadata.get("usage") if result.metadata else None
+                await _terminate_run_safe(
+                    active_run_id,
+                    conv.tenant_id,
+                    success=True,
+                    usage=usage_dict if isinstance(usage_dict, dict) else None,
+                )
         if result.status == "stopped":
             # User-initiated stop. Forward a status frame so the UI exits
             # the transitional 'stopping' state, then emit done to close
@@ -1153,6 +1218,12 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
             _queue.notify_idle(conversation_id)
         if result.status == "error":
             had_error = True
+            await _terminate_run_safe(
+                active_run_id,
+                conv.tenant_id,
+                success=False,
+                error={"code": "AGENT_ERROR", "message": result.error or "agent run failed"},
+            )
 
     output = await _run_agent(cw_state, conv_state, prompt, _on_output)
 

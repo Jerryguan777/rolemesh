@@ -319,6 +319,11 @@ class NewMessage:
     timestamp: str
     is_from_me: bool = False
     is_bot_message: bool = False
+    # The ``runs`` row this inbound message triggered (web channel only; NULL
+    # for IM channels and pre-runs messages). Threaded through so the
+    # orchestrator can write the run's terminal status server-side (INV-6 path
+    # 1/2) instead of depending on the browser's WS staying connected.
+    run_id: str | None = None
 
 
 @dataclass

@@ -658,6 +658,11 @@ def _record_to_new_message(row: asyncpg.Record, chat_jid: str = "") -> NewMessag
         timestamp=ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
         is_from_me=bool(row["is_from_me"]),
         is_bot_message=bool(row.get("is_bot_message", False)) if hasattr(row, "get") else False,
+        run_id=(
+            str(row["run_id"])
+            if hasattr(row, "get") and row.get("run_id") is not None
+            else None
+        ),
     )
 
 
@@ -676,7 +681,7 @@ async def get_messages_since(
         rows = await conn.fetch(
             """
             SELECT * FROM (
-                SELECT id, sender, sender_name, content, timestamp, is_from_me, is_bot_message
+                SELECT id, sender, sender_name, content, timestamp, is_from_me, is_bot_message, run_id
                 FROM messages
                 WHERE tenant_id = $1::uuid AND conversation_id = $2::uuid AND timestamp > $3
                     AND is_bot_message = FALSE AND content NOT LIKE $4
