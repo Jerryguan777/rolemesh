@@ -38,7 +38,6 @@ import rolemesh.core.config as c
 print(json.dumps({
     "ASSISTANT_NAME": c.ASSISTANT_NAME,
     "ASSISTANT_HAS_OWN_NUMBER": c.ASSISTANT_HAS_OWN_NUMBER,
-    "MAX_CONCURRENT_CONTAINERS": c.MAX_CONCURRENT_CONTAINERS,
     "GLOBAL_MAX_CONTAINERS": c.GLOBAL_MAX_CONTAINERS,
     "CONTAINER_TIMEOUT": c.CONTAINER_TIMEOUT,
     "CREDENTIAL_PROXY_PORT": c.CREDENTIAL_PROXY_PORT,
@@ -82,14 +81,6 @@ def cfg(*, no_system_tz: bool = False, **overrides: object) -> dict:
 # --- numeric clamping --------------------------------------------------------
 
 
-def test_max_concurrent_containers_clamped_to_at_least_one() -> None:
-    """A zero/negative env must not disable concurrency limiting — the
-    max(1, ...) floor protects the orchestrator from spawning unbounded
-    containers."""
-    assert cfg(MAX_CONCURRENT_CONTAINERS="0")["MAX_CONCURRENT_CONTAINERS"] == 1
-    assert cfg(MAX_CONCURRENT_CONTAINERS="-5")["MAX_CONCURRENT_CONTAINERS"] == 1
-
-
 def test_global_max_containers_clamped_to_at_least_one() -> None:
     assert cfg(GLOBAL_MAX_CONTAINERS="0")["GLOBAL_MAX_CONTAINERS"] == 1
     assert cfg(GLOBAL_MAX_CONTAINERS="-1")["GLOBAL_MAX_CONTAINERS"] == 1
@@ -103,9 +94,9 @@ def test_numeric_env_overrides_are_parsed() -> None:
 
 
 def test_numeric_defaults_when_unset() -> None:
-    out = cfg(CONTAINER_TIMEOUT=_DELETE, MAX_CONCURRENT_CONTAINERS=_DELETE)
+    out = cfg(CONTAINER_TIMEOUT=_DELETE, GLOBAL_MAX_CONTAINERS=_DELETE)
     assert out["CONTAINER_TIMEOUT"] == 1800000
-    assert out["MAX_CONCURRENT_CONTAINERS"] == 5
+    assert out["GLOBAL_MAX_CONTAINERS"] == 20
 
 
 # --- string / boolean parsing ------------------------------------------------

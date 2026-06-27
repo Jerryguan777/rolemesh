@@ -117,7 +117,11 @@ APPROVAL_TIMEOUT: int = int(os.environ.get("APPROVAL_TIMEOUT", "300000"))  # 5 m
 # therefore retired.
 
 MCP_PROXY_PREFIX: str = "mcp-proxy"
-MAX_CONCURRENT_CONTAINERS: int = max(1, int(os.environ.get("MAX_CONCURRENT_CONTAINERS", "5")))
+# Global ceiling on total LIVE containers (processing + warm). Slot-follows-turn
+# rework: turn admission is global/tenant/coworker (OrchestratorState); this is
+# the single memory ceiling. The former MAX_CONCURRENT_CONTAINERS env (an
+# orch_state-less fallback) was removed — admission always runs through
+# OrchestratorState now, so it had no remaining consumer.
 GLOBAL_MAX_CONTAINERS: int = max(1, int(os.environ.get("GLOBAL_MAX_CONTAINERS", "20")))
 
 # Runtime-abstraction backend selector: "docker" | "k8s" (not OCI runtime).

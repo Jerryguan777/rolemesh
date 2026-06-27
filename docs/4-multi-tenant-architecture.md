@@ -145,7 +145,7 @@ class CoworkerConfig:
     system_prompt: str | None
     tools: list[McpServerConfig]   # external MCP server bindings
     agent_backend: str        # "claude" or "pi"
-    max_concurrent: int
+    max_concurrent_containers: int   # max concurrent in-flight turns
     container_config: dict | None
     permissions: AgentPermissions  # 3 boolean fields (see auth-architecture.md)
 ```
@@ -282,7 +282,7 @@ The schema below includes only columns with defined purpose — no placeholder f
 |-------|-------------|---------|
 | `tenants` | `id`, `name`, `slug`, `max_concurrent_containers`, `last_message_cursor` | Organizational boundary and limits |
 | `users` | `id`, `tenant_id`, `name`, `role`, `email`, `external_sub` | Human users + auth provider mapping |
-| `coworkers` | `id`, `tenant_id`, `name`, `folder`, `agent_backend`, `system_prompt`, `tools` (JSONB), `permissions` (JSONB), `container_config`, `max_concurrent` | AI agents with full config |
+| `coworkers` | `id`, `tenant_id`, `name`, `folder`, `agent_backend`, `system_prompt`, `tools` (JSONB), `permissions` (JSONB), `container_config`, `max_concurrent_containers` | AI agents with full config |
 | `channel_bindings` | `id`, `tenant_id`, `coworker_id`, `channel_type`, `credentials`, `bot_display_name` | Per-coworker bot identities |
 | `conversations` | `id`, `tenant_id`, `coworker_id`, `channel_binding_id`, `channel_chat_id`, `last_agent_invocation`, `user_id` | Per-chat contexts with independent session |
 | `sessions` | `conversation_id` (PK), `tenant_id`, `coworker_id`, `session_id` | Claude SDK / Pi session mapping per conversation |
