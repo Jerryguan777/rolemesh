@@ -523,17 +523,6 @@ class ContainerAgentExecutor:
                 try:
                     raw = json.loads(msg.data)
                     parsed = _parse_container_output(raw)
-                    # DIAG (slot-leak hunt): record every result the executor
-                    # actually receives on agent.{job_id}.results, with is_final.
-                    # Pair with DIAG-MARKER-PUB in agent_runner to localize the
-                    # missing batch-final marker (emission vs NATS delivery).
-                    # Remove once root-caused.
-                    logger.info(
-                        "DIAG-RESULT-RECV",
-                        job_id=job_id,
-                        status=parsed.status,
-                        is_final=parsed.is_final,
-                    )
                     if parsed.new_session_id:
                         new_session_id = parsed.new_session_id
                     had_streaming_output = True

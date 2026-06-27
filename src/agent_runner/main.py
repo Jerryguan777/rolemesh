@@ -536,10 +536,6 @@ async def run_query_loop(
                     is_final=True,
                 ),
             )
-            # DIAG (slot-leak hunt): prove the batch-final marker is emitted.
-            # Pair with DIAG-RESULT-RECV in container_executor._read_results to
-            # localize emission vs NATS delivery. Remove once root-caused.
-            log(f"DIAG-MARKER-PUB is_final=True job={job_id}")
 
             log("Query ended, waiting for next NATS message...")
 
