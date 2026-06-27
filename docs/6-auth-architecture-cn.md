@@ -248,7 +248,7 @@ class AgentPermissions:
 
 | 关注点 | 归属位置 | 为何不放进权限里 |
 |---------|---------------|-------------------|
-| 最大并发容器数 | `coworkers.max_concurrent` | 资源限制，不是授权 |
+| 最大并发容器数 | `coworkers.max_concurrent_containers` | 资源限制，不是授权 |
 | 容器超时 | `container_config.timeout` | 资源限制 |
 | 可用的 MCP 服务器有哪些 | `coworkers.tools[]` | 工具绑定，与 auth 正交 |
 | 挂载限制 | `mount_security.py` 加外部白名单 | 安全策略，不是能力 |

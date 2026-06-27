@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -41,7 +43,25 @@ class _QueuedTask:
 
 @dataclass
 class _GroupState:
+    # ``active`` == a container exists for this group (spawn → exit), spanning
+    # both processing and the warm idle window. ``processing`` == a turn is
+    # in flight (turn-start → is_final); only this holds a turn slot, tracked
+    # idempotently by ``slot_held`` (slot-follows-turn rework). A warm idle
+    # container has ``active and not processing`` and holds no turn slot —
+    # it only counts against the global live-container ceiling.
+    #
+    # ``processing`` and ``slot_held`` move in lockstep but are NOT redundant —
+    # do not collapse them. ``processing`` is the lifecycle *phase* (it drives
+    # warm detection, idle-timer gating, and the send_message resume branch);
+    # ``slot_held`` is the counter-accounting *token* that makes
+    # ``_acquire_turn`` / ``_release_turn`` idempotent. They must stay distinct:
+    # ``_reserve_slot`` sets ``processing`` True *before* acquiring the turn, so
+    # using ``processing`` as the idempotency guard would mis-read "already held"
+    # and silently drop the increment.
     active: bool = False
+    processing: bool = False
+    slot_held: bool = False
+    last_active_at: float = 0.0  # monotonic ts of last is_final (warm-pool LRU key)
     idle_waiting: bool = False
     is_task_container: bool = False
     running_task_id: str | None = None
@@ -65,6 +85,10 @@ class _GroupState:
     idle_handle: asyncio.TimerHandle | None = None
     awaiting_approval: set[str] = field(default_factory=set)
     adopted: bool = False
+    # Reaper bookkeeping: consecutive sweeps this group was ``active`` with a
+    # registered container that is no longer live. Reaped once it crosses the
+    # two-sweep confirmation threshold (guards the just-exited race).
+    missing_sweeps: int = 0
 
 
 class GroupQueue:
@@ -79,7 +103,10 @@ class GroupQueue:
     ) -> None:
         self._groups: dict[str, _GroupState] = {}
         self._idle_timeout_ms = idle_timeout_ms
-        self._active_count: int = 0
+        # Warm idle containers (``active and not processing``), ordered by last
+        # is_final time → front is the LRU eviction victim when a cold start
+        # needs room under the global live-container ceiling.
+        self._warm: OrderedDict[str, float] = OrderedDict()
         self._waiting_groups: list[str] = []
         self._process_messages_fn: Callable[[str], Awaitable[bool]] | None = None
         self._on_queued: Callable[[str], Awaitable[None]] | None = None
@@ -88,6 +115,14 @@ class GroupQueue:
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._transport = transport
         self._runtime = runtime
+        # Single source of truth for concurrency counters. A default is created
+        # when none is injected (tests/eval) so all admission goes through one
+        # path — no parallel in-queue counter to drift (the old ``_active_count``
+        # is gone).
+        if orchestrator_state is None:
+            from rolemesh.core.orchestrator_state import OrchestratorState
+
+            orchestrator_state = OrchestratorState()
         self._orch_state = orchestrator_state
 
     def _spawn(self, coro: Awaitable[None]) -> None:
@@ -103,24 +138,64 @@ class GroupQueue:
             self._groups[group_jid] = state
         return state
 
-    def _can_start(self, tenant_id: str, coworker_id: str) -> bool:
-        """Check three-level concurrency."""
-        if self._orch_state:
-            return self._orch_state.can_start_container(tenant_id, coworker_id)
-        # Fallback to simple global limit
-        from rolemesh.core.config import MAX_CONCURRENT_CONTAINERS
+    def _can_start_turn(self, tenant_id: str, coworker_id: str) -> bool:
+        """Three-level turn admission (concurrent in-flight turns)."""
+        return self._orch_state.can_start_container(tenant_id, coworker_id)
 
-        return self._active_count < MAX_CONCURRENT_CONTAINERS
+    def _can_spawn(self) -> bool:
+        """Whether a new container fits under the global live-container ceiling."""
+        return self._orch_state.can_spawn_container()
 
-    def _increment(self, tenant_id: str, coworker_id: str) -> None:
-        self._active_count += 1
-        if self._orch_state:
-            self._orch_state.increment_active(tenant_id, coworker_id)
+    def _acquire_turn(self, state: _GroupState) -> None:
+        """Acquire a turn slot for ``state`` (idempotent on ``slot_held``)."""
+        if state.slot_held:
+            return
+        state.slot_held = True
+        self._orch_state.increment_active(state.tenant_id, state.coworker_id)
 
-    def _decrement(self, tenant_id: str, coworker_id: str) -> None:
-        self._active_count -= 1
-        if self._orch_state:
-            self._orch_state.decrement_active(tenant_id, coworker_id)
+    def _release_turn(self, state: _GroupState) -> None:
+        """Release ``state``'s turn slot (idempotent on ``slot_held``)."""
+        if not state.slot_held:
+            return
+        state.slot_held = False
+        self._orch_state.decrement_active(state.tenant_id, state.coworker_id)
+
+    def _acquire_container(self, state: _GroupState) -> None:
+        """Account a live container for ``state`` (idempotent on ``active``)."""
+        if state.active:
+            return
+        state.active = True
+        self._orch_state.acquire_container()
+
+    def _release_container(self, state: _GroupState) -> None:
+        """Account ``state``'s container exit (idempotent on ``active``).
+
+        Warm-set removal is the caller's job (it holds the ``group_jid`` key);
+        this only flips the flag and the global live counter.
+        """
+        if not state.active:
+            return
+        state.active = False
+        self._orch_state.release_container()
+
+    def _reserve_slot(self, state: _GroupState) -> None:
+        """Synchronously reserve a live-container + turn slot at the admission
+        *decision* point, before spawning the (async) runner.
+
+        Closes a TOCTOU: ``_run_for_group`` / ``_run_task`` only increment the
+        counters once their spawned task actually runs, so without reserving
+        here, multiple check-then-spawn decisions in the same event-loop tick
+        (notably one ``_drain_waiting`` pass releasing into several queued
+        groups, but also a burst of ``enqueue_*`` calls) all observe the
+        pre-increment counts, all pass, and over-admit — breaching the
+        per-coworker / per-tenant / global ceilings until the turns settle.
+        Bumping the counts synchronously here makes the next check in the same
+        tick see them. Idempotent (``_acquire_*`` guard on ``slot_held`` /
+        ``active``), so the runner's own acquire becomes a no-op.
+        """
+        self._acquire_container(state)
+        state.processing = True
+        self._acquire_turn(state)
 
     def set_process_messages_fn(self, fn: Callable[[str], Awaitable[bool]]) -> None:
         """Set the callback for processing messages for a group."""
@@ -164,24 +239,48 @@ class GroupQueue:
         state.tenant_id = tenant_id or state.tenant_id
         state.coworker_id = coworker_id or state.coworker_id
 
+        # A container already exists (processing or warm). Mark the message
+        # pending; delivery to a live container is the send_message (resume)
+        # path, and a warm container that is never resumed drains into a fresh
+        # container after it idle-reaps. No turn slot is taken here.
         if state.active:
             state.pending_messages = True
             logger.debug("Container active, message queued", group_jid=group_jid)
             return
 
-        if not self._can_start(state.tenant_id, state.coworker_id):
+        # Cold start needs BOTH turn admission and a free live-container slot.
+        if not self._can_start_turn(state.tenant_id, state.coworker_id) or not self._can_spawn():
             state.pending_messages = True
             if group_jid not in self._waiting_groups:
                 self._waiting_groups.append(group_jid)
+            # If only the live-container ceiling blocks (turn admission is fine),
+            # evict the LRU warm container to make room; its exit drains the
+            # waiting queue (async eviction).
+            if self._can_start_turn(state.tenant_id, state.coworker_id) and not self._can_spawn():
+                self._evict_lru_warm()
             logger.debug(
                 "At concurrency limit, message queued",
                 group_jid=group_jid,
-                active_count=self._active_count,
+                global_active=self._orch_state.global_active,
+                live_containers=self._orch_state.live_containers,
             )
             self._fire(self._on_queued, group_jid)
             return
 
+        self._reserve_slot(state)
         self._spawn(self._run_for_group(group_jid, "messages"))
+
+    def _evict_lru_warm(self) -> None:
+        """Ask the least-recently-used warm container to wind down, freeing a
+        live-container slot. Eviction is async: the victim's exit (R2) runs
+        ``_drain_waiting`` which spawns the queued cold start.
+        """
+        for victim_jid in list(self._warm.keys()):
+            vstate = self._groups.get(victim_jid)
+            if vstate and vstate.active and not vstate.processing:
+                logger.debug("Evicting LRU warm container", group_jid=victim_jid)
+                self.request_shutdown(victim_jid)
+                return
 
     def enqueue_task(
         self,
@@ -218,7 +317,7 @@ class GroupQueue:
             logger.debug("Container active, task queued", group_jid=group_jid, task_id=task_id)
             return
 
-        if not self._can_start(state.tenant_id, state.coworker_id):
+        if not self._can_start_turn(state.tenant_id, state.coworker_id) or not self._can_spawn():
             state.pending_tasks.append(
                 _QueuedTask(
                     id=task_id, group_jid=group_jid, fn=fn, tenant_id=state.tenant_id, coworker_id=state.coworker_id
@@ -226,11 +325,14 @@ class GroupQueue:
             )
             if group_jid not in self._waiting_groups:
                 self._waiting_groups.append(group_jid)
+            if self._can_start_turn(state.tenant_id, state.coworker_id) and not self._can_spawn():
+                self._evict_lru_warm()
             logger.debug(
                 "At concurrency limit, task queued",
                 group_jid=group_jid,
                 task_id=task_id,
-                active_count=self._active_count,
+                global_active=self._orch_state.global_active,
+                live_containers=self._orch_state.live_containers,
             )
             return
 
@@ -238,6 +340,7 @@ class GroupQueue:
         task = _QueuedTask(
             id=task_id, group_jid=group_jid, fn=fn, tenant_id=state.tenant_id, coworker_id=state.coworker_id
         )
+        self._reserve_slot(state)
         self._spawn(self._run_task(group_jid, task))
 
     def register_process(
@@ -274,17 +377,33 @@ class GroupQueue:
         return state.container_name
 
     def notify_idle(self, group_jid: str) -> None:
-        """Mark container as idle-waiting. Preempt if tasks pending."""
+        """Turn complete (is_final): release the turn slot, keep the container warm.
+
+        Slot-follows-turn rework — this is release-point R1. The turn slot is
+        handed back here (not at container exit), so a warm idle container no
+        longer occupies turn admission. The container itself stays alive in the
+        warm pool until idle-reaped or LRU-evicted. Preempt (wind down) instead
+        of going warm when tasks are pending.
+        """
         state = self._get_group(group_jid)
         # An approval suspend explicitly disowns reaping path B (§8). If an
         # is_final output races in while a decision is still pending, honour the
-        # suspend rather than re-arming the flag that would let a queued task
-        # reap the container mid-approval.
+        # suspend rather than releasing the slot / re-arming idle mid-approval.
         if state.awaiting_approval:
             return
+        self._release_turn(state)
+        state.processing = False
         state.idle_waiting = True
+        state.last_active_at = time.monotonic()
+        if state.active and not state.is_task_container:
+            self._warm[group_jid] = state.last_active_at
+            self._warm.move_to_end(group_jid)
         if state.pending_tasks:
             self.request_shutdown(group_jid)
+        else:
+            self.arm_idle_timer(group_jid)
+        # A freed turn slot may admit a queued group.
+        self._drain_waiting()
 
     # -- HITL approval: idle suspend / resume (docs/12-hitl-approval-architecture.md §8)
 
@@ -305,7 +424,12 @@ class GroupQueue:
         if state.idle_handle is not None:
             state.idle_handle.cancel()
             state.idle_handle = None
-        if state.awaiting_approval:
+        # No idle reaping while a turn is in flight (processing) or an approval
+        # is pending. The idle window only governs the WARM phase; a long
+        # processing turn that emits no output is bounded by the container
+        # watchdog (TURN_INACTIVITY_TIMEOUT), not by idle reaping — so a low
+        # IDLE_TIMEOUT can never kill a legitimately busy turn.
+        if state.awaiting_approval or state.processing:
             return
         loop = asyncio.get_running_loop()
         cb = self._reap_adopted if state.adopted else self.request_shutdown
@@ -377,13 +501,17 @@ class GroupQueue:
         ``finally``, which is not executing for an adopted one.
         """
         state = self._get_group(group_jid)
-        state.active = True
+        state.tenant_id = tenant_id or state.tenant_id
+        state.coworker_id = coworker_id or state.coworker_id
+        # Account the surviving container against the live ceiling. It is
+        # idle-governed (not a turn): no turn slot, so ``processing`` stays
+        # False and ``arm_idle_timer`` (via resume_from_approval) can reap it.
+        self._acquire_container(state)
+        state.processing = False
         state.is_running = True
         state.is_task_container = False
         state.adopted = True
         state.job_id = job_id
-        state.tenant_id = tenant_id or state.tenant_id
-        state.coworker_id = coworker_id or state.coworker_id
 
     def _reap_adopted(self, group_jid: str) -> None:
         """Idle-reap an adopted (restart-recovered) container and clear state.
@@ -396,7 +524,10 @@ class GroupQueue:
         """
         self.request_shutdown(group_jid)
         state = self._get_group(group_jid)
-        state.active = False
+        self._release_turn(state)  # idempotent; adopted holds none, but be safe
+        self._release_container(state)
+        self._warm.pop(group_jid, None)
+        state.processing = False
         state.is_running = False
         state.adopted = False
         state.container_name = None
@@ -405,14 +536,36 @@ class GroupQueue:
         self._drain_group(group_jid)
 
     def send_message(self, group_jid: str, text: str) -> bool:
-        """Send a follow-up message to the active container via NATS JetStream."""
+        """Deliver a message to this group's live container via NATS.
+
+        Two cases (slot-follows-turn rework):
+
+        * **processing** — the container is mid-turn; the message joins the
+          in-flight batch (one is_final settles the whole batch), no new slot.
+        * **warm** — idle between turns; this is a *resume* (acquire-point A2).
+          It needs turn admission: if granted, acquire a turn slot, leave the
+          warm pool, cancel idle reaping, then deliver; if denied, return False
+          so the caller queues it for a later drain.
+
+        Returns False when there is no live container, it is a task container,
+        no transport is wired, or a warm resume is refused by admission.
+        """
         state = self._get_group(group_jid)
         if not state.active or not state.job_id or state.is_task_container:
             return False
-        state.idle_waiting = False
 
         if self._transport is None:
             return False
+
+        if not state.processing:
+            # Warm resume (A2): gate on turn admission before re-acquiring.
+            if not self._can_start_turn(state.tenant_id, state.coworker_id):
+                return False
+            self.cancel_idle_timer(group_jid)
+            self._warm.pop(group_jid, None)
+            self._acquire_turn(state)
+            state.processing = True
+        state.idle_waiting = False
 
         try:
 
@@ -518,17 +671,25 @@ class GroupQueue:
 
     async def _run_for_group(self, group_jid: str, reason: str) -> None:
         state = self._get_group(group_jid)
-        state.active = True
         state.idle_waiting = False
         state.is_task_container = False
         state.pending_messages = False
-        self._increment(state.tenant_id, state.coworker_id)
+        self.cancel_idle_timer(group_jid)
+        # Cold start: acquire a live container AND the first turn slot. Within
+        # this single coroutine the turn slot may be released (notify_idle, R1)
+        # and re-acquired (send_message resume, A2) many times as the warm
+        # container handles follow-ups; the finally below is the idempotent
+        # backstop (R2) for a container that exits mid-turn.
+        self._acquire_container(state)
+        state.processing = True
+        self._acquire_turn(state)
 
         logger.debug(
             "Starting container for group",
             group_jid=group_jid,
             reason=reason,
-            active_count=self._active_count,
+            global_active=self._orch_state.global_active,
+            live_containers=self._orch_state.live_containers,
         )
         self._fire(self._on_container_starting, group_jid)
 
@@ -543,27 +704,34 @@ class GroupQueue:
             logger.exception("Error processing messages for group", group_jid=group_jid)
             self._schedule_retry(group_jid, state)
         finally:
-            state.active = False
+            self._release_turn(state)  # R2: idempotent (R1 usually released already)
+            self._release_container(state)
+            self._warm.pop(group_jid, None)
+            state.processing = False
             state.is_running = False
             state.container_name = None
             state.group_folder = None
             state.job_id = None
-            self._decrement(state.tenant_id, state.coworker_id)
             self._drain_group(group_jid)
 
     async def _run_task(self, group_jid: str, task: _QueuedTask) -> None:
         state = self._get_group(group_jid)
-        state.active = True
         state.idle_waiting = False
         state.is_task_container = True
         state.running_task_id = task.id
-        self._increment(state.tenant_id, state.coworker_id)
+        self.cancel_idle_timer(group_jid)
+        # Tasks are one-shot (no warm reuse): hold both a live container and a
+        # turn slot for the whole task, release both on exit.
+        self._acquire_container(state)
+        state.processing = True
+        self._acquire_turn(state)
 
         logger.debug(
             "Running queued task",
             group_jid=group_jid,
             task_id=task.id,
-            active_count=self._active_count,
+            global_active=self._orch_state.global_active,
+            live_containers=self._orch_state.live_containers,
         )
 
         try:
@@ -571,14 +739,16 @@ class GroupQueue:
         except Exception:
             logger.exception("Error running task", group_jid=group_jid, task_id=task.id)
         finally:
-            state.active = False
+            self._release_turn(state)
+            self._release_container(state)
+            self._warm.pop(group_jid, None)
+            state.processing = False
             state.is_task_container = False
             state.running_task_id = None
             state.is_running = False
             state.container_name = None
             state.group_folder = None
             state.job_id = None
-            self._decrement(state.tenant_id, state.coworker_id)
             self._drain_group(group_jid)
 
     def _schedule_retry(self, group_jid: str, state: _GroupState) -> None:
@@ -613,15 +783,21 @@ class GroupQueue:
 
         state = self._get_group(group_jid)
 
-        # Tasks first
-        if state.pending_tasks:
-            task = state.pending_tasks.pop(0)
-            self._spawn(self._run_task(group_jid, task))
-            return
-
-        if state.pending_messages:
-            self._spawn(self._run_for_group(group_jid, "drain"))
-            return
+        # _drain_group runs after this group's container has exited (R2) — so
+        # restarting its own pending work is a cold start: gate on turn
+        # admission AND a free live-container slot. If either is unavailable,
+        # queue it for a later cross-group drain rather than bypassing limits.
+        if state.pending_tasks or state.pending_messages:
+            if self._can_start_turn(state.tenant_id, state.coworker_id) and self._can_spawn():
+                self._reserve_slot(state)
+                if state.pending_tasks:
+                    task = state.pending_tasks.pop(0)
+                    self._spawn(self._run_task(group_jid, task))
+                    return
+                self._spawn(self._run_for_group(group_jid, "drain"))
+                return
+            if group_jid not in self._waiting_groups:
+                self._waiting_groups.append(group_jid)
 
         self._drain_waiting()
 
@@ -629,18 +805,96 @@ class GroupQueue:
         remaining: list[str] = []
         for next_jid in self._waiting_groups:
             state = self._get_group(next_jid)
-            if not self._can_start(state.tenant_id, state.coworker_id):
+            if state.active:
+                # Already has a container (it will self-drain); drop from waiting.
+                continue
+            if not (self._can_start_turn(state.tenant_id, state.coworker_id) and self._can_spawn()):
                 remaining.append(next_jid)
                 continue
 
             if state.pending_tasks:
                 task = state.pending_tasks.pop(0)
+                self._reserve_slot(state)  # bump counts NOW so the next iteration sees them
                 self._spawn(self._run_task(next_jid, task))
             elif state.pending_messages:
+                self._reserve_slot(state)  # bump counts NOW so the next iteration sees them
                 self._spawn(self._run_for_group(next_jid, "drain"))
             else:
                 continue  # nothing to do, don't re-add
         self._waiting_groups = remaining
+
+    # -- out-of-band reaper (counter reconciliation) ---------------------
+
+    async def reconcile_once(self, prefix: str = "rolemesh-") -> int:
+        """One reaper sweep: reap groups marked ``active`` whose container is no
+        longer live, reconciling the three-level + live counters with reality.
+
+        This is the backstop for a leaked slot — a ``_run_for_group`` whose
+        ``finally`` never ran (abnormal coroutine death) leaves ``active`` True
+        and the counters incremented while the container is already gone. We
+        confirm a group "ghost" across two consecutive sweeps (the just-exited
+        race window where the container died but the finally hasn't run yet) and
+        a group whose container is not yet registered is given grace. A
+        ``list_live`` failure aborts the sweep so a transient runtime hiccup
+        never mass-reaps healthy groups. Returns the number reaped.
+        """
+        if self._shutting_down or self._runtime is None:
+            return 0
+        try:
+            live = await self._runtime.list_live(prefix)
+        except (OSError, RuntimeError):
+            logger.debug("reaper: list_live failed; skipping sweep")
+            return 0
+
+        reaped = 0
+        for group_jid, state in list(self._groups.items()):
+            if not state.active:
+                state.missing_sweeps = 0
+                continue
+            if state.container_name and state.container_name in live:
+                state.missing_sweeps = 0  # healthy
+                continue
+            if state.container_name is None:
+                continue  # just spawned, not yet registered — grace
+            # Registered but absent from the live set — confirm across two sweeps.
+            state.missing_sweeps += 1
+            if state.missing_sweeps < 2:
+                continue
+            logger.warning(
+                "reaper: reaping ghost group (container gone, slot leaked)",
+                group_jid=group_jid,
+                container=state.container_name,
+            )
+            self._reap_ghost(group_jid)
+            reaped += 1
+        return reaped
+
+    def _reap_ghost(self, group_jid: str) -> None:
+        """Release a ghost group's slot + container counters and drain its work."""
+        state = self._get_group(group_jid)
+        self._release_turn(state)
+        self._release_container(state)
+        self._warm.pop(group_jid, None)
+        self.cancel_idle_timer(group_jid)
+        state.processing = False
+        state.is_running = False
+        state.is_task_container = False
+        state.running_task_id = None
+        state.container_name = None
+        state.job_id = None
+        state.missing_sweeps = 0
+        self._drain_group(group_jid)
+
+    async def run_reaper(self, interval_s: float = 60.0, prefix: str = "rolemesh-") -> None:
+        """Periodic reconciliation loop (started by the orchestrator lifespan)."""
+        while not self._shutting_down:
+            await asyncio.sleep(interval_s)
+            try:
+                n = await self.reconcile_once(prefix)
+                if n:
+                    logger.info("reaper swept ghost containers", reaped=n)
+            except Exception:
+                logger.exception("reaper sweep failed")
 
     async def shutdown(self, _grace_period_ms: int = 0) -> None:
         """Graceful shutdown -- detach containers, don't kill them."""
@@ -653,7 +907,7 @@ class GroupQueue:
 
         logger.info(
             "GroupQueue shutting down (containers detached, not killed)",
-            active_count=self._active_count,
+            live_containers=self._orch_state.live_containers,
             detached_containers=active_containers,
         )
 

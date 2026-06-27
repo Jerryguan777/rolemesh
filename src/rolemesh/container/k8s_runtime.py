@@ -795,6 +795,30 @@ class K8sRuntime:
             logger.info("Deleted orphaned agent pods", count=len(removed), names=removed)
         return removed
 
+    async def list_live(self, prefix: str) -> set[str]:
+        """Names of RUNNING agent pods matching ``prefix`` (reaper liveness oracle).
+
+        Filters by the managed-by label server-side, then keeps only pods whose
+        name starts with ``prefix`` and whose ``status.phase == 'Running'`` —
+        the K8s analogue of "the container process still exists". Read-only.
+        """
+        from rolemesh.core.config import ROLEMESH_K8S_NAMESPACE
+
+        core = self._ensure_core()
+        pods = await core.list_namespaced_pod(
+            ROLEMESH_K8S_NAMESPACE,
+            label_selector=f"{AGENT_MANAGED_BY_LABEL}={AGENT_MANAGED_BY_VALUE}",
+        )
+        live: set[str] = set()
+        for pod in pods.items:
+            pod_name = str(pod.metadata.name)
+            if not pod_name.startswith(prefix):
+                continue
+            phase = str(getattr(getattr(pod, "status", None), "phase", ""))
+            if phase == "Running":
+                live.add(pod_name)
+        return live
+
     # -- infrastructure verification (docs/21 §4.2 rev4) ------------------
 
     async def verify_infrastructure(self) -> None:

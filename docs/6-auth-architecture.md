@@ -248,7 +248,7 @@ This is at least as important as what is in: keeping permissions thin (Design Pr
 
 | Concern | Where it lives | Why not permissions |
 |---------|---------------|-------------------|
-| Max concurrent containers | `coworkers.max_concurrent` | Resource limit, not authorization |
+| Max concurrent containers | `coworkers.max_concurrent_containers` | Resource limit, not authorization |
 | Container timeout | `container_config.timeout` | Resource limit |
 | Which MCP servers are available | `coworkers.tools[]` | Tool binding, orthogonal to auth |
 | Mount restrictions | `mount_security.py` with external allowlist | Security policy, not capability |

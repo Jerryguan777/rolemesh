@@ -20,7 +20,7 @@ function makeCoworker(overrides: Partial<Coworker> = {}): Coworker {
     folder: 'ops',
     agent_backend: 'claude',
     status: 'active',
-    max_concurrent: 1,
+    max_concurrent_containers: 1,
     created_at: '2026-01-01T00:00:00Z',
     ...overrides,
   } as Coworker;

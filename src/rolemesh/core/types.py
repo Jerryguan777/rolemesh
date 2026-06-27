@@ -146,7 +146,15 @@ class Coworker:
     agent_backend: str = "claude"
     system_prompt: str | None = None
     container_config: ContainerConfig | None = None
-    max_concurrent: int = 2
+    # Max concurrent *turns* (in-flight agent invocations) for this coworker —
+    # the per-coworker level of three-level turn admission. Slot-follows-turn
+    # rework: this bounds concurrent TURNS, not live containers. A warm idle
+    # container holds no turn slot and does not count here, so one coworker may
+    # back MORE live containers than this value (up to one warm per idle
+    # conversation); the only ceiling on live-container *count* is the global
+    # GLOBAL_MAX_CONTAINERS (enforced via OrchestratorState.live_containers).
+    # Named ``*_containers`` for naming symmetry with the tenant/global limits.
+    max_concurrent_containers: int = 2
     status: str = "active"
     created_at: str = ""
     permissions: AgentPermissions | None = None  # filled by __post_init__; always non-None after init
@@ -314,6 +322,11 @@ class NewMessage:
     timestamp: str
     is_from_me: bool = False
     is_bot_message: bool = False
+    # The ``runs`` row this inbound message triggered (web channel only; NULL
+    # for IM channels and pre-runs messages). Threaded through so the
+    # orchestrator can write the run's terminal status server-side (INV-6 path
+    # 1/2) instead of depending on the browser's WS staying connected.
+    run_id: str | None = None
 
 
 @dataclass

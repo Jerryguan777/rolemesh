@@ -19,7 +19,7 @@ def test_from_coworker_preserves_db_row_identity() -> None:
         folder="trader",
         agent_backend="claude",
         system_prompt="You trade.",
-        max_concurrent=2,
+        max_concurrent_containers=2,
         status="active",
         created_at="2024-01-01T00:00:00Z",
     )

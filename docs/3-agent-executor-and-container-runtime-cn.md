@@ -67,7 +67,7 @@
 
 底层。它知道如何检查容器后端是否可用、依据规约启动一个容器、停止一个运行中的容器，以及清理上次崩溃残留的孤儿。它**不**知道任何关于 agent、提示词、NATS、会话或业务逻辑的事情。
 
-该 Protocol 暴露五个方法：`ensure_available`、`run`、`stop`、`cleanup_orphans`、`close`。任何满足该形状的对象（Python `Protocol`——见下文"设计权衡"）都是合法的运行时。
+该 Protocol 暴露六个方法：`ensure_available`、`run`、`stop`、`cleanup_orphans`、`list_live`、`close`。（`list_live(prefix)` 是一个只读的存活探针——返回当前运行中容器的名字集合——供调度器的 reaper 使用，见下文"并发：GroupQueue"。）任何满足该形状的对象（Python `Protocol`——见下文"设计权衡"）都是合法的运行时。
 
 ### ContainerSpec：要运行什么
 
@@ -230,13 +230,19 @@ _executors = {
 
 ## 并发：GroupQueue
 
-`ContainerAgentExecutor` 是*调用*原语——每次调用 spawn 一个容器。*何时* spawn 的决定由 `GroupQueue`（位于 `container/scheduler.py`）负责，它强制三道相互独立的并发上限：
+`ContainerAgentExecutor` 是*调用*原语——每次调用 spawn 一个容器。*何时* spawn 的决定由 `GroupQueue`（位于 `container/scheduler.py`）负责。
 
-- **全局**——orchestrator 内全部 agent 容器的总数。
-- **按租户**——单个租户不能耗尽全局配额。
-- **按 coworker**——某个话痨 coworker 不能耗尽其租户的配额。
+**槽随 turn 走，不随容器走。** 一个 *turn* 是一次飞行中的 agent 调用。turn 准入分三级强制：
 
-当一个 turn 到达时，`GroupQueue` 要么立即把它派给 executor，要么排队直到对应上限有空闲。运行时层对此一无所知——它看到的只是稳定的 `runtime.run(spec)` 调用流。
+- **全局 / 按租户 / 按 coworker**——并发飞行中的 *turn* 数（`OrchestratorState` 的 `*_active` 计数器）。槽在 turn 开始时获取（冷启动，或暖容器被跟进消息唤醒），在 batch-final（`is_final`）结果时释放——**不**占满容器的整个生命周期。
+
+完成的容器不会立即退出；它**暖驻**（warm）`IDLE_TIMEOUT` 以便免冷启动地服务跟进消息。暖容器**不**占 turn 槽，因此不会 wedge 它的 coworker/租户——它只计入一个独立的全局**存活容器上限**（`GLOBAL_MAX_CONTAINERS`，内存边界）。当冷启动需要在该上限下腾位时，最久未用（LRU）的暖容器被驱逐（异步：请它收尾，其退出会排空等待队列）。
+
+当一个 turn 到达时，`GroupQueue` 要么立即派发，要么排队直到有槽空闲。运行时层对此一无所知——它看到的只是稳定的 `runtime.run(spec)` 调用流。
+
+**Reaper。** 由于计数器在内存中，异常死掉的协程可能泄漏一个槽。一个周期性 reaper 用 `runtime.list_live()` 对账计数器：一个仍标记为 active 但容器已消失的会话，经两轮确认后被回收并归还其槽。这把"卡死直到重启"的失败模式变成自愈，而不是只依赖每次 spawn 的 `finally`。
+
+容器看门狗（`TURN_INACTIVITY_TIMEOUT`，在 executor 内）会强停一个长时间不吐输出的 turn；它与优雅的、仅暖驻期的 `IDLE_TIMEOUT` 回收不同，且下取整到 `APPROVAL_TIMEOUT + 30s`,因此永远不会抢占一个 pending 的 HITL 审批。
 
 ---
 

@@ -1722,7 +1722,7 @@ export interface components {
             model_id?: string | null;
             system_prompt?: string | null;
             status: components["schemas"]["CoworkerStatus"];
-            max_concurrent: number;
+            max_concurrent_containers: number;
             /** Format: uuid */
             created_by_user_id?: string | null;
             visibility: components["schemas"]["Visibility"];
@@ -1741,7 +1741,7 @@ export interface components {
             model_id?: string | null;
             system_prompt?: string | null;
             /** @default 2 */
-            max_concurrent: number;
+            max_concurrent_containers: number;
             permissions?: components["schemas"]["CoworkerPermissions"];
             /** @default false */
             is_frontdesk: boolean;
@@ -1753,7 +1753,7 @@ export interface components {
             /** Format: uuid */
             model_id?: string | null;
             status?: components["schemas"]["CoworkerStatus"];
-            max_concurrent?: number;
+            max_concurrent_containers?: number;
             permissions?: components["schemas"]["CoworkerPermissions"] | null;
             is_frontdesk?: boolean | null;
             routing_description?: string | null;

@@ -177,7 +177,7 @@ class Coworker(BaseModel):
     model_id: str | None = None
     system_prompt: str | None = None
     status: CoworkerStatus
-    max_concurrent: int = Field(ge=1)
+    max_concurrent_containers: int = Field(ge=1)
     created_by_user_id: str | None = None
     # Always populated server-side (the DB column is NOT NULL), so this is
     # a REQUIRED response field — keep it without a default so the yaml
@@ -210,7 +210,7 @@ class CoworkerCreate(BaseModel):
     agent_backend: BackendName
     model_id: str | None = None
     system_prompt: str | None = None
-    max_concurrent: int = Field(default=2, ge=1, le=20)
+    max_concurrent_containers: int = Field(default=2, ge=1, le=20)
     # Frontdesk v1.2 (D4). permissions defaults to no-capabilities; set
     # agent_delegate=True alongside is_frontdesk=True to build a working
     # frontdesk in one call. routing_description is length-capped to keep the
@@ -235,7 +235,7 @@ class CoworkerUpdate(BaseModel):
     system_prompt: str | None = None
     model_id: str | None = None
     status: CoworkerStatus | None = None
-    max_concurrent: int | None = Field(default=None, ge=1, le=20)
+    max_concurrent_containers: int | None = Field(default=None, ge=1, le=20)
     # Frontdesk v1.2 (D4). Absent = leave alone (handler resolves to current
     # values before the is_frontdesk role-gate validation).
     permissions: CoworkerPermissions | None = None

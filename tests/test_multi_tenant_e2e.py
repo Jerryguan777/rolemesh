@@ -87,7 +87,7 @@ async def _create_coworker_full(
     name: str,
     folder: str,
     permissions: AgentPermissions | None = None,
-    max_concurrent: int = 2,
+    max_concurrent_containers: int = 2,
     channel_type: str = "telegram",
     credentials: dict[str, str] | None = None,
     chat_ids: list[str] | None = None,
@@ -100,7 +100,7 @@ async def _create_coworker_full(
         name=name,
         folder=folder,
         permissions=permissions,
-        max_concurrent=max_concurrent,
+        max_concurrent_containers=max_concurrent_containers,
     )
     binding = await create_channel_binding(
         coworker_id=cw.id,
@@ -554,7 +554,7 @@ class TestThreeLevelConcurrency:
         assert state.can_start_container("t1", "cw3") is True
 
     async def test_coworker_limit_blocks_second_container_for_same_coworker(self, env: Path) -> None:
-        """Coworker max_concurrent=1 → second request for same coworker queued."""
+        """Coworker max_concurrent_containers=1 → second request for same coworker queued."""
         state = OrchestratorState(global_limit=10)
         state.tenants["t1"] = Tenant(id="t1", name="T", max_concurrent_containers=10)
 
@@ -564,7 +564,7 @@ class TestThreeLevelConcurrency:
             name="Bot",
             folder="bot",
             agent_backend="claude",
-            max_concurrent=1,
+            max_concurrent_containers=1,
         )
         state.coworkers["cw1"] = CoworkerState.from_coworker(cw)
 
@@ -1048,7 +1048,7 @@ class TestOrchestratorStateLookups:
             name="Bot",
             folder="bot",
             agent_backend="claude",
-            max_concurrent=2,
+            max_concurrent_containers=2,
         )
         cw_state = CoworkerState.from_coworker(cw)
         cw_state.channel_bindings["telegram"] = binding
@@ -1076,7 +1076,7 @@ class TestOrchestratorStateLookups:
             name="Bot",
             folder="bot",
             agent_backend="claude",
-            max_concurrent=2,
+            max_concurrent_containers=2,
         )
         cw_state = CoworkerState.from_coworker(cw)
         cw_state.channel_bindings["telegram"] = binding
@@ -1094,7 +1094,7 @@ class TestOrchestratorStateLookups:
             name="Bot",
             folder="my-bot",
             agent_backend="claude",
-            max_concurrent=2,
+            max_concurrent_containers=2,
         )
         state.coworkers["cw1"] = CoworkerState.from_coworker(cw)
 
@@ -1106,3 +1106,129 @@ class TestOrchestratorStateLookups:
         assert state.get_coworker_by_folder("t2", "my-bot") is None
         # Wrong folder
         assert state.get_coworker_by_folder("t1", "other-bot") is None
+
+
+# ===========================================================================
+# Scenario: slot-follows-turn under same-coworker concurrent conversations
+#
+# Regression guard for the "3rd conversation to one coworker blocked for a full
+# IDLE_TIMEOUT" failure: drives the REAL _process_conversation_messages /
+# _on_output / GroupQueue path (no Docker) with a fake executor that emits the
+# realistic is_final sequence and then stays WARM (blocked), so the only way a
+# queued conversation can be admitted is the R1 (notify_idle) slot release —
+# the warm containers never idle-reap within the test window.
+# ===========================================================================
+
+
+class WarmExecutor:
+    """Fake executor that replays the live is_final sequence then stays warm.
+
+    Per call (keyed by conversation): emit a reply event (is_final=False), then
+    the batch-final marker (is_final=True) — exactly what agent_runner publishes
+    — then block on a shared release Event, simulating a container that lingers
+    warm after its turn (handle.wait still pending). ``release`` lets the test
+    tear the warm containers down at the end.
+    """
+
+    def __init__(self) -> None:
+        self.started: set[str] = set()
+        self.is_final: dict[str, asyncio.Event] = {}
+        self.release = asyncio.Event()
+
+    @property
+    def name(self) -> str:
+        return "mock"
+
+    async def execute(
+        self,
+        inp: object,
+        on_process: Callable[..., None],
+        on_output: Callable[..., Awaitable[None]] | None = None,
+    ) -> object:
+        from rolemesh.agent import AgentInput, AgentOutput
+
+        assert isinstance(inp, AgentInput)
+        cid = inp.conversation_id
+        self.started.add(cid)
+        self.is_final.setdefault(cid, asyncio.Event())
+        on_process(f"rolemesh-{cid}", f"job-{cid}")
+        if on_output:
+            await on_output(
+                AgentOutput(status="success", result="hi", new_session_id="s", is_final=False)
+            )
+            await on_output(
+                AgentOutput(status="success", result=None, new_session_id="s", is_final=True)
+            )
+        self.is_final[cid].set()
+        await self.release.wait()  # stay warm until the test releases us
+        return AgentOutput(status="success", result=None, new_session_id="s")
+
+
+async def _wait_is_final(ex: WarmExecutor, cid: str, timeout: float = 3.0) -> None:
+    """Poll until the executor has emitted is_final for ``cid`` (so notify_idle ran)."""
+    for _ in range(int(timeout / 0.02)):
+        ev = ex.is_final.get(cid)
+        if ev is not None and ev.is_set():
+            return
+        await asyncio.sleep(0.02)
+    raise TimeoutError(f"is_final never emitted for {cid}")
+
+
+class TestSameCoworkerSlotFollowsTurn:
+    async def test_third_conversation_admits_immediately_after_is_final(self, env: Path) -> None:
+        """coworker max_concurrent_containers=2: after two turns reach is_final
+        (containers still warm), a 3rd conversation must cold-start at once —
+        not wait for the warm containers to idle-reap."""
+        import rolemesh.main as m
+
+        tenant = await _create_tenant_in_db("Acct Inc", "acct-slot", max_containers=10)
+        cw, binding, convs = await _create_coworker_full(
+            tenant.id,
+            "Accounting",
+            "accounting",
+            max_concurrent_containers=2,
+            chat_ids=["c-a", "c-b", "c-c"],
+        )
+        conv_a, conv_b, conv_c = convs
+
+        state = OrchestratorState(global_limit=10)
+        state.tenants[tenant.id] = tenant
+        state.coworkers[cw.id] = _build_coworker_state(cw, binding, convs)
+
+        ex = WarmExecutor()
+        _wire_main_state(state, ex, {"telegram": MockGateway()})
+        # The queue must account on the SAME OrchestratorState we assert on
+        # (the default _wire_main_state helper gives the queue its own).
+        m._queue = m.GroupQueue(orchestrator_state=state)
+        m._queue.set_process_messages_fn(m._process_conversation_messages)
+
+        # Fill both per-coworker turn slots with conversations A and B.
+        for conv in (conv_a, conv_b):
+            await _inject_message(tenant.id, conv.id, f"hello from {conv.id}")
+            m._queue.enqueue_message_check(conv.id, tenant_id=tenant.id, coworker_id=cw.id)
+
+        # Both turns reach is_final → their containers go warm (still blocked).
+        await _wait_is_final(ex, conv_a.id)
+        await _wait_is_final(ex, conv_b.id)
+        await asyncio.sleep(0.05)  # let notify_idle's _drain_waiting settle
+
+        # R1 must have released BOTH per-coworker turn slots even though the two
+        # containers are still alive (warm). If the slot were pinned for the warm
+        # window (the bug), this would be 2.
+        assert state.coworker_active.get(cw.id, 0) == 0, (
+            "per-coworker turn slot leaked across the warm window"
+        )
+        assert {conv_a.id, conv_b.id} <= ex.started
+        assert state.live_containers == 2  # both still alive (warm), not reaped
+
+        # The 3rd conversation must cold-start immediately via the freed slot —
+        # the warm containers never idle-reap within this window (IDLE_TIMEOUT is
+        # minutes), so admission here can only come from the R1 release.
+        await _inject_message(tenant.id, conv_c.id, "hello from C")
+        m._queue.enqueue_message_check(conv_c.id, tenant_id=tenant.id, coworker_id=cw.id)
+        await _wait_is_final(ex, conv_c.id, timeout=3.0)
+        assert conv_c.id in ex.started, "3rd conversation was not admitted (slot-follows-turn broken)"
+
+        # Tear down the warm containers.
+        ex.release.set()
+        await asyncio.sleep(0.05)

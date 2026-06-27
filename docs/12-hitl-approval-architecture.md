@@ -131,7 +131,7 @@ The hook blocks on `asyncio.wait_for(decision, APPROVAL_TIMEOUT)`. On any exit �
 
 ### 4. The orchestrator suspends idle reaping during the wait — it does not fake liveness
 
-A container blocked for 20 minutes produces no output, and the orchestrator's idle machinery would otherwise reap it as hung. The wrong fix is a heartbeat that *pretends* the container is busy. The right fix is to tell the orchestrator the truth: this is a known, bounded, legitimate wait. On an `approval_request` the orchestrator **suspends** idle reaping for that conversation; on the decision (or on the container's own timeout-cancel) it **resumes** it. The container's own watchdog is left untouched, guaranteed by a startup invariant (`APPROVAL_TIMEOUT < IDLE_TIMEOUT + 30s`) that ensures the approval always resolves first.
+A container blocked on a decision produces no output, and the orchestrator's idle machinery would otherwise reap it as hung. The wrong fix is a heartbeat that *pretends* the container is busy. The right fix is to tell the orchestrator the truth: this is a known, bounded, legitimate wait. On an `approval_request` the orchestrator **suspends** idle reaping for that conversation; on the decision (or on the container's own timeout-cancel) it **resumes** it. The container's own watchdog (`TURN_INACTIVITY_TIMEOUT`) is left untouched: it floors its bound at `APPROVAL_TIMEOUT + 30s` at runtime, so it can never pre-empt a pending approval regardless of how the timeouts are configured. (This runtime floor replaced the former `APPROVAL_TIMEOUT < IDLE_TIMEOUT + 30s` startup invariant, which is retired.)
 
 ### 5. Concurrency and crash-safety are first-class
 
@@ -165,7 +165,7 @@ Rejected as the *only* channel. The LLM may forget, may phrase the outcome unrec
 
 ## Known Constraints
 
-- **One pending approval pins one container** for up to `APPROVAL_TIMEOUT`. Concurrency ceilings (`MAX_CONCURRENT_CONTAINERS`, `GLOBAL_MAX_CONTAINERS`) must absorb the worst case so approvals don't starve ordinary runs. This is the price of the in-loop model and is accepted deliberately.
+- **One pending approval pins one turn slot** (its container is still processing) for up to `APPROVAL_TIMEOUT`. The three-level turn-admission ceilings and the global live-container ceiling (`GLOBAL_MAX_CONTAINERS`) must absorb the worst case so approvals don't starve ordinary runs. This is the price of the in-loop model and is accepted deliberately.
 - **In-argument conditions only.** Policies decide on the call's own arguments. Cross-call or stateful conditions ("third refund today") are out of scope by design.
 - **MCP tools only.** Built-in tools (`Read`, `Edit`, `Bash`, …) are not gated by approval; they're governed by the safety pipeline and container hardening.
 
@@ -239,10 +239,10 @@ No `approval_audit_log` table, no `resolved_approver_user_ids` (self-approval �
 
 ### §5 Config & invariants
 ```
-APPROVAL_TIMEOUT   core/config.py   300_000 ms (5 min)   container await + DB expires_at share this
-startup assertion  core/config.py   APPROVAL_TIMEOUT < IDLE_TIMEOUT + 30_000   else refuse to start
+APPROVAL_TIMEOUT          core/config.py   300_000 ms (5 min)   container await + DB expires_at share this
+TURN_INACTIVITY_TIMEOUT   core/config.py   420_000 ms (7 min)   per-turn watchdog inactivity bound
 ```
-With `IDLE_TIMEOUT = 1_800_000 ms` and the container watchdog floor `max(config_timeout, IDLE_TIMEOUT + 30_000)`, the assertion guarantees the approval await always fires before the container watchdog — so the watchdog can never pre-empt an approval.
+The container watchdog (container_executor.py) sets its per-turn inactivity bound to the per-coworker `container_config.timeout` override else `TURN_INACTIVITY_TIMEOUT`, then floors it at `max(base, APPROVAL_TIMEOUT + 30_000)`. This runtime floor guarantees the approval await always fires before the watchdog — so the watchdog can never pre-empt an approval, regardless of `IDLE_TIMEOUT` / per-coworker overrides. It replaces the former `APPROVAL_TIMEOUT < IDLE_TIMEOUT + 30_000` startup assertion (now removed), which coupled approval safety to the warm-idle dwell.
 
 **Queue key rule** (reuse, do not reinvent): `conversation_id or coworker_id`. The container and its approval suspend state MUST land on the same `_GroupState` entry, so use this exact rule.
 
@@ -276,7 +276,7 @@ A bounded ≤5-min approval wait must **explicitly suspend** idle reaping, not f
 
 **R1 — does the gated tool call survive the block? Yes, in-process.** The block is cooperative (the hook `await`s an `asyncio.Future`; the event loop never freezes, so MCP keepalives, NATS decision delivery, and the idle/interrupt pollers keep ticking). MCP connections are container/turn-scoped, not per-call, and nothing in our code closes one during a block. No container-held credential ages out — LLM creds are injected per-request by the credential proxy (the container holds only `ANTHROPIC_BASE_URL`), and external MCP auth uses the static per-request `X-RoleMesh-User-Id` header. Residual (not unit-testable): a *remote* MCP server may drop an idle HTTP/SSE session during the wait; the 5-min bound keeps the window short, and transparent reconnect or a lower timeout mitigates if it surfaces. "Tool failed after approval" has no separate hard channel — it surfaces through the **normal tool-error path** (Claude `PostToolUseFailure`; Pi `tool_result` with `is_error`); a retry that re-hits the hook produces a **new** approval request.
 
-**Operational**: each pending approval holds one container ≤ `APPROVAL_TIMEOUT`; `MAX_CONCURRENT_CONTAINERS` / `GLOBAL_MAX_CONTAINERS` must keep headroom (accepted trade-off; logged if a cap is hit).
+**Operational**: each pending approval holds one turn slot ≤ `APPROVAL_TIMEOUT`; the three-level turn ceilings and `GLOBAL_MAX_CONTAINERS` must keep headroom (accepted trade-off; logged if a cap is hit).
 
 ### §10 Delivery, policy CRUD & SPA surface
 

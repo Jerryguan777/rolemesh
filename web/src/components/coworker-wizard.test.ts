@@ -75,7 +75,7 @@ const CREATED_COWORKER: Coworker = {
   agent_backend: 'claude',
   model_id: MODELS[0]!.id,
   status: 'active',
-  max_concurrent: 2,
+  max_concurrent_containers: 2,
   visibility: 'private',
   permissions: { agent_delegate: false, task_schedule: false, task_manage_others: false },
   is_frontdesk: false,

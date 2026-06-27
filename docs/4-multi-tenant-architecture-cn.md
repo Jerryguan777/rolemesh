@@ -145,7 +145,7 @@ class CoworkerConfig:
     system_prompt: str | None
     tools: list[McpServerConfig]   # external MCP server bindings
     agent_backend: str        # "claude" or "pi"
-    max_concurrent: int
+    max_concurrent_containers: int   # 最大并发 turn 数
     container_config: dict | None
     permissions: AgentPermissions  # 3 boolean fields (see auth-architecture.md)
 ```
@@ -282,7 +282,7 @@ async with admin_conn() as conn:
 |-------|-------------|---------|
 | `tenants` | `id`、`name`、`slug`、`max_concurrent_containers`、`last_message_cursor` | 组织边界与限制 |
 | `users` | `id`、`tenant_id`、`name`、`role`、`email`、`external_sub` | 人类用户 + 认证提供者映射 |
-| `coworkers` | `id`、`tenant_id`、`name`、`folder`、`agent_backend`、`system_prompt`、`tools`（JSONB）、`permissions`（JSONB）、`container_config`、`max_concurrent` | 带完整配置的 AI Agent |
+| `coworkers` | `id`、`tenant_id`、`name`、`folder`、`agent_backend`、`system_prompt`、`tools`（JSONB）、`permissions`（JSONB）、`container_config`、`max_concurrent_containers` | 带完整配置的 AI Agent |
 | `channel_bindings` | `id`、`tenant_id`、`coworker_id`、`channel_type`、`credentials`、`bot_display_name` | 按 Coworker 的 bot 身份 |
 | `conversations` | `id`、`tenant_id`、`coworker_id`、`channel_binding_id`、`channel_chat_id`、`last_agent_invocation`、`user_id` | 每个聊天的上下文，带独立 session |
 | `sessions` | `conversation_id`（PK）、`tenant_id`、`coworker_id`、`session_id` | 每个 Conversation 的 Claude SDK / Pi session 映射 |

@@ -128,7 +128,7 @@ async def test_create_and_get_coworker() -> None:
         name="Ops Bot",
         folder="ops-bot",
         permissions=AgentPermissions(task_manage_others=True),
-        max_concurrent=3,
+        max_concurrent_containers=3,
     )
     # MCP configs now live in coworker_mcp_servers + mcp_servers
     # (02b dropped the inline JSONB). Seed via the high-level admin
@@ -147,7 +147,7 @@ async def test_create_and_get_coworker() -> None:
     )
     assert cw.id
     assert cw.permissions is not None and cw.permissions.task_manage_others is True
-    assert cw.max_concurrent == 3
+    assert cw.max_concurrent_containers == 3
     assert cw.agent_backend == "claude"
 
     fetched = await get_coworker(cw.id, tenant_id=t.id)

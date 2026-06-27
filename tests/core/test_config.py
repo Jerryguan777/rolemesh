@@ -38,7 +38,6 @@ import rolemesh.core.config as c
 print(json.dumps({
     "ASSISTANT_NAME": c.ASSISTANT_NAME,
     "ASSISTANT_HAS_OWN_NUMBER": c.ASSISTANT_HAS_OWN_NUMBER,
-    "MAX_CONCURRENT_CONTAINERS": c.MAX_CONCURRENT_CONTAINERS,
     "GLOBAL_MAX_CONTAINERS": c.GLOBAL_MAX_CONTAINERS,
     "CONTAINER_TIMEOUT": c.CONTAINER_TIMEOUT,
     "CREDENTIAL_PROXY_PORT": c.CREDENTIAL_PROXY_PORT,
@@ -46,6 +45,7 @@ print(json.dumps({
     "TIMEZONE": c.TIMEZONE,
     "APPROVAL_TIMEOUT": c.APPROVAL_TIMEOUT,
     "IDLE_TIMEOUT": c.IDLE_TIMEOUT,
+    "TURN_INACTIVITY_TIMEOUT": c.TURN_INACTIVITY_TIMEOUT,
 }))
 """
 
@@ -81,14 +81,6 @@ def cfg(*, no_system_tz: bool = False, **overrides: object) -> dict:
 # --- numeric clamping --------------------------------------------------------
 
 
-def test_max_concurrent_containers_clamped_to_at_least_one() -> None:
-    """A zero/negative env must not disable concurrency limiting — the
-    max(1, ...) floor protects the orchestrator from spawning unbounded
-    containers."""
-    assert cfg(MAX_CONCURRENT_CONTAINERS="0")["MAX_CONCURRENT_CONTAINERS"] == 1
-    assert cfg(MAX_CONCURRENT_CONTAINERS="-5")["MAX_CONCURRENT_CONTAINERS"] == 1
-
-
 def test_global_max_containers_clamped_to_at_least_one() -> None:
     assert cfg(GLOBAL_MAX_CONTAINERS="0")["GLOBAL_MAX_CONTAINERS"] == 1
     assert cfg(GLOBAL_MAX_CONTAINERS="-1")["GLOBAL_MAX_CONTAINERS"] == 1
@@ -102,9 +94,9 @@ def test_numeric_env_overrides_are_parsed() -> None:
 
 
 def test_numeric_defaults_when_unset() -> None:
-    out = cfg(CONTAINER_TIMEOUT=_DELETE, MAX_CONCURRENT_CONTAINERS=_DELETE)
+    out = cfg(CONTAINER_TIMEOUT=_DELETE, GLOBAL_MAX_CONTAINERS=_DELETE)
     assert out["CONTAINER_TIMEOUT"] == 1800000
-    assert out["MAX_CONCURRENT_CONTAINERS"] == 5
+    assert out["GLOBAL_MAX_CONTAINERS"] == 20
 
 
 # --- string / boolean parsing ------------------------------------------------
@@ -154,26 +146,25 @@ def test_approval_timeout_default_is_5_min() -> None:
     assert cfg(APPROVAL_TIMEOUT=_DELETE)["APPROVAL_TIMEOUT"] == 300_000
 
 
-def test_approval_timeout_below_watchdog_floor() -> None:
-    """Frozen §5 invariant: the approval await must fire before the container
-    watchdog floor (IDLE_TIMEOUT + 30_000), so the watchdog can never pre-empt
-    a pending approval."""
-    out = cfg(APPROVAL_TIMEOUT=_DELETE, IDLE_TIMEOUT=_DELETE)
-    assert out["APPROVAL_TIMEOUT"] < out["IDLE_TIMEOUT"] + 30_000
+def test_idle_timeout_default_is_5_min() -> None:
+    """Slot-follows-turn rework lowered the warm-pool dwell from 30 min to
+    5 min; it no longer pins an admission slot so a low value is safe."""
+    assert cfg(IDLE_TIMEOUT=_DELETE)["IDLE_TIMEOUT"] == 300_000
 
 
-def test_startup_refuses_when_approval_timeout_reaches_watchdog_floor() -> None:
-    """A misconfigured APPROVAL_TIMEOUT that would let the watchdog reap a
-    pending approval must refuse to start (the module-level guard raises), not
-    silently kill containers mid-approval."""
-    import os
+def test_turn_inactivity_timeout_default_exceeds_approval() -> None:
+    """The default per-turn watchdog bound must sit above APPROVAL_TIMEOUT so a
+    pending approval is not reaped. (At runtime the watchdog additionally floors
+    itself at APPROVAL_TIMEOUT + 30s, so this holds regardless of overrides —
+    the former startup invariant is retired.)"""
+    out = cfg(APPROVAL_TIMEOUT=_DELETE, TURN_INACTIVITY_TIMEOUT=_DELETE)
+    assert out["TURN_INACTIVITY_TIMEOUT"] == 420_000
+    assert out["APPROVAL_TIMEOUT"] < out["TURN_INACTIVITY_TIMEOUT"]
 
-    env = dict(os.environ)
-    env["IDLE_TIMEOUT"] = "1800000"
-    env["APPROVAL_TIMEOUT"] = str(1_800_000 + 30_000)  # == floor, not strictly <
-    proc = subprocess.run(
-        [sys.executable, "-c", _SCRIPT],
-        env=env, cwd=_ROOT, capture_output=True, text=True, timeout=60,
-    )
-    assert proc.returncode != 0
-    assert "APPROVAL_TIMEOUT" in proc.stderr
+
+def test_startup_no_longer_refuses_high_approval_timeout() -> None:
+    """The old ``APPROVAL_TIMEOUT < IDLE_TIMEOUT + 30_000`` startup guard is
+    gone: approval safety is enforced at runtime by the watchdog floor, so a
+    high APPROVAL_TIMEOUT must import cleanly rather than refusing to start."""
+    out = cfg(APPROVAL_TIMEOUT="1830000", IDLE_TIMEOUT="300000")
+    assert out["APPROVAL_TIMEOUT"] == 1_830_000

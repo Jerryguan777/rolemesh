@@ -578,6 +578,26 @@ class DockerRuntime:
             logger.info("Stopped orphaned containers", count=len(removed), names=removed)
         return removed
 
+    async def list_live(self, prefix: str) -> set[str]:
+        """Names of RUNNING containers matching ``prefix`` (reaper liveness oracle).
+
+        ``all=False`` restricts the listing to running containers, so an
+        exited/dead container is naturally absent. Docker's ``name`` filter is a
+        substring match, so re-check the prefix explicitly (same guard as
+        ``cleanup_orphans``). Read-only — never stops anything.
+        """
+        client = self._ensure_client()
+        containers = await client.containers.list(
+            all=False,
+            filters={"name": [prefix]},
+        )
+        live: set[str] = set()
+        for c in containers:
+            cname: str = c._container.get("Names", [""])[0].lstrip("/")
+            if cname.startswith(prefix):
+                live.add(cname)
+        return live
+
     async def close(self) -> None:
         if self._client:
             await self._client.close()

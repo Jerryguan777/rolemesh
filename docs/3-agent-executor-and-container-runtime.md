@@ -67,7 +67,7 @@ The two layers communicate through small data types (`ContainerSpec`, `Container
 
 The low-level layer. It knows how to check that the container backend is available, start a container from a specification, stop a running container, and clean up orphans from a previous crash. It does **not** know about agents, prompts, NATS, sessions, or any business logic.
 
-The protocol exposes five methods: `ensure_available`, `run`, `stop`, `cleanup_orphans`, `close`. Anything that satisfies that shape (Python `Protocol` — see "Design Trade-offs" below) is a valid runtime.
+The protocol exposes six methods: `ensure_available`, `run`, `stop`, `cleanup_orphans`, `list_live`, `close`. (`list_live(prefix)` is a read-only liveness oracle — the names of currently-running containers — consumed by the scheduler's reaper, see "Concurrency: GroupQueue" below.) Anything that satisfies that shape (Python `Protocol` — see "Design Trade-offs" below) is a valid runtime.
 
 ### ContainerSpec: what to run
 
@@ -230,13 +230,19 @@ What runs *inside* the container — hook handlers, safety pipeline, skill loadi
 
 ## Concurrency: GroupQueue
 
-`ContainerAgentExecutor` is the *invocation* primitive — it spawns one container per call. The decision of *when* to spawn is delegated to `GroupQueue` (in `container/scheduler.py`), which enforces three independent concurrency ceilings:
+`ContainerAgentExecutor` is the *invocation* primitive — it spawns one container per call. The decision of *when* to spawn is delegated to `GroupQueue` (in `container/scheduler.py`).
 
-- **Global** — total agent containers across the orchestrator.
-- **Per-tenant** — one tenant cannot exhaust the global quota.
-- **Per-coworker** — one chatty coworker cannot exhaust its tenant's quota.
+**Slot follows the turn, not the container.** A *turn* is an in-flight agent invocation. Turn admission is enforced at three independent levels:
 
-When a turn arrives, `GroupQueue` either dispatches it to the executor immediately or queues it until the appropriate ceiling has free capacity. The runtime layer is unaware of this — it sees a steady drip of `runtime.run(spec)` calls.
+- **Global / Per-tenant / Per-coworker** — concurrent in-flight *turns* (`OrchestratorState`'s `*_active` counters). A slot is acquired when a turn starts (cold start, or a warm container resumed by a follow-up) and released at the batch-final (`is_final`) result — **not** held for the container's whole life.
+
+A finished container does not exit immediately; it lingers **warm** for `IDLE_TIMEOUT` to serve a follow-up without a cold start. A warm container holds **no** turn slot, so it cannot wedge its coworker/tenant — it counts only against a separate global **live-container ceiling** (`GLOBAL_MAX_CONTAINERS`, the memory bound). When a cold start needs room under that ceiling, the least-recently-used warm container is evicted (asynchronously: it is asked to wind down and its exit drains the waiting queue).
+
+When a turn arrives, `GroupQueue` either dispatches it immediately or queues it until a slot frees. The runtime layer is unaware of this — it sees a steady drip of `runtime.run(spec)` calls.
+
+**Reaper.** Because the counters are in-memory, an abnormally-died coroutine could leak a slot. A periodic reaper reconciles the counters against `runtime.list_live()`: a group still marked active whose container has vanished is reaped after two confirming sweeps, returning its slot. This self-heals the "wedged until restart" failure mode rather than relying solely on the per-spawn `finally`.
+
+The container watchdog (`TURN_INACTIVITY_TIMEOUT`, in the executor) force-stops a turn that streams no output for too long; it is distinct from the graceful, warm-only `IDLE_TIMEOUT` reaping and is floored at `APPROVAL_TIMEOUT + 30s` so it can never pre-empt a pending HITL approval.
 
 ---
 
