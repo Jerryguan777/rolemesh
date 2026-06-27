@@ -46,6 +46,7 @@ print(json.dumps({
     "TIMEZONE": c.TIMEZONE,
     "APPROVAL_TIMEOUT": c.APPROVAL_TIMEOUT,
     "IDLE_TIMEOUT": c.IDLE_TIMEOUT,
+    "TURN_INACTIVITY_TIMEOUT": c.TURN_INACTIVITY_TIMEOUT,
 }))
 """
 
@@ -154,26 +155,25 @@ def test_approval_timeout_default_is_5_min() -> None:
     assert cfg(APPROVAL_TIMEOUT=_DELETE)["APPROVAL_TIMEOUT"] == 300_000
 
 
-def test_approval_timeout_below_watchdog_floor() -> None:
-    """Frozen §5 invariant: the approval await must fire before the container
-    watchdog floor (IDLE_TIMEOUT + 30_000), so the watchdog can never pre-empt
-    a pending approval."""
-    out = cfg(APPROVAL_TIMEOUT=_DELETE, IDLE_TIMEOUT=_DELETE)
-    assert out["APPROVAL_TIMEOUT"] < out["IDLE_TIMEOUT"] + 30_000
+def test_idle_timeout_default_is_5_min() -> None:
+    """Slot-follows-turn rework lowered the warm-pool dwell from 30 min to
+    5 min; it no longer pins an admission slot so a low value is safe."""
+    assert cfg(IDLE_TIMEOUT=_DELETE)["IDLE_TIMEOUT"] == 300_000
 
 
-def test_startup_refuses_when_approval_timeout_reaches_watchdog_floor() -> None:
-    """A misconfigured APPROVAL_TIMEOUT that would let the watchdog reap a
-    pending approval must refuse to start (the module-level guard raises), not
-    silently kill containers mid-approval."""
-    import os
+def test_turn_inactivity_timeout_default_exceeds_approval() -> None:
+    """The default per-turn watchdog bound must sit above APPROVAL_TIMEOUT so a
+    pending approval is not reaped. (At runtime the watchdog additionally floors
+    itself at APPROVAL_TIMEOUT + 30s, so this holds regardless of overrides —
+    the former startup invariant is retired.)"""
+    out = cfg(APPROVAL_TIMEOUT=_DELETE, TURN_INACTIVITY_TIMEOUT=_DELETE)
+    assert out["TURN_INACTIVITY_TIMEOUT"] == 420_000
+    assert out["APPROVAL_TIMEOUT"] < out["TURN_INACTIVITY_TIMEOUT"]
 
-    env = dict(os.environ)
-    env["IDLE_TIMEOUT"] = "1800000"
-    env["APPROVAL_TIMEOUT"] = str(1_800_000 + 30_000)  # == floor, not strictly <
-    proc = subprocess.run(
-        [sys.executable, "-c", _SCRIPT],
-        env=env, cwd=_ROOT, capture_output=True, text=True, timeout=60,
-    )
-    assert proc.returncode != 0
-    assert "APPROVAL_TIMEOUT" in proc.stderr
+
+def test_startup_no_longer_refuses_high_approval_timeout() -> None:
+    """The old ``APPROVAL_TIMEOUT < IDLE_TIMEOUT + 30_000`` startup guard is
+    gone: approval safety is enforced at runtime by the watchdog floor, so a
+    high APPROVAL_TIMEOUT must import cleanly rather than refusing to start."""
+    out = cfg(APPROVAL_TIMEOUT="1830000", IDLE_TIMEOUT="300000")
+    assert out["APPROVAL_TIMEOUT"] == 1_830_000

@@ -88,7 +88,19 @@ CONTAINER_IMAGE: str = os.environ.get("CONTAINER_IMAGE", "rolemesh-agent:latest"
 CONTAINER_TIMEOUT: int = int(os.environ.get("CONTAINER_TIMEOUT", "1800000"))
 CONTAINER_MAX_OUTPUT_SIZE: int = int(os.environ.get("CONTAINER_MAX_OUTPUT_SIZE", "10485760"))  # 10MB
 CREDENTIAL_PROXY_PORT: int = int(os.environ.get("CREDENTIAL_PROXY_PORT", "3001"))
-IDLE_TIMEOUT: int = int(os.environ.get("IDLE_TIMEOUT", "1800000"))  # 30 min
+# Warm-pool dwell (slot-follows-turn rework): how long a completed container is
+# kept warm for the next message before graceful idle reaping. It no longer
+# pins an admission slot, so this is a pure warm-reuse / memory trade-off —
+# default 5 min. Lowering it is safe: idle reaping is WARM-only and can never
+# kill a processing turn.
+IDLE_TIMEOUT: int = int(os.environ.get("IDLE_TIMEOUT", "300000"))  # 5 min
+
+# Per-turn inactivity bound for the container watchdog: a processing turn that
+# streams no output for this long is treated as hung and force-stopped. This is
+# the FORCEFUL backstop, distinct from the (graceful, warm-only) IDLE_TIMEOUT.
+# The watchdog floors it at APPROVAL_TIMEOUT + 30_000 at runtime so it can never
+# pre-empt a pending HITL approval — replacing the old startup invariant.
+TURN_INACTIVITY_TIMEOUT: int = int(os.environ.get("TURN_INACTIVITY_TIMEOUT", "420000"))  # 7 min
 
 # HITL tool approval (docs/12-hitl-approval-architecture.md §5). The container's
 # approval-decision await and the DB row's ``expires_at`` share this single
@@ -97,19 +109,12 @@ IDLE_TIMEOUT: int = int(os.environ.get("IDLE_TIMEOUT", "1800000"))  # 30 min
 # container-hold cost low.
 APPROVAL_TIMEOUT: int = int(os.environ.get("APPROVAL_TIMEOUT", "300000"))  # 5 min
 
-# Startup invariant (§5): the approval await must always fire before the
-# container watchdog floor ``max(config_timeout, IDLE_TIMEOUT + 30_000)``
-# (container_executor.py), so the watchdog can never pre-empt a pending
-# approval. A misconfigured deployment that breaks this must refuse to
-# start rather than silently kill containers mid-approval. Raised (not
-# ``assert``) so ``python -O`` cannot strip the guard.
-if APPROVAL_TIMEOUT >= IDLE_TIMEOUT + 30_000:
-    raise ValueError(
-        f"APPROVAL_TIMEOUT ({APPROVAL_TIMEOUT}) must be < IDLE_TIMEOUT "
-        f"({IDLE_TIMEOUT}) + 30_000; otherwise the container watchdog can "
-        "pre-empt a pending approval. Lower APPROVAL_TIMEOUT or raise "
-        "IDLE_TIMEOUT."
-    )
+# Approval safety is now enforced at runtime, not by a startup invariant: the
+# container watchdog (container_executor.py) floors its per-turn inactivity
+# bound at ``APPROVAL_TIMEOUT + 30_000``, so it can never pre-empt a pending
+# approval regardless of IDLE_TIMEOUT / TURN_INACTIVITY_TIMEOUT / per-coworker
+# overrides. The former ``APPROVAL_TIMEOUT < IDLE_TIMEOUT + 30_000`` guard is
+# therefore retired.
 
 MCP_PROXY_PREFIX: str = "mcp-proxy"
 MAX_CONCURRENT_CONTAINERS: int = max(1, int(os.environ.get("MAX_CONCURRENT_CONTAINERS", "5")))

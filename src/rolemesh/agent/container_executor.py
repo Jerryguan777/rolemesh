@@ -29,12 +29,12 @@ from rolemesh.container.skill_projection import (
     materialize_skills_for_spawn,
 )
 from rolemesh.core.config import (
+    APPROVAL_TIMEOUT,
     CONTAINER_MAX_OUTPUT_SIZE,
-    CONTAINER_TIMEOUT,
     CREDENTIAL_PROXY_PORT,
     DATA_DIR,
-    IDLE_TIMEOUT,
     MCP_PROXY_PREFIX,
+    TURN_INACTIVITY_TIMEOUT,
 )
 from rolemesh.core.logger import get_logger
 from rolemesh.egress.token_identity import Identity
@@ -472,10 +472,20 @@ class ContainerAgentExecutor:
         had_streaming_output = False
         timed_out = False
 
-        config_timeout = (
-            coworker.container_config.timeout if coworker.container_config else CONTAINER_TIMEOUT
-        ) or CONTAINER_TIMEOUT
-        timeout_ms = max(config_timeout, IDLE_TIMEOUT + 30_000)
+        # Per-turn inactivity watchdog (slot-follows-turn rework). The bound is
+        # the per-coworker container_config.timeout override when set, else the
+        # global TURN_INACTIVITY_TIMEOUT. It is an *inactivity* timer (reset by
+        # streamed output below), not a total-runtime cap — a turn that keeps
+        # streaming never trips it. Floored at APPROVAL_TIMEOUT + 30s so it can
+        # never pre-empt a pending HITL approval (the container emits no output
+        # while blocked on a decision); this runtime floor replaces the former
+        # APPROVAL_TIMEOUT < IDLE_TIMEOUT + 30_000 startup invariant.
+        base_timeout = (
+            coworker.container_config.timeout
+            if (coworker.container_config and coworker.container_config.timeout)
+            else TURN_INACTIVITY_TIMEOUT
+        )
+        timeout_ms = max(base_timeout, APPROVAL_TIMEOUT + 30_000)
         timeout_s = timeout_ms / 1000.0
 
         # Timeout management
@@ -634,7 +644,7 @@ class ContainerAgentExecutor:
             return AgentOutput(
                 status="error",
                 result=None,
-                error=f"Container timed out after {config_timeout}ms",
+                error=f"Container timed out after {timeout_ms}ms of inactivity",
             )
 
         timestamp = datetime.now(UTC).isoformat().replace(":", "-").replace(".", "-")
