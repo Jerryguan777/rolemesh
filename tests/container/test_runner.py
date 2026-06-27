@@ -464,9 +464,18 @@ class TestMetadataBlackholeAndNetwork:
         assert spec.extra_hosts.get("metadata.google.internal") == "127.0.0.1"
 
     def test_custom_network_name_applied_from_config(self) -> None:
-        with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
+        # Pin the bridge name: a developer .env with an empty
+        # CONTAINER_NETWORK_NAME leaks into os.environ via
+        # rolemesh.bootstrap's load_dotenv whenever another test module
+        # imports rolemesh.main/webui.main first, which would null this out.
+        with (
+            patch(
+                "rolemesh.container.runner.CONTAINER_NETWORK_NAME",
+                "rolemesh-agent-net",
+            ),
+            patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"),
+        ):
             spec = build_container_spec([], "c", "j")
-        # Default config points at rolemesh-agent-net unless CONTAINER_NETWORK_NAME='' is set.
         assert spec.network_name == "rolemesh-agent-net"
 
     def test_empty_network_name_yields_none(self) -> None:
@@ -486,7 +495,12 @@ class TestComputeEgressRouting:
     def test_routing_with_token(self) -> None:
         from rolemesh.container import runner
 
-        with patch.object(runner, "EGRESS_GATEWAY_DNS_IP", "172.20.0.2"):
+        # Pin the bridge name against developer-.env pollution (see
+        # test_custom_network_name_applied_from_config).
+        with (
+            patch.object(runner, "CONTAINER_NETWORK_NAME", "rolemesh-agent-net"),
+            patch.object(runner, "EGRESS_GATEWAY_DNS_IP", "172.20.0.2"),
+        ):
             r = compute_egress_routing("TOK")
 
         assert r.proxy_base == "http://egress-gateway:3001"
