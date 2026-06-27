@@ -147,10 +147,13 @@ class Coworker:
     system_prompt: str | None = None
     container_config: ContainerConfig | None = None
     # Max concurrent *turns* (in-flight agent invocations) for this coworker —
-    # the per-coworker level of the three-level admission. Warm idle containers
-    # do not count (slot-follows-turn rework). Named ``*_containers`` for
-    # symmetry with the tenant/global limits; reads as "max concurrent active
-    # containers", which equals concurrent turns (one active container per turn).
+    # the per-coworker level of three-level turn admission. Slot-follows-turn
+    # rework: this bounds concurrent TURNS, not live containers. A warm idle
+    # container holds no turn slot and does not count here, so one coworker may
+    # back MORE live containers than this value (up to one warm per idle
+    # conversation); the only ceiling on live-container *count* is the global
+    # GLOBAL_MAX_CONTAINERS (enforced via OrchestratorState.live_containers).
+    # Named ``*_containers`` for naming symmetry with the tenant/global limits.
     max_concurrent_containers: int = 2
     status: str = "active"
     created_at: str = ""

@@ -49,6 +49,15 @@ class _GroupState:
     # idempotently by ``slot_held`` (slot-follows-turn rework). A warm idle
     # container has ``active and not processing`` and holds no turn slot —
     # it only counts against the global live-container ceiling.
+    #
+    # ``processing`` and ``slot_held`` move in lockstep but are NOT redundant —
+    # do not collapse them. ``processing`` is the lifecycle *phase* (it drives
+    # warm detection, idle-timer gating, and the send_message resume branch);
+    # ``slot_held`` is the counter-accounting *token* that makes
+    # ``_acquire_turn`` / ``_release_turn`` idempotent. They must stay distinct:
+    # ``_reserve_slot`` sets ``processing`` True *before* acquiring the turn, so
+    # using ``processing`` as the idempotency guard would mis-read "already held"
+    # and silently drop the increment.
     active: bool = False
     processing: bool = False
     slot_held: bool = False

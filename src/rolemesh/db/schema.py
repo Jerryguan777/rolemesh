@@ -397,6 +397,11 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             agent_backend TEXT DEFAULT 'claude',
             system_prompt TEXT,
             container_config JSONB,
+            -- Per-coworker concurrent-TURN ceiling, not a live-container count
+            -- (slot-follows-turn rework). Warm idle containers hold no turn slot,
+            -- so a coworker can back more live containers than this; live-container
+            -- count is bounded only by the global GLOBAL_MAX_CONTAINERS. Named
+            -- ``*_containers`` for symmetry with the tenant/global limits.
             max_concurrent_containers INT DEFAULT 2,
             status TEXT DEFAULT 'active',
             created_at TIMESTAMPTZ DEFAULT now(),
