@@ -76,6 +76,10 @@ class _GroupState:
     idle_handle: asyncio.TimerHandle | None = None
     awaiting_approval: set[str] = field(default_factory=set)
     adopted: bool = False
+    # Reaper bookkeeping: consecutive sweeps this group was ``active`` with a
+    # registered container that is no longer live. Reaped once it crosses the
+    # two-sweep confirmation threshold (guards the just-exited race).
+    missing_sweeps: int = 0
 
 
 class GroupQueue:
@@ -785,6 +789,79 @@ class GroupQueue:
             else:
                 continue  # nothing to do, don't re-add
         self._waiting_groups = remaining
+
+    # -- out-of-band reaper (counter reconciliation) ---------------------
+
+    async def reconcile_once(self, prefix: str = "rolemesh-") -> int:
+        """One reaper sweep: reap groups marked ``active`` whose container is no
+        longer live, reconciling the three-level + live counters with reality.
+
+        This is the backstop for a leaked slot — a ``_run_for_group`` whose
+        ``finally`` never ran (abnormal coroutine death) leaves ``active`` True
+        and the counters incremented while the container is already gone. We
+        confirm a group "ghost" across two consecutive sweeps (the just-exited
+        race window where the container died but the finally hasn't run yet) and
+        a group whose container is not yet registered is given grace. A
+        ``list_live`` failure aborts the sweep so a transient runtime hiccup
+        never mass-reaps healthy groups. Returns the number reaped.
+        """
+        if self._shutting_down or self._runtime is None:
+            return 0
+        try:
+            live = await self._runtime.list_live(prefix)
+        except (OSError, RuntimeError):
+            logger.debug("reaper: list_live failed; skipping sweep")
+            return 0
+
+        reaped = 0
+        for group_jid, state in list(self._groups.items()):
+            if not state.active:
+                state.missing_sweeps = 0
+                continue
+            if state.container_name and state.container_name in live:
+                state.missing_sweeps = 0  # healthy
+                continue
+            if state.container_name is None:
+                continue  # just spawned, not yet registered — grace
+            # Registered but absent from the live set — confirm across two sweeps.
+            state.missing_sweeps += 1
+            if state.missing_sweeps < 2:
+                continue
+            logger.warning(
+                "reaper: reaping ghost group (container gone, slot leaked)",
+                group_jid=group_jid,
+                container=state.container_name,
+            )
+            self._reap_ghost(group_jid)
+            reaped += 1
+        return reaped
+
+    def _reap_ghost(self, group_jid: str) -> None:
+        """Release a ghost group's slot + container counters and drain its work."""
+        state = self._get_group(group_jid)
+        self._release_turn(state)
+        self._release_container(state)
+        self._warm.pop(group_jid, None)
+        self.cancel_idle_timer(group_jid)
+        state.processing = False
+        state.is_running = False
+        state.is_task_container = False
+        state.running_task_id = None
+        state.container_name = None
+        state.job_id = None
+        state.missing_sweeps = 0
+        self._drain_group(group_jid)
+
+    async def run_reaper(self, interval_s: float = 60.0, prefix: str = "rolemesh-") -> None:
+        """Periodic reconciliation loop (started by the orchestrator lifespan)."""
+        while not self._shutting_down:
+            await asyncio.sleep(interval_s)
+            try:
+                n = await self.reconcile_once(prefix)
+                if n:
+                    logger.info("reaper swept ghost containers", reaped=n)
+            except Exception:
+                logger.exception("reaper sweep failed")
 
     async def shutdown(self, _grace_period_ms: int = 0) -> None:
         """Graceful shutdown -- detach containers, don't kill them."""

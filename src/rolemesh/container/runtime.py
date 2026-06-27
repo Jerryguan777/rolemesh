@@ -140,6 +140,20 @@ class ContainerRuntime(Protocol):
         self, prefix: str, *, allowed_images: frozenset[str]
     ) -> list[str]: ...
 
+    async def list_live(self, prefix: str) -> set[str]:
+        """Names of currently-RUNNING containers whose name starts with ``prefix``.
+
+        Read-only liveness oracle for the scheduler's reaper: it reconciles the
+        in-memory ``active`` groups against this set and reaps any whose
+        container has vanished (a leaked slot whose ``finally`` never ran). Only
+        running containers are returned — an exited/created/dead container is
+        absent, which is exactly the "gone" signal the reaper needs. No image
+        whitelist is applied (unlike ``cleanup_orphans``): this never stops or
+        removes anything, and membership is only ever checked for names the
+        orchestrator itself minted.
+        """
+        ...
+
     async def close(self) -> None: ...
 
 

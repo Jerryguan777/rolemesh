@@ -189,6 +189,65 @@ async def test_slot_released_at_is_final_container_stays_warm() -> None:
     assert gs.active is False
 
 
+class _FakeRuntime:
+    """Minimal runtime exposing list_live for reaper tests."""
+
+    def __init__(self, live: set[str]) -> None:
+        self._live = live
+
+    async def list_live(self, prefix: str) -> set[str]:
+        return {n for n in self._live if n.startswith(prefix)}
+
+
+async def test_reaper_reaps_ghost_after_two_sweeps() -> None:
+    """A group marked active whose container is no longer live is reaped after
+    two confirming sweeps, releasing its leaked turn + container counters."""
+    state = OrchestratorState(global_limit=5)
+    runtime = _FakeRuntime(live=set())  # nothing alive
+    queue = GroupQueue(runtime=runtime, orchestrator_state=state)  # type: ignore[arg-type]
+
+    # Simulate a leaked slot: active group, registered container, counters held,
+    # but the container is gone (not in list_live).
+    gs = queue._get_group("ghost")
+    gs.tenant_id, gs.coworker_id = "t1", "cw1"
+    queue._acquire_container(gs)
+    gs.processing = True
+    queue._acquire_turn(gs)
+    queue.register_process("ghost", "rolemesh-ghost-123")
+    assert state.global_active == 1
+    assert state.live_containers == 1
+
+    # First sweep: suspected, not yet reaped (two-sweep confirmation).
+    assert await queue.reconcile_once() == 0
+    assert gs.active is True
+    assert gs.missing_sweeps == 1
+
+    # Second sweep: confirmed → reaped, counters reconciled to zero.
+    assert await queue.reconcile_once() == 1
+    assert gs.active is False
+    assert state.global_active == 0
+    assert state.live_containers == 0
+
+
+async def test_reaper_spares_live_and_unregistered() -> None:
+    """A group whose container is live, and one not yet registered, are spared."""
+    state = OrchestratorState(global_limit=5)
+    runtime = _FakeRuntime(live={"rolemesh-alive-1"})
+    queue = GroupQueue(runtime=runtime, orchestrator_state=state)  # type: ignore[arg-type]
+
+    alive = queue._get_group("alive")
+    queue._acquire_container(alive)
+    queue.register_process("alive", "rolemesh-alive-1")
+
+    starting = queue._get_group("starting")
+    queue._acquire_container(starting)  # active but no container_name yet
+
+    assert await queue.reconcile_once() == 0
+    assert await queue.reconcile_once() == 0
+    assert alive.active is True
+    assert starting.active is True
+
+
 async def test_warm_container_does_not_wedge_other_coworker() -> None:
     """A warm idle container holds no turn slot, so it cannot wedge a second
     coworker's cold start at the coworker turn ceiling."""

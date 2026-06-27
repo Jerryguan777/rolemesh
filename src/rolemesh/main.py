@@ -1879,6 +1879,12 @@ async def main() -> None:
         run_safety_maintenance_loop(stop_event=safety_maintenance_stop)
     )
 
+    # Out-of-band reaper: periodically reconcile the scheduler's concurrency
+    # counters against the runtime's live containers, reaping any group whose
+    # slot leaked (a _run_for_group whose finally never ran). Self-heals the
+    # "wedged until restart" failure mode.
+    reaper_task = asyncio.create_task(_queue.run_reaper())
+
     ipc_tasks = await _start_nats_ipc_subscriptions(_transport, ipc_deps)
 
     # EC-2: serve the egress gateway's snapshot RPCs. The gateway asks
@@ -2094,6 +2100,9 @@ async def main() -> None:
     safety_maintenance_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await safety_maintenance_task
+    reaper_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await reaper_task
     # V2 P0.3: shut down the safety RPC server and its thread pool so
     # nats-py can tear down the subscription cleanly and in-flight
     # sync checks do not block process exit.
