@@ -169,6 +169,25 @@ class GroupQueue:
         state.active = False
         self._orch_state.release_container()
 
+    def _reserve_slot(self, state: _GroupState) -> None:
+        """Synchronously reserve a live-container + turn slot at the admission
+        *decision* point, before spawning the (async) runner.
+
+        Closes a TOCTOU: ``_run_for_group`` / ``_run_task`` only increment the
+        counters once their spawned task actually runs, so without reserving
+        here, multiple check-then-spawn decisions in the same event-loop tick
+        (notably one ``_drain_waiting`` pass releasing into several queued
+        groups, but also a burst of ``enqueue_*`` calls) all observe the
+        pre-increment counts, all pass, and over-admit — breaching the
+        per-coworker / per-tenant / global ceilings until the turns settle.
+        Bumping the counts synchronously here makes the next check in the same
+        tick see them. Idempotent (``_acquire_*`` guard on ``slot_held`` /
+        ``active``), so the runner's own acquire becomes a no-op.
+        """
+        self._acquire_container(state)
+        state.processing = True
+        self._acquire_turn(state)
+
     def set_process_messages_fn(self, fn: Callable[[str], Awaitable[bool]]) -> None:
         """Set the callback for processing messages for a group."""
         self._process_messages_fn = fn
@@ -239,6 +258,7 @@ class GroupQueue:
             self._fire(self._on_queued, group_jid)
             return
 
+        self._reserve_slot(state)
         self._spawn(self._run_for_group(group_jid, "messages"))
 
     def _evict_lru_warm(self) -> None:
@@ -311,6 +331,7 @@ class GroupQueue:
         task = _QueuedTask(
             id=task_id, group_jid=group_jid, fn=fn, tenant_id=state.tenant_id, coworker_id=state.coworker_id
         )
+        self._reserve_slot(state)
         self._spawn(self._run_task(group_jid, task))
 
     def register_process(
@@ -759,6 +780,7 @@ class GroupQueue:
         # queue it for a later cross-group drain rather than bypassing limits.
         if state.pending_tasks or state.pending_messages:
             if self._can_start_turn(state.tenant_id, state.coworker_id) and self._can_spawn():
+                self._reserve_slot(state)
                 if state.pending_tasks:
                     task = state.pending_tasks.pop(0)
                     self._spawn(self._run_task(group_jid, task))
@@ -783,8 +805,10 @@ class GroupQueue:
 
             if state.pending_tasks:
                 task = state.pending_tasks.pop(0)
+                self._reserve_slot(state)  # bump counts NOW so the next iteration sees them
                 self._spawn(self._run_task(next_jid, task))
             elif state.pending_messages:
+                self._reserve_slot(state)  # bump counts NOW so the next iteration sees them
                 self._spawn(self._run_for_group(next_jid, "drain"))
             else:
                 continue  # nothing to do, don't re-add

@@ -189,6 +189,52 @@ async def test_slot_released_at_is_final_container_stays_warm() -> None:
     assert gs.active is False
 
 
+async def test_drain_does_not_over_admit_on_single_release() -> None:
+    """TOCTOU guard: a single freed slot must admit exactly ONE queued turn,
+    not every queued group. Pre-fix, _drain_waiting checked admission
+    synchronously but acquired the slot later (in the spawned _run_for_group),
+    so one release fanned out into multiple spawns and breached the ceiling."""
+    state = OrchestratorState(global_limit=2)
+    queue = GroupQueue(orchestrator_state=state)
+
+    started: dict[str, asyncio.Event] = {j: asyncio.Event() for j in ("g1", "g2", "g3", "g4")}
+    release: dict[str, asyncio.Event] = {j: asyncio.Event() for j in ("g1", "g2", "g3", "g4")}
+    peak = 0
+
+    async def process(group_jid: str) -> bool:
+        nonlocal peak
+        started[group_jid].set()
+        peak = max(peak, state.global_active)
+        await release[group_jid].wait()
+        return True
+
+    queue.set_process_messages_fn(process)
+
+    # Enqueue 4 turns at the global ceiling of 2 — all in one tick.
+    for j in ("g1", "g2", "g3", "g4"):
+        queue.enqueue_message_check(j, tenant_id="t1", coworker_id="cw1")
+
+    await asyncio.sleep(0.05)
+    # Exactly 2 admitted; 2 queued (enqueue-time reservation holds the line).
+    assert state.global_active == 2
+    assert started["g1"].is_set() and started["g2"].is_set()
+    assert not started["g3"].is_set() and not started["g4"].is_set()
+
+    # Free exactly ONE slot. The drain it triggers must admit exactly one of
+    # the two waiting groups — never both.
+    release["g1"].set()
+    await asyncio.sleep(0.05)
+    assert state.global_active == 2, "single release over-admitted (ceiling breached)"
+    assert started["g3"].is_set() ^ started["g4"].is_set(), "exactly one queued turn admitted"
+    assert peak <= 2, "concurrency ceiling was breached at some point"
+
+    # Drain the rest cleanly.
+    for j in ("g2", "g3", "g4"):
+        release[j].set()
+    await asyncio.sleep(0.1)
+    assert state.global_active == 0
+
+
 class _FakeRuntime:
     """Minimal runtime exposing list_live for reaper tests."""
 
