@@ -551,6 +551,22 @@ class ClaudeBackend:
                         is_final=False,
                         usage=usage,
                     ))
+                    # End the turn once this batch is fully answered. In
+                    # multi-turn streaming mode the SDK keeps query() reading
+                    # from the persistent MessageStream, so after the last
+                    # ResultMessage the async-for would block forever waiting
+                    # for more input — run_prompt never returns and the NATS
+                    # bridge never publishes the batch-final (is_final=True)
+                    # marker, leaking the orchestrator's turn slot until the
+                    # watchdog. Closing the input ends the turn deterministically.
+                    # Guard on has_pending() so a follow-up already queued (or
+                    # pushed before the SDK's next input read) is still drained
+                    # and answered first — MessageStream.__aiter__ drains the
+                    # queue before honoring _done. Cross-turn continuity rides
+                    # options.resume + resume-session-at, not this stream, so
+                    # closing it per-turn is safe; abort() owns its own end().
+                    if not self._aborting and not stream.has_pending():
+                        stream.end()
 
         aborted = False
         try:
