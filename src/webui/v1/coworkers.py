@@ -82,7 +82,7 @@ def _coworker_to_response(cw: object) -> Coworker:
         model_id=cw.model_id,
         system_prompt=cw.system_prompt,
         status=cw.status,  # type: ignore[arg-type]
-        max_concurrent=cw.max_concurrent,
+        max_concurrent_containers=cw.max_concurrent_containers,
         created_by_user_id=cw.created_by_user_id,
         visibility=cw.visibility,  # type: ignore[attr-defined]
         permissions=CoworkerPermissions(
@@ -219,7 +219,7 @@ async def create_coworker_endpoint(
             folder=body.folder,
             agent_backend=body.agent_backend,
             system_prompt=body.system_prompt,
-            max_concurrent=body.max_concurrent,
+            max_concurrent_containers=body.max_concurrent_containers,
             model_id=body.model_id,
             created_by_user_id=user.user_id,
             permissions=AgentPermissions(
@@ -379,8 +379,8 @@ async def patch_coworker_endpoint(
         kwargs["system_prompt"] = body.system_prompt
     if body.status is not None:
         kwargs["status"] = body.status
-    if body.max_concurrent is not None:
-        kwargs["max_concurrent"] = body.max_concurrent
+    if body.max_concurrent_containers is not None:
+        kwargs["max_concurrent_containers"] = body.max_concurrent_containers
     if body.model_id is not None:
         kwargs["model_id"] = body.model_id
     if body.permissions is not None:

@@ -70,7 +70,7 @@ const COWORKER_A: Coworker = {
   folder: 'ops',
   agent_backend: 'claude',
   status: 'active',
-  max_concurrent: 1,
+  max_concurrent_containers: 1,
   visibility: 'private',
   permissions: { agent_delegate: false, task_schedule: false, task_manage_others: false },
   is_frontdesk: false,

@@ -90,7 +90,7 @@ class AgentResponse(BaseModel):
     agent_backend: str
     system_prompt: str | None = None
     tools: list[dict[str, object]] = Field(default_factory=list)
-    max_concurrent: int
+    max_concurrent_containers: int
     status: str
     permissions: dict[str, object] = Field(default_factory=dict)
     created_at: str
@@ -128,7 +128,7 @@ class AgentCreate(BaseModel):
     agent_backend: str = "claude"
     system_prompt: str | None = None
     tools: list[dict[str, object]] = Field(default_factory=list)
-    max_concurrent: int = Field(2, ge=1, le=20)
+    max_concurrent_containers: int = Field(2, ge=1, le=20)
     permissions: dict[str, object] | None = None
 
 
@@ -136,7 +136,7 @@ class AgentUpdate(BaseModel):
     name: str | None = None
     system_prompt: str | None = None
     tools: list[dict[str, object]] | None = None
-    max_concurrent: int | None = Field(None, ge=1, le=20)
+    max_concurrent_containers: int | None = Field(None, ge=1, le=20)
     status: str | None = Field(None, pattern=r"^(active|paused|disabled)$")
     permissions: dict[str, object] | None = None
 

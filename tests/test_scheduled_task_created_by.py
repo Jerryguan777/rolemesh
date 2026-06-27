@@ -259,7 +259,7 @@ async def test_run_task_stamps_agent_input_user_id_from_task() -> None:
     coworker = Coworker(
         id=cw_id, tenant_id=tid, name="CW", folder="folder",
         agent_backend="claude", system_prompt=None,
-        container_config=None, max_concurrent=1, status="active",
+        container_config=None, max_concurrent_containers=1, status="active",
         permissions=AgentPermissions(
             task_schedule=True,
             task_manage_others=False, agent_delegate=False,
@@ -326,7 +326,7 @@ async def test_run_task_passes_empty_string_when_task_has_null_creator() -> None
     coworker = Coworker(
         id=cw_id, tenant_id=tid, name="CW", folder="folder",
         agent_backend="claude", system_prompt=None,
-        container_config=None, max_concurrent=1, status="active",
+        container_config=None, max_concurrent_containers=1, status="active",
         permissions=AgentPermissions(
             task_schedule=True,
             task_manage_others=False, agent_delegate=False,

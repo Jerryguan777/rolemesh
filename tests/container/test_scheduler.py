@@ -149,3 +149,74 @@ async def test_concurrency_limit_via_orchestrator_state() -> None:
     state2 = queue._get_group("group2")
     assert state2.pending_messages is True
     await asyncio.sleep(0.5)
+
+
+async def test_slot_released_at_is_final_container_stays_warm() -> None:
+    """Slot-follows-turn: notify_idle (is_final) frees the turn slot while the
+    container stays live (warm). The container slot is freed only at exit."""
+    state = OrchestratorState(global_limit=5)
+    queue = GroupQueue(orchestrator_state=state)
+
+    went_warm = asyncio.Event()
+    may_exit = asyncio.Event()
+
+    async def process(group_jid: str) -> bool:
+        # Turn finished (is_final) → go warm, but keep the container alive.
+        queue.notify_idle(group_jid)
+        went_warm.set()
+        await may_exit.wait()
+        return True
+
+    queue.set_process_messages_fn(process)
+    queue.enqueue_message_check("g1", tenant_id="t1", coworker_id="cw1")
+
+    await asyncio.wait_for(went_warm.wait(), timeout=1.0)
+    gs = queue._get_group("g1")
+    # Turn slot released, but the container is still alive and warm.
+    assert state.global_active == 0
+    assert state.coworker_active.get("cw1", 0) == 0
+    assert state.live_containers == 1
+    assert gs.active is True
+    assert gs.processing is False
+    assert gs.idle_waiting is True
+    assert "g1" in queue._warm
+
+    # Container exits → live counter returns to zero, warm entry cleared.
+    may_exit.set()
+    await asyncio.sleep(0.05)
+    assert state.live_containers == 0
+    assert "g1" not in queue._warm
+    assert gs.active is False
+
+
+async def test_warm_container_does_not_wedge_other_coworker() -> None:
+    """A warm idle container holds no turn slot, so it cannot wedge a second
+    coworker's cold start at the coworker turn ceiling."""
+    state = OrchestratorState(global_limit=5)
+    queue = GroupQueue(orchestrator_state=state)
+
+    warm = asyncio.Event()
+    g2_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def process(group_jid: str) -> bool:
+        if group_jid == "g1":
+            queue.notify_idle(group_jid)  # g1 goes warm immediately
+            warm.set()
+            await release.wait()
+        else:
+            g2_started.set()
+            await release.wait()
+        return True
+
+    queue.set_process_messages_fn(process)
+    queue.enqueue_message_check("g1", tenant_id="t1", coworker_id="cw1")
+    await asyncio.wait_for(warm.wait(), timeout=1.0)
+
+    # g2 (different coworker) cold-starts even though g1's container is alive.
+    queue.enqueue_message_check("g2", tenant_id="t1", coworker_id="cw2")
+    await asyncio.wait_for(g2_started.wait(), timeout=1.0)
+    assert state.live_containers == 2  # both containers alive
+    assert state.global_active == 1  # only g2 holds a turn slot
+    release.set()
+    await asyncio.sleep(0.05)

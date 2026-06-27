@@ -87,7 +87,7 @@ async def _create_coworker_full(
     name: str,
     folder: str,
     permissions: AgentPermissions | None = None,
-    max_concurrent: int = 2,
+    max_concurrent_containers: int = 2,
     channel_type: str = "telegram",
     credentials: dict[str, str] | None = None,
     chat_ids: list[str] | None = None,
@@ -100,7 +100,7 @@ async def _create_coworker_full(
         name=name,
         folder=folder,
         permissions=permissions,
-        max_concurrent=max_concurrent,
+        max_concurrent_containers=max_concurrent_containers,
     )
     binding = await create_channel_binding(
         coworker_id=cw.id,
@@ -554,7 +554,7 @@ class TestThreeLevelConcurrency:
         assert state.can_start_container("t1", "cw3") is True
 
     async def test_coworker_limit_blocks_second_container_for_same_coworker(self, env: Path) -> None:
-        """Coworker max_concurrent=1 → second request for same coworker queued."""
+        """Coworker max_concurrent_containers=1 → second request for same coworker queued."""
         state = OrchestratorState(global_limit=10)
         state.tenants["t1"] = Tenant(id="t1", name="T", max_concurrent_containers=10)
 
@@ -564,7 +564,7 @@ class TestThreeLevelConcurrency:
             name="Bot",
             folder="bot",
             agent_backend="claude",
-            max_concurrent=1,
+            max_concurrent_containers=1,
         )
         state.coworkers["cw1"] = CoworkerState.from_coworker(cw)
 
@@ -1048,7 +1048,7 @@ class TestOrchestratorStateLookups:
             name="Bot",
             folder="bot",
             agent_backend="claude",
-            max_concurrent=2,
+            max_concurrent_containers=2,
         )
         cw_state = CoworkerState.from_coworker(cw)
         cw_state.channel_bindings["telegram"] = binding
@@ -1076,7 +1076,7 @@ class TestOrchestratorStateLookups:
             name="Bot",
             folder="bot",
             agent_backend="claude",
-            max_concurrent=2,
+            max_concurrent_containers=2,
         )
         cw_state = CoworkerState.from_coworker(cw)
         cw_state.channel_bindings["telegram"] = binding
@@ -1094,7 +1094,7 @@ class TestOrchestratorStateLookups:
             name="Bot",
             folder="my-bot",
             agent_backend="claude",
-            max_concurrent=2,
+            max_concurrent_containers=2,
         )
         state.coworkers["cw1"] = CoworkerState.from_coworker(cw)
 

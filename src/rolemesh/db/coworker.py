@@ -63,7 +63,7 @@ async def create_coworker(
     agent_backend: str = "claude",
     system_prompt: str | None = None,
     container_config: ContainerConfig | None = None,
-    max_concurrent: int = 2,
+    max_concurrent_containers: int = 2,
     permissions: AgentPermissions | None = None,
     model_id: str | None = None,
     created_by_user_id: str | None = None,
@@ -107,7 +107,7 @@ async def create_coworker(
         row = await conn.fetchrow(
             """
             INSERT INTO coworkers (tenant_id, name, folder, agent_backend, system_prompt,
-                container_config, max_concurrent, permissions,
+                container_config, max_concurrent_containers, permissions,
                 model_id, created_by_user_id, visibility,
                 is_frontdesk, routing_description)
             VALUES ($1::uuid, $2, $3, $4, $5, $6::jsonb, $7, $8::jsonb,
@@ -120,7 +120,7 @@ async def create_coworker(
             agent_backend,
             system_prompt,
             cc_json,
-            max_concurrent,
+            max_concurrent_containers,
             json.dumps(effective_perms.to_dict()),
             model_id,
             created_by_user_id,
@@ -153,7 +153,7 @@ def _record_to_coworker(row: asyncpg.Record) -> Coworker:
         agent_backend=row.get("agent_backend") or "claude",
         system_prompt=row.get("system_prompt"),
         container_config=_parse_container_config(row["container_config"]),
-        max_concurrent=row["max_concurrent"],
+        max_concurrent_containers=row["max_concurrent_containers"],
         status=row["status"] or "active",
         created_at=row["created_at"].isoformat() if row["created_at"] else "",
         permissions=permissions,
@@ -305,7 +305,7 @@ async def update_coworker(
     tenant_id: str,
     name: str | None = None,
     system_prompt: str | None = None,
-    max_concurrent: int | None = None,
+    max_concurrent_containers: int | None = None,
     status: str | None = None,
     permissions: AgentPermissions | None = None,
     model_id: str | None | Any = _MODEL_ID_UNSET,
@@ -337,9 +337,9 @@ async def update_coworker(
         fields.append(f"system_prompt = ${param_idx}")
         values.append(system_prompt)
         param_idx += 1
-    if max_concurrent is not None:
-        fields.append(f"max_concurrent = ${param_idx}")
-        values.append(max_concurrent)
+    if max_concurrent_containers is not None:
+        fields.append(f"max_concurrent_containers = ${param_idx}")
+        values.append(max_concurrent_containers)
         param_idx += 1
     if status is not None:
         fields.append(f"status = ${param_idx}")

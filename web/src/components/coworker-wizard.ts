@@ -401,9 +401,9 @@ export class CoworkerWizard extends LitElement {
           agent_backend: this.draft.agentBackend!,
           model_id: this.draft.modelId,
           system_prompt: this.draft.instructions.trim() || null,
-          // max_concurrent intentionally not surfaced
+          // max_concurrent_containers intentionally not surfaced
           // (locked decision #10 — backend default applies).
-          max_concurrent: 2,
+          max_concurrent_containers: 2,
           // Frontdesk v1.2: the wizard creates ordinary specialists; a
           // frontdesk is flagged via the coworker API / a future admin
           // toggle, not this create form. Always false here.

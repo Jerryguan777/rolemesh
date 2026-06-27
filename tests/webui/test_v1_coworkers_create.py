@@ -159,7 +159,7 @@ async def test_create_coworker_minimal_no_model() -> None:
     assert body["folder"] == folder
     assert body["model_id"] is None
     assert body["status"] == "active"
-    assert body["max_concurrent"] == 2
+    assert body["max_concurrent_containers"] == 2
     assert body["tenant_id"] == tid
 
 

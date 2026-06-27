@@ -146,7 +146,12 @@ class Coworker:
     agent_backend: str = "claude"
     system_prompt: str | None = None
     container_config: ContainerConfig | None = None
-    max_concurrent: int = 2
+    # Max concurrent *turns* (in-flight agent invocations) for this coworker —
+    # the per-coworker level of the three-level admission. Warm idle containers
+    # do not count (slot-follows-turn rework). Named ``*_containers`` for
+    # symmetry with the tenant/global limits; reads as "max concurrent active
+    # containers", which equals concurrent turns (one active container per turn).
+    max_concurrent_containers: int = 2
     status: str = "active"
     created_at: str = ""
     permissions: AgentPermissions | None = None  # filled by __post_init__; always non-None after init

@@ -42,7 +42,7 @@ def _populated_coworker() -> Coworker:
             memory_limit="1g",
             cpu_limit=2.0,
         ),
-        max_concurrent=8,
+        max_concurrent_containers=8,
         status="paused",
         created_at="2026-05-20T12:34:56+00:00",
         permissions=AgentPermissions(
@@ -82,7 +82,7 @@ def test_every_field_round_trips() -> None:
     assert r.agent_backend == cw.agent_backend
     assert r.system_prompt == cw.system_prompt
     assert r.container_config == cw.container_config
-    assert r.max_concurrent == cw.max_concurrent
+    assert r.max_concurrent_containers == cw.max_concurrent_containers
     assert r.status == cw.status
     assert r.created_at == cw.created_at
     assert r.permissions == cw.permissions

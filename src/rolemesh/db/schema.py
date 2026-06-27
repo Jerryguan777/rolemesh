@@ -397,7 +397,7 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
             agent_backend TEXT DEFAULT 'claude',
             system_prompt TEXT,
             container_config JSONB,
-            max_concurrent INT DEFAULT 2,
+            max_concurrent_containers INT DEFAULT 2,
             status TEXT DEFAULT 'active',
             created_at TIMESTAMPTZ DEFAULT now(),
             UNIQUE (tenant_id, folder)
@@ -444,6 +444,23 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
     # callers must seed mcp_servers and bind via the relation layer.
     # Idempotent — a fresh testcontainer never had the column.
     await conn.execute("ALTER TABLE coworkers DROP COLUMN IF EXISTS tools")
+    # Slot-follows-turn rework: rename the per-coworker concurrency column
+    # ``max_concurrent`` → ``max_concurrent_containers`` for symmetry with the
+    # tenant/global limits. Idempotent: only renames when the legacy column is
+    # still present and the new one is absent (a fresh DB created the new name
+    # directly above). Semantics shifted from "container count" to "concurrent
+    # turns" — no data change, the integer carries over.
+    await conn.execute(
+        "ALTER TABLE coworkers "
+        "RENAME COLUMN max_concurrent TO max_concurrent_containers"
+        if await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM information_schema.columns "
+            "WHERE table_name='coworkers' AND column_name='max_concurrent') "
+            "AND NOT EXISTS(SELECT 1 FROM information_schema.columns "
+            "WHERE table_name='coworkers' AND column_name='max_concurrent_containers')"
+        )
+        else "SELECT 1"
+    )
     # Rename legacy backend value: ``claude-code`` was the original name
     # before the Pi integration (commit c032db0) renamed it to ``claude``.
     # The alias was kept for back-compat; this idempotent UPDATE retires
