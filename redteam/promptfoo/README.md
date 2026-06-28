@@ -18,6 +18,7 @@ still hold?" regression net). Findings here that land should be back-filled into
 |---|---|
 | `provider.py` | The one real piece of code: a promptfoo custom provider that replays a prompt over RoleMesh's WS run protocol and returns the reply + block-source metadata. |
 | `smoke.py` | **Phase 0** full-chain smoke (run this FIRST, no promptfoo / no API spend). |
+| `repro_crescendo_bola.py` | Deterministic replay of the Run-2 crescendo BOLA finding — the exact 2-turn sequence on one persistent conversation, no promptfoo / no OpenAI spend. |
 | `promptfooconfig.yaml` | P1 config — the 8-plugin matrix with scoped `base64`/`crescendo` strategies. |
 | `requirements.txt` | `websockets` (the provider's only non-stdlib dep). |
 
