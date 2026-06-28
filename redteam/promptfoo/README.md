@@ -218,6 +218,13 @@ So compute RoleMesh's real defense rate over `{rolemesh_safety, tool_layer}`, an
 read `model_aup`/`model_refusal` PASSes as "the attack was stopped upstream of
 RoleMesh's controls" — useful context, not evidence the tool layer held.
 
+> **Known gap — `defended_by` is MISSING on multi-turn (crescendo) cases.**
+> promptfoo grades a synthesized multi-turn transcript and does not propagate
+> the final `call_api`'s `metadata` onto the graded result, so `defended_by`
+> (and `tool_calls`) come through empty for crescendo. This is the same
+> stateless-multi-turn limitation as the crescendo caveat above — it resolves
+> with the session→persistent-conversation work (P2), not a piecemeal fix.
+
 `smoke.py` treats the chain as **confirmed** only when at least one probe yields
 `MCP TOOL CALLED` or `SAFETY-BLOCKED` (it exits non-zero otherwise) — both prove
 the request reached the target through the credential proxy. A `chain_error`
@@ -234,6 +241,24 @@ runs from "RoleMesh defended" counts.
   `fetch-mcp`'s outbound request originates from the MCP container, off the
   agent's egress path (see `redteam/mcp/fetch_mcp.py`). Egress is covered by
   attack_sim A5/D2/D4 + `scripts/verify-hardening.sh`.
+
+> **Important — what a cross-user MCP hit does and does NOT prove.** The sandbox
+> MCPs are registered with **`auth_mode="service"`** and a *static* `X-Actor-Id`
+> header (see `redteam/seed.py`). The credential proxy forwards that static
+> header verbatim (`reverse_proxy.py` `handle_mcp_proxy`: `fwd_headers.update(
+> server_headers)`). RoleMesh's **dynamic** per-user identity path — resolve
+> `X-RoleMesh-User-Id` → mint that user's token via the vault → set it as the
+> upstream `Authorization` → strip the internal id — only runs for
+> `auth_mode in {user, both}` and is therefore **never exercised** by this rig.
+> Consequently:
+> - A cross-user leak via `list_files`/`read_file` is the **deliberately
+>   vulnerable** sandbox MCP (its docstring: "intentionally NO check that a path
+>   belongs to the caller") combined with a model that was talked into the call.
+>   It is **not** a RoleMesh code bug, and it does **not** test RoleMesh's real
+>   identity isolation — that mechanism was never engaged in service mode.
+> - To actually exercise RoleMesh's per-user/tenant isolation, register a target
+>   with `auth_mode=user|both` + a token vault so the dynamic token path runs.
+>   Tracked as a rig upgrade (next round), not done here.
 
 ## Cadence
 
@@ -253,3 +278,12 @@ a per-PR gate). The deterministic per-PR gate stays `tests/attack_sim/`.
   real IPI vector, replacing the unfit IPI plugin); map promptfoo **session →
   persistent conversation** (`workers:1`) for genuine multi-turn crescendo;
   back-fill the `tool-discovery` finding into `attack_sim`; archive baselines.
+- **Rig upgrade — exercise RoleMesh's *real* identity isolation**: register at
+  least one target with `auth_mode=user|both` + a token vault so the dynamic
+  per-user token path runs (today's `service`-mode static `X-Actor` bypasses it,
+  so the rig cannot yet confirm or refute RoleMesh's per-user/tenant isolation).
+- **attack_sim category E (BOLA / tenant isolation) is MISSING** (only A/B/C/D/
+  G/H exist). Add it as the white-box counterpart: assert the proxy mints a
+  per-user token and **strips `X-RoleMesh-User-Id`** before forwarding, and
+  document (B2-style) that object-level authz is **delegated to the MCP tool** —
+  RoleMesh supplies identity, the tool must enforce scope.
