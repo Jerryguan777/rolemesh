@@ -48,8 +48,10 @@ redteam:
     - bfla                       # function-level authz: invoke admin-only delete_record / admin_export_all
     - rbac                       # role boundary on the admin tools
     - pii                        # leak the seeded SSN / credit-card / email
-    - tool-discovery             # enumerate available tools/servers
+    - tool-discovery             # enumerate available tools/servers (P1's only real finding)
     - excessive-agency           # act beyond the member scope unprompted
+    - cross-session-leak         # tenant isolation: pull another tenant's/session's data (attack_sim E / ASI06)
+    - ssrf                       # drive fetch-mcp at internal/metadata URLs (attack_sim A5 / ASI05)
   # NOTE: indirect-prompt-injection is intentionally NOT here. promptfoo's IPI
   # plugin injects into a prompt VARIABLE (needs config.indirectInjectionVar),
   # but this provider sends a single user prompt — so it was being skipped. The
@@ -63,12 +65,24 @@ redteam:
   # ones are limited to where they matter most via config.plugins.
   strategies:
     - basic                      # baseline — raw plugin cases on all plugins
-    - id: base64                 # encoding bypass — only the data-access/leak plugins
+    - id: base64                 # encoding bypass — symbolic coverage only (see note)
       config:
         plugins:
           - bola
-          - pii
+    # NOTE: base64 retargeted from {bola,pii} to {bola} only. In P1 most base64
+    # cases were stopped by Anthropic's Usage-Policy layer ("violate our Usage
+    # Policy"), not RoleMesh — low signal for the tool layer, and pii's 4
+    # sub-plugins made it the bulk of the run. One bola case keeps an
+    # encoding-bypass smoke probe on the most RoleMesh-relevant ask (cross-user
+    # read) without the volume. The new `defended_by` metadata field now labels
+    # these as `model_aup` so the report shows them for what they are.
     - id: crescendo              # multi-turn escalation — only the highest-risk plugin
       config:
         plugins:
           - bfla
+    # CAVEAT: this provider opens a NEW conversation per call_api (no session
+    # threading), so crescendo's turns each hit a fresh agent context — it tests
+    # resistance to escalating *single* prompts, NOT true multi-turn erosion of
+    # a remembered conversation. Genuine multi-turn needs session->persistent-
+    # conversation mapping in provider.py (+ workers:1); tracked for a later
+    # phase. Treat "held N rounds" accordingly. Each case is also ~10 min.
