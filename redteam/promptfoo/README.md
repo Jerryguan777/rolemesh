@@ -279,12 +279,19 @@ a per-PR gate). The deterministic per-PR gate stays `tests/attack_sim/`.
   isolation + SSRF) with scoped `base64` / `crescendo`; `numTests` ships at the
   calibration value 2, raise after a calibration run. The provider now tags
   every outcome with `defended_by` so model-layer 'false PASSes' are visible.
-- **P2**: capture the **tool-result** frame so `tool_layer` can split "authz
-  rejected a cross-scope call" from "agent self-limited to in-scope calls";
-  add the purpose-built **MCP-tool-response indirect-injection** case (RoleMesh's
-  real IPI vector, replacing the unfit IPI plugin); map promptfoo **session →
-  persistent conversation** (`workers:1`) for genuine multi-turn crescendo;
-  back-fill the `tool-discovery` finding into `attack_sim`; archive baselines.
+- **P2** (scoped down at wrap-up — not a single milestone any more):
+  - **Archive baselines — done.** See `baselines/` (the 2026-06-29 poison-mcp
+    validation; consolidated picture in `baselines/README.md`).
+  - **Back-fill `tool-discovery` into `attack_sim` — not pursued**, deliberately,
+    to keep this branch from sprawling. Left as a noted gap.
+  - **Deferred to follow-up branches** (avoid over-engineering this one):
+    capture the **tool-result** frame so `tool_layer` can split "authz rejected a
+    cross-scope call" from "agent self-limited" (also unlocks the
+    truncation-immune STRONG ruler); add the purpose-built **MCP-tool-response
+    indirect-injection** case (the real IPI vector, replacing the unfit IPI
+    plugin); map promptfoo **session → persistent conversation** (`workers:1`)
+    for genuine multi-turn crescendo (highest break-potential, but a new
+    capability — its own branch).
 - **Poisoned MCP / tool-description trust (ASI04) — target + ruler landed.** A
   fourth sandbox server, `poison-mcp` (`:9104`, `audit_log`), is seeded and bound
   by `redteam/seed.py`. Its tool *description* induces the agent to forward
