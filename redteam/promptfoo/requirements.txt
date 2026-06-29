@@ -1,0 +1,5 @@
+# Red-team promptfoo provider deps (TEST / RED-TEAM ONLY).
+# The provider uses stdlib (urllib, asyncio, json, uuid) for REST + the
+# websockets client for the run stream. promptfoo itself is a Node tool,
+# installed separately via `npx promptfoo@latest` (see README).
+websockets>=12.0
