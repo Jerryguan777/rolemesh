@@ -97,6 +97,15 @@ The original E1/E2 drove the approval engine, removed with the human-approval su
 | E2 | Forge coworkerId belonging to another tenant | Guard anchors on the coworker's authoritative tenant, not the claim | `test_E2_forged_coworker_id_dropped`, `test_E2b_unknown_coworker_id_dropped` | ✅ |
 | E6 | NATS subject sidechannel — a *consistent* forge (victim coworker_id **and** matching tenant_id) on core NATS | NATS account-per-tenant / tenant-scoped credentials (not implemented) | `test_E6_consistent_cross_tenant_forge_is_rejected` | ❌ xfail (NATS ACL gap) |
 
+### Identity isolation (credential-proxy plane)
+
+Per-user / per-tenant credential isolation is enforced at the credential proxy (`rolemesh.egress.reverse_proxy`), not the model. A half-trusted container can put any `X-RoleMesh-User-Id` on its outbound requests, so the proxy must derive identity from the **verified** signed token (`identity` from `TokenAuthority.verify`), never that header.
+
+| ID | Attack | Defense | Test | Status |
+|---|---|---|---|---|
+| E7 (MCP) | Forge `X-RoleMesh-User-Id: userB` on a userA-token request to be handed userB's OIDC token from the shared vault | MCP path keys the vault lookup on `identity.user_id`, not the header (mismatch logged, header ignored) | `test_E_identity_isolation::test_E7_mcp_forged_user_id_header_does_not_select_another_users_token` | ✅ (fixed — the proxy previously trusted the header) |
+| E7 (provider) | Forge `X-RoleMesh-User-Id` to steer LLM credential selection | LLM credential resolves by `identity.tenant_id`; the header plays no part | `test_E7_provider_credential_selection_ignores_forged_user_id_header` | ✅ (control) |
+
 ---
 
 ## G. Denial of service
@@ -151,11 +160,11 @@ The counts below were taken at the time the matrix was first drafted. Run `pytes
 | B. Secrets | 10 | 1 | 1 | 1 |
 | C. Prompt injection | 7 | 0 | 3 | 0 |
 | D. Data exfil | 9 | 0 | 0 | 0 |
-| E. Tenant iso | 4 | 1 | 0 | 0 |
+| E. Tenant + identity iso | 6 | 1 | 0 | 0 |
 | G. DoS | 3 | 0 | 0 | 2 |
 | H. Config | 8 | 0 | 0 | 1 |
 | I. Network egress | 13 | 0 | 0 | 0 |
-| **Total** | **74** | **2** | **4** | **10** |
+| **Total** | **76** | **2** | **4** | **10** |
 
 ---
 

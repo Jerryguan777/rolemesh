@@ -18,6 +18,7 @@ failing, a known defense just regressed.
 | `test_C_prompt_injection.py` | Prompt injection / jailbreak | Safety `llm_guard.prompt_injection`, `llm_guard.jailbreak` |
 | `test_D_data_exfil.py` | Data exfiltration (PII, URL, DNS) | Safety `pii.regex`, `domain_allowlist`, egress `GlobalDnsPolicy` |
 | `test_E_tenant_isolation.py` | Tenant isolation | `SafetyRpcServer` authoritative-tenant guard |
+| `test_E_identity_isolation.py` | Identity isolation (credential proxy) | `identity.user_id` from the verified token, not the `X-RoleMesh-User-Id` header |
 | `test_G_dos.py` | Denial of service | Pipeline resilience, worker queueing, rate limits |
 | `test_H_config_attack.py` | Configuration-layer attack | Pydantic validation, AgentPermissions |
 | `test_I_egress_gateway.py` | Network egress (gateway plane) | `egress.domain_rule` allowlist + `GlobalDnsPolicy` |

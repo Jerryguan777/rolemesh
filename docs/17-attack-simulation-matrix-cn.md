@@ -97,6 +97,15 @@
 | E2 | 伪造属于另一租户的 coworkerId | 守卫锚定 coworker 的权威租户，而非声明 | `test_E2_forged_coworker_id_dropped`、`test_E2b_unknown_coworker_id_dropped` | ✅ |
 | E6 | NATS subject 侧信道 —— *一致的*伪造（victim coworker_id **加**匹配的 tenant_id）经核心 NATS | NATS account-per-tenant / 租户范围凭据（未实现） | `test_E6_consistent_cross_tenant_forge_is_rejected` | ❌ xfail（NATS ACL 缺口） |
 
+### 身份隔离（credential-proxy 平面）
+
+per-user / per-tenant 的凭据隔离在 credential proxy（`rolemesh.egress.reverse_proxy`）这一层执行，不在模型。半可信容器可以在出站请求上塞任意 `X-RoleMesh-User-Id`,所以代理必须从**验证过的**签名 token 取身份（`identity`,来自 `TokenAuthority.verify`),绝不取该 header。
+
+| ID | 攻击 | 防御 | 测试 | 状态 |
+|---|---|---|---|---|
+| E7（MCP） | 在 userA 的 token 请求上伪造 `X-RoleMesh-User-Id: userB`,企图从共享 vault 拿到 userB 的 OIDC token | MCP 路径用 `identity.user_id` 而非 header 做 vault 查询（不符则记录并忽略 header） | `test_E_identity_isolation::test_E7_mcp_forged_user_id_header_does_not_select_another_users_token` | ✅（已修 —— 此前代理信任该 header） |
+| E7（provider） | 伪造 `X-RoleMesh-User-Id` 企图左右 LLM 凭据选择 | LLM 凭据按 `identity.tenant_id` 解析,header 不参与 | `test_E7_provider_credential_selection_ignores_forged_user_id_header` | ✅（对照） |
+
 ---
 
 ## G. 拒绝服务
@@ -151,11 +160,11 @@
 | B. 密钥 | 10 | 1 | 1 | 1 |
 | C. Prompt 注入 | 7 | 0 | 3 | 0 |
 | D. 数据外泄 | 9 | 0 | 0 | 0 |
-| E. 租户隔离 | 4 | 1 | 0 | 0 |
+| E. 租户 + 身份隔离 | 6 | 1 | 0 | 0 |
 | G. DoS | 3 | 0 | 0 | 2 |
 | H. 配置 | 8 | 0 | 0 | 1 |
 | I. 网络 egress | 13 | 0 | 0 | 0 |
-| **合计** | **74** | **2** | **4** | **10** |
+| **合计** | **76** | **2** | **4** | **10** |
 
 ---
 
