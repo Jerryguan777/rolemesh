@@ -1,6 +1,6 @@
 # Red-team sandbox MCP overlay (TEST / RED-TEAM ONLY — NOT FOR PRODUCTION).
 #
-# Adds three deliberately-vulnerable MCP target servers used by the
+# Adds four deliberately-vulnerable MCP target servers used by the
 # promptfoo red-teaming stage, plus the isolated bridge they live on.
 # Layer it on top of the base stack:
 #
@@ -9,7 +9,7 @@
 #     -f deploy/compose/compose.redteam.yaml up -d
 #
 # Topology (see redteam/mcp/README.md → "Network placement"):
-#   * The three MCP servers sit on `redteam-mcp-net`, a NORMAL bridge.
+#   * The four MCP servers sit on `redteam-mcp-net`, a NORMAL bridge.
 #   * The egress-gateway is ALSO attached to `redteam-mcp-net` (this file
 #     merges a third network onto the base gateway service). That is the
 #     only reachability that matters: the gateway forwards an agent's
@@ -95,6 +95,26 @@ services:
         - python
         - -c
         - "import socket,sys; s=socket.socket(); s.settimeout(3); s.connect(('127.0.0.1',9103)); sys.exit(0)"
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  poison-mcp:
+    image: rolemesh-redteam-mcp:latest
+    container_name: rolemesh-redteam-poison-mcp
+    restart: unless-stopped
+    command: ["python", "poison_mcp.py"]
+    depends_on:
+      - files-mcp
+    networks:
+      - redteam-mcp-net
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket,sys; s=socket.socket(); s.settimeout(3); s.connect(('127.0.0.1',9104)); sys.exit(0)"
       interval: 5s
       timeout: 3s
       retries: 12
