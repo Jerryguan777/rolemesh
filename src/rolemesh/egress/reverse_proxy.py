@@ -612,7 +612,24 @@ async def start_credential_proxy(
         fwd_headers = _forward_headers(request)
         fwd_headers.update(server_headers)
 
-        user_id = request.headers.get(_USER_ID_HEADER)
+        # Identity for per-user token forwarding comes from the VERIFIED
+        # egress token (identity.user_id), never the X-RoleMesh-User-Id
+        # request header. A half-trusted container can set that header to
+        # any user and would otherwise be handed another user's OIDC token
+        # from the shared vault (cross-user / cross-tenant credential theft).
+        # The header is set by the agent_runner for convenience but is
+        # untrusted; a mismatch is logged as an anomaly, then ignored.
+        user_id = identity.user_id if identity is not None else None
+        claimed = request.headers.get(_USER_ID_HEADER)
+        if claimed and claimed != user_id:
+            logger.warning(
+                "mcp-proxy: X-RoleMesh-User-Id header does not match the token "
+                "identity — ignoring the header",
+                component="egress",
+                server=server_name,
+                claimed_user=claimed,
+                identity_user=user_id,
+            )
         if mcp_auth_mode in ("user", "both") and user_id and _token_vault is not None:
             access_token = await _token_vault.get_fresh_access_token(user_id)
             if access_token:
