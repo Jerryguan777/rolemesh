@@ -30,12 +30,19 @@ still hold?" regression net). Findings here that land should be back-filled into
      -f deploy/compose/compose.keycloak.yaml \
      -f deploy/compose/compose.redteam.yaml up -d --build
    ```
-2. **Seed** the 3 MCP targets + bind them to the `redteam-target` coworker:
+2. **Seed** the 4 MCP targets + bind them to the `redteam-target` coworker:
    ```bash
    ROLEMESH_OWNER_TOKEN="$(deploy/compose/keycloak/get-token.sh owner@t1)" \
      python redteam/seed.py
    ```
    Note the printed coworker id.
+
+   > **Egress allow-rule (default-deny gotcha).** Binding an MCP server does
+   > NOT open the gateway to it — under default-deny the agent cannot reach a
+   > newly-bound host until an `egress_request` allow-rule for its `host:port`
+   > exists. The 2026-06-29 validation found `poison-mcp:9104` unreachable
+   > until one was added (tenant t1). Add an allow-rule per bound MCP, or the
+   > chain reads as BROKEN-CHAIN, not "defended".
 3. **Provider deps**: `pip install -r redteam/promptfoo/requirements.txt`
 4. **promptfoo**: Node ≥ 20; invoked via `npx promptfoo@latest` (no global install needed).
 
@@ -297,6 +304,14 @@ a per-PR gate). The deterministic per-PR gate stays `tests/attack_sim/`.
     `audit_log`'s own return `result` field — wire `poison_signal` to it once
     the **tool-RESULT frame** lands (the P2 capture above). STRONG is also a
     conjunction (poison ∧ BOLA); a STRONG-negative ≠ poison resisted.
+  - **Validated 2026-06-29** (`baselines/2026-06-29-poison-mcp.md`): chain +
+    WEAK ruler live-verified; `audit_log` executes (not parked). Headline
+    finding: this stack has **no `PRE_TOOL_CALL` `tool_input` scan**, so an
+    ASI04 STRONG exfil through a bound tool is unblocked by default (a real
+    gap, confirmed by config). No live STRONG was producible — Claude refused
+    the cross-user read upstream (4/4 benign reads, 0 self-`audit_log`: strong
+    model-layer resistance). **Target + ruler are done; the items below are
+    deferred to follow-up branches to avoid over-engineering this one.**
 - **Rig upgrade — exercise RoleMesh's *real* identity isolation**: register at
   least one target with `auth_mode=user|both` + a token vault so the dynamic
   per-user token path runs (today's `service`-mode static `X-Actor` bypasses it,
