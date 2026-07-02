@@ -1,0 +1,55 @@
+/* Design tokens (spec §3) — transcribed from the design reference via
+ * the companion prototype's :root block. THE ONLY FILE in src/ where
+ * raw hex may appear (scripts/lint-tokens-only.mjs enforces this).
+ * Loaded before Tailwind; both SPAs share this token vocabulary. */
+:root {
+  /* palette (design-system tokens) */
+  --rm-action: #307FE2;
+  --rm-action-hover: #00B9FF;
+  --rm-text: #282828;
+  --rm-text-muted: #A1A1A1;
+  --rm-border: #EBEBEB;
+  --rm-app-bg: #FFFFFF;
+  --rm-card-bg: #FCFCFC;
+  --rm-info-bg: #E5E9F6;
+  --rm-info-text: #2647B3;
+  --rm-tab-active: #FF9840; /* active-tab underline — orange by design */
+  --rm-scrim: rgba(0, 0, 0, 0.32);
+  --rm-elevation-soar: 0px 0px 24px rgba(0, 0, 0, 0.16);
+  --rm-user-bubble: #F5F5F5;
+
+  /* shell (sidebar) tokens */
+  --rm-nav-text: #10233F;
+  --rm-nav-text-2: #5A6F8D;
+  --rm-nav-border: #D7E2F1;
+  --rm-nav-hover: #F6F9FF;
+  --rm-gradient: linear-gradient(135deg, #3080E4 0%, #69A9FF 52%, #8DD3FF 100%);
+
+  /* brand mark (two-diamond placeholder, D-3) */
+  --rm-mark-primary: #307FE2;
+  --rm-mark-secondary: #000000;
+
+  /* coworker-avatar palette — functional (deterministic identification
+   * colour), lifted into tokens here (web/ tracks the same lift as a
+   * chore; web-react starts clean). Index via var(--rm-avatar-N). */
+  --rm-avatar-0: #307FE2;
+  --rm-avatar-1: #2647B3;
+  --rm-avatar-2: #1C821C;
+  --rm-avatar-3: #FF9840;
+  --rm-avatar-4: #663399;
+  --rm-avatar-5: #E00606;
+
+  /* typography */
+  --font-base: "Nunito Sans", Helvetica, Arial, sans-serif;
+
+  /* chat layout */
+  --chat-max-width: 72rem;
+  --chat-row-gap: 1rem;
+  --chat-col-gap: 1rem;
+  --chat-icon-size: 48px;
+  --icon-size: 2rem;
+  --timestamp-col-width: 7rem;
+  --timestamp-dot-size: 0.5rem;
+  --timestamp-top-offset: 1rem;
+  --timeline-border-width: 1px;
+}
