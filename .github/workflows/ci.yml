@@ -135,3 +135,49 @@ jobs:
       - name: Vitest
         working-directory: web
         run: npm test
+
+  # Frontend (web-react/) job — the second SPA, same gates as web/ plus
+  # tsc + vite build (the Lit SPA has no equivalent compile step; here
+  # TS strict is part of the contract). Node 22: Vite 8 requires 22.12+.
+  web-react:
+    name: Web React (lint + types + tests + build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web-react/package-lock.json
+
+      - name: Install dependencies
+        working-directory: web-react
+        run: npm ci
+
+      - name: Lint (tokens-only)
+        working-directory: web-react
+        run: npm run lint:tokens-only
+
+      - name: Lint (no-admin-chat)
+        working-directory: web-react
+        run: npm run lint:no-admin-chat
+
+      - name: Lint (flat-route)
+        working-directory: web-react
+        run: npm run lint:flat-route
+
+      - name: OpenAPI types in sync with contract
+        working-directory: web-react
+        run: npm run openapi:check
+
+      - name: Vitest
+        working-directory: web-react
+        run: npm test
+
+      - name: Typecheck + build
+        working-directory: web-react
+        run: npm run build
