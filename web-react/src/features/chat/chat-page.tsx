@@ -125,7 +125,12 @@ export function ChatPage() {
   }
 
   // --- render state (spec §6.1) ---
-  const noAgent = !agentId || (coworkersQ.data !== undefined && !activeAgent);
+  // A failed coworkers read degrades to the no-agent empty state
+  // rather than an indefinite skeleton; retry happens via the query.
+  const noAgent =
+    !agentId ||
+    coworkersQ.isError ||
+    (coworkersQ.data !== undefined && !activeAgent);
   const bootstrapping =
     !noAgent && (!coworkersQ.data || !chatId || messagesQ.data === undefined);
   const history = messagesQ.data ?? [];
