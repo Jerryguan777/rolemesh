@@ -11,6 +11,7 @@
 const STORAGE_TOKEN = 'rm_id_token';
 const STORAGE_VERIFIER = 'rm_pkce_verifier';
 const STORAGE_STATE = 'rm_pkce_state';
+const STORAGE_REDIRECT = 'rm_oidc_redirect_uri';
 
 export interface AuthConfig {
   provider: string;
@@ -75,6 +76,7 @@ export function clearToken(): void {
   sessionStorage.removeItem(STORAGE_TOKEN);
   sessionStorage.removeItem(STORAGE_VERIFIER);
   sessionStorage.removeItem(STORAGE_STATE);
+  sessionStorage.removeItem(STORAGE_REDIRECT);
 }
 
 /** Decode JWT payload without signature verification (validation happens server-side). */
@@ -120,10 +122,22 @@ export async function startLogin(config: AuthConfig): Promise<void> {
   sessionStorage.setItem(STORAGE_VERIFIER, verifier);
   sessionStorage.setItem(STORAGE_STATE, state);
 
+  // redirect_uri is derived from THIS page's origin, not taken from the
+  // backend config: the /oauth2/callback bridge stores the auth code in
+  // sessionStorage, which is per-origin — if the IdP sent the browser
+  // back to a different origin (e.g. the backend's :8080 while the SPA
+  // runs on a Vite dev port), the SPA could never read the code. The
+  // exchange echoes the same value to the token endpoint (the backend's
+  // CodeExchangeRequest.redirect_uri override), so authorize and
+  // exchange always agree. The IdP must whitelist every SPA origin's
+  // /oauth2/callback; config.redirect_uri stays as the backend fallback.
+  const redirectUri = `${location.origin}/oauth2/callback`;
+  sessionStorage.setItem(STORAGE_REDIRECT, redirectUri);
+
   const params = new URLSearchParams({
     response_type: 'code',
     client_id: config.client_id,
-    redirect_uri: config.redirect_uri,
+    redirect_uri: redirectUri,
     scope: config.scope,
     state,
     code_challenge: challenge,
@@ -141,14 +155,22 @@ export async function handleCallback(): Promise<ExchangeResponse | null> {
   const verifier = sessionStorage.getItem(STORAGE_VERIFIER);
   if (!code || !verifier) return null;
 
+  const redirectUri = sessionStorage.getItem(STORAGE_REDIRECT);
   sessionStorage.removeItem('oidc_code');
   sessionStorage.removeItem('oidc_state');
   sessionStorage.removeItem(STORAGE_VERIFIER);
+  sessionStorage.removeItem(STORAGE_REDIRECT);
 
   const res = await fetch('/api/auth/exchange', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ code, code_verifier: verifier }),
+    body: JSON.stringify({
+      code,
+      code_verifier: verifier,
+      // Must match the redirect_uri used in the authorize request; when
+      // absent the backend falls back to its OIDC_REDIRECT_URI.
+      redirect_uri: redirectUri ?? undefined,
+    }),
     credentials: 'include', // accept the httpOnly refresh cookie set by backend
   });
   if (!res.ok) return null;

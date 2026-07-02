@@ -31,10 +31,17 @@ pass() { printf '  \033[32mPASS\033[0m %s\n' "$1"; }
 fail() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; exit 1; }
 
 # token <username> <id|access>  -> prints the requested token
+#
+# scope MUST stay aligned with the webui's OIDC_SCOPES (compose env):
+# requesting offline_access here is what catches realm-seed
+# regressions — Keycloak rejects the whole grant with
+# error=not_allowed when a user lacks the offline_access role, which
+# is exactly how the browser PKCE flow fails.
 token() {
   local user="$1" kind="$2"
   curl -sf "$TOKEN_URL" \
-    -d grant_type=password -d scope=openid \
+    -d grant_type=password \
+    --data-urlencode "scope=openid profile email offline_access" \
     -d client_id="$CLIENT_ID" -d client_secret="$CLIENT_SECRET" \
     -d username="$user" -d password="$PASSWORD" \
     | jq -r ".${kind}_token"

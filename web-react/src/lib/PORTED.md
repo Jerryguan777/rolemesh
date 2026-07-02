@@ -8,7 +8,7 @@ header. Keep them in sync manually until workspace extraction.
 |---|---|---|
 | `lib/capabilities.ts` (+test) | `auth/capabilities.ts` | cf6b0f1 |
 | `lib/coworker-label.ts` (+test) | `services/coworker-label.ts` | cf6b0f1 |
-| `lib/oidc-auth.ts` | `services/oidc-auth.ts` | cf6b0f1 |
+| `lib/oidc-auth.ts` | `services/oidc-auth.ts` | cf6b0f1; re-synced on this branch (origin-derived redirect_uri fix — both copies changed together) |
 | `ws/v1_client.ts` (+test) | `ws/v1_client.ts` | cf6b0f1 |
 | `ws/ws-client-base.ts` (+test) | `ws/ws-client-base.ts` | cf6b0f1 |
 | `ws/connection-state.ts` (+test) | `ws/connection-state.ts` | cf6b0f1 |
