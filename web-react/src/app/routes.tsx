@@ -84,6 +84,12 @@ const SafetyLogPage = lazy(() =>
   })),
 );
 
+const GeneralPage = lazy(() =>
+  import('../features/settings/general/general-page').then((m) => ({
+    default: m.GeneralPage,
+  })),
+);
+
 /** Catch-all: rewrite v1.1 flat bookmarks (query strings survive the
  *  redirect); anything else falls back to chat — same default the Lit
  *  topLevelShell() uses. */
@@ -159,6 +165,16 @@ export function AppRoutes() {
           <Suspense fallback={null}>
             <Gated slug="safety-log">
               <SafetyLogPage />
+            </Gated>
+          </Suspense>
+        }
+      />
+      <Route
+        path="/manage/general/*"
+        element={
+          <Suspense fallback={null}>
+            <Gated slug="general">
+              <GeneralPage />
             </Gated>
           </Suspense>
         }

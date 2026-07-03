@@ -99,6 +99,18 @@ export function useSafetyChecks() {
   });
 }
 
+// ---- General / tenant settings page (Part K) ----
+
+/** Owner-only tenant settings. Errors surface (the page maps a 403 to
+ *  the friendly owner-only notice). */
+export function useTenant() {
+  return useQuery({
+    queryKey: ['tenant'],
+    queryFn: () => getApiClient().getTenant(),
+    retry: false,
+  });
+}
+
 // ---- Safety log page (Part J) ----
 
 /** One page of the decision log. The filter object is part of the key —
