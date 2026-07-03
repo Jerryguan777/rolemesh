@@ -96,11 +96,17 @@ export function isStepValid(
     case 1:
       return d.backend !== null;
     case 2:
-      // Model REQUIRED: picked + provider credentialed + in the
-      // backend-filtered visible set (mirrors the Lit isStepValid).
+      // Model REQUIRED: picked + provider credentialed + model ACTIVE +
+      // in the backend-filtered visible set. The `is_active` clause is
+      // the F.4 usable predicate (`hasCredential && is_active`), matching
+      // renderModel's lock and the Lit `disabled = inactive ||
+      // !hasCredential`; without it, editing a coworker whose model was
+      // later deactivated would let a stale inactive pick advance.
       if (!d.modelId) return false;
       return modelGroups.some(
-        (g) => g.hasCredential && g.models.some((m) => m.id === d.modelId),
+        (g) =>
+          g.hasCredential &&
+          g.models.some((m) => m.id === d.modelId && m.is_active),
       );
     default:
       return true; // Tools/Skills optional · Review free

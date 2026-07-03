@@ -34,6 +34,12 @@ const SkillsPage = lazy(() =>
   })),
 );
 
+const ModelsPage = lazy(() =>
+  import('../features/settings/models/models-page').then((m) => ({
+    default: m.ModelsPage,
+  })),
+);
+
 /** Catch-all: rewrite v1.1 flat bookmarks (query strings survive the
  *  redirect); anything else falls back to chat — same default the Lit
  *  topLevelShell() uses. */
@@ -68,6 +74,14 @@ export function AppRoutes() {
         element={
           <Suspense fallback={null}>
             <SkillsPage />
+          </Suspense>
+        }
+      />
+      <Route
+        path="/manage/models/*"
+        element={
+          <Suspense fallback={null}>
+            <ModelsPage />
           </Suspense>
         }
       />

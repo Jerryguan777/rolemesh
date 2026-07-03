@@ -7,14 +7,14 @@ function draft(overrides: Partial<WizardDraft>): WizardDraft {
   return { ...emptyDraft(), ...overrides };
 }
 
-function model(id: string): Model {
+function model(id: string, isActive = true): Model {
   return {
     id,
     provider: 'anthropic',
     model_id: id,
     model_family: 'claude',
     display_name: id,
-    is_active: true,
+    is_active: isActive,
   } as Model;
 }
 
@@ -23,8 +23,12 @@ function group(hasCredential: boolean, ids: string[]): ProviderGroup {
     provider: 'anthropic',
     hasCredential,
     credentialUpdatedAt: null,
-    models: ids.map(model),
+    models: ids.map((id) => model(id)),
   };
+}
+
+function groupWith(hasCredential: boolean, models: Model[]): ProviderGroup {
+  return { provider: 'anthropic', hasCredential, credentialUpdatedAt: null, models };
 }
 
 // Pins the per-step advance gates (spec C.4 table, D-C4 resolved:
@@ -57,6 +61,14 @@ describe('isStepValid', () => {
     // e.g. engine switched and the old pick fell out of the groups.
     const d = draft({ modelId: 'm-gone' });
     expect(isStepValid(2, d, [group(true, ['m-1'])])).toBe(false);
+  });
+
+  it('Model must be ACTIVE — an inactive pick blocks (F.4 usable predicate)', () => {
+    const d = draft({ modelId: 'm-dead' });
+    // credentialed group but the picked model is inactive → blocked.
+    expect(isStepValid(2, d, [groupWith(true, [model('m-dead', false)])])).toBe(false);
+    // same model active → allowed.
+    expect(isStepValid(2, d, [groupWith(true, [model('m-dead', true)])])).toBe(true);
   });
 
   it('leaves Tools/Skills/Review free', () => {
