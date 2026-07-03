@@ -1,0 +1,47 @@
+/* Settings stub / access-denied pages — simple title header + panel,
+ * token-styled. Real pages replace the stub per the §1.1 growth rule. */
+
+.settings-page {
+  height: 100%;
+  overflow-y: auto;
+  padding: 2rem 2.5rem;
+}
+.settings-page h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.5rem;
+  font-weight: 800;
+  color: var(--rm-text);
+}
+.settings-page .back-link {
+  display: inline-block;
+  margin-bottom: 1.5rem;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: var(--rm-action);
+}
+.settings-page .back-link:hover {
+  color: var(--rm-action-hover);
+}
+.settings-panel {
+  max-width: 40rem;
+  border: 1px solid var(--rm-border);
+  border-radius: 4px;
+  background: var(--rm-card-bg);
+  padding: 1.5rem;
+  font-size: 1rem;
+  line-height: 1.5;
+  color: var(--rm-text);
+}
+.settings-panel code {
+  font-size: 0.875em;
+  background: var(--rm-nav-hover);
+  border-radius: 2px;
+  padding: 1px 5px;
+}
+.settings-panel.denied {
+  border-left: 3px solid var(--rm-tab-active);
+}

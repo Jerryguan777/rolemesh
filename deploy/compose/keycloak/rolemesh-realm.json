@@ -38,14 +38,16 @@
       "implicitFlowEnabled": false,
       "serviceAccountsEnabled": false,
       "redirectUris": [
-        "http://localhost:8080/oauth2/callback"
+        "http://localhost:8080/oauth2/callback",
+        "http://localhost:5174/oauth2/callback"
       ],
       "webOrigins": [
-        "http://localhost:8080"
+        "http://localhost:8080",
+        "http://localhost:5174"
       ],
       "attributes": {
         "pkce.code.challenge.method": "S256",
-        "post.logout.redirect.uris": "http://localhost:8080/*"
+        "post.logout.redirect.uris": "http://localhost:8080/*##http://localhost:5174/*"
       },
       "protocolMappers": [
         {
@@ -95,7 +97,8 @@
       },
       "credentials": [
         { "type": "password", "value": "Passw0rd!", "temporary": false }
-      ]
+      ],
+      "realmRoles": ["default-roles-rolemesh", "offline_access"]
     },
     {
       "username": "member@t1",
@@ -110,7 +113,8 @@
       },
       "credentials": [
         { "type": "password", "value": "Passw0rd!", "temporary": false }
-      ]
+      ],
+      "realmRoles": ["default-roles-rolemesh", "offline_access"]
     },
     {
       "username": "owner@t2",
@@ -125,7 +129,8 @@
       },
       "credentials": [
         { "type": "password", "value": "Passw0rd!", "temporary": false }
-      ]
+      ],
+      "realmRoles": ["default-roles-rolemesh", "offline_access"]
     }
   ]
 }

@@ -1,0 +1,66 @@
+/* OIDC login page — React port of web/'s rm-login-page, restyled onto
+ * the §3 tokens (the Lit original predates tokens.css). */
+
+.login-root {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  width: 100vw;
+  background: var(--rm-card-bg);
+  font-family: var(--font-base);
+}
+.login-card {
+  position: relative;
+  overflow: hidden;
+  background: var(--rm-app-bg);
+  padding: 48px 56px;
+  border: 1px solid var(--rm-nav-border);
+  border-radius: 4px;
+  box-shadow: var(--rm-elevation-soar);
+  text-align: center;
+  min-width: 320px;
+}
+.login-card::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 2px;
+  background: var(--rm-gradient);
+}
+.login-card h1 {
+  margin: 12px 0 4px;
+  font-size: 1.5rem;
+  font-weight: 800;
+  color: var(--rm-nav-text);
+}
+.login-card p {
+  margin: 0 0 28px;
+  color: var(--rm-text-muted);
+  font-size: 0.875rem;
+}
+.login-card button {
+  background: var(--rm-action);
+  color: var(--rm-app-bg);
+  border: none;
+  padding: 12px 32px;
+  font-size: 0.9375rem;
+  font-weight: 700;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.login-card button:hover {
+  background: var(--rm-action-hover);
+}
+.login-card button:disabled {
+  background: var(--rm-text-muted);
+  cursor: not-allowed;
+}
+.login-error {
+  color: var(--rm-avatar-5);
+  margin-top: 16px;
+  font-size: 0.8125rem;
+}

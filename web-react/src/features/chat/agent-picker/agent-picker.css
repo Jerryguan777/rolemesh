@@ -1,0 +1,249 @@
+/* Agent picker modal — transcribed from the prototype (.scrim / .dlg /
+ * tabs / search / masonry / .card). Geometry per spec Appendix A:
+ * 75vw × 80vh, header 32px, tab bar 2rem with 2px orange underline,
+ * 3-col masonry, checkbox 18px at 10,10. */
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: var(--rm-scrim);
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.dlg {
+  background: var(--rm-app-bg);
+  border-radius: 8px;
+  box-shadow: var(--rm-elevation-soar);
+  padding: 0.5rem 1.5rem 1rem;
+  display: flex;
+  flex-direction: column;
+  width: 75vw;
+  height: 80vh;
+  min-height: 0;
+}
+.dlg-header {
+  height: 32px;
+  flex: 0 0 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 0.5rem;
+}
+.dlg-header .hleft {
+  display: flex;
+  align-items: center;
+}
+.dlg-brand-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 8px;
+  box-sizing: content-box;
+}
+.dlg-title {
+  margin: 0;
+  color: var(--rm-text);
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.tabs-shell {
+  flex: 1 1 0%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.tabs-bar {
+  border-bottom: 1px solid var(--rm-border);
+  flex: 0 0 auto;
+  margin-top: 8px;
+  display: flex;
+  gap: 4px;
+  height: 2rem;
+}
+.tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0 12px;
+  height: 2rem;
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: var(--rm-action);
+}
+.tab:hover {
+  color: var(--rm-action-hover);
+}
+.tab.active {
+  color: var(--rm-text);
+}
+.tab.active::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  background: var(--rm-tab-active);
+}
+.tabs-content {
+  flex: 1 1 0%;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.search-row {
+  flex: 0 0 auto;
+  padding: 12px 1rem 12px 0;
+}
+.search-field {
+  position: relative;
+  width: 100%;
+}
+.search-field input {
+  width: 100%;
+  height: 40px;
+  padding: 0 40px 0 12px;
+  font-family: var(--font-base);
+  font-size: 0.875rem;
+  color: var(--rm-text);
+  border: 1px solid var(--rm-text-muted);
+  border-radius: 4px;
+  background: var(--rm-app-bg);
+}
+.search-field input::placeholder {
+  color: var(--rm-text-muted);
+}
+.search-field input:focus-visible {
+  outline: 2px solid var(--rm-action);
+  outline-offset: -1px;
+}
+.search-field .search-ic {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--rm-action);
+  pointer-events: none;
+}
+.search-field .search-ic svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+
+.masonry-scroll {
+  flex: 1 1 0%;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding-right: 0.5rem;
+}
+.masonry {
+  columns: 3;
+  column-gap: 2rem;
+}
+@media (max-width: 1100px) {
+  .masonry {
+    columns: 2;
+  }
+}
+@media (max-width: 720px) {
+  .masonry {
+    columns: 1;
+  }
+}
+
+.card {
+  position: relative;
+  width: 100%;
+  display: inline-block;
+  border: 1px solid var(--rm-border);
+  border-radius: 4px;
+  background: var(--rm-card-bg);
+  overflow: hidden;
+  cursor: pointer;
+  padding: 16px;
+  text-align: left;
+  margin: 0 0 2rem;
+  break-inside: avoid;
+  -webkit-column-break-inside: avoid;
+  font-family: var(--font-base);
+  color: var(--rm-text);
+}
+.card:hover {
+  outline: 1px solid var(--rm-action-hover);
+  outline-offset: -1px;
+}
+.card .cb {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--rm-action);
+  border-radius: 2px;
+  background: var(--rm-app-bg);
+  pointer-events: none;
+}
+.card:hover .cb {
+  border-color: var(--rm-action-hover);
+}
+.card.selected .cb {
+  background: var(--rm-action);
+}
+.card.selected .cb::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 0.5px;
+  width: 5px;
+  height: 9px;
+  border-style: solid;
+  border-color: var(--rm-app-bg);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+.card-content {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding-left: 1rem;
+}
+.card .provider {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--rm-text-muted);
+}
+.card .name {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: var(--rm-text);
+  line-height: 1.3;
+}
+.card .profile {
+  color: var(--rm-text-muted);
+  font-size: 1rem;
+  line-height: 1.5;
+}
+.card .desc {
+  font-size: 1rem;
+  line-height: 1.5;
+  color: var(--rm-text);
+}
+.tab-empty {
+  padding: 32px 0;
+  text-align: center;
+  color: var(--rm-text-muted);
+  font-size: 0.875rem;
+}

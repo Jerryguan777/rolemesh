@@ -1,3 +1,4 @@
+// Copied from web/src/services/oidc-auth.ts @ cf6b0f1; keep in sync manually until workspace extraction.
 // OIDC PKCE login flow utilities.
 //
 // Usage:

@@ -1,0 +1,24 @@
+@import './tokens.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-base);
+  color: var(--rm-text);
+  background: var(--rm-app-bg);
+  font-size: 0.875rem;
+}
+
+button {
+  font-family: inherit;
+}

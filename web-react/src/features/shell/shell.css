@@ -1,0 +1,88 @@
+/* Shell CSS — transcribed from the prototype (.app / .rm-sidebar /
+ * .brand-card / .rm-nav / .main). Values per spec Appendix A. */
+
+.app {
+  display: flex;
+  overflow: hidden;
+  height: 100vh;
+  width: 100vw;
+}
+
+.rm-sidebar {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  width: 235px;
+  flex-shrink: 0;
+  height: 100vh;
+  padding: 0.75rem;
+  border-right: 1px solid var(--rm-nav-border);
+  background: var(--rm-app-bg);
+}
+
+.brand-card {
+  position: relative;
+  overflow: hidden;
+  border-radius: 2px;
+  border: 1px solid var(--rm-nav-border);
+  background: var(--rm-app-bg);
+  padding: 1.5rem;
+}
+.brand-card::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 2px;
+  background: var(--rm-gradient);
+}
+.brand-logo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.brand-names {
+  margin-top: 1rem;
+  text-align: center;
+}
+.brand-names .sub {
+  font-size: 0.75rem;
+  color: var(--rm-nav-text-2);
+}
+.brand-names .title {
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: var(--rm-nav-text);
+}
+
+.rm-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.rm-nav button {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  border-radius: 2px;
+  padding: 0.5rem 1rem;
+  text-align: left;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--rm-nav-text);
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.rm-nav button:hover {
+  background: var(--rm-nav-hover);
+}
+.rm-nav button.active {
+  background: var(--rm-gradient);
+  color: var(--rm-app-bg);
+}
+
+.main {
+  flex: 1;
+  overflow: hidden;
+}
