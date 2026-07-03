@@ -28,6 +28,12 @@ const MCPServersPage = lazy(() =>
   })),
 );
 
+const SkillsPage = lazy(() =>
+  import('../features/settings/skills/skills-page').then((m) => ({
+    default: m.SkillsPage,
+  })),
+);
+
 /** Catch-all: rewrite v1.1 flat bookmarks (query strings survive the
  *  redirect); anything else falls back to chat — same default the Lit
  *  topLevelShell() uses. */
@@ -54,6 +60,14 @@ export function AppRoutes() {
         element={
           <Suspense fallback={null}>
             <MCPServersPage />
+          </Suspense>
+        }
+      />
+      <Route
+        path="/manage/skills/*"
+        element={
+          <Suspense fallback={null}>
+            <SkillsPage />
           </Suspense>
         }
       />

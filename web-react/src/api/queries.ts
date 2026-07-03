@@ -115,3 +115,17 @@ export function useSkills(enabled: boolean) {
     enabled,
   });
 }
+
+// ---- Skills catalog page (Part E) ----
+//
+// The list carries bound_coworker_count + created_by_user_id, so the
+// page needs no fan-out (unlike Part D's MCP usage counts). Same
+// ['skills'] key the coworker wizard's step-5 catalogue reads, so a
+// created skill appears there with no extra wiring.
+
+export function useSkillRegistry() {
+  return useQuery({
+    queryKey: ['skills'],
+    queryFn: () => getApiClient().listSkills(),
+  });
+}
