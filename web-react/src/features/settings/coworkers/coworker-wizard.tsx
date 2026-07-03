@@ -5,12 +5,13 @@
 // Skills · Review. Stepper reuses the tab-bar idiom — completed steps
 // are blue + ✓ and clickable, current gets the orange underline.
 //
-// Deliberate divergence from the Lit wizard, per spec C.4 + the v4
-// prototype: the Model step is OPTIONAL — the first card is
-// `Backend default` (model_id = null; the runtime resolves its default
-// model, the documented pre-v1.1 semantics). The Lit wizard requires a
-// credentialed model pick; flip `isStepValid` case 2 if that stricter
-// gate is ever wanted back.
+// Model step is REQUIRED — Lit parity per D-C4 (spec v5): a model must
+// be picked, its provider must hold a credential, and it must survive
+// the backend compatibility filter. No "Backend default" card (the
+// v4 draft's citation for one was wrong); with zero credentialed
+// providers the wizard cannot complete — the credential link-out
+// (D-C1) is the intended path. Editing a legacy null-model coworker
+// forces the user to converge on a model before advancing.
 //
 // Edit-mode locks (contract-enforced — CoworkerUpdate has neither
 // `folder` nor `agent_backend`): slug read-only with hint; engine
@@ -41,7 +42,10 @@ import {
   useSkills,
 } from '../../../api/queries';
 import { BrandMark } from '../../../components/brand-mark';
-import { groupModelsByProvider } from '../../../lib/models-grouping';
+import {
+  groupModelsByProvider,
+  type ProviderGroup,
+} from '../../../lib/models-grouping';
 import { isValidSlug, slugify } from './use-slug';
 
 export const WIZARD_STEPS = [
@@ -77,15 +81,29 @@ export function emptyDraft(): WizardDraft {
   };
 }
 
-/** Per-step advance gate (spec C.4 table). Exported for tests. */
-export function isStepValid(step: number, d: WizardDraft): boolean {
+/** Per-step advance gate (spec C.4 table, D-C4 Lit parity). Exported
+ *  for tests. `modelGroups` is the backend-filtered, credential-
+ *  annotated projection (models-grouping.ts) the Model step renders —
+ *  the gate and the visible set stay one source. */
+export function isStepValid(
+  step: number,
+  d: WizardDraft,
+  modelGroups: readonly ProviderGroup[] = [],
+): boolean {
   switch (step) {
     case 0:
       return d.name.trim().length > 0 && isValidSlug(d.folder);
     case 1:
       return d.backend !== null;
+    case 2:
+      // Model REQUIRED: picked + provider credentialed + in the
+      // backend-filtered visible set (mirrors the Lit isStepValid).
+      if (!d.modelId) return false;
+      return modelGroups.some(
+        (g) => g.hasCredential && g.models.some((m) => m.id === d.modelId),
+      );
     default:
-      return true; // Model optional (Backend default) · Tools/Skills/Review free
+      return true; // Tools/Skills optional · Review free
   }
 }
 
@@ -198,7 +216,7 @@ export function CoworkerWizard({
   const selectedModel: Model | null =
     (draft.modelId && modelsQ.data?.find((m) => m.id === draft.modelId)) || null;
 
-  const canAdvance = isStepValid(step, draft);
+  const canAdvance = isStepValid(step, draft, modelGroups);
 
   async function handleSubmit(): Promise<void> {
     if (busy) return;
@@ -418,15 +436,9 @@ export function CoworkerWizard({
   function renderModel() {
     return (
       <>
-        <button
-          className={`opt-card${draft.modelId === null ? ' selected' : ''}`}
-          onClick={() => setDraft((d) => ({ ...d, modelId: null }))}
-        >
-          <div className="t">Backend default</div>
-          <div className="d">
-            Let the {draft.backend ?? 'engine'} runtime pick its default model
-          </div>
-        </button>
+        {modelGroups.length === 0 ? (
+          <div className="hint">No models compatible with this engine.</div>
+        ) : null}
         {modelGroups.map((g) => (
           <div key={g.provider}>
             <div className="group-h">{g.provider}</div>
@@ -539,7 +551,7 @@ export function CoworkerWizard({
       ['Name', draft.name],
       ['Slug', <code key="s">{draft.folder}</code>],
       ['Engine', draft.backend ?? '—'],
-      ['Model', selectedModel?.display_name ?? 'Backend default'],
+      ['Model', selectedModel?.display_name ?? '—'],
       ['MCP servers', mcpNames.length ? mcpNames.join(', ') : '—'],
       ['Skills', skillNames.length ? skillNames.join(', ') : '—'],
       ['Instructions', draft.instructions || '—'],
