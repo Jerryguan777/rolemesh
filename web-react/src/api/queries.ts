@@ -68,6 +68,17 @@ export function useMCPServers(enabled: boolean) {
   });
 }
 
+// ---- Approval policies page (Part H) ----
+
+/** The tenant's approval policies. Surfaces load failures (page-owned
+ *  list, not a degrade-to-empty catalogue read). */
+export function useApprovalPolicies() {
+  return useQuery({
+    queryKey: ['approval-policies'],
+    queryFn: () => getApiClient().listApprovalPolicies(),
+  });
+}
+
 // ---- MCP server registry page (Part D) ----
 
 /** The registry list (its own key — the wizard's catalogue hook above

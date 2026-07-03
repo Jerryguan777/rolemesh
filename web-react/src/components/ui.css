@@ -568,3 +568,54 @@
 .model-row .m-fill {
   flex: 1;
 }
+
+/* Switch — labelled toggle primitive (components/switch.tsx). First
+ * consumers: the approval-policy card's enable toggle + the policy
+ * dialog's Status field. */
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: var(--font-base);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--rm-text-muted);
+}
+.switch:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.switch .track {
+  width: 30px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--rm-border);
+  position: relative;
+  transition: background 0.12s;
+  flex-shrink: 0;
+}
+.switch .track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--rm-app-bg);
+  transition: left 0.12s;
+  box-shadow: 0 1px 2px var(--rm-scrim);
+}
+.switch.on {
+  color: var(--rm-text);
+}
+.switch.on .track {
+  background: var(--rm-action);
+}
+.switch.on .track::after {
+  left: 16px;
+}

@@ -32,6 +32,10 @@ export type Model = components['schemas']['Model'];
 export type ModelProvider = components['schemas']['ModelProvider'];
 export type CredentialResponse = components['schemas']['CredentialResponse'];
 export type CredentialUpsert = components['schemas']['CredentialUpsert'];
+export type ConditionExpr = components['schemas']['ConditionExpr'];
+export type ApprovalPolicy = components['schemas']['ApprovalPolicy'];
+export type ApprovalPolicyCreate = components['schemas']['ApprovalPolicyCreate'];
+export type ApprovalPolicyUpdate = components['schemas']['ApprovalPolicyUpdate'];
 export type MCPServer = components['schemas']['MCPServer'];
 export type MCPServerCreate = components['schemas']['MCPServerCreate'];
 export type MCPServerUpdate = components['schemas']['MCPServerUpdate'];
@@ -88,6 +92,26 @@ export class ApiClient {
     return new ApiError(resp.status, body, msg);
   }
 
+  /** Body-carrying request helper — EVERY JSON mutation goes through
+   *  here so the Content-Type can never be forgotten. Browsers default
+   *  a string body to `text/plain;charset=UTF-8`, and FastAPI then
+   *  validates the whole body as one string → 422 "Input should be a
+   *  valid dictionary". Owning the JSON.stringify here makes the bug
+   *  class unrepresentable. Throws ApiError on non-2xx. */
+  private async fetchJson(
+    method: 'POST' | 'PATCH' | 'PUT',
+    url: string,
+    body: unknown,
+  ): Promise<Response> {
+    const resp = await fetch(url, {
+      method,
+      headers: this.headers({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return resp;
+  }
+
   async getMe(): Promise<Me> {
     const resp = await fetch(`${this.baseUrl}/api/v1/me`, {
       method: 'GET',
@@ -126,15 +150,11 @@ export class ApiClient {
     coworkerId: string,
     name?: string | null,
   ): Promise<Conversation> {
-    const resp = await fetch(
+    const resp = await this.fetchJson(
+      'POST',
       `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(coworkerId)}/conversations`,
-      {
-        method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ name: name ?? null }),
-      },
+      { name: name ?? null },
     );
-    if (!resp.ok) throw await this.parseError(resp);
     return (await resp.json()) as Conversation;
   }
 
@@ -175,12 +195,11 @@ export class ApiClient {
   }
 
   async createCoworker(body: CoworkerCreate): Promise<Coworker> {
-    const resp = await fetch(`${this.baseUrl}/api/v1/coworkers`, {
-      method: 'POST',
-      headers: this.headers({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify(body),
-    });
-    if (!resp.ok) throw await this.parseError(resp);
+    const resp = await this.fetchJson(
+      'POST',
+      `${this.baseUrl}/api/v1/coworkers`,
+      body,
+    );
     return (await resp.json()) as Coworker;
   }
 
@@ -189,15 +208,11 @@ export class ApiClient {
    *  webui/schemas_v1.CoworkerUpdate (note: `model_id: null` to CLEAR
    *  is currently rejected by the handler — omit the key instead). */
   async updateCoworker(id: string, body: CoworkerUpdate): Promise<Coworker> {
-    const resp = await fetch(
+    const resp = await this.fetchJson(
+      'PATCH',
       `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(id)}`,
-      {
-        method: 'PATCH',
-        headers: this.headers({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify(body),
-      },
+      body,
     );
-    if (!resp.ok) throw await this.parseError(resp);
     return (await resp.json()) as Coworker;
   }
 
@@ -242,17 +257,58 @@ export class ApiClient {
     return (await resp.json()) as CredentialResponse[];
   }
 
+  async listApprovalPolicies(): Promise<ApprovalPolicy[]> {
+    // Paged endpoint; request the max window and return the items so
+    // callers keep their array shape (page-through UI is a follow-up).
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/approvals/policies?limit=200`,
+      { method: 'GET', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return ((await resp.json()) as components['schemas']['ApprovalPolicyPage'])
+      .items;
+  }
+
+  async createApprovalPolicy(body: ApprovalPolicyCreate): Promise<ApprovalPolicy> {
+    const resp = await this.fetchJson(
+      'POST',
+      `${this.baseUrl}/api/v1/approvals/policies`,
+      body,
+    );
+    return (await resp.json()) as ApprovalPolicy;
+  }
+
+  async updateApprovalPolicy(
+    id: string,
+    body: ApprovalPolicyUpdate,
+  ): Promise<ApprovalPolicy> {
+    const resp = await this.fetchJson(
+      'PATCH',
+      `${this.baseUrl}/api/v1/approvals/policies/${encodeURIComponent(id)}`,
+      body,
+    );
+    return (await resp.json()) as ApprovalPolicy;
+  }
+
+  async deleteApprovalPolicy(id: string): Promise<void> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/approvals/policies/${encodeURIComponent(id)}`,
+      { method: 'DELETE', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+  }
+
   /** Upsert (create OR rotate) the credential for one provider.
    *  `PUT /credentials/{provider}` — 200 CredentialResponse (no secret). */
   async putCredential(
     provider: ModelProvider,
     body: CredentialUpsert,
   ): Promise<CredentialResponse> {
-    const resp = await fetch(
+    const resp = await this.fetchJson(
+      'PUT',
       `${this.baseUrl}/api/v1/credentials/${encodeURIComponent(provider)}`,
-      { method: 'PUT', headers: this.headers(), body: JSON.stringify(body) },
+      body,
     );
-    if (!resp.ok) throw await this.parseError(resp);
     return (await resp.json()) as CredentialResponse;
   }
 
@@ -276,25 +332,20 @@ export class ApiClient {
   }
 
   async createMCPServer(body: MCPServerCreate): Promise<MCPServer> {
-    const resp = await fetch(`${this.baseUrl}/api/v1/mcp-servers`, {
-      method: 'POST',
-      headers: this.headers({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify(body),
-    });
-    if (!resp.ok) throw await this.parseError(resp);
+    const resp = await this.fetchJson(
+      'POST',
+      `${this.baseUrl}/api/v1/mcp-servers`,
+      body,
+    );
     return (await resp.json()) as MCPServer;
   }
 
   async updateMCPServer(id: string, body: MCPServerUpdate): Promise<MCPServer> {
-    const resp = await fetch(
+    const resp = await this.fetchJson(
+      'PATCH',
       `${this.baseUrl}/api/v1/mcp-servers/${encodeURIComponent(id)}`,
-      {
-        method: 'PATCH',
-        headers: this.headers({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify(body),
-      },
+      body,
     );
-    if (!resp.ok) throw await this.parseError(resp);
     return (await resp.json()) as MCPServer;
   }
 
@@ -336,15 +387,11 @@ export class ApiClient {
     coworkerId: string,
     body: CoworkerMCPBindingCreate,
   ): Promise<CoworkerMCPBindingResponse> {
-    const resp = await fetch(
+    const resp = await this.fetchJson(
+      'POST',
       `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(coworkerId)}/mcp-servers`,
-      {
-        method: 'POST',
-        headers: this.headers({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify(body),
-      },
+      body,
     );
-    if (!resp.ok) throw await this.parseError(resp);
     return (await resp.json()) as CoworkerMCPBindingResponse;
   }
 
@@ -379,27 +426,22 @@ export class ApiClient {
   }
 
   async createSkill(body: SkillCreate): Promise<Skill> {
-    const resp = await fetch(`${this.baseUrl}/api/v1/skills`, {
-      method: 'POST',
-      headers: this.headers({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify(body),
-    });
-    if (!resp.ok) throw await this.parseError(resp);
+    const resp = await this.fetchJson(
+      'POST',
+      `${this.baseUrl}/api/v1/skills`,
+      body,
+    );
     return (await resp.json()) as Skill;
   }
 
   /** PATCH. `name` is read-only server-side — omit it (edit sends the
    *  full `files` map for atomic replacement per the Lit contract). */
   async updateSkill(id: string, body: SkillUpdate): Promise<Skill> {
-    const resp = await fetch(
+    const resp = await this.fetchJson(
+      'PATCH',
       `${this.baseUrl}/api/v1/skills/${encodeURIComponent(id)}`,
-      {
-        method: 'PATCH',
-        headers: this.headers({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify(body),
-      },
+      body,
     );
-    if (!resp.ok) throw await this.parseError(resp);
     return (await resp.json()) as Skill;
   }
 
