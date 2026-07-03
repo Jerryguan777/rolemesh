@@ -3,6 +3,13 @@
 // Conversation, Debug Panel. Enter sends, Shift+Enter newline, empty
 // submit is a no-op; disabled (muted placeholder) until an agent is
 // chosen.
+//
+// IME guard (Lit parity, message-editor.ts handleKeyDown): the Enter
+// that confirms an IME composition (e.g. committing Latin text from a
+// Chinese input method) fires a keydown with `isComposing: true` — it
+// must NOT send. keyCode 229 additionally catches Safari, which
+// delivers that keydown after compositionend with isComposing already
+// false (a variant the Lit fix predates).
 
 import { useState, type KeyboardEvent } from 'react';
 import { Clock, History, PanelRight, User } from 'lucide-react';
@@ -26,7 +33,13 @@ export function MessageInput({
   const [value, setValue] = useState('');
 
   function onKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key !== 'Enter' || e.shiftKey) return;
+    if (
+      e.key !== 'Enter' ||
+      e.shiftKey ||
+      e.nativeEvent.isComposing ||
+      e.keyCode === 229
+    )
+      return;
     e.preventDefault();
     const text = value.trim();
     if (!text) return;
