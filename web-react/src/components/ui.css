@@ -541,7 +541,9 @@
 
 /* Read-only resource row — shared by the models catalog (provider
  * groups) and the credentials page (fixed provider rows). Page-specific
- * chrome (models .prov-group, cred status text) stays in each page CSS. */
+ * chrome (models .prov-group, cred status text) stays in each page CSS.
+ * Width unified at 760px with the .pol-card rule family (D-UI1 — the
+ * v7/v8 prototypes said 640; one cap for every row-list page). */
 .model-row {
   display: flex;
   align-items: center;
@@ -551,7 +553,7 @@
   background: var(--rm-card-bg);
   padding: 10px 14px;
   margin-bottom: 8px;
-  max-width: 640px;
+  max-width: 760px;
 }
 .model-row.dim {
   opacity: 0.45;
@@ -618,4 +620,112 @@
 }
 .switch.on .track::after {
   left: 16px;
+}
+
+/* Priority badge — evaluation-order lists (approval policies + safety
+ * rules). Tint scale via lib/rule-ordering priorityBadgeClass. */
+.pol-pri {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 2px;
+  white-space: nowrap;
+  background: var(--rm-info-bg);
+  color: var(--rm-info-text);
+}
+.pol-pri--hi {
+  background: var(--rm-warn-bg);
+  color: var(--rm-warn-text);
+}
+.pol-pri--zero {
+  background: var(--rm-border);
+  color: var(--rm-text-muted);
+}
+
+/* Evaluation-order rule card family + list hint + dialog live preview —
+ * shared by the approval-policies and safety-rules pages. */
+.pol-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  border: 1px solid var(--rm-border);
+  border-radius: 4px;
+  background: var(--rm-card-bg);
+  padding: 12px 14px;
+  margin-bottom: 8px;
+  max-width: 760px;
+}
+.pol-card .body {
+  flex: 1;
+  min-width: 0;
+}
+.pol-card.off .body {
+  opacity: 0.55;
+}
+/* .pol-pri badge family hoisted to components/ui.css (shared with
+ * the safety-rules page). */
+.pol-card .target {
+  font-weight: 700;
+  font-size: 0.9375rem;
+}
+.pol-card .target .all {
+  font-weight: 400;
+  color: var(--rm-text-muted);
+}
+.pol-card .sentence {
+  font-size: 0.875rem;
+  color: var(--rm-text);
+  margin-top: 2px;
+}
+.pol-card .sentence b {
+  font-weight: 700;
+}
+.pol-card .cardacts {
+  display: inline-flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.pol-card:hover .cardacts,
+.pol-card:focus-within .cardacts {
+  opacity: 1;
+}
+@keyframes apprHighlight {
+  0% {
+    outline: 2px solid var(--rm-action);
+    outline-offset: -1px;
+  }
+  100% {
+    outline: 2px solid transparent;
+  }
+}
+.pol-card.flash {
+  animation: apprHighlight 1.8s ease-out;
+}
+.page-hint {
+  font-size: 0.8125rem;
+  color: var(--rm-text-muted);
+  border-top: 1px solid var(--rm-border);
+  padding: 10px 2px;
+  max-width: 760px;
+}
+/* live preview */
+.preview {
+  border: 1px solid var(--rm-border);
+  border-left: 3px solid var(--rm-action);
+  border-radius: 4px;
+  background: var(--rm-card-bg);
+  padding: 10px 12px;
+  font-size: 0.875rem;
+  margin-top: 4px;
+}
+.preview .pv-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--rm-text-muted);
+  font-weight: 700;
+  margin-bottom: 4px;
 }

@@ -79,6 +79,26 @@ export function useApprovalPolicies() {
   });
 }
 
+// ---- Safety rules page (Part I) ----
+
+/** Tenant + visible platform rules. Page-owned list — surfaces errors. */
+export function useSafetyRules() {
+  return useQuery({
+    queryKey: ['safety-rules'],
+    queryFn: () => getApiClient().listSafetyRules(),
+  });
+}
+
+/** Registered check catalog (behaviour metadata for the rule editor).
+ *  Near-static — cache aggressively. */
+export function useSafetyChecks() {
+  return useQuery({
+    queryKey: ['safety-checks'],
+    queryFn: () => getApiClient().listSafetyChecks(),
+    staleTime: 5 * 60_000,
+  });
+}
+
 // ---- MCP server registry page (Part D) ----
 
 /** The registry list (its own key — the wizard's catalogue hook above

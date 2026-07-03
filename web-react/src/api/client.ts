@@ -36,6 +36,13 @@ export type ConditionExpr = components['schemas']['ConditionExpr'];
 export type ApprovalPolicy = components['schemas']['ApprovalPolicy'];
 export type ApprovalPolicyCreate = components['schemas']['ApprovalPolicyCreate'];
 export type ApprovalPolicyUpdate = components['schemas']['ApprovalPolicyUpdate'];
+export type SafetyRule = components['schemas']['SafetyRule'];
+export type SafetyRuleCreate = components['schemas']['SafetyRuleCreate'];
+export type SafetyRuleUpdate = components['schemas']['SafetyRuleUpdate'];
+export type SafetyRuleAuditEntry = components['schemas']['SafetyRuleAuditEntry'];
+export type SafetyCheck = components['schemas']['SafetyCheck'];
+export type SafetyStage = components['schemas']['SafetyStage'];
+export type SafetyVerdictAction = components['schemas']['SafetyVerdictAction'];
 export type MCPServer = components['schemas']['MCPServer'];
 export type MCPServerCreate = components['schemas']['MCPServerCreate'];
 export type MCPServerUpdate = components['schemas']['MCPServerUpdate'];
@@ -296,6 +303,70 @@ export class ApiClient {
       { method: 'DELETE', headers: this.headers() },
     );
     if (!resp.ok) throw await this.parseError(resp);
+  }
+
+  // ------------------------------------------------------------------
+  // Safety rules (Part I). Method names identical to the Lit client.
+  // ------------------------------------------------------------------
+
+  /** Tenant rules + visible platform-owned rules (source=platform). */
+  async listSafetyRules(): Promise<SafetyRule[]> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/safety/rules?limit=200`, {
+      method: 'GET',
+      headers: this.headers(),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return ((await resp.json()) as components['schemas']['SafetyRulePage']).items;
+  }
+
+  async createSafetyRule(body: SafetyRuleCreate): Promise<SafetyRule> {
+    const resp = await this.fetchJson(
+      'POST',
+      `${this.baseUrl}/api/v1/safety/rules`,
+      body,
+    );
+    return (await resp.json()) as SafetyRule;
+  }
+
+  /** PATCH. Scope is immutable — SafetyRuleUpdate has no coworker_id
+   *  field; the sanctioned scope-change path is Duplicate. */
+  async updateSafetyRule(id: string, body: SafetyRuleUpdate): Promise<SafetyRule> {
+    const resp = await this.fetchJson(
+      'PATCH',
+      `${this.baseUrl}/api/v1/safety/rules/${encodeURIComponent(id)}`,
+      body,
+    );
+    return (await resp.json()) as SafetyRule;
+  }
+
+  async deleteSafetyRule(id: string): Promise<void> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/safety/rules/${encodeURIComponent(id)}`,
+      { method: 'DELETE', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+  }
+
+  /** Newest-first change history for one rule (404 on unknown id —
+   *  RLS-safe existence semantics). */
+  async listSafetyRuleAudit(id: string): Promise<SafetyRuleAuditEntry[]> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/safety/rules/${encodeURIComponent(id)}/audit?limit=200`,
+      { method: 'GET', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return ((await resp.json()) as components['schemas']['SafetyRuleAuditPage'])
+      .items;
+  }
+
+  /** Registered check catalog (rule-editor metadata; stable order). */
+  async listSafetyChecks(): Promise<SafetyCheck[]> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/safety/checks`, {
+      method: 'GET',
+      headers: this.headers(),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as SafetyCheck[];
   }
 
   /** Upsert (create OR rotate) the credential for one provider.

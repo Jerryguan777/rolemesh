@@ -2,7 +2,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import type { ApprovalPolicy } from '../../../api/client';
-import { PolicyCard, priorityBadgeClass } from './policy-card';
+import { priorityBadgeClass } from '../../../lib/rule-ordering';
+import { PolicyCard } from './policy-card';
 
 function policy(over: Partial<ApprovalPolicy> = {}): ApprovalPolicy {
   return {
