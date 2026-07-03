@@ -22,7 +22,7 @@ import { sortByEvaluationOrder } from '../../../lib/rule-ordering';
 import { AuditDrawer } from './audit-drawer';
 import { RuleCard } from './rule-card';
 import { RuleDialog } from './rule-dialog';
-import { checkLabel, safSentence } from './safety-catalog';
+import { checkLabel, safSentence } from '../../../lib/safety-catalog';
 import './safety-rules.css';
 
 interface DialogState {

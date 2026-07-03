@@ -5,34 +5,8 @@
  * label, audit drawer rows, duplicate banners, action segmented
  * control, routing table, and config grid. */
 
-/* five-color action pill (allow/warn/redact/require_approval/block) */
-.saf-act {
-  font-size: 11px;
-  font-weight: 700;
-  padding: 2px 8px;
-  border-radius: 2px;
-  white-space: nowrap;
-}
-.saf-act--allow {
-  background: var(--rm-success-bg);
-  color: var(--rm-success-text);
-}
-.saf-act--warn {
-  background: var(--rm-border);
-  color: var(--rm-text-muted);
-}
-.saf-act--redact {
-  background: var(--rm-warn-bg);
-  color: var(--rm-warn-text);
-}
-.saf-act--require_approval {
-  background: var(--rm-appr-bg);
-  color: var(--rm-appr-text);
-}
-.saf-act--block {
-  background: var(--rm-danger-bg);
-  color: var(--rm-danger);
-}
+/* .saf-act verdict pill family hoisted to components/ui.css — the
+ * safety-log page is the second consumer. */
 
 /* slow-latency + scope chips (inline in the card's target row) */
 .saf-chip {

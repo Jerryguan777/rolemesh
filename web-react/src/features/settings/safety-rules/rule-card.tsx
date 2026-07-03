@@ -16,7 +16,7 @@ import {
   checkLabel,
   effectiveAction,
   safSentence,
-} from './safety-catalog';
+} from '../../../lib/safety-catalog';
 
 export function RuleCard({
   rule,

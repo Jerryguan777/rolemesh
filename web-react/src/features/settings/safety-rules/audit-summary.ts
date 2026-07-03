@@ -6,7 +6,7 @@
 // an operator cares about. Kept deliberately small + deterministic.
 
 import type { SafetyRuleAuditEntry } from '../../../api/client';
-import { checkLabel } from './safety-catalog';
+import { checkLabel } from '../../../lib/safety-catalog';
 
 export function auditSummary(entry: SafetyRuleAuditEntry): string {
   if (entry.action === 'created') {

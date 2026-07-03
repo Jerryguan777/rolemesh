@@ -17,7 +17,7 @@ import {
   getSchemaEnum,
   normalizeDomainLine,
 } from './config-convert';
-import { SAF_ACTION_LABEL, supportedActions } from './safety-catalog';
+import { SAF_ACTION_LABEL, supportedActions } from '../../../lib/safety-catalog';
 
 export type Config = Record<string, unknown>;
 type OnChange = (next: Config) => void;

@@ -15,7 +15,7 @@ import {
 } from '../../../api/client';
 import { BrandMark } from '../../../components/brand-mark';
 import { auditSummary } from './audit-summary';
-import { checkLabel } from './safety-catalog';
+import { checkLabel } from '../../../lib/safety-catalog';
 
 export function AuditDrawer({
   rule,

@@ -12,7 +12,7 @@ import {
   SAF_ACTION_SUB,
   actionButtonState,
   naturalAction,
-} from './safety-catalog';
+} from '../../../lib/safety-catalog';
 
 export function ActionPanel({
   check,

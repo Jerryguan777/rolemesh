@@ -43,6 +43,25 @@ export type SafetyRuleAuditEntry = components['schemas']['SafetyRuleAuditEntry']
 export type SafetyCheck = components['schemas']['SafetyCheck'];
 export type SafetyStage = components['schemas']['SafetyStage'];
 export type SafetyVerdictAction = components['schemas']['SafetyVerdictAction'];
+export type SafetyDecision = components['schemas']['SafetyDecision'];
+export type SafetyDecisionPage = components['schemas']['SafetyDecisionPage'];
+export type SafetyFinding = components['schemas']['SafetyFinding'];
+export type SafetyFindingSeverity = components['schemas']['SafetyFindingSeverity'];
+
+/** Filter set for the safety-decisions list + CSV export (Part J).
+ *  Field names mirror the Lit client; keys serialize to the wire's
+ *  snake_case query params. */
+export interface SafetyDecisionFilters {
+  verdictAction?: SafetyVerdictAction | null;
+  coworkerId?: string | null;
+  stage?: SafetyStage | null;
+  fromTs?: string | null;
+  toTs?: string | null;
+  checkId?: string | null;
+  ruleId?: string | null;
+  limit?: number;
+  offset?: number;
+}
 export type MCPServer = components['schemas']['MCPServer'];
 export type MCPServerCreate = components['schemas']['MCPServerCreate'];
 export type MCPServerUpdate = components['schemas']['MCPServerUpdate'];
@@ -357,6 +376,49 @@ export class ApiClient {
     if (!resp.ok) throw await this.parseError(resp);
     return ((await resp.json()) as components['schemas']['SafetyRuleAuditPage'])
       .items;
+  }
+
+  private decisionsQuery(filters?: SafetyDecisionFilters): URLSearchParams {
+    const qs = new URLSearchParams();
+    if (filters?.verdictAction) qs.set('verdict_action', filters.verdictAction);
+    if (filters?.coworkerId) qs.set('coworker_id', filters.coworkerId);
+    if (filters?.stage) qs.set('stage', filters.stage);
+    if (filters?.fromTs) qs.set('from_ts', filters.fromTs);
+    if (filters?.toTs) qs.set('to_ts', filters.toTs);
+    if (filters?.checkId) qs.set('check_id', filters.checkId);
+    if (filters?.ruleId) qs.set('rule_id', filters.ruleId);
+    if (filters?.limit !== undefined) qs.set('limit', String(filters.limit));
+    if (filters?.offset !== undefined) qs.set('offset', String(filters.offset));
+    return qs;
+  }
+
+  /** Safety-decision log page (Part J). Paged envelope carries `total`
+   *  in-band — no second count call. */
+  async listSafetyDecisions(
+    filters?: SafetyDecisionFilters,
+  ): Promise<SafetyDecisionPage> {
+    const qs = this.decisionsQuery(filters);
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/safety/decisions${qs.size ? `?${qs}` : ''}`,
+      { method: 'GET', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as SafetyDecisionPage;
+  }
+
+  /** CSV export — an authenticated blob fetch (a plain <a href> cannot
+   *  carry the bearer token). Carries the SAME filters as the list
+   *  (Lit parity); pagination params are excluded — export is bulk. */
+  async downloadSafetyDecisionsCsv(
+    filters?: SafetyDecisionFilters,
+  ): Promise<Blob> {
+    const qs = this.decisionsQuery({ ...filters, limit: undefined, offset: undefined });
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/safety/decisions.csv${qs.size ? `?${qs}` : ''}`,
+      { method: 'GET', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return resp.blob();
   }
 
   /** Registered check catalog (rule-editor metadata; stable order). */
