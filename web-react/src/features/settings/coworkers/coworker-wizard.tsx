@@ -633,7 +633,7 @@ export function CoworkerWizard({
             );
           })}
         </div>
-        <div className="wiz-body">
+        <div className="wiz-body wizard">
           {cataloguesLoading ? (
             <div className="hint">Loading…</div>
           ) : backendsQ.isError || modelsQ.isError ? (

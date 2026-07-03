@@ -32,6 +32,10 @@ export type Model = components['schemas']['Model'];
 export type ModelProvider = components['schemas']['ModelProvider'];
 export type CredentialResponse = components['schemas']['CredentialResponse'];
 export type MCPServer = components['schemas']['MCPServer'];
+export type MCPServerCreate = components['schemas']['MCPServerCreate'];
+export type MCPServerUpdate = components['schemas']['MCPServerUpdate'];
+export type MCPType = components['schemas']['MCPType'];
+export type MCPAuthMode = components['schemas']['MCPAuthMode'];
 export type SkillSummary = components['schemas']['SkillSummary'];
 export type ApprovalRequest = components['schemas']['ApprovalRequest'];
 
@@ -241,6 +245,41 @@ export class ApiClient {
     });
     if (!resp.ok) throw await this.parseError(resp);
     return ((await resp.json()) as components['schemas']['MCPServerPage']).items;
+  }
+
+  async createMCPServer(body: MCPServerCreate): Promise<MCPServer> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/mcp-servers`, {
+      method: 'POST',
+      headers: this.headers({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as MCPServer;
+  }
+
+  async updateMCPServer(id: string, body: MCPServerUpdate): Promise<MCPServer> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/mcp-servers/${encodeURIComponent(id)}`,
+      {
+        method: 'PATCH',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(body),
+      },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as MCPServer;
+  }
+
+  /** Hard-delete an MCP server. 204 on success; 409 RESOURCE_IN_USE
+   *  when the server is still bound to any coworker — the backend is
+   *  the authoritative gate (the page's client-side count is advisory
+   *  only). The 409 body carries `details.coworker_ids`. */
+  async deleteMCPServer(id: string): Promise<void> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/mcp-servers/${encodeURIComponent(id)}`,
+      { method: 'DELETE', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
   }
 
   async listSkills(): Promise<SkillSummary[]> {

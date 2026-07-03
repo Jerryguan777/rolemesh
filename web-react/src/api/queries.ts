@@ -68,6 +68,46 @@ export function useMCPServers(enabled: boolean) {
   });
 }
 
+// ---- MCP server registry page (Part D) ----
+
+/** The registry list (its own key — the wizard's catalogue hook above
+ *  swallows errors; this page wants to surface a list-load failure). */
+export function useMCPServerRegistry() {
+  return useQuery({
+    queryKey: ['mcp-servers'],
+    queryFn: () => getApiClient().listMCPServers(),
+  });
+}
+
+/** Client-derived per-server bound-coworker counts (spec D.1, Lit
+ *  parity): the backend doesn't surface a count on MCPServer, so we
+ *  list coworkers and fan out their binding reads. A failed read
+ *  renders as 0 (never blocks). Shares the ['coworkers'] key and the
+ *  per-coworker binding keys with the coworker wizard's step-4
+ *  pre-fill, so the cache is reused. Returns Map<mcpServerId, count>. */
+export function useMCPUsageCounts(enabled: boolean) {
+  return useQuery({
+    queryKey: ['mcp-usage-counts'],
+    enabled,
+    queryFn: async () => {
+      const api = getApiClient();
+      const coworkers = await api.listCoworkers();
+      const results = await Promise.allSettled(
+        coworkers.map((c) => api.listCoworkerMCPServers(c.id)),
+      );
+      const counts = new Map<string, number>();
+      for (const r of results) {
+        if (r.status !== 'fulfilled') continue;
+        for (const binding of r.value) {
+          const id = binding.mcp_server_id;
+          counts.set(id, (counts.get(id) ?? 0) + 1);
+        }
+      }
+      return counts;
+    },
+  });
+}
+
 export function useSkills(enabled: boolean) {
   return useQuery({
     queryKey: ['skills'],

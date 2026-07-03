@@ -22,6 +22,12 @@ const CoworkersPage = lazy(() =>
   })),
 );
 
+const MCPServersPage = lazy(() =>
+  import('../features/settings/mcp-servers/mcp-servers-page').then((m) => ({
+    default: m.MCPServersPage,
+  })),
+);
+
 /** Catch-all: rewrite v1.1 flat bookmarks (query strings survive the
  *  redirect); anything else falls back to chat — same default the Lit
  *  topLevelShell() uses. */
@@ -40,6 +46,14 @@ export function AppRoutes() {
         element={
           <Suspense fallback={null}>
             <CoworkersPage />
+          </Suspense>
+        }
+      />
+      <Route
+        path="/manage/mcp-servers/*"
+        element={
+          <Suspense fallback={null}>
+            <MCPServersPage />
           </Suspense>
         }
       />

@@ -17,6 +17,7 @@ export function ConfirmDialog({
   confirmLabel,
   busyLabel,
   busy,
+  disableConfirm = false,
   onConfirm,
   onCancel,
 }: {
@@ -25,6 +26,9 @@ export function ConfirmDialog({
   confirmLabel: string;
   busyLabel: string;
   busy: boolean;
+  /** Blocks the confirm action while the dialog stays open (e.g. a
+   *  binding-aware delete block). Cancel/ESC/scrim still dismiss. */
+  disableConfirm?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -66,7 +70,11 @@ export function ConfirmDialog({
           <button className="btn-ghost" disabled={busy} onClick={onCancel}>
             Cancel
           </button>
-          <button className="btn-danger" disabled={busy} onClick={onConfirm}>
+          <button
+            className="btn-danger"
+            disabled={busy || disableConfirm}
+            onClick={onConfirm}
+          >
             {busy ? busyLabel : confirmLabel}
           </button>
         </div>
