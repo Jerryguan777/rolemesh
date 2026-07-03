@@ -90,17 +90,10 @@
   color: var(--rm-text-muted);
 }
 
+/* Base .pager graduated to ui.css (the members page is its second
+ * consumer); only this page's width cap stays here. */
 .pager {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  padding: 10px 2px;
-  font-size: 0.8125rem;
-  color: var(--rm-text-muted);
   max-width: 860px;
-}
-.pager .sp {
-  flex: 1;
 }
 
 /* detail modal */

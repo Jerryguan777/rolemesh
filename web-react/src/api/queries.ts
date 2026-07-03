@@ -111,6 +111,20 @@ export function useTenant() {
   });
 }
 
+// ---- Members page (Part L) ----
+
+/** One page of the tenant's users. Gated by `user.manage` upstream
+ *  (route-level Gated) — a load failure here surfaces as an error row.
+ *  Offset is part of the key; invalidating the `['users']` prefix
+ *  refreshes every page. */
+export function useUsers(offset: number, limit: number) {
+  return useQuery({
+    queryKey: ['users', offset, limit],
+    queryFn: () => getApiClient().listUsers(limit, offset),
+    placeholderData: (prev) => prev,
+  });
+}
+
 // ---- Safety log page (Part J) ----
 
 /** One page of the decision log. The filter object is part of the key —
