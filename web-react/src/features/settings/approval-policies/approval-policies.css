@@ -1,0 +1,169 @@
+/* Approval policies page (spec Part H). Shared primitives (page chrome,
+ * buttons, dialog family, switch, toast) live in components/ui.css; this
+ * file owns the policy card, priority badge, evaluation-order hint,
+ * condition builder, and the dialog's live preview. */
+
+.pol-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  border: 1px solid var(--rm-border);
+  border-radius: 4px;
+  background: var(--rm-card-bg);
+  padding: 12px 14px;
+  margin-bottom: 8px;
+  max-width: 760px;
+}
+.pol-card .body {
+  flex: 1;
+  min-width: 0;
+}
+.pol-card.off .body {
+  opacity: 0.55;
+}
+.pol-pri {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 2px;
+  white-space: nowrap;
+  background: var(--rm-info-bg);
+  color: var(--rm-info-text);
+}
+.pol-pri--hi {
+  background: var(--rm-warn-bg);
+  color: var(--rm-warn-text);
+}
+.pol-pri--zero {
+  background: var(--rm-border);
+  color: var(--rm-text-muted);
+}
+.pol-card .target {
+  font-weight: 700;
+  font-size: 0.9375rem;
+}
+.pol-card .target .all {
+  font-weight: 400;
+  color: var(--rm-text-muted);
+}
+.pol-card .sentence {
+  font-size: 0.875rem;
+  color: var(--rm-text);
+  margin-top: 2px;
+}
+.pol-card .sentence b {
+  font-weight: 700;
+}
+.pol-card .cardacts {
+  display: inline-flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.pol-card:hover .cardacts,
+.pol-card:focus-within .cardacts {
+  opacity: 1;
+}
+.page-hint {
+  font-size: 0.8125rem;
+  color: var(--rm-text-muted);
+  border-top: 1px solid var(--rm-border);
+  padding: 10px 2px;
+  max-width: 760px;
+}
+@keyframes apprHighlight {
+  0% {
+    outline: 2px solid var(--rm-action);
+    outline-offset: -1px;
+  }
+  100% {
+    outline: 2px solid transparent;
+  }
+}
+.pol-card.flash {
+  animation: apprHighlight 1.8s ease-out;
+}
+
+/* condition builder */
+.seg {
+  display: inline-flex;
+  border: 1px solid var(--rm-border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.seg button {
+  border: none;
+  background: var(--rm-app-bg);
+  cursor: pointer;
+  font-family: var(--font-base);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--rm-nav-text-2);
+  padding: 6px 12px;
+}
+.seg button.on {
+  background: var(--rm-info-bg);
+  color: var(--rm-info-text);
+}
+.cond-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.cond-row input,
+.cond-row select {
+  font-family: var(--font-base);
+  font-size: 0.875rem;
+  border: 1px solid var(--rm-text-muted);
+  border-radius: 4px;
+  padding: 6px 8px;
+  background: var(--rm-app-bg);
+}
+.cond-row .cf {
+  flex: 2;
+  min-width: 0;
+}
+.cond-row .cv {
+  flex: 2;
+  min-width: 0;
+}
+.cond-row select {
+  flex: 0 0 auto;
+  /* ui.css's `.field select` sets width:100% for standalone fields —
+   * inside a condition row the op select must size to its content or
+   * it blows the row out and horizontally scrolls the dialog body. */
+  width: auto;
+  height: auto;
+}
+.cond-readonly {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  overflow-x: auto;
+  border: 1px solid var(--rm-border);
+  border-radius: 4px;
+  padding: 10px;
+  background: var(--rm-card-bg);
+  margin: 0;
+}
+
+/* live preview */
+.preview {
+  border: 1px solid var(--rm-border);
+  border-left: 3px solid var(--rm-action);
+  border-radius: 4px;
+  background: var(--rm-card-bg);
+  padding: 10px 12px;
+  font-size: 0.875rem;
+  margin-top: 4px;
+}
+.preview .pv-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--rm-text-muted);
+  font-weight: 700;
+  margin-bottom: 4px;
+}

@@ -3,9 +3,11 @@
 // redirect map. Settings load via React.lazy — the structural
 // realization of lint-no-admin-chat's goal (a lean chat bundle).
 
-import { Suspense, lazy } from 'react';
+import { Suspense, lazy, type ReactNode } from 'react';
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { applyLegacyRedirect } from './legacy-redirects';
+import { entryForSlug } from './nav';
+import { hasCapability } from '../lib/capabilities';
 import { ChatPage } from '../features/chat/chat-page';
 
 const SettingsPage = lazy(() =>
@@ -13,6 +15,24 @@ const SettingsPage = lazy(() =>
     default: m.SettingsPage,
   })),
 );
+
+const AccessDeniedPage = lazy(() =>
+  import('../features/settings/access-denied-page').then((m) => ({
+    default: m.AccessDeniedPage,
+  })),
+);
+
+/** Capability gate for GROWN settings routes (spec §8: direct navigation
+ *  to a denied route renders the access-denied page). The generic
+ *  `/manage/:slug` stub route already checks inside SettingsPage; grown
+ *  pages have their own static routes, so the check lives here. */
+function Gated({ slug, children }: { slug: string; children: ReactNode }) {
+  const entry = entryForSlug(slug);
+  if (entry?.requires && !hasCapability(entry.requires)) {
+    return <AccessDeniedPage label={entry.label} />;
+  }
+  return <>{children}</>;
+}
 
 // Grown settings pages get their own lazy chunk keyed by slug (§1.1
 // settings growth rule) — the static route ranks above /manage/:slug.
@@ -46,6 +66,12 @@ const CredentialsPage = lazy(() =>
   })),
 );
 
+const ApprovalPoliciesPage = lazy(() =>
+  import('../features/settings/approval-policies/approval-policies-page').then(
+    (m) => ({ default: m.ApprovalPoliciesPage }),
+  ),
+);
+
 /** Catch-all: rewrite v1.1 flat bookmarks (query strings survive the
  *  redirect); anything else falls back to chat — same default the Lit
  *  topLevelShell() uses. */
@@ -71,7 +97,9 @@ export function AppRoutes() {
         path="/manage/mcp-servers/*"
         element={
           <Suspense fallback={null}>
-            <MCPServersPage />
+            <Gated slug="mcp-servers">
+              <MCPServersPage />
+            </Gated>
           </Suspense>
         }
       />
@@ -87,7 +115,19 @@ export function AppRoutes() {
         path="/manage/credentials/*"
         element={
           <Suspense fallback={null}>
-            <CredentialsPage />
+            <Gated slug="credentials">
+              <CredentialsPage />
+            </Gated>
+          </Suspense>
+        }
+      />
+      <Route
+        path="/manage/approval-policies/*"
+        element={
+          <Suspense fallback={null}>
+            <Gated slug="approval-policies">
+              <ApprovalPoliciesPage />
+            </Gated>
           </Suspense>
         }
       />

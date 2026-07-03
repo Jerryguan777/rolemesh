@@ -32,6 +32,10 @@ export type Model = components['schemas']['Model'];
 export type ModelProvider = components['schemas']['ModelProvider'];
 export type CredentialResponse = components['schemas']['CredentialResponse'];
 export type CredentialUpsert = components['schemas']['CredentialUpsert'];
+export type ConditionExpr = components['schemas']['ConditionExpr'];
+export type ApprovalPolicy = components['schemas']['ApprovalPolicy'];
+export type ApprovalPolicyCreate = components['schemas']['ApprovalPolicyCreate'];
+export type ApprovalPolicyUpdate = components['schemas']['ApprovalPolicyUpdate'];
 export type MCPServer = components['schemas']['MCPServer'];
 export type MCPServerCreate = components['schemas']['MCPServerCreate'];
 export type MCPServerUpdate = components['schemas']['MCPServerUpdate'];
@@ -240,6 +244,48 @@ export class ApiClient {
     });
     if (!resp.ok) throw await this.parseError(resp);
     return (await resp.json()) as CredentialResponse[];
+  }
+
+  async listApprovalPolicies(): Promise<ApprovalPolicy[]> {
+    // Paged endpoint; request the max window and return the items so
+    // callers keep their array shape (page-through UI is a follow-up).
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/approvals/policies?limit=200`,
+      { method: 'GET', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return ((await resp.json()) as components['schemas']['ApprovalPolicyPage'])
+      .items;
+  }
+
+  async createApprovalPolicy(body: ApprovalPolicyCreate): Promise<ApprovalPolicy> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/approvals/policies`, {
+      method: 'POST',
+      headers: this.headers(),
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as ApprovalPolicy;
+  }
+
+  async updateApprovalPolicy(
+    id: string,
+    body: ApprovalPolicyUpdate,
+  ): Promise<ApprovalPolicy> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/approvals/policies/${encodeURIComponent(id)}`,
+      { method: 'PATCH', headers: this.headers(), body: JSON.stringify(body) },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as ApprovalPolicy;
+  }
+
+  async deleteApprovalPolicy(id: string): Promise<void> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/approvals/policies/${encodeURIComponent(id)}`,
+      { method: 'DELETE', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
   }
 
   /** Upsert (create OR rotate) the credential for one provider.
