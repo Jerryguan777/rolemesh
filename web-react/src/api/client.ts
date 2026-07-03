@@ -45,6 +45,8 @@ export type SafetyStage = components['schemas']['SafetyStage'];
 export type SafetyVerdictAction = components['schemas']['SafetyVerdictAction'];
 export type TenantResponse = components['schemas']['TenantResponse'];
 export type TenantUpdate = components['schemas']['TenantUpdate'];
+export type ChannelLinkToken = components['schemas']['ChannelLinkToken'];
+export type ChannelLinkIdentity = components['schemas']['ChannelLinkIdentity'];
 export type UserResponse = components['schemas']['UserResponse'];
 export type UserCreate = components['schemas']['UserCreate'];
 export type UserUpdate = components['schemas']['UserUpdate'];
@@ -354,6 +356,41 @@ export class ApiClient {
       body,
     );
     return (await resp.json()) as TenantResponse;
+  }
+
+  // ------------------------------------------------------------------
+  // Personal channel links (Part M). Lifted from the Lit client —
+  // the caller's OWN Telegram identity links, not coworker↔channel
+  // bindings. The POST carries no body (fetchJson is body-carrying
+  // only); it mints a one-shot token and 409s RESOURCE_NOT_AVAILABLE
+  // when the tenant has no Telegram bot configured — the page renders
+  // that as a "configure a bot first" panel, not a transient error.
+  // ------------------------------------------------------------------
+
+  async issueTelegramLinkToken(): Promise<ChannelLinkToken> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/me/channel-links/telegram`, {
+      method: 'POST',
+      headers: this.headers(),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as ChannelLinkToken;
+  }
+
+  async listTelegramLinks(): Promise<ChannelLinkIdentity[]> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/me/channel-links/telegram`, {
+      method: 'GET',
+      headers: this.headers(),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as ChannelLinkIdentity[];
+  }
+
+  async unlinkChannelIdentity(identityId: string): Promise<void> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/me/channel-links/${encodeURIComponent(identityId)}`,
+      { method: 'DELETE', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
   }
 
   // ------------------------------------------------------------------

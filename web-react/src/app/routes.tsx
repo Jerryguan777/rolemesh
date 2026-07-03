@@ -96,6 +96,12 @@ const MembersPage = lazy(() =>
   })),
 );
 
+const ConnectedChannelsPage = lazy(() =>
+  import('../features/settings/connected-channels/connected-channels-page').then(
+    (m) => ({ default: m.ConnectedChannelsPage }),
+  ),
+);
+
 /** Catch-all: rewrite v1.1 flat bookmarks (query strings survive the
  *  redirect); anything else falls back to chat — same default the Lit
  *  topLevelShell() uses. */
@@ -182,6 +188,15 @@ export function AppRoutes() {
             <Gated slug="general">
               <GeneralPage />
             </Gated>
+          </Suspense>
+        }
+      />
+      {/* Personal page — no capability gate (nav requires: null). */}
+      <Route
+        path="/manage/connected-channels/*"
+        element={
+          <Suspense fallback={null}>
+            <ConnectedChannelsPage />
           </Suspense>
         }
       />

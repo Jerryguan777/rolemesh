@@ -1,0 +1,34 @@
+/* Connected channels (Part M) — page-owned chrome, single consumer.
+ * Panels cap at 560px (the General form-column precedent); the
+ * identity rows reuse the global .model-row at the D-UI1 760px cap. */
+.cc-panel {
+  border: 1px solid var(--rm-border);
+  border-radius: 4px;
+  background: var(--rm-card-bg);
+  padding: 16px;
+  max-width: 560px;
+  margin-bottom: 12px;
+}
+.cc-code {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 14px;
+  letter-spacing: 0.06em;
+  background: #fff;
+  border: 1px dashed var(--rm-text-muted);
+  border-radius: 4px;
+  padding: 8px 12px;
+  display: inline-block;
+  user-select: all;
+}
+.cc-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: var(--rm-warn-text);
+}
+.cc-ok {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  color: var(--rm-success-text);
+  font-weight: 700;
+}

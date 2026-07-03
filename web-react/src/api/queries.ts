@@ -111,6 +111,21 @@ export function useTenant() {
   });
 }
 
+// ---- Connected channels page (Part M) ----
+
+/** The caller's own Telegram identity links. While a link attempt is
+ *  pending the page passes `polling: true` and TanStack re-fetches
+ *  every 3 s (the Lit poll loop; interval dies with the component).
+ *  Poll-round failures are swallowed by keeping the last good data —
+ *  a transient 5xx during the wait window must not break the flow. */
+export function useChannelLinks(polling: boolean) {
+  return useQuery({
+    queryKey: ['channel-links'],
+    queryFn: () => getApiClient().listTelegramLinks(),
+    refetchInterval: polling ? 3000 : false,
+  });
+}
+
 // ---- Members page (Part L) ----
 
 /** One page of the tenant's users. Gated by `user.manage` upstream
