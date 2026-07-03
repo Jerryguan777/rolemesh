@@ -31,6 +31,7 @@ export type Me = components['schemas']['Me'];
 export type Model = components['schemas']['Model'];
 export type ModelProvider = components['schemas']['ModelProvider'];
 export type CredentialResponse = components['schemas']['CredentialResponse'];
+export type CredentialUpsert = components['schemas']['CredentialUpsert'];
 export type MCPServer = components['schemas']['MCPServer'];
 export type MCPServerCreate = components['schemas']['MCPServerCreate'];
 export type MCPServerUpdate = components['schemas']['MCPServerUpdate'];
@@ -239,6 +240,30 @@ export class ApiClient {
     });
     if (!resp.ok) throw await this.parseError(resp);
     return (await resp.json()) as CredentialResponse[];
+  }
+
+  /** Upsert (create OR rotate) the credential for one provider.
+   *  `PUT /credentials/{provider}` — 200 CredentialResponse (no secret). */
+  async putCredential(
+    provider: ModelProvider,
+    body: CredentialUpsert,
+  ): Promise<CredentialResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/credentials/${encodeURIComponent(provider)}`,
+      { method: 'PUT', headers: this.headers(), body: JSON.stringify(body) },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as CredentialResponse;
+  }
+
+  /** `DELETE /credentials/{provider}` (204). A 409 RESOURCE_IN_USE
+   *  carries `details.coworker_ids` — surfaced per-row by the page. */
+  async deleteCredential(provider: ModelProvider): Promise<void> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/credentials/${encodeURIComponent(provider)}`,
+      { method: 'DELETE', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
   }
 
   async listMCPServers(): Promise<MCPServer[]> {

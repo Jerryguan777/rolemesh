@@ -26,13 +26,13 @@
 
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { X } from 'lucide-react';
-import { useNavigate } from 'react-router-dom';
 import {
   ApiError,
   getApiClient,
   type BackendName,
   type Coworker,
   type Model,
+  type ModelProvider,
 } from '../../../api/client';
 import {
   useBackends,
@@ -42,6 +42,7 @@ import {
   useSkills,
 } from '../../../api/queries';
 import { BrandMark } from '../../../components/brand-mark';
+import { CredentialDialog } from '../../../components/credential-dialog';
 import {
   groupModelsByProvider,
   type ProviderGroup,
@@ -152,7 +153,15 @@ export function CoworkerWizard({
   );
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<SubmitFailure | null>(null);
-  const navigate = useNavigate();
+  // D-C1 (credential half) resolved in v8: step 3's `+ Add credential`
+  // opens the credential dialog IN PLACE (pre-filled with the locked
+  // group's provider) instead of linking out. On save the shared
+  // ['credentials'] query invalidates → modelGroups recomputes → the
+  // locked card unlocks live. `undefined` = closed. The MCP half
+  // (step 4) still links out (no equivalent inline spawn wired).
+  const [credDialogProvider, setCredDialogProvider] = useState<
+    ModelProvider | undefined
+  >(undefined);
 
   // Catalogues (credentials/MCP/skills degrade to [] — see queries.ts).
   const backendsQ = useBackends(true);
@@ -199,12 +208,15 @@ export function CoworkerWizard({
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key !== 'Escape') return;
+      // Defer to the stacked credential dialog when it's open — let its
+      // own (later-registered) capture handler close it first.
+      if (credDialogProvider !== undefined) return;
       e.stopPropagation();
       if (!busy) onClose();
     }
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
-  }, [busy, onClose]);
+  }, [busy, onClose, credDialogProvider]);
 
   const selectedBackend = useMemo(
     () => backendsQ.data?.find((b) => b.name === draft.backend) ?? null,
@@ -460,16 +472,16 @@ export function CoworkerWizard({
                           Inactive in the catalogue
                         </span>
                       ) : (
-                        // D-C1: link out to the credentials page instead
-                        // of the Lit wizard's nested credential dialog.
+                        // D-C1 (v8): open the credential dialog in place,
+                        // pre-filled with this group's provider (mirrors
+                        // the Lit wizard's request-credential event).
                         <button
                           className="warn"
-                          onClick={() => {
-                            onClose();
-                            navigate('/manage/credentials');
-                          }}
+                          onClick={() =>
+                            setCredDialogProvider(g.provider as ModelProvider)
+                          }
                         >
-                          No credential — add one under Settings → Credentials
+                          + Add credential
                         </button>
                       )}
                     </div>
@@ -678,6 +690,13 @@ export function CoworkerWizard({
           </span>
         </div>
       </div>
+
+      {credDialogProvider !== undefined ? (
+        <CredentialDialog
+          provider={credDialogProvider}
+          onClose={() => setCredDialogProvider(undefined)}
+        />
+      ) : null}
     </div>
   );
 }

@@ -8,11 +8,13 @@
 // backend so every provider/model shows; inactive models are kept and
 // surfaced dimmed. Behavioral reference web/src/components/models-page.ts.
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { ArrowLeft, Plus } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
+import type { ModelProvider } from '../../../api/client';
 import { useCredentials, useModels } from '../../../api/queries';
 import { groupModelsByProvider } from '../../../lib/models-grouping';
+import { CredentialDialog } from '../../../components/credential-dialog';
 import { ProviderGroup } from './provider-group';
 import './models.css';
 
@@ -28,10 +30,14 @@ export function ModelsPage() {
     [modelsQ.data, credentialsQ.data],
   );
 
-  // D-MO1: the credential dialog belongs to the (not-yet-built)
-  // credentials page — Add credential / Connect link out to its stub
-  // for now (mirrors the coworker wizard's D-C1 link-out).
-  const toCredentials = () => navigate('/manage/credentials');
+  // D-MO1 resolved (v8): Add credential / Connect open the real
+  // credential dialog in place. Header Add → provider select (null);
+  // a group's Connect → pre-filled with that provider. The dialog
+  // invalidates ['models'] + ['credentials'] on save, so pills flip
+  // live with no extra wiring. `undefined` = closed.
+  const [dialogProvider, setDialogProvider] = useState<
+    ModelProvider | null | undefined
+  >(undefined);
 
   const hasModels = (modelsQ.data?.length ?? 0) > 0;
 
@@ -51,7 +57,7 @@ export function ModelsPage() {
             its credential is set.
           </div>
         </div>
-        <button className="btn-primary" onClick={toCredentials}>
+        <button className="btn-primary" onClick={() => setDialogProvider(null)}>
           <Plus />
           Add credential
         </button>
@@ -71,10 +77,21 @@ export function ModelsPage() {
           </div>
         ) : (
           groups.map((g) => (
-            <ProviderGroup key={g.provider} group={g} onConnect={toCredentials} />
+            <ProviderGroup
+              key={g.provider}
+              group={g}
+              onConnect={(provider) => setDialogProvider(provider as ModelProvider)}
+            />
           ))
         )}
       </div>
+
+      {dialogProvider !== undefined ? (
+        <CredentialDialog
+          provider={dialogProvider}
+          onClose={() => setDialogProvider(undefined)}
+        />
+      ) : null}
     </div>
   );
 }

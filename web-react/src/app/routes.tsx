@@ -40,6 +40,12 @@ const ModelsPage = lazy(() =>
   })),
 );
 
+const CredentialsPage = lazy(() =>
+  import('../features/settings/credentials/credentials-page').then((m) => ({
+    default: m.CredentialsPage,
+  })),
+);
+
 /** Catch-all: rewrite v1.1 flat bookmarks (query strings survive the
  *  redirect); anything else falls back to chat — same default the Lit
  *  topLevelShell() uses. */
@@ -74,6 +80,14 @@ export function AppRoutes() {
         element={
           <Suspense fallback={null}>
             <SkillsPage />
+          </Suspense>
+        }
+      />
+      <Route
+        path="/manage/credentials/*"
+        element={
+          <Suspense fallback={null}>
+            <CredentialsPage />
           </Suspense>
         }
       />
