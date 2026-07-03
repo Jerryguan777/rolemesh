@@ -333,6 +333,42 @@ export class ApiClient {
   }
 
   // ------------------------------------------------------------------
+  // HITL approval requests (Part O). Two distinct reads, per the wire:
+  // the tenant-wide PENDING set (inbox + reconnect; envelope-paged,
+  // optional conversation filter) and a conversation's FULL record
+  // (every status + decided_at/note, oldest first — chat history
+  // hydration). There is no status query param; spec O.1's single
+  // parameterised endpoint was corrected against the contract.
+  // ------------------------------------------------------------------
+
+  async listPendingApprovalRequests(
+    conversationId?: string,
+  ): Promise<ApprovalRequest[]> {
+    const q = conversationId
+      ? `&conversation_id=${encodeURIComponent(conversationId)}`
+      : '';
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/approvals/requests?limit=100${q}`,
+      { method: 'GET', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (
+      (await resp.json()) as components['schemas']['ApprovalRequestPage']
+    ).items;
+  }
+
+  async listConversationApprovalRequests(
+    conversationId: string,
+  ): Promise<ApprovalRequest[]> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/conversations/${encodeURIComponent(conversationId)}/approval-requests`,
+      { method: 'GET', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as ApprovalRequest[];
+  }
+
+  // ------------------------------------------------------------------
   // Tenant settings (Part K). Owner-only: both routes 403 without
   // `tenant.manage` — the page turns the GET 403 into a friendly
   // full-page notice.

@@ -1,0 +1,351 @@
+/* Approval cards + inbox (Part O) — design-language card: white
+ * surface, 4px radius, hairline borders, state carried by the semantic
+ * pill family (never a tinted full-width band). The card sits in the
+ * TEXT column of the stream (avatar width + 16px row gap) — it belongs
+ * to the coworker's content, not its identity. Chat-chunk-scoped:
+ * every consumer lives in the always-loaded chat page. */
+
+.apr-card {
+  border: 1px solid var(--rm-border);
+  border-radius: 4px;
+  background: var(--rm-card-bg);
+  max-width: 560px;
+  margin: 10px 0 10px calc(var(--icon-size) + 16px);
+  overflow: hidden;
+  font-family: var(--font-base);
+}
+.apr-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: var(--rm-text);
+  background: var(--rm-card-bg);
+  border-bottom: 1px solid var(--rm-border);
+}
+.apr-head .st {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 2px;
+  white-space: nowrap;
+}
+.apr-card .st {
+  background: var(--rm-warn-bg);
+  color: var(--rm-warn-text);
+}
+.apr-card.approved .st {
+  background: var(--rm-success-bg);
+  color: var(--rm-success-text);
+}
+.apr-card.rejected .st {
+  background: var(--rm-danger-bg);
+  color: var(--rm-danger);
+}
+.apr-card.expired .st,
+.apr-card.cancelled .st {
+  background: var(--rm-border);
+  color: var(--rm-text-muted);
+}
+.apr-head .sp {
+  flex: 1;
+}
+.apr-head .cd {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  font-size: 12px;
+  color: var(--rm-text-muted);
+}
+.apr-head .cd.urgent {
+  color: var(--rm-danger);
+}
+.apr-head .at {
+  color: var(--rm-text-muted);
+  font-weight: 600;
+}
+.apr-bd {
+  padding: 12px 14px 13px;
+}
+.apr-card.resolved .apr-bd {
+  padding: 10px 14px 11px;
+}
+.apr-meta {
+  font-size: 12px;
+  color: var(--rm-text-muted);
+  margin-bottom: 8px;
+}
+.apr-card.resolved .apr-meta {
+  font-size: 11px;
+  margin-bottom: 5px;
+}
+/* O.5 safety provenance — cautionary callout idiom: white surface,
+ * hairline border, warn LEFT RULE only (no tinted background). */
+.apr-safety {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  background: var(--rm-card-bg);
+  border: 1px solid var(--rm-border);
+  border-left: 3px solid var(--rm-warn-text);
+  border-radius: 0 4px 4px 0;
+  padding: 8px 10px;
+  font-size: 0.8125rem;
+  color: var(--rm-text);
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.apr-safety a {
+  margin-left: auto;
+  color: var(--rm-action);
+  font-weight: 700;
+  text-decoration: underline;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.apr-safety a:hover {
+  color: var(--rm-action-hover);
+}
+.apr-tool {
+  display: inline-block;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 12px;
+  border: 1px solid var(--rm-border);
+  border-radius: 2px;
+  background: var(--rm-card-bg);
+  padding: 3px 8px;
+  margin-bottom: 10px;
+}
+.apr-params {
+  border: 1px solid var(--rm-border);
+  border-radius: 4px;
+  margin-bottom: 10px;
+}
+.apr-params .prow {
+  display: flex;
+  gap: 10px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--rm-border);
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 12px;
+}
+.apr-params .prow:last-of-type {
+  border-bottom: none;
+}
+.apr-params .pk {
+  color: var(--rm-text-muted);
+  min-width: 110px;
+  flex-shrink: 0;
+}
+.apr-params .pv {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.apr-params .pmore {
+  display: block;
+  width: 100%;
+  border: none;
+  border-top: 1px solid var(--rm-border);
+  background: none;
+  cursor: pointer;
+  font: 700 11.5px var(--font-base);
+  color: var(--rm-action);
+  padding: 5px;
+}
+.apr-card.resolved .apr-params,
+.apr-card.resolved .rationale {
+  opacity: 0.7;
+}
+.rationale {
+  border-left: 3px solid var(--rm-action);
+  padding: 2px 0 2px 10px;
+  margin-bottom: 12px;
+}
+.rationale .cap {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--rm-text-muted);
+}
+.rationale .rl-text {
+  font-size: 0.8125rem;
+  color: var(--rm-nav-text-2);
+}
+.rationale.clamp .rl-text {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.rationale .rl-more {
+  display: none;
+  font: 700 11.5px var(--font-base);
+  color: var(--rm-action);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 0 0;
+}
+.rationale.clamp .rl-more {
+  display: inline;
+}
+.apr-note {
+  border-left: 3px solid var(--rm-danger);
+  padding: 2px 0 2px 10px;
+  margin-bottom: 10px;
+}
+.apr-note .cap {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--rm-danger);
+}
+.apr-acts {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  align-items: center;
+}
+.apr-acts .demo {
+  margin-right: auto;
+  font-style: italic;
+  font-size: 11px;
+  color: var(--rm-text-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+.apr-reject-form {
+  border-top: 1px solid var(--rm-border);
+  margin-top: 12px;
+  padding-top: 10px;
+}
+.apr-reject-form .hint {
+  margin-bottom: 6px;
+}
+.apr-reject-form textarea {
+  width: 100%;
+  min-height: 56px;
+  padding: 8px 10px;
+  border: 1px solid var(--rm-border);
+  border-radius: 4px;
+  font-family: var(--font-base);
+  font-size: 0.8125rem;
+  resize: vertical;
+}
+.apr-back {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--rm-action);
+  text-decoration: underline;
+  cursor: pointer;
+  background: none;
+  border: none;
+  font-family: var(--font-base);
+}
+.apr-back:hover {
+  color: var(--rm-action-hover);
+}
+@keyframes aprHalo {
+  0% {
+    outline: 2px solid var(--rm-action);
+    outline-offset: -1px;
+  }
+  100% {
+    outline: 2px solid transparent;
+  }
+}
+.apr-card.highlight {
+  animation: aprHalo 1.8s ease-out;
+}
+
+/* inbox — top-bar icon + badge + triage popover */
+.chat-topbar {
+  position: absolute;
+  top: 10px;
+  right: 16px;
+  z-index: 30;
+}
+.inbox-btn {
+  position: relative;
+}
+/* urgency signal lives in the row/card countdowns; the badge keeps
+ * one danger red (v16 audit — the hardcoded deep-red was removed) */
+.inbox-badge {
+  position: absolute;
+  top: -4px;
+  right: -6px;
+  background: var(--rm-danger);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: 999px;
+  min-width: 16px;
+  height: 16px;
+  line-height: 16px;
+  text-align: center;
+  padding: 0 3px;
+}
+.inbox-pop {
+  position: absolute;
+  top: 34px;
+  right: 0;
+  width: 400px;
+  background: #fff;
+  border: 1px solid var(--rm-border);
+  border-radius: 6px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.14);
+}
+.inbox-h {
+  padding: 10px 14px;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  border-bottom: 1px solid var(--rm-border);
+}
+.inbox-row {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--rm-border);
+  cursor: pointer;
+}
+.inbox-row:hover {
+  background: var(--rm-nav-hover);
+}
+.inbox-row .r1 {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 0.8125rem;
+  font-weight: 700;
+}
+.inbox-row .r2 {
+  font-size: 12px;
+  color: var(--rm-text-muted);
+  margin: 2px 0;
+}
+.inbox-row .r2 .urgent {
+  color: var(--rm-danger);
+  font-weight: 700;
+}
+.inbox-row .r3 {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  color: var(--rm-text-muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.inbox-f {
+  padding: 8px 14px;
+  font-size: 11px;
+  color: var(--rm-text-muted);
+}
+.inbox-f button {
+  background: none;
+  border: none;
+  color: var(--rm-action);
+  font: 700 11px var(--font-base);
+  cursor: pointer;
+  padding: 0;
+}

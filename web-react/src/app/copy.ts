@@ -22,6 +22,4 @@ export const COPY = {
   debugTitle: 'Run history',
   debugEmpty: 'No runs yet for this conversation.',
   assistantsPlaceholder: 'No assistants yet.',
-  approvalPending:
-    'This conversation has a pending approval — decide it in the classic UI.',
 } as const;
