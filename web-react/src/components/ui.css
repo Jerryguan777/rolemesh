@@ -482,3 +482,50 @@
   color: var(--rm-text-muted);
   margin-top: 2px;
 }
+
+/* ============ manage-card pills + ownership tag (shared) ============ */
+.pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.pill {
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 2px;
+  text-transform: capitalize;
+}
+.pill-shared {
+  background: var(--rm-success-bg);
+  color: var(--rm-success-text);
+}
+.pill-private {
+  background: var(--rm-border);
+  color: var(--rm-text-muted);
+}
+.pill-active {
+  background: var(--rm-success-bg);
+  color: var(--rm-success-text);
+}
+.pill-paused {
+  background: var(--rm-warn-bg);
+  color: var(--rm-warn-text);
+}
+.pill-disabled,
+.pill-off {
+  background: var(--rm-border);
+  color: var(--rm-text-muted);
+}
+.own-tag {
+  font-size: 12px;
+  color: var(--rm-text-muted);
+}
+.view-only {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--rm-text-muted);
+  text-transform: uppercase;
+}
