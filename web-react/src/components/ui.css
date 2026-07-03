@@ -421,6 +421,7 @@
   color: var(--rm-danger);
 }
 .field input[type="text"],
+.field input[type="password"],
 .field textarea,
 .field select {
   width: 100%;
@@ -431,6 +432,14 @@
   border-radius: 4px;
   background: var(--rm-app-bg);
   padding: 8px 10px;
+}
+/* Secret fields track slightly wider so the bullets read as a masked
+ * key; the placeholder stays normal so its hint is legible. */
+.field input[type="password"] {
+  letter-spacing: 0.08em;
+}
+.field input[type="password"]::placeholder {
+  letter-spacing: normal;
 }
 .field textarea {
   min-height: 96px;
@@ -528,4 +537,34 @@
   font-weight: 700;
   color: var(--rm-text-muted);
   text-transform: uppercase;
+}
+
+/* Read-only resource row — shared by the models catalog (provider
+ * groups) and the credentials page (fixed provider rows). Page-specific
+ * chrome (models .prov-group, cred status text) stays in each page CSS. */
+.model-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--rm-border);
+  border-radius: 4px;
+  background: var(--rm-card-bg);
+  padding: 10px 14px;
+  margin-bottom: 8px;
+  max-width: 640px;
+}
+.model-row.dim {
+  opacity: 0.45;
+}
+.model-row .m-name {
+  font-weight: 700;
+  font-size: 0.9375rem;
+}
+.model-row .m-sub {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--rm-text-muted);
+}
+.model-row .m-fill {
+  flex: 1;
 }

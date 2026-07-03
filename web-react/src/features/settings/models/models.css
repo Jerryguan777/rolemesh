@@ -1,6 +1,6 @@
 /* Models page — read-only provider groups (spec Part F). Shared
- * primitives (page chrome, buttons, pills, toast) live in
- * components/ui.css; only the group + read-only row are page-specific. */
+ * primitives (page chrome, buttons, pills, toast, .model-row family)
+ * live in components/ui.css; only the provider group is page-specific. */
 
 .prov-group {
   margin-bottom: 20px;
@@ -14,32 +14,6 @@
 .prov-head b {
   font-size: 1rem;
   text-transform: capitalize;
-}
-.model-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  border: 1px solid var(--rm-border);
-  border-radius: 4px;
-  background: var(--rm-card-bg);
-  padding: 10px 14px;
-  margin-bottom: 8px;
-  max-width: 640px;
-}
-.model-row.dim {
-  opacity: 0.45;
-}
-.model-row .m-name {
-  font-weight: 700;
-  font-size: 0.9375rem;
-}
-.model-row .m-sub {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-  color: var(--rm-text-muted);
-}
-.model-row .m-fill {
-  flex: 1;
 }
 /* connect button: ghost sized down to sit inline in the group head */
 .prov-head .btn-ghost {
