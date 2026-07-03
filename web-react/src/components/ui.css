@@ -571,6 +571,63 @@
   flex: 1;
 }
 
+/* Member-row chrome (Part L). Global (not members.css) because the
+ * spec anticipates the role pills back-propagating to the coworker
+ * ownership tags — and sibling-chunk CSS is the load-order trap this
+ * file exists to prevent. */
+.role-pill {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 2px;
+  text-transform: capitalize;
+}
+.role-pill--owner {
+  background: var(--rm-action);
+  color: #fff;
+}
+.role-pill--admin {
+  background: var(--rm-info-bg);
+  color: var(--rm-info-text);
+}
+.role-pill--member {
+  background: var(--rm-border);
+  color: var(--rm-text-muted);
+}
+.you-tag {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--rm-action);
+  border: 1px solid var(--rm-action);
+  border-radius: 2px;
+  padding: 0 5px;
+}
+.chan-tag {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 10.5px;
+  color: var(--rm-text-muted);
+  border: 1px solid var(--rm-border);
+  border-radius: 2px;
+  padding: 1px 5px;
+}
+
+/* Offset/limit pager — graduated from safety-log.css when the members
+ * page became its second consumer. Width is page-owned (safety-log
+ * caps it at its 860px surfaces, members at the 760px row column). */
+.pager {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 2px;
+  font-size: 0.8125rem;
+  color: var(--rm-text-muted);
+}
+.pager .sp {
+  flex: 1;
+}
+
 /* Switch — labelled toggle primitive (components/switch.tsx). First
  * consumers: the approval-policy card's enable toggle + the policy
  * dialog's Status field. */

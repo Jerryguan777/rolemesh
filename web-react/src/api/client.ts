@@ -45,6 +45,10 @@ export type SafetyStage = components['schemas']['SafetyStage'];
 export type SafetyVerdictAction = components['schemas']['SafetyVerdictAction'];
 export type TenantResponse = components['schemas']['TenantResponse'];
 export type TenantUpdate = components['schemas']['TenantUpdate'];
+export type UserResponse = components['schemas']['UserResponse'];
+export type UserCreate = components['schemas']['UserCreate'];
+export type UserUpdate = components['schemas']['UserUpdate'];
+export type UserPage = components['schemas']['UserPage'];
 export type SafetyDecision = components['schemas']['SafetyDecision'];
 export type SafetyDecisionPage = components['schemas']['SafetyDecisionPage'];
 export type SafetyFinding = components['schemas']['SafetyFinding'];
@@ -350,6 +354,52 @@ export class ApiClient {
       body,
     );
     return (await resp.json()) as TenantResponse;
+  }
+
+  // ------------------------------------------------------------------
+  // Users (Part L). Gated by `user.manage` (owner + admin). Two
+  // business rules live in the handler, not in capabilities: only an
+  // owner may create/assign the `owner` role (403), and you cannot
+  // delete yourself (400). The detail GET is omitted — the list rows
+  // already carry every field the page renders (trimmed-client rule).
+  // ------------------------------------------------------------------
+
+  async listUsers(limit = 20, offset = 0): Promise<UserPage> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/users?limit=${limit}&offset=${offset}`,
+      { method: 'GET', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as UserPage;
+  }
+
+  async createUser(body: UserCreate): Promise<UserResponse> {
+    const resp = await this.fetchJson(
+      'POST',
+      `${this.baseUrl}/api/v1/users`,
+      body,
+    );
+    return (await resp.json()) as UserResponse;
+  }
+
+  /** PATCH. `email: ""` clears the stored email; omit/null leaves it
+   *  unchanged. `channel_ids` has no write path here — channel identity
+   *  is owned by the channel-linking flows. */
+  async updateUser(id: string, body: UserUpdate): Promise<UserResponse> {
+    const resp = await this.fetchJson(
+      'PATCH',
+      `${this.baseUrl}/api/v1/users/${encodeURIComponent(id)}`,
+      body,
+    );
+    return (await resp.json()) as UserResponse;
+  }
+
+  async deleteUser(id: string): Promise<void> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/users/${encodeURIComponent(id)}`,
+      { method: 'DELETE', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
   }
 
   // ------------------------------------------------------------------

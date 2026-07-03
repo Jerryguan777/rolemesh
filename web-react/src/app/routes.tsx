@@ -90,6 +90,12 @@ const GeneralPage = lazy(() =>
   })),
 );
 
+const MembersPage = lazy(() =>
+  import('../features/settings/members/members-page').then((m) => ({
+    default: m.MembersPage,
+  })),
+);
+
 /** Catch-all: rewrite v1.1 flat bookmarks (query strings survive the
  *  redirect); anything else falls back to chat — same default the Lit
  *  topLevelShell() uses. */
@@ -175,6 +181,16 @@ export function AppRoutes() {
           <Suspense fallback={null}>
             <Gated slug="general">
               <GeneralPage />
+            </Gated>
+          </Suspense>
+        }
+      />
+      <Route
+        path="/manage/members/*"
+        element={
+          <Suspense fallback={null}>
+            <Gated slug="members">
+              <MembersPage />
             </Gated>
           </Suspense>
         }
