@@ -421,6 +421,7 @@
   color: var(--rm-danger);
 }
 .field input[type="text"],
+.field input[type="password"],
 .field textarea,
 .field select {
   width: 100%;
@@ -431,6 +432,14 @@
   border-radius: 4px;
   background: var(--rm-app-bg);
   padding: 8px 10px;
+}
+/* Secret fields track slightly wider so the bullets read as a masked
+ * key; the placeholder stays normal so its hint is legible. */
+.field input[type="password"] {
+  letter-spacing: 0.08em;
+}
+.field input[type="password"]::placeholder {
+  letter-spacing: normal;
 }
 .field textarea {
   min-height: 96px;

@@ -207,7 +207,6 @@ export function CredentialDialog({
               <input
                 id={`cr-extra-${e.key}`}
                 type="text"
-                className="mono"
                 spellCheck={false}
                 placeholder={e.placeholder ?? ''}
                 value={extras[e.key] ?? ''}
