@@ -40,7 +40,9 @@ export function AgentPickerModal({
       `${c.name} ${c.routing_description ?? ''}`.toLowerCase().includes(q),
   );
 
-  const canCreate = hasCapability('coworker.manage');
+  // Creation is gated on `coworker.create` (spec C.2) — `coworker.manage`
+  // is the row-management capability, a different grant.
+  const canCreate = hasCapability('coworker.create');
 
   return (
     <div
@@ -49,7 +51,7 @@ export function AgentPickerModal({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="dlg" role="dialog" aria-modal="true" aria-label="RoleMesh assistants and agents">
+      <div className="dlg picker" role="dialog" aria-modal="true" aria-label="RoleMesh assistants and agents">
         <div className="dlg-header">
           <div className="hleft">
             <div className="dlg-brand-icon">

@@ -22,7 +22,7 @@ export function AgentCard({
   const modelLabel = model?.display_name ?? coworker.model_id ?? null;
   return (
     <div
-      className={`card${selected ? ' selected' : ''}`}
+      className={`card pick${selected ? ' selected' : ''}`}
       role="radio"
       aria-checked={selected}
       tabIndex={0}

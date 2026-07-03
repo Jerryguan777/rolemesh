@@ -14,6 +14,14 @@ const SettingsPage = lazy(() =>
   })),
 );
 
+// Grown settings pages get their own lazy chunk keyed by slug (§1.1
+// settings growth rule) — the static route ranks above /manage/:slug.
+const CoworkersPage = lazy(() =>
+  import('../features/settings/coworkers/coworkers-page').then((m) => ({
+    default: m.CoworkersPage,
+  })),
+);
+
 /** Catch-all: rewrite v1.1 flat bookmarks (query strings survive the
  *  redirect); anything else falls back to chat — same default the Lit
  *  topLevelShell() uses. */
@@ -27,6 +35,14 @@ export function AppRoutes() {
   return (
     <Routes>
       <Route path="/" element={<ChatPage />} />
+      <Route
+        path="/manage/coworkers/*"
+        element={
+          <Suspense fallback={null}>
+            <CoworkersPage />
+          </Suspense>
+        }
+      />
       <Route
         path="/manage/:slug/*"
         element={

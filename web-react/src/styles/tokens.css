@@ -25,6 +25,15 @@
   --rm-nav-hover: #F6F9FF;
   --rm-gradient: linear-gradient(135deg, #3080E4 0%, #69A9FF 52%, #8DD3FF 100%);
 
+  /* state pills + destructive actions (Part C §C.1) */
+  --rm-success-bg: #E7F3E7;
+  --rm-success-text: #1C821C;
+  --rm-warn-bg: #FDEBD9;
+  --rm-warn-text: #B25E00;
+  --rm-danger: #E00606;
+  --rm-danger-bg: #FBE6E6;
+  --rm-disabled-bg: #EBEBEB;
+
   /* brand mark (two-diamond placeholder, D-3) */
   --rm-mark-primary: #307FE2;
   --rm-mark-secondary: #000000;

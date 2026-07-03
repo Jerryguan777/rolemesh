@@ -181,19 +181,9 @@
   margin-top: 0.75rem;
   font-size: 1rem;
 }
-.btn-primary {
-  background: var(--rm-action);
-  color: var(--rm-app-bg);
-  border: none;
-  border-radius: 2px;
-  padding: 8px 18px;
-  font-size: 0.875rem;
-  font-weight: 700;
-  cursor: pointer;
+/* .btn-primary base lives in components/ui.css */
+.empty-state .btn-primary {
   margin-top: 1rem;
-}
-.btn-primary:hover {
-  background: var(--rm-action-hover);
 }
 
 /* status bar — reference statusBar region (§5.4): active-agent line
@@ -338,24 +328,7 @@
   width: 18px;
   height: 18px;
 }
-.icon-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  color: var(--rm-action);
-  padding: 4px;
-  border-radius: 2px;
-}
-.icon-btn:hover {
-  color: var(--rm-action-hover);
-}
-.icon-btn svg {
-  width: 18px;
-  height: 18px;
-}
+/* .icon-btn base lives in components/ui.css */
 
 /* right asides (recall + debug) */
 .aside-panel {

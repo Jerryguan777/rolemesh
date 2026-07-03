@@ -35,3 +35,43 @@ export function useMessages(chatId: string | null) {
     enabled: !!chatId,
   });
 }
+
+// ---- coworker-wizard catalogues (Part C) ----
+//
+// Credentials / MCP servers / skills degrade to [] on failure (same
+// catch-to-empty policy as the Lit wizard's loadCatalogues) — e.g. a
+// member without `credential.byok.manage` gets a 403 on the
+// credentials read; the wizard then renders those models as locked
+// rather than erroring out.
+
+export function useBackends(enabled: boolean) {
+  return useQuery({
+    queryKey: ['backends'],
+    queryFn: () => getApiClient().getBackends(),
+    enabled,
+  });
+}
+
+export function useCredentials(enabled: boolean) {
+  return useQuery({
+    queryKey: ['credentials'],
+    queryFn: () => getApiClient().listCredentials().catch(() => []),
+    enabled,
+  });
+}
+
+export function useMCPServers(enabled: boolean) {
+  return useQuery({
+    queryKey: ['mcp-servers'],
+    queryFn: () => getApiClient().listMCPServers().catch(() => []),
+    enabled,
+  });
+}
+
+export function useSkills(enabled: boolean) {
+  return useQuery({
+    queryKey: ['skills'],
+    queryFn: () => getApiClient().listSkills().catch(() => []),
+    enabled,
+  });
+}
