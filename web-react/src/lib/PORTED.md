@@ -13,6 +13,9 @@ header. Keep them in sync manually until workspace extraction.
 | `ws/ws-client-base.ts` (+test) | `ws/ws-client-base.ts` | cf6b0f1 |
 | `ws/connection-state.ts` (+test) | `ws/connection-state.ts` | cf6b0f1 |
 | `lib/models-grouping.ts` (+test) | `services/models-grouping.ts` | 5d3650e |
+| `lib/skill-constants.ts` | `api/skill_constants.ts` | b443846 |
+| `lib/skill-manifest.ts` (+test) | extracted from `components/skill-dialog.ts` | b443846 |
+| `lib/skill-upload.ts` (+test) | extracted from `components/skill-dialog.ts` | b443846 |
 
 Ported (adapted, not verbatim — source noted in the file header):
 

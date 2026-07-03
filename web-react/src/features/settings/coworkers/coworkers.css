@@ -5,45 +5,8 @@
  * and the dialog form primitives (.field/.opt-card/.wiz-body/foot/err).
  * Anything below is used by coworkers alone. */
 
-/* manage-card: visibility/status pills + ownership tag + open-chat */
-.pills {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  align-items: center;
-}
-.pill {
-  display: inline-flex;
-  font-size: 12px;
-  font-weight: 700;
-  padding: 2px 8px;
-  border-radius: 2px;
-  text-transform: capitalize;
-}
-.pill-shared {
-  background: var(--rm-success-bg);
-  color: var(--rm-success-text);
-}
-.pill-private {
-  background: var(--rm-border);
-  color: var(--rm-text-muted);
-}
-.pill-active {
-  background: var(--rm-success-bg);
-  color: var(--rm-success-text);
-}
-.pill-paused {
-  background: var(--rm-warn-bg);
-  color: var(--rm-warn-text);
-}
-.pill-disabled {
-  background: var(--rm-border);
-  color: var(--rm-text-muted);
-}
-.own-tag {
-  font-size: 12px;
-  color: var(--rm-text-muted);
-}
+/* manage-card: coworker-specific open-chat (pills + own-tag are shared,
+ * in components/ui.css) */
 .open-chat {
   display: inline-flex;
   align-items: center;
@@ -62,12 +25,6 @@
 .open-chat svg {
   width: 14px;
   height: 14px;
-}
-.view-only {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--rm-text-muted);
-  text-transform: uppercase;
 }
 
 /* wizard: stepper (tab-bar idiom) */

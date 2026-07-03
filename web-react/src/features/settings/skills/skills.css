@@ -1,0 +1,168 @@
+/* Skills page — the skill-SPECIFIC bits (chips, dialog dropzone + file
+ * tree). Shared primitives (page chrome, card family, pills, dialog
+ * form primitives, buttons, toast) live in components/ui.css. */
+
+/* filter chips */
+.chips {
+  display: flex;
+  gap: 6px;
+  padding: 12px 0 2px;
+  flex-shrink: 0;
+}
+.chip {
+  border: 1px solid var(--rm-border);
+  background: var(--rm-app-bg);
+  cursor: pointer;
+  color: var(--rm-nav-text-2);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 4px 12px;
+  border-radius: 2px;
+}
+.chip:hover {
+  border-color: var(--rm-action-hover);
+  color: var(--rm-action-hover);
+}
+.chip.on {
+  background: var(--rm-info-bg);
+  color: var(--rm-info-text);
+  border-color: transparent;
+}
+
+/* dialog: description counter */
+.counter {
+  text-align: right;
+  font-size: 12px;
+  color: var(--rm-text-muted);
+  margin-top: 2px;
+}
+.counter.warn {
+  color: var(--rm-warn-text);
+}
+
+/* dialog: additional-files disclosure */
+details.files {
+  border: 1px solid var(--rm-border);
+  border-radius: 4px;
+  padding: 8px 12px;
+  margin-bottom: 14px;
+}
+details.files summary {
+  cursor: pointer;
+  font-size: 0.8125rem;
+  font-weight: 700;
+  color: var(--rm-action);
+}
+.dropzone {
+  border: 2px dashed var(--rm-border);
+  border-radius: 6px;
+  margin-top: 10px;
+  padding: 18px 16px;
+  text-align: center;
+  background: var(--rm-card-bg);
+}
+.dropzone.hover {
+  border-color: var(--rm-action);
+  background: var(--rm-info-bg);
+}
+.dropzone .dz-msg {
+  font-size: 0.8125rem;
+  color: var(--rm-text);
+  margin-bottom: 8px;
+}
+.dz-btns {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+}
+.dz-btn {
+  display: inline-block;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--rm-text-muted);
+  border-radius: 4px;
+  background: var(--rm-app-bg);
+  color: var(--rm-text);
+  padding: 5px 12px;
+}
+.dz-btn:hover {
+  border-color: var(--rm-action-hover);
+  color: var(--rm-action-hover);
+}
+.dz-btn.off {
+  opacity: 0.6;
+  pointer-events: none;
+}
+.dz-btn input {
+  display: none;
+}
+.dropzone .dz-note {
+  font-size: 11px;
+  color: var(--rm-text-muted);
+  margin-top: 8px;
+}
+.upload-toast {
+  font-size: 12px;
+  color: var(--rm-text);
+  margin-top: 8px;
+}
+
+/* dialog: file tree */
+.tree {
+  margin-top: 14px;
+}
+.tree-title {
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+  color: var(--rm-text-muted);
+  margin-bottom: 4px;
+}
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12.5px;
+}
+.tree-row.indent {
+  padding-left: 24px;
+}
+.tree-row .t-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tree-row .t-main-note {
+  font-family: var(--font-base);
+  font-size: 11px;
+  font-style: italic;
+  color: var(--rm-text-muted);
+}
+.tree-row .t-size {
+  font-family: var(--font-base);
+  font-size: 11px;
+  color: var(--rm-text-muted);
+  white-space: nowrap;
+}
+.tree-row .icon-btn {
+  opacity: 0.55;
+  padding: 3px;
+}
+.tree-row:hover .icon-btn {
+  opacity: 1;
+}
+.tree-row .icon-btn.danger {
+  color: var(--rm-danger);
+}
+.tree-row .icon-btn svg {
+  width: 13px;
+  height: 13px;
+}
+.tree-folder {
+  color: var(--rm-text);
+}

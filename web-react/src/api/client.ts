@@ -37,6 +37,9 @@ export type MCPServerUpdate = components['schemas']['MCPServerUpdate'];
 export type MCPType = components['schemas']['MCPType'];
 export type MCPAuthMode = components['schemas']['MCPAuthMode'];
 export type SkillSummary = components['schemas']['SkillSummary'];
+export type Skill = components['schemas']['Skill'];
+export type SkillCreate = components['schemas']['SkillCreate'];
+export type SkillUpdate = components['schemas']['SkillUpdate'];
 export type ApprovalRequest = components['schemas']['ApprovalRequest'];
 
 export type ErrorResponseBody =
@@ -332,6 +335,74 @@ export class ApiClient {
       { method: 'DELETE', headers: this.headers() },
     );
     if (!resp.ok) throw await this.parseError(resp);
+  }
+
+  // ------------------------------------------------------------------
+  // Skill catalog CRUD + share (Part E). Method names identical to the
+  // Lit client (spec §11).
+  // ------------------------------------------------------------------
+
+  /** Full skill incl. the `files` map — the dialog fetches this on
+   *  edit-open to seed Instructions + the file tree. */
+  async getSkill(id: string): Promise<Skill> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/skills/${encodeURIComponent(id)}`,
+      { method: 'GET', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Skill;
+  }
+
+  async createSkill(body: SkillCreate): Promise<Skill> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/skills`, {
+      method: 'POST',
+      headers: this.headers({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Skill;
+  }
+
+  /** PATCH. `name` is read-only server-side — omit it (edit sends the
+   *  full `files` map for atomic replacement per the Lit contract). */
+  async updateSkill(id: string, body: SkillUpdate): Promise<Skill> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/skills/${encodeURIComponent(id)}`,
+      {
+        method: 'PATCH',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(body),
+      },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Skill;
+  }
+
+  /** 204; 409 RESOURCE_IN_USE when bound to any coworker. */
+  async deleteSkill(id: string): Promise<void> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/skills/${encodeURIComponent(id)}`,
+      { method: 'DELETE', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+  }
+
+  async shareSkill(id: string): Promise<Skill> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/skills/${encodeURIComponent(id)}/share`,
+      { method: 'POST', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Skill;
+  }
+
+  async unshareSkill(id: string): Promise<Skill> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/skills/${encodeURIComponent(id)}/unshare`,
+      { method: 'POST', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Skill;
   }
 
   async listCoworkerSkills(coworkerId: string): Promise<CoworkerSkillBinding[]> {
