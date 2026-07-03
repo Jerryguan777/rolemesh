@@ -5,7 +5,9 @@
 // fields, no invented flows. Reconcile per the behavior-parity rule
 // when the Lit page lands.
 //
-// A form, not a collection: one 560px column, dirty-tracked Save
+// A form, not a collection: one 760px column (D-UI2 — the v12
+// prototype said 560; forms/panels joined the D-UI1 row cap so every
+// settings surface shares one width), dirty-tracked Save
 // (disabled when clean, invalid, or busy) + Revert (visible only when
 // dirty); one PATCH carries both writable fields; field errors replace
 // the hint line in danger color (the dialogs' pattern).
@@ -126,7 +128,7 @@ export function GeneralPage() {
             Failed to load workspace settings — retry from the sidebar.
           </div>
         ) : tenant && f ? (
-          <div style={{ maxWidth: 560 }}>
+          <div style={{ maxWidth: 760 }}>
             <div className="field">
               <label htmlFor="gen-name">Workspace name</label>
               <input

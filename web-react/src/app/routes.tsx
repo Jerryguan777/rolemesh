@@ -96,6 +96,12 @@ const MembersPage = lazy(() =>
   })),
 );
 
+const AppearancePage = lazy(() =>
+  import('../features/settings/appearance/appearance-page').then((m) => ({
+    default: m.AppearancePage,
+  })),
+);
+
 const ConnectedChannelsPage = lazy(() =>
   import('../features/settings/connected-channels/connected-channels-page').then(
     (m) => ({ default: m.ConnectedChannelsPage }),
@@ -188,6 +194,17 @@ export function AppRoutes() {
             <Gated slug="general">
               <GeneralPage />
             </Gated>
+          </Suspense>
+        }
+      />
+      {/* Personal page — no capability gate (nav requires: null).
+          With this route every named settings entry is grown (A–N);
+          the /manage/:slug stub is now unknown-slug fallback only. */}
+      <Route
+        path="/manage/appearance/*"
+        element={
+          <Suspense fallback={null}>
+            <AppearancePage />
           </Suspense>
         }
       />

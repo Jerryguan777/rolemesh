@@ -1,12 +1,13 @@
 /* Connected channels (Part M) — page-owned chrome, single consumer.
- * Panels cap at 560px (the General form-column precedent); the
- * identity rows reuse the global .model-row at the D-UI1 760px cap. */
+ * Panels share the 760px cap with the .model-row identity rows
+ * (D-UI2 — forms and panels joined the D-UI1 row width; the v14
+ * prototype said 560). */
 .cc-panel {
   border: 1px solid var(--rm-border);
   border-radius: 4px;
   background: var(--rm-card-bg);
   padding: 16px;
-  max-width: 560px;
+  max-width: 760px;
   margin-bottom: 12px;
 }
 .cc-code {
