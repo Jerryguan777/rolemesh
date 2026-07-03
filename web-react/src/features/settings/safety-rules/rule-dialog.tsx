@@ -53,7 +53,7 @@ import {
   actionButtonState,
   naturalAction,
   safSentence,
-} from './safety-catalog';
+} from '../../../lib/safety-catalog';
 
 interface FormState {
   checkId: string;

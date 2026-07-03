@@ -2,7 +2,7 @@
 // module (I.5: port WHOLE, with tests).
 import { describe, expect, it } from 'vitest';
 
-import type { SafetyCheck, SafetyStage } from '../../../api/client';
+import type { SafetyCheck, SafetyStage } from '../api/client';
 import {
   SAFETY_CHECK_CATALOG,
   actionButtonState,

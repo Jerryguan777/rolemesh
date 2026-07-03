@@ -4,7 +4,7 @@
 // domains.
 
 import { useQuery } from '@tanstack/react-query';
-import { getApiClient } from './client';
+import { getApiClient, type SafetyDecisionFilters } from './client';
 
 export function useCoworkers() {
   return useQuery({
@@ -96,6 +96,19 @@ export function useSafetyChecks() {
     queryKey: ['safety-checks'],
     queryFn: () => getApiClient().listSafetyChecks(),
     staleTime: 5 * 60_000,
+  });
+}
+
+// ---- Safety log page (Part J) ----
+
+/** One page of the decision log. The filter object is part of the key —
+ *  every filter/page change is its own cache entry; `placeholderData`
+ *  keeps the previous page rendered while the next loads. */
+export function useSafetyDecisions(filters: SafetyDecisionFilters) {
+  return useQuery({
+    queryKey: ['safety-decisions', filters],
+    queryFn: () => getApiClient().listSafetyDecisions(filters),
+    placeholderData: (prev) => prev,
   });
 }
 

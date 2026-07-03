@@ -1,6 +1,7 @@
 // Copied from web/src/components/safety-catalog.ts @ feat/webui-react;
-// keep in sync manually until workspace extraction. Page-private pure
-// module — colocated in the slug folder per the §1.1 growth rule.
+// keep in sync manually until workspace extraction. Graduated from
+// features/settings/safety-rules/ to lib/ when the safety-log page
+// became the second consumer (§1.1: pure + ≥2 consumers → lib/).
 // React note: sentence helpers return HTML strings rendered with
 // dangerouslySetInnerHTML (dynamic text escaped inside — same contract
 // as the Lit unsafeHTML call).
@@ -26,7 +27,7 @@ import type {
   SafetyCheck,
   SafetyStage,
   SafetyVerdictAction,
-} from '../../../api/client';
+} from '../api/client';
 
 // Which config form a check renders — a presentation hint derived from the
 // check's config_schema (spec §6.12). Not on the wire.

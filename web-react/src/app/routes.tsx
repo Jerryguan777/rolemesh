@@ -78,6 +78,12 @@ const SafetyRulesPage = lazy(() =>
   })),
 );
 
+const SafetyLogPage = lazy(() =>
+  import('../features/settings/safety-log/safety-log-page').then((m) => ({
+    default: m.SafetyLogPage,
+  })),
+);
+
 /** Catch-all: rewrite v1.1 flat bookmarks (query strings survive the
  *  redirect); anything else falls back to chat — same default the Lit
  *  topLevelShell() uses. */
@@ -143,6 +149,16 @@ export function AppRoutes() {
           <Suspense fallback={null}>
             <Gated slug="safety">
               <SafetyRulesPage />
+            </Gated>
+          </Suspense>
+        }
+      />
+      <Route
+        path="/manage/safety-log/*"
+        element={
+          <Suspense fallback={null}>
+            <Gated slug="safety-log">
+              <SafetyLogPage />
             </Gated>
           </Suspense>
         }
