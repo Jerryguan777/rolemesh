@@ -541,7 +541,9 @@
 
 /* Read-only resource row — shared by the models catalog (provider
  * groups) and the credentials page (fixed provider rows). Page-specific
- * chrome (models .prov-group, cred status text) stays in each page CSS. */
+ * chrome (models .prov-group, cred status text) stays in each page CSS.
+ * Width unified at 760px with the .pol-card rule family (D-UI1 — the
+ * v7/v8 prototypes said 640; one cap for every row-list page). */
 .model-row {
   display: flex;
   align-items: center;
@@ -551,7 +553,7 @@
   background: var(--rm-card-bg);
   padding: 10px 14px;
   margin-bottom: 8px;
-  max-width: 640px;
+  max-width: 760px;
 }
 .model-row.dim {
   opacity: 0.45;
