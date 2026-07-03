@@ -15,7 +15,7 @@
   font-size: 14px;
   letter-spacing: 0.06em;
   background: #fff;
-  border: 1px dashed var(--rm-text-muted);
+  border: 1px solid var(--rm-border); /* v16 audit: dashed is reserved for drop targets */
   border-radius: 4px;
   padding: 8px 12px;
   display: inline-block;

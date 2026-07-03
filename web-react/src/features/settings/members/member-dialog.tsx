@@ -64,7 +64,7 @@ export function MemberDialog({
   const roleHint = !isOwnerCaller
     ? 'Only owners can grant the owner role — the server enforces this.'
     : editingSelf && role !== 'owner'
-      ? '⚠ Lowering your own role may remove your access to this page.'
+      ? 'Lowering your own role may remove your access to this page.'
       : 'Owners and admins can manage members and workspace resources.';
 
   async function save() {

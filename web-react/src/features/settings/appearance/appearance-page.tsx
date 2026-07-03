@@ -14,7 +14,7 @@
 // chunk's CSS (.cc-panel) — the load-order trap ui.css exists to
 // prevent.
 
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, Moon, Sun } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useSystemTheme } from './use-system-theme';
 
@@ -55,7 +55,9 @@ export function AppearancePage() {
             detected setting below will drive it automatically once it lands.
           </div>
           <div className="model-row" style={{ marginBottom: 0 }} data-testid="app-theme-row">
-            <span aria-hidden="true">{dark ? '🌙' : '☀️'}</span>
+            <span aria-hidden="true" style={{ display: 'inline-flex' }}>
+              {dark ? <Moon size={16} /> : <Sun size={16} />}
+            </span>
             <span>
               <div className="m-name">System: {dark ? 'Dark' : 'Light'}</div>
               <div className="m-sub" style={{ fontFamily: 'var(--font-base)' }}>
