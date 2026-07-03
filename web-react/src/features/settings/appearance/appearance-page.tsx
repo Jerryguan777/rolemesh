@@ -44,7 +44,8 @@ export function AppearancePage() {
             borderRadius: 4,
             background: 'var(--rm-card-bg)',
             padding: 16,
-            maxWidth: 560,
+            maxWidth: 760, // D-UI2 — one cap for every settings surface
+
           }}
         >
           <b>Theme</b>
