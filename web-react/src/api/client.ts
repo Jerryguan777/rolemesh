@@ -14,11 +14,25 @@ import { getStoredToken } from '../lib/oidc-auth';
 export type ApiPaths = paths;
 
 export type BackendName = components['schemas']['BackendName'];
+export type Backend = components['schemas']['Backend'];
+export type BackendList = Backend[];
 export type Coworker = components['schemas']['Coworker'];
+export type CoworkerCreate = components['schemas']['CoworkerCreate'];
+export type CoworkerUpdate = components['schemas']['CoworkerUpdate'];
+export type CoworkerMCPBindingCreate =
+  components['schemas']['CoworkerMCPBindingCreate'];
+export type CoworkerMCPBindingResponse =
+  components['schemas']['CoworkerMCPBindingResponse'];
+export type CoworkerSkillBinding =
+  components['schemas']['CoworkerSkillBinding'];
 export type Conversation = components['schemas']['Conversation'];
 export type Message = components['schemas']['Message'];
 export type Me = components['schemas']['Me'];
 export type Model = components['schemas']['Model'];
+export type ModelProvider = components['schemas']['ModelProvider'];
+export type CredentialResponse = components['schemas']['CredentialResponse'];
+export type MCPServer = components['schemas']['MCPServer'];
+export type SkillSummary = components['schemas']['SkillSummary'];
 export type ApprovalRequest = components['schemas']['ApprovalRequest'];
 
 export type ErrorResponseBody =
@@ -136,6 +150,183 @@ export class ApiClient {
     });
     if (!resp.ok) throw await this.parseError(resp);
     return (await resp.json()) as Model[];
+  }
+
+  // ------------------------------------------------------------------
+  // Coworker management (Part C). Method names identical to the Lit
+  // client (spec §11) — lift, don't rewrite.
+  // ------------------------------------------------------------------
+
+  async getBackends(): Promise<BackendList> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/backends`, {
+      method: 'GET',
+      headers: this.headers(),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as BackendList;
+  }
+
+  async createCoworker(body: CoworkerCreate): Promise<Coworker> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/coworkers`, {
+      method: 'POST',
+      headers: this.headers({ 'Content-Type': 'application/json' }),
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Coworker;
+  }
+
+  /** Patch selected fields on a coworker. Backend treats ABSENT keys
+   *  as "leave alone"; explicit nulls follow the per-field rules in
+   *  webui/schemas_v1.CoworkerUpdate (note: `model_id: null` to CLEAR
+   *  is currently rejected by the handler — omit the key instead). */
+  async updateCoworker(id: string, body: CoworkerUpdate): Promise<Coworker> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(id)}`,
+      {
+        method: 'PATCH',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(body),
+      },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Coworker;
+  }
+
+  /** Hard-delete a coworker. Backend uses DB ON DELETE CASCADE to drop
+   *  conversations / runs / messages — there is no soft-delete path. */
+  async deleteCoworker(id: string): Promise<void> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(id)}`,
+      { method: 'DELETE', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+  }
+
+  /** Flip a coworker's visibility to `shared` (tenant-wide). Real
+   *  authorization is the ownership escape server-side (a member may
+   *  share only what they created). Idempotent. */
+  async shareCoworker(id: string): Promise<Coworker> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(id)}/share`,
+      { method: 'POST', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Coworker;
+  }
+
+  /** Flip a coworker's visibility back to `private`. */
+  async unshareCoworker(id: string): Promise<Coworker> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(id)}/unshare`,
+      { method: 'POST', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as Coworker;
+  }
+
+  async listCredentials(): Promise<CredentialResponse[]> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/credentials`, {
+      method: 'GET',
+      headers: this.headers(),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as CredentialResponse[];
+  }
+
+  async listMCPServers(): Promise<MCPServer[]> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/mcp-servers?limit=200`, {
+      method: 'GET',
+      headers: this.headers(),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return ((await resp.json()) as components['schemas']['MCPServerPage']).items;
+  }
+
+  async listSkills(): Promise<SkillSummary[]> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/skills?limit=200`, {
+      method: 'GET',
+      headers: this.headers(),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return ((await resp.json()) as components['schemas']['SkillSummaryPage'])
+      .items;
+  }
+
+  /** List MCP-server bindings for a coworker (wizard edit pre-fill). */
+  async listCoworkerMCPServers(
+    coworkerId: string,
+  ): Promise<CoworkerMCPBindingResponse[]> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(coworkerId)}/mcp-servers`,
+      { method: 'GET', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as CoworkerMCPBindingResponse[];
+  }
+
+  async bindCoworkerMCPServer(
+    coworkerId: string,
+    body: CoworkerMCPBindingCreate,
+  ): Promise<CoworkerMCPBindingResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(coworkerId)}/mcp-servers`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(body),
+      },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as CoworkerMCPBindingResponse;
+  }
+
+  /** Remove a single MCP-server binding (path takes the MCP SERVER id,
+   *  not a separate binding id — the junction is keyed by the pair). */
+  async unbindCoworkerMCPServer(
+    coworkerId: string,
+    mcpServerId: string,
+  ): Promise<void> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(coworkerId)}` +
+        `/mcp-servers/${encodeURIComponent(mcpServerId)}`,
+      { method: 'DELETE', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+  }
+
+  async listCoworkerSkills(coworkerId: string): Promise<CoworkerSkillBinding[]> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(coworkerId)}/skills`,
+      { method: 'GET', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as CoworkerSkillBinding[];
+  }
+
+  async enableCoworkerSkill(
+    coworkerId: string,
+    skillId: string,
+  ): Promise<CoworkerSkillBinding> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(coworkerId)}` +
+        `/skills/${encodeURIComponent(skillId)}`,
+      { method: 'POST', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as CoworkerSkillBinding;
+  }
+
+  async disableCoworkerSkill(
+    coworkerId: string,
+    skillId: string,
+  ): Promise<void> {
+    const resp = await fetch(
+      `${this.baseUrl}/api/v1/coworkers/${encodeURIComponent(coworkerId)}` +
+        `/skills/${encodeURIComponent(skillId)}`,
+      { method: 'DELETE', headers: this.headers() },
+    );
+    if (!resp.ok) throw await this.parseError(resp);
   }
 }
 

@@ -12,6 +12,7 @@ header. Keep them in sync manually until workspace extraction.
 | `ws/v1_client.ts` (+test) | `ws/v1_client.ts` | cf6b0f1 |
 | `ws/ws-client-base.ts` (+test) | `ws/ws-client-base.ts` | cf6b0f1 |
 | `ws/connection-state.ts` (+test) | `ws/connection-state.ts` | cf6b0f1 |
+| `lib/models-grouping.ts` (+test) | `services/models-grouping.ts` | 5d3650e |
 
 Ported (adapted, not verbatim — source noted in the file header):
 
