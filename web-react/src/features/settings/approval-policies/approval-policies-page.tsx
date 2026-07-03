@@ -24,6 +24,7 @@ import {
   type ApprovalPolicy,
 } from '../../../api/client';
 import { useApprovalPolicies } from '../../../api/queries';
+import { sortByEvaluationOrder } from '../../../lib/rule-ordering';
 import { BrandMark } from '../../../components/brand-mark';
 import { ConfirmDialog } from '../../../components/confirm-dialog';
 import { conditionSentence } from './condition-form';
@@ -31,15 +32,9 @@ import { PolicyCard } from './policy-card';
 import { PolicyDialog } from './policy-dialog';
 import './approval-policies.css';
 
-/** List order = server evaluation order (spec §5.5): priority desc, then
- *  the newest rule first on ties. created_at is ISO-8601 from the API. */
-export function sortPolicies(rows: ApprovalPolicy[]): ApprovalPolicy[] {
-  return [...rows].sort(
-    (a, b) =>
-      b.priority - a.priority ||
-      Date.parse(b.created_at) - Date.parse(a.created_at),
-  );
-}
+/** List order = server evaluation order (spec §5.5) — the shared
+ *  lib/rule-ordering sort, re-exported for this page's tests. */
+export const sortPolicies = sortByEvaluationOrder<ApprovalPolicy>;
 
 function errText(err: unknown): string {
   if (err instanceof ApiError) return err.body?.message ?? `HTTP ${err.status}`;

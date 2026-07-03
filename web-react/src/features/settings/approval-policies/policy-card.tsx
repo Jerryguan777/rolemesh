@@ -8,15 +8,8 @@
 import { Copy, Pencil, Trash2 } from 'lucide-react';
 import type { ApprovalPolicy } from '../../../api/client';
 import { Switch } from '../../../components/switch';
+import { priorityBadgeClass } from '../../../lib/rule-ordering';
 import { conditionSentence } from './condition-form';
-
-/** Badge tint class for a priority value (Appendix C.3): amber when ≥10,
- *  muted when exactly 0, neutral otherwise. */
-export function priorityBadgeClass(priority: number): string {
-  if (priority >= 10) return ' pol-pri--hi';
-  if (priority === 0) return ' pol-pri--zero';
-  return '';
-}
 
 export function PolicyCard({
   policy,

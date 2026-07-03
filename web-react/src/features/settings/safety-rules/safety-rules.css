@@ -1,0 +1,259 @@
+/* Safety rules page (spec Part I). Shared primitives (page chrome,
+ * pol-card family, priority badge, switch, dialog family, toast) live
+ * in components/ui.css + the approval-policies hoists; this file owns
+ * the safety-specific chips, action pill, platform banner, section
+ * label, audit drawer rows, duplicate banners, action segmented
+ * control, routing table, and config grid. */
+
+/* five-color action pill (allow/warn/redact/require_approval/block) */
+.saf-act {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 2px;
+  white-space: nowrap;
+}
+.saf-act--allow {
+  background: var(--rm-success-bg);
+  color: var(--rm-success-text);
+}
+.saf-act--warn {
+  background: var(--rm-border);
+  color: var(--rm-text-muted);
+}
+.saf-act--redact {
+  background: var(--rm-warn-bg);
+  color: var(--rm-warn-text);
+}
+.saf-act--require_approval {
+  background: var(--rm-appr-bg);
+  color: var(--rm-appr-text);
+}
+.saf-act--block {
+  background: var(--rm-danger-bg);
+  color: var(--rm-danger);
+}
+
+/* slow-latency + scope chips (inline in the card's target row) */
+.saf-chip {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 2px;
+  background: var(--rm-info-bg);
+  color: var(--rm-info-text);
+  white-space: nowrap;
+}
+.saf-chip--slow {
+  background: var(--rm-warn-bg);
+  color: var(--rm-warn-text);
+}
+
+/* platform tier: accent badge + info banner + section label */
+.pol-pri--plat {
+  background: var(--rm-action);
+  color: var(--rm-app-bg);
+}
+.plat-banner {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  max-width: 760px;
+  background: var(--rm-info-bg);
+  color: var(--rm-info-text);
+  border-radius: 4px;
+  padding: 10px 14px;
+  font-size: 0.8125rem;
+  margin-bottom: 12px;
+}
+.saf-section {
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 700;
+  color: var(--rm-text-muted);
+  border-bottom: 1px solid var(--rm-border);
+  padding-bottom: 6px;
+  margin: 18px 0 10px;
+  max-width: 760px;
+}
+
+/* audit drawer rows */
+.audit-row {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--rm-border);
+  font-size: 0.875rem;
+}
+.audit-row:last-child {
+  border-bottom: none;
+}
+.audit-verb {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 2px;
+}
+.audit-verb--created {
+  background: var(--rm-success-bg);
+  color: var(--rm-success-text);
+}
+.audit-verb--updated {
+  background: var(--rm-border);
+  color: var(--rm-text-muted);
+}
+.audit-verb--deleted {
+  background: var(--rm-danger-bg);
+  color: var(--rm-danger);
+}
+.audit-row .who {
+  font-weight: 700;
+}
+.audit-row .when {
+  color: var(--rm-text-muted);
+  font-size: 12px;
+  margin-left: auto;
+  white-space: nowrap;
+}
+.audit-row .diff {
+  width: 100%;
+  color: var(--rm-text);
+  font-size: 0.8125rem;
+}
+
+/* G3 duplicate-detection banners (info = auto-flipped to edit,
+ * warn = forced-create, subtle = platform-overlap FYI) */
+.dup-banner {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  border-radius: 4px;
+  padding: 10px 12px;
+  font-size: 0.8125rem;
+  margin-bottom: 12px;
+}
+.dup-banner.info {
+  background: var(--rm-info-bg);
+  color: var(--rm-info-text);
+}
+.dup-banner.warn {
+  background: var(--rm-warn-bg);
+  color: var(--rm-warn-text);
+}
+.dup-banner.subtle {
+  background: var(--rm-card-bg);
+  border: 1px solid var(--rm-border);
+  color: var(--rm-text-muted);
+}
+.dup-banner button {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  color: inherit;
+}
+
+/* action segmented control (experience 1) */
+.actseg {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.actseg button {
+  border: 1px solid var(--rm-border);
+  border-radius: 4px;
+  background: var(--rm-app-bg);
+  cursor: pointer;
+  font-family: var(--font-base);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  padding: 6px 12px;
+  color: var(--rm-nav-text-2);
+}
+.actseg button.on {
+  border-color: var(--rm-action);
+  color: var(--rm-action);
+  box-shadow: inset 0 0 0 1px var(--rm-action);
+}
+.actseg button:disabled {
+  opacity: 0.45;
+  text-decoration: line-through;
+  cursor: not-allowed;
+}
+.actseg .sub {
+  display: block;
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--rm-text-muted);
+}
+.actseg .dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  margin-left: 5px;
+  vertical-align: 2px;
+}
+
+/* per-finding routing table (experience 2) */
+.route-table {
+  border: 1px solid var(--rm-border);
+  border-radius: 4px;
+}
+.route-table .rt-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--rm-border);
+}
+.route-table .rt-row:last-child {
+  border-bottom: none;
+}
+.route-table .rt-label {
+  flex: 1;
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+.route-table .rt-code {
+  display: block;
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--rm-text-muted);
+}
+.route-table select {
+  font-family: var(--font-base);
+  font-size: 0.8125rem;
+  border: 1px solid var(--rm-text-muted);
+  border-radius: 4px;
+  padding: 4px 8px;
+  background: var(--rm-app-bg);
+  cursor: pointer;
+}
+
+/* pii-entities checkbox grid */
+.cfg-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 14px;
+}
+.cfg-grid label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+.cfg-grid .code {
+  font-family: ui-monospace, Menlo, monospace;
+  font-size: 11px;
+  color: var(--rm-text-muted);
+}

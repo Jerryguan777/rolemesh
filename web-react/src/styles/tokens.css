@@ -51,6 +51,11 @@
   /* typography */
   --font-base: "Nunito Sans", Helvetica, Arial, sans-serif;
 
+  /* require_approval pill (safety rules Part I) — the only non-derived
+   * purple in the palette */
+  --rm-appr-bg: #efe5f6;
+  --rm-appr-text: #6b2fa0;
+
   /* chat layout */
   --chat-max-width: 72rem;
   --chat-row-gap: 1rem;
