@@ -43,6 +43,8 @@ export type SafetyRuleAuditEntry = components['schemas']['SafetyRuleAuditEntry']
 export type SafetyCheck = components['schemas']['SafetyCheck'];
 export type SafetyStage = components['schemas']['SafetyStage'];
 export type SafetyVerdictAction = components['schemas']['SafetyVerdictAction'];
+export type TenantResponse = components['schemas']['TenantResponse'];
+export type TenantUpdate = components['schemas']['TenantUpdate'];
 export type SafetyDecision = components['schemas']['SafetyDecision'];
 export type SafetyDecisionPage = components['schemas']['SafetyDecisionPage'];
 export type SafetyFinding = components['schemas']['SafetyFinding'];
@@ -322,6 +324,32 @@ export class ApiClient {
       { method: 'DELETE', headers: this.headers() },
     );
     if (!resp.ok) throw await this.parseError(resp);
+  }
+
+  // ------------------------------------------------------------------
+  // Tenant settings (Part K). Owner-only: both routes 403 without
+  // `tenant.manage` — the page turns the GET 403 into a friendly
+  // full-page notice.
+  // ------------------------------------------------------------------
+
+  async getTenant(): Promise<TenantResponse> {
+    const resp = await fetch(`${this.baseUrl}/api/v1/tenant`, {
+      method: 'GET',
+      headers: this.headers(),
+    });
+    if (!resp.ok) throw await this.parseError(resp);
+    return (await resp.json()) as TenantResponse;
+  }
+
+  /** PATCH — only `name` + `max_concurrent_containers` have a write
+   *  path (slug is fixed at creation; plan is a platform concern). */
+  async updateTenant(body: TenantUpdate): Promise<TenantResponse> {
+    const resp = await this.fetchJson(
+      'PATCH',
+      `${this.baseUrl}/api/v1/tenant`,
+      body,
+    );
+    return (await resp.json()) as TenantResponse;
   }
 
   // ------------------------------------------------------------------
