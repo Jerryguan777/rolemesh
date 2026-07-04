@@ -88,7 +88,11 @@ services:
       # Audience left empty -> defaults to client_id. Keycloak id_token aud is
       # the client_id, so it validates with zero extra mappers.
       OIDC_AUDIENCE: ""
-      # redirect_uri is browser-facing -> the host-published webui address.
+      # Fallback only: both SPAs derive redirect_uri from their own origin
+      # (see oidc-auth.ts) and echo it through the code exchange, so login
+      # works from :8080 AND the Vite dev ports without flipping this env.
+      # Every SPA origin must be whitelisted in rolemesh-realm.json
+      # (redirectUris / webOrigins / post.logout.redirect.uris).
       OIDC_REDIRECT_URI: http://localhost:8080/oauth2/callback
       # offline_access is requested so the browser flow gets a refresh_token
       # (webui silent-refresh / session continuity). Not needed by promptfoo.
