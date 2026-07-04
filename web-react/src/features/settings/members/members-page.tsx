@@ -208,7 +208,7 @@ export function MembersPage() {
           </p>
           {removing.role === 'owner' ? (
             <p>
-              ⚠ <b>{removing.name} is an owner.</b> Make sure another owner remains —
+              <b>{removing.name} is an owner.</b> Make sure another owner remains —
               the server does not block removing the last one.
             </p>
           ) : null}

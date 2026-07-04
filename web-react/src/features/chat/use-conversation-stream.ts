@@ -8,15 +8,20 @@
 // the messages query and clears the live buffer — everything the
 // server accepted is in the refetch, so nothing is lost or doubled.
 //
-// The approval degradation notice (spec §0.6, mandatory in this
-// branch) is driven by pendingApprovals: `event.approval.requested`
-// adds, `event.approval.resolved` removes. Cards arrive next PR.
+// Approval events route to the approval store (Part O — this retires
+// the §0.6 degraded-approvals banner): `requested`/`resolved` run the
+// §9 transitions, and a (re)connect re-hydrates the card list from the
+// conversation's authoritative record (fire-and-forget pushes can be
+// missed while the socket is down).
 
 import { useCallback, useEffect, useReducer, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { getStoredToken } from '../../lib/oidc-auth';
+import { useApprovalStore } from '../../stores/approval-store';
 import {
   V1WsClient,
+  type ApprovalRequestedEvent,
+  type ApprovalResolvedEvent,
   type ConnectionStatus,
   type ServerEvent,
 } from '../../ws/v1_client';
@@ -44,7 +49,6 @@ interface StreamState {
   runActive: boolean;
   /** event.run.progress label ("running", "tool: web_search", …). */
   progress: string | null;
-  pendingApprovals: string[];
   status: ConnectionStatus;
 }
 
@@ -53,7 +57,6 @@ const INITIAL: StreamState = {
   draft: null,
   runActive: false,
   progress: null,
-  pendingApprovals: [],
   status: 'idle',
 };
 
@@ -130,17 +133,6 @@ function reduce(state: StreamState, action: Action): StreamState {
             runActive: false,
             progress: null,
           };
-        case 'event.approval.requested':
-          return state.pendingApprovals.includes(ev.request_id)
-            ? state
-            : { ...state, pendingApprovals: [...state.pendingApprovals, ev.request_id] };
-        case 'event.approval.resolved':
-          return {
-            ...state,
-            pendingApprovals: state.pendingApprovals.filter(
-              (id) => id !== ev.request_id,
-            ),
-          };
         default:
           // Delegation chips et al. — tolerated, rendered next PR.
           return state;
@@ -162,18 +154,36 @@ export function useConversationStream(chatId: string | null) {
       getToken: getStoredToken,
     });
     clientRef.current = client;
-    const offEvent = client.onEvent('*', (event) =>
-      dispatch({ type: 'event', event }),
-    );
+    // Bind the approval store to this conversation: drops the old
+    // chat's cards, adopts this WS client for decision frames, and
+    // hydrates from the conversation's full approval record (§3.8).
+    useApprovalStore.getState().openConversation(chatId, client);
+    const offEvent = client.onEvent('*', (event) => {
+      // Approval events are out-of-band (they never touch run state) —
+      // they go to the store, everything else to the reducer.
+      if (event.type === 'event.approval.requested') {
+        useApprovalStore.getState().wsRequested(event as ApprovalRequestedEvent);
+        return;
+      }
+      if (event.type === 'event.approval.resolved') {
+        useApprovalStore.getState().wsResolved(event as ApprovalResolvedEvent);
+        return;
+      }
+      dispatch({ type: 'event', event });
+    });
     let everOpen = false;
     const offStatus = client.onStatus((status) => {
       dispatch({ type: 'status', status });
       if (status === 'open') {
         if (everOpen) {
           // Reconnect → re-hydrate truth from REST and drop the live
-          // buffer (the refetch supersedes it).
+          // buffer (the refetch supersedes it). Approval cards re-read
+          // the authoritative record too — a card raised or decided
+          // while the socket was down is only recoverable via REST.
           void queryClient.invalidateQueries({ queryKey: ['messages', chatId] });
           dispatch({ type: 'clear-live' });
+          void useApprovalStore.getState().refreshCards();
+          void useApprovalStore.getState().refreshInbox();
         }
         everOpen = true;
       }
@@ -184,6 +194,7 @@ export function useConversationStream(chatId: string | null) {
       offStatus();
       client.disconnect();
       clientRef.current = null;
+      useApprovalStore.getState().openConversation(null, null);
     };
   }, [chatId, queryClient]);
 

@@ -810,8 +810,10 @@
   color: var(--rm-warn-text);
 }
 .saf-act--require_approval {
-  background: var(--rm-appr-bg);
-  color: var(--rm-appr-text);
+  /* v16 audit: the palette is closed — the former purple one-off
+   * remapped into the info family. */
+  background: var(--rm-info-bg);
+  color: var(--rm-info-text);
 }
 .saf-act--block {
   background: var(--rm-danger-bg);

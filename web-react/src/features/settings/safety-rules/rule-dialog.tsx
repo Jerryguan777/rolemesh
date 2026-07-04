@@ -23,7 +23,7 @@
 // rule" link is the sanctioned scope-change path.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { X } from 'lucide-react';
+import { Info, Shield, TriangleAlert, X } from 'lucide-react';
 import {
   ApiError,
   getApiClient,
@@ -406,7 +406,7 @@ export function RuleDialog({
           {/* G3 banners */}
           {dupTarget && !forceCreate ? (
             <div className="dup-banner info" data-testid="saf-dup-banner-info">
-              <span>ℹ</span>
+              <Info size={15} style={{ flexShrink: 0, marginTop: 1 }} />
               <span>
                 You already have a <b>{SAFETY_CHECK_CATALOG[dupTarget.check_id]?.label ?? dupTarget.check_id}</b>{' '}
                 rule for <b>{SAF_STAGE_LABEL[dupTarget.stage] ?? dupTarget.stage}</b> on{' '}
@@ -419,7 +419,7 @@ export function RuleDialog({
             </div>
           ) : forceCreate ? (
             <div className="dup-banner warn" data-testid="saf-dup-banner-warn">
-              <span>⚠</span>
+              <TriangleAlert size={15} style={{ flexShrink: 0, marginTop: 1 }} />
               <span>
                 Creating a second rule for the same surface — they may conflict.{' '}
                 <button
@@ -435,7 +435,7 @@ export function RuleDialog({
             </div>
           ) : platformOverlap ? (
             <div className="dup-banner subtle" data-testid="saf-dup-banner-fyi">
-              <span>🛡</span>
+              <Shield size={15} style={{ flexShrink: 0, marginTop: 1 }} />
               <span>
                 A platform default{' '}
                 <b>{SAFETY_CHECK_CATALOG[platformOverlap.check_id]?.label ?? platformOverlap.check_id}</b>{' '}

@@ -132,7 +132,7 @@ describe('MembersPage', () => {
     expect(screen.getByText('Clearing this field removes the stored email.')).toBeTruthy();
     fireEvent.change(screen.getByLabelText('Role'), { target: { value: 'member' } });
     expect(
-      screen.getByText('⚠ Lowering your own role may remove your access to this page.'),
+      screen.getByText('Lowering your own role may remove your access to this page.'),
     ).toBeTruthy();
   });
 

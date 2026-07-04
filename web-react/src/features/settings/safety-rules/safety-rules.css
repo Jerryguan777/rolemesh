@@ -114,8 +114,12 @@
   color: var(--rm-info-text);
 }
 .dup-banner.warn {
-  background: var(--rm-warn-bg);
-  color: var(--rm-warn-text);
+  /* v16 audit: strong colors never fill areas — cautionary callout =
+   * white surface + hairline border + warn left rule. */
+  background: var(--rm-card-bg);
+  border: 1px solid var(--rm-border);
+  border-left: 3px solid var(--rm-warn-text);
+  color: var(--rm-text);
 }
 .dup-banner.subtle {
   background: var(--rm-card-bg);

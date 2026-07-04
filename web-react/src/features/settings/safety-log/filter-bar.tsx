@@ -10,6 +10,7 @@
 // writes from_ts; `Custom` reveals the datetime-local pair (the shipped
 // Lit control) for arbitrary ranges. Same wire semantics either way.
 
+import { Shield } from 'lucide-react';
 import type {
   SafetyCheck,
   SafetyStage,
@@ -91,7 +92,8 @@ export function FilterBar({
     <div className="log-bar" data-testid="log-filter-bar">
       {filters.ruleId ? (
         <span className="rule-chip" data-testid="rule-chip">
-          🛡 Rule: {ruleChipLabel ?? filters.ruleId}
+          <Shield size={14} style={{ flexShrink: 0, verticalAlign: -2 }} /> Rule:{' '}
+          {ruleChipLabel ?? filters.ruleId}
           <button
             title="Clear rule filter"
             aria-label="Clear rule filter"

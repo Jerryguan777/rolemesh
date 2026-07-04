@@ -16,7 +16,11 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { getApiClient, type Coworker } from '../../api/client';
+import {
+  getApiClient,
+  type ApprovalRequest,
+  type Coworker,
+} from '../../api/client';
 import { useConversations, useCoworkers, useMessages, useModels } from '../../api/queries';
 import { currentMe } from '../../lib/capabilities';
 import { modelsByIdMap } from '../../lib/coworker-label';
@@ -30,7 +34,41 @@ import { RunHistoryAside } from './run-history-aside';
 import { StatusBar } from './status-bar';
 import { useChatParams } from './use-chat-params';
 import { useConversationStream } from './use-conversation-stream';
+import { ApprovalsInbox } from './approvals/approvals-inbox';
+import { useApprovalStore } from '../../stores/approval-store';
 import './chat.css';
+import './approvals/approvals.css';
+
+// DEV-only demo affordances (spec O.3/O.4, build-flag-stripped): they
+// poke the mock backend's raise/expire helpers so the full server-echo
+// path runs — a fabricated client-side card would be dropped by the
+// next REST refresh.
+const DEMO = import.meta.env.DEV
+  ? {
+      async simulateOne(conversationId: string | null) {
+        try {
+          await fetch('/api/__mock/approval-raise', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ conversation_id: conversationId }),
+          });
+        } catch (err) {
+          console.warn('demo raise failed (not the mock backend?)', err);
+        }
+      },
+      async simulateTimeout(requestId: string) {
+        try {
+          await fetch('/api/__mock/approval-expire', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ request_id: requestId }),
+          });
+        } catch (err) {
+          console.warn('demo expire failed (not the mock backend?)', err);
+        }
+      },
+    }
+  : null;
 
 type Aside = 'recall' | 'debug' | null;
 
@@ -134,16 +172,41 @@ export function ChatPage() {
   const bootstrapping =
     !noAgent && (!coworkersQ.data || !chatId || messagesQ.data === undefined);
   const history = messagesQ.data ?? [];
+  const cardCount = useApprovalStore((s) => s.cards.length);
+  const setHighlight = useApprovalStore((s) => s.setHighlight);
   const isEmpty =
     !bootstrapping &&
     history.length === 0 &&
     stream.rows.length === 0 &&
-    stream.draft === null;
+    stream.draft === null &&
+    cardCount === 0;
 
   const initials = initialsOf(currentMe()?.name);
 
+  // Inbox row jump (§4.7): close-jump-highlight. Switching agent+chat
+  // re-runs the bootstrap + card hydration; the highlighted card
+  // pulses and auto-expands once it renders.
+  function jumpToApproval(row: ApprovalRequest) {
+    setHighlight(row.request_id);
+    if (row.conversation_id && row.conversation_id !== chatId) {
+      setParams({
+        agentId: row.coworker_id ?? agentId,
+        chatId: row.conversation_id,
+      });
+    }
+  }
+
   return (
     <div className="chat-shell">
+      <div className="chat-topbar">
+        <ApprovalsInbox
+          coworkers={coworkersQ.data ?? []}
+          conversations={conversationsQ.data ?? []}
+          activeChatId={chatId}
+          onJump={jumpToApproval}
+          onSimulate={DEMO ? () => void DEMO.simulateOne(chatId) : undefined}
+        />
+      </div>
       <div className="chat-container">
         <div className="msg-root">
           {noAgent ? (
@@ -162,8 +225,11 @@ export function ChatPage() {
               history={history}
               liveRows={stream.rows}
               draft={stream.draft}
-              pendingApprovals={stream.pendingApprovals}
               initials={initials}
+              agentName={activeAgent?.name ?? null}
+              onSimulateTimeout={
+                DEMO ? (id) => void DEMO.simulateTimeout(id) : undefined
+              }
             />
           )}
         </div>
