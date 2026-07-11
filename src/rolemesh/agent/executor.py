@@ -92,7 +92,12 @@ class AgentBackendConfig:
     """
 
     name: str
-    image: str
+    # None means "use the deployment-layer CONTAINER_IMAGE env var"
+    # (the normal case — operators set the image via Helm values or
+    # compose env, and it must also match the orphan-cleanup image
+    # whitelist built from CONTAINER_IMAGE in main.py). Only set an
+    # explicit image here if a backend genuinely needs a different one.
+    image: str | None = None
     entrypoint: list[str] | None = None
     extra_mounts: list[tuple[str, str, bool]] = field(default_factory=list)
     extra_env: dict[str, str] = field(default_factory=dict)
@@ -101,7 +106,6 @@ class AgentBackendConfig:
 
 CLAUDE_CODE_BACKEND = AgentBackendConfig(
     name="claude",
-    image="rolemesh-agent:latest",
     extra_env={"AGENT_BACKEND": "claude"},
 )
 
@@ -156,7 +160,6 @@ def _pi_extra_env() -> dict[str, str]:
 
 PI_BACKEND = AgentBackendConfig(
     name="pi",
-    image="rolemesh-agent:latest",
     extra_env=_pi_extra_env(),
     skip_claude_session=True,
 )

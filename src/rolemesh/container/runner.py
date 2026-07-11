@@ -446,7 +446,12 @@ def build_container_spec(
     ``None`` keeps the legacy .env-default behavior for callers that
     don't have a coworker context (evaluation CLI, etc.).
     """
-    image = backend_config.image if backend_config else CONTAINER_IMAGE
+    # CONTAINER_IMAGE (deployment-layer env) is the single source of
+    # truth for the agent image; a backend_config.image (None — or, per
+    # the `or`, empty — by default) only overrides it for backends that
+    # genuinely need a different image. The same CONTAINER_IMAGE feeds
+    # the orphan-cleanup whitelist in main.py, so the two stay in sync.
+    image = (backend_config.image if backend_config else None) or CONTAINER_IMAGE
 
     # All topology decisions (NATS URL, proxy base, token placement,
     # proxy env, bridge, DNS, extra_hosts) are made in one place —
