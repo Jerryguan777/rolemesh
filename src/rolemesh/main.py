@@ -2051,6 +2051,7 @@ async def main() -> None:
     from rolemesh.db import get_coworker as _db_get_coworker
     from rolemesh.db import list_skills_for_coworker as _db_list_skills
     from rolemesh.orchestration.coworker_hot_reload import (
+        apply_mcp_changed_event_to_projections,
         subscribe_coworker_mcp_changed,
         subscribe_coworker_restart,
         subscribe_coworker_skills_changed,
@@ -2103,6 +2104,52 @@ async def main() -> None:
         fetch_mcp_configs=_fetch_mcp_configs,
     )
     egress_responder_subs.append(coworker_mcp_sub)
+
+    # egress.mcp.changed → coworker projections. A /mcp-servers PATCH
+    # or DELETE changes the JOINed view every bound coworker spawns
+    # with, but that surface only publishes ``egress.mcp.changed`` —
+    # the ``web.coworker.mcp_changed`` chain above never fires for it,
+    # so projections stayed stale until an unrelated unlink/relink.
+    # Second core-NATS subscription on the same subject as the
+    # registry-mirror one wired earlier (multiple subscribers per
+    # subject is normal NATS); ``mcp_cache.subscribe_mcp_changes`` is
+    # shared with the gateway and stays untouched. Fire-and-forget is
+    # acceptable here for the same reason it is for the registry
+    # mirror: a missed event degrades to staleness until the next
+    # orchestrator restart re-seeds projections from DB.
+    from rolemesh.db import list_coworker_ids_bound_to_mcp_server
+    from rolemesh.egress.mcp_cache import MCP_CHANGED_SUBJECT
+
+    async def _on_mcp_changed_refresh_projections(msg: object) -> None:
+        try:
+            event = json.loads(msg.data)  # type: ignore[attr-defined]
+        except (ValueError, AttributeError):
+            return  # registry-mirror subscriber already logs these
+        try:
+            n = await apply_mcp_changed_event_to_projections(
+                event,
+                state=_state,
+                fetch_mcp_configs=_fetch_mcp_configs,
+                list_bound_coworker_ids=list_coworker_ids_bound_to_mcp_server,
+            )
+        except Exception:
+            logger.exception(
+                "egress.mcp.changed projection refresh failed",
+                payload=event,
+            )
+            return
+        if n:
+            logger.info(
+                "Coworker MCP projections refreshed after server change",
+                mcp_server=event.get("name") if isinstance(event, dict) else None,
+                action=event.get("action") if isinstance(event, dict) else None,
+                refreshed=n,
+            )
+
+    mcp_projection_sub = await _transport.nc.subscribe(
+        MCP_CHANGED_SUBJECT, cb=_on_mcp_changed_refresh_projections,
+    )
+    egress_responder_subs.append(mcp_projection_sub)
 
     # web.coworker.skills_changed — sibling of mcp_changed for the
     # per-tenant skills catalog (v1.1 03b). Catalog edits and
