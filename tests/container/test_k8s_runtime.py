@@ -1285,3 +1285,49 @@ async def test_run_without_ensure_available_raises() -> None:
     rt = K8sRuntime()
     with pytest.raises(RuntimeError, match="ensure_available"):
         await rt.run(ContainerSpec(name="a", image="img"))
+
+
+# ===========================================================================
+# rwo-colocated node pinning (docs/21 §7.2).
+# The data PVC is ReadWriteOnce in storage.mode=rwo-colocated: an agent pod
+# scheduled to any node but the orchestrator's hangs Pending forever on a
+# Multi-Attach error. The runtime therefore pins agent pods to the
+# orchestrator's own node (Downward-API-provided) via nodeSelector.
+# ===========================================================================
+
+
+def test_rwo_colocated_pins_agent_to_orchestrator_node() -> None:
+    manifest = _manifest(
+        ContainerSpec(name="a", image="img"),
+        storage_mode="rwo-colocated",
+        node_name="worker-1",
+    )
+    assert manifest["spec"]["nodeSelector"] == {"kubernetes.io/hostname": "worker-1"}
+
+
+def test_default_manifest_has_no_node_selector() -> None:
+    # Mutation caught: unconditionally emitting the selector would pin
+    # RWX-mode agents (and every existing deployment) to one node.
+    manifest = _manifest(ContainerSpec(name="a", image="img"))
+    assert "nodeSelector" not in manifest["spec"]
+
+
+def test_rwx_mode_has_no_node_selector() -> None:
+    manifest = _manifest(
+        ContainerSpec(name="a", image="img"),
+        storage_mode="rwx",
+        node_name="worker-1",
+    )
+    assert "nodeSelector" not in manifest["spec"]
+
+
+def test_rwo_colocated_without_node_name_stays_unpinned() -> None:
+    # Missing Downward API env must degrade to today's behavior (volume
+    # constraint only), never emit an empty/bogus selector that would make
+    # the pod unschedulable everywhere.
+    manifest = _manifest(
+        ContainerSpec(name="a", image="img"),
+        storage_mode="rwo-colocated",
+        node_name="",
+    )
+    assert "nodeSelector" not in manifest["spec"]

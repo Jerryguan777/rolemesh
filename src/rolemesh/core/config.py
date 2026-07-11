@@ -150,6 +150,15 @@ ROLEMESH_CONTAINER_RUNTIME: str = os.environ.get("ROLEMESH_CONTAINER_RUNTIME", "
 #   ROLEMESH_K8S_RUNTIME_CLASS    RuntimeClass used when a spec asks for the
 #                                 gVisor OCI runtime (spec.runtime="runsc");
 #                                 empty = the conventional name "gvisor"
+#   ROLEMESH_K8S_STORAGE_MODE     the chart's storage.mode ("rwx" |
+#                                 "rwo-colocated"). In rwo-colocated the
+#                                 data PVC is ReadWriteOnce and agent pods
+#                                 MUST land on the node it is attached to
+#                                 (this pod's own node) — otherwise they
+#                                 hang Pending on a Multi-Attach error.
+#   ROLEMESH_K8S_NODE_NAME        this pod's node (chart injects it via the
+#                                 Downward API, fieldRef spec.nodeName);
+#                                 the rwo-colocated nodeSelector target
 ROLEMESH_K8S_NAMESPACE: str = os.environ.get("ROLEMESH_K8S_NAMESPACE", "rolemesh")
 ROLEMESH_K8S_DATA_PVC: str = os.environ.get("ROLEMESH_K8S_DATA_PVC", "rolemesh-data")
 ROLEMESH_K8S_IMAGE_PULL_SECRET: str = os.environ.get("ROLEMESH_K8S_IMAGE_PULL_SECRET", "")
@@ -157,6 +166,8 @@ ROLEMESH_K8S_IMAGE_PULL_POLICY: str = os.environ.get(
     "ROLEMESH_K8S_IMAGE_PULL_POLICY", "IfNotPresent"
 )
 ROLEMESH_K8S_RUNTIME_CLASS: str = os.environ.get("ROLEMESH_K8S_RUNTIME_CLASS", "")
+ROLEMESH_K8S_STORAGE_MODE: str = os.environ.get("ROLEMESH_K8S_STORAGE_MODE", "")
+ROLEMESH_K8S_NODE_NAME: str = os.environ.get("ROLEMESH_K8S_NODE_NAME", "")
 
 # OCI runtime selection (R1). "runc" is the default; "runsc" enables gVisor
 # syscall-level sandboxing and requires runsc to be registered in
