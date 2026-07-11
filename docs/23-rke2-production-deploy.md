@@ -95,8 +95,7 @@ storage:
 The data PVC is ReadWriteOnce; the orchestrator mounts it directly (the
 scheduler pins it to the PVC's node), and the agent pods the orchestrator
 spawns mount the same RWO PVC and co-locate automatically (a second node
-attaching blocks with a Multi-Attach error). See
-`values-rwo-colocated.yaml`.
+attaching blocks with a Multi-Attach error).
 
 ## 3. Secrets
 

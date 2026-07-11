@@ -127,10 +127,6 @@ spec:
             # get it pinned as their resolver and verify asserts the match.
             - name: EGRESS_GATEWAY_DNS_IP
               value: {{ required "egressGateway.clusterIP is required" .Values.egressGateway.clusterIP | quote }}
-            # Gateway service name (informational; the runner reads
-            # EGRESS_GATEWAY_CONTAINER_NAME which defaults to this).
-            - name: EGRESS_GATEWAY_HOST
-              value: "egress-gateway"
             - name: EGRESS_TOKEN_SECRET
               valueFrom:
                 secretKeyRef:

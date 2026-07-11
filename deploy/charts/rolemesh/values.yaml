@@ -1,9 +1,8 @@
 # RoleMesh Helm chart — default (production-leaning) values.
 #
-# Three value files ship with the chart:
+# Two value files ship with the chart:
 #   values.yaml              this file — production-leaning defaults
 #   values-kind.yaml         local kind single-node loop (docs/21 §10.3)
-#   values-rwo-colocated.yaml RWO storage + podAffinity (docs/21 §7.2)
 #
 # HARD CONTRACT (docs/21 §4.2, src/rolemesh/container/k8s_runtime.py):
 # the orchestrator's verify_infrastructure() reads several object names and
@@ -33,7 +32,8 @@
 clusterDomain: cluster.local
 
 # -- Images ------------------------------------------------------------------
-# tag "" falls back to Chart.appVersion (see _helpers rolemesh.imageTag).
+# tag "" falls back to Chart.appVersion (each template inlines
+# `default .Chart.AppVersion .Values.<x>.image.tag`).
 image:
   pullPolicy: IfNotPresent
   # Optional imagePullSecrets name for private registries. Injected into the
@@ -180,8 +180,8 @@ storage:
   #                  share it from any node (Longhorn RWX / NFS). DEFAULT.
   #   rwo-colocated  ReadWriteOnce PVC + podAffinity pins the orchestrator
   #                  (and agents, via the orchestrator's scheduling) to the
-  #                  PVC's node. Use when no RWX class exists (docs/21 §7.2).
-  #                  Set via values-rwo-colocated.yaml.
+  #                  PVC's node. Use when no RWX class exists (docs/21 §7.2;
+  #                  see docs/23 §2.2 for the RKE2 example).
   mode: rwx
   size: 10Gi
   # Empty = cluster default StorageClass. For RWX you typically name the

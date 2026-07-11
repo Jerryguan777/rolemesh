@@ -38,15 +38,6 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end -}}
 
 {{/*
-Image tag resolution: an explicit per-image .tag wins; otherwise fall
-back to the chart's appVersion so a fresh `helm install` pins a coherent
-release without forcing the operator to repeat the version three times.
-*/}}
-{{- define "rolemesh.imageTag" -}}
-{{- default .root.Chart.AppVersion .image.tag -}}
-{{- end -}}
-
-{{/*
 The orchestrator ServiceAccount name. The orchestrator Deployment runs
 under it and verify_infrastructure self-checks its RBAC; the Role/Binding
 target the same name.
