@@ -77,6 +77,12 @@ webui:
     # their parameters (set type: LoadBalancer alongside). Rendered
     # verbatim onto the webui Service; empty map renders nothing.
     annotations: {}
+    # spec.loadBalancerClass (K8s 1.24+): some platform LB controllers
+    # only reconcile Services carrying their class. Only meaningful with
+    # type: LoadBalancer; empty renders nothing. NOTE: the field is
+    # IMMUTABLE after Service creation — changing it later requires
+    # deleting and recreating the Service.
+    loadBalancerClass: ""
   # The UI's external URL once exposed (scheme://host[:port], no trailing
   # slash). Single source consumed by: WEBUI_BASE_URL (webui +
   # orchestrator env) and the auth.oidc.redirectUri default. Empty =
@@ -276,6 +282,15 @@ auth:
     # true, or the browser drops the refresh cookie.
     cookieSecure: true
     cookieSamesite: "lax"
+    # -- Group/scope-based role mapping (webui-only; IdPs that deliver
+    # roles via a groups claim rather than a flat role claim). All
+    # optional; empty renders nothing. The two *RoleMap values are JSON
+    # STRINGS — set them via a values FILE (-f), not --set, whose
+    # comma/brace escaping mangles JSON.
+    claimGroups: ""       # e.g. "groups"
+    groupRoleMap: ""      # e.g. '{"idp-admins": "admin", "idp-users": "member"}'
+    scopeRoleMap: ""      # e.g. '{"rolemesh.admin": "admin"}'
+    adapter: ""           # named claim-mapping adapter; empty = generic
 
 # -- Seed Job ----------------------------------------------------------------
 # Post-install/upgrade Job that runs schema creation + the initial admin
@@ -306,6 +321,15 @@ networkPolicy:
   # via another mechanism. Disabling removes agent isolation — never do this
   # in production.
   enabled: true
+  # Cilium CNI only: render a CiliumNetworkPolicy allowing the
+  # orchestrator to reach the kube-apiserver entity. Cilium implements
+  # standard-NetworkPolicy ipBlock as "external traffic only", so the
+  # orchestrator-policy 0.0.0.0/0:443/6443 rule does not cover pod ->
+  # K8s API on Cilium — the orchestrator then fail-closes at startup,
+  # its log stuck on API timeouts. Enable this on Cilium clusters; leave
+  # off elsewhere (the CRD does not exist on other CNIs).
+  cilium:
+    enabled: false
   # The cluster's DNS service IP+port for the gateway-policy/orchestrator
   # egress to kube-dns (the gateway forwards recursive queries upstream).
   kubeDns:

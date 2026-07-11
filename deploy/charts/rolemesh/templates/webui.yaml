@@ -20,6 +20,9 @@ metadata:
   {{- end }}
 spec:
   type: {{ .Values.webui.service.type }}
+  {{- with .Values.webui.service.loadBalancerClass }}
+  loadBalancerClass: {{ . | quote }}
+  {{- end }}
   selector:
     app.kubernetes.io/component: webui
     app.kubernetes.io/instance: {{ .Release.Name }}
@@ -121,6 +124,22 @@ spec:
               value: {{ .Values.auth.oidc.claimTenantId | quote }}
             - name: OIDC_CLAIM_ROLE
               value: {{ .Values.auth.oidc.claimRole | quote }}
+            {{- with .Values.auth.oidc.claimGroups }}
+            - name: OIDC_CLAIM_GROUPS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.auth.oidc.groupRoleMap }}
+            - name: OIDC_GROUP_ROLE_MAP
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.auth.oidc.scopeRoleMap }}
+            - name: OIDC_SCOPE_ROLE_MAP
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.auth.oidc.adapter }}
+            - name: OIDC_ADAPTER
+              value: {{ . | quote }}
+            {{- end }}
             - name: OIDC_COOKIE_SECURE
               value: {{ .Values.auth.oidc.cookieSecure | quote }}
             - name: OIDC_COOKIE_SAMESITE

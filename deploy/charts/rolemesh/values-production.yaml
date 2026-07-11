@@ -35,9 +35,11 @@ webui:
     repository: "registry.example.com/CHANGEME/rolemesh-webui"
     tag: "0.1.0"
   # Expose the UI through the platform load balancer (annotations are
-  # controller-specific; ask your platform team for the required set):
+  # controller-specific; ask your platform team for the required set;
+  # some controllers additionally require their loadBalancerClass):
   # service:
   #   type: LoadBalancer
+  #   loadBalancerClass: "lb.example.com"
   #   annotations:
   #     lb.example.com/hostname: "rolemesh.example.com"
 egressGateway:
@@ -67,15 +69,27 @@ secrets:
 
 # -- Auth: SSO via OIDC -----------------------------------------------------
 # Wires BOTH webui and orchestrator (see values.yaml `auth:` for every
-# field). redirectUri derives from webui.externalUrl when set.
+# field). redirectUri derives from webui.externalUrl when set. For IdPs
+# that deliver roles via a groups claim, add the group mapping fields —
+# JSON strings, set via this file (-f), never --set.
 # auth:
 #   mode: oidc
 #   oidc:
 #     discoveryUrl: "https://idp.example.com/realms/CHANGEME/.well-known/openid-configuration"
 #     clientId: "rolemesh-web"
 #     existingSecret: "CHANGEME-oidc-secret"   # key: OIDC_CLIENT_SECRET
+#     claimGroups: "groups"
+#     groupRoleMap: '{"idp-rolemesh-admins": "admin"}'
 # webui:
 #   externalUrl: "https://rolemesh.example.com"
+
+# -- NetworkPolicy: Cilium clusters ------------------------------------------
+# On Cilium, standard ipBlock rules do not cover pod -> kube-apiserver;
+# enable the companion CiliumNetworkPolicy or the orchestrator cannot
+# reach the K8s API and fail-closes at startup (see values.yaml).
+# networkPolicy:
+#   cilium:
+#     enabled: true
 
 # -- Database: external Postgres -----------------------------------------
 # Bundled Postgres is a dev/PoC convenience (single replica, chart-managed

@@ -1,0 +1,36 @@
+{{- if and .Values.networkPolicy.enabled .Values.networkPolicy.cilium.enabled }}
+{{- /*
+Cilium-specific companion to orchestrator-policy (networkpolicy.yaml).
+
+WHY: Cilium implements standard-NetworkPolicy ipBlock (toCIDR) as
+"traffic leaving the cluster" — it does NOT match pod -> Service
+ClusterIP / kube-apiserver traffic, which Cilium classifies as the
+special `kube-apiserver` entity. orchestrator-policy's
+`ipBlock 0.0.0.0/0 : 443/6443` rule therefore never admits the
+orchestrator's K8s API calls on Cilium: verify_infrastructure cannot
+reach the API server and the orchestrator fail-closes at startup
+(symptom: startup log stuck on API timeouts against the kubernetes
+Service ClusterIP).
+
+This policy adds ONLY that missing allowance, using Cilium's native
+entity concept. It is additive: Cilium merges allowances across
+CiliumNetworkPolicy and standard NetworkPolicy objects, so the four
+standard policies keep doing everything else and stay the contract
+verify_infrastructure checks. Non-Cilium clusters never render this
+(default off — the CRD does not exist there).
+*/ -}}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: orchestrator-apiserver-cilium
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "rolemesh.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app.kubernetes.io/component: orchestrator
+  egress:
+    - toEntities:
+        - kube-apiserver
+{{- end }}
