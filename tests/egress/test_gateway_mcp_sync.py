@@ -17,6 +17,7 @@ apply_snapshot_to_registry, the subscription wiring, and the aiohttp
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING, Any
@@ -303,3 +304,79 @@ async def test_healthz_combines_both_seed_flags_and_stays_200() -> None:
             "mcp_seeded": True,
             "mcp_entries": 1,
         }
+
+
+# ---------------------------------------------------------------------------
+# apply failures and task death stay visible
+# ---------------------------------------------------------------------------
+
+
+async def test_apply_failure_is_retried_not_fatal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A snapshot that fetches fine but fails to APPLY must count as a
+    failed attempt (warning + retry), not escape the loop — an escaped
+    exception kills the sync task while /healthz keeps reporting the
+    last seeded state, recreating the invisible degradation this
+    module exists to prevent."""
+    monkeypatch.setattr(gateway, "_SNAPSHOT_RETRY_INITIAL_S", 0.01)
+    monkeypatch.setattr(gateway, "_SNAPSHOT_RETRY_MAX_S", 0.04)
+
+    real_apply = gateway.apply_snapshot_to_registry
+    calls = {"n": 0}
+
+    def _flaky_apply(entries: list[Any]) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("injected apply failure")
+        real_apply(entries)
+
+    monkeypatch.setattr(gateway, "apply_snapshot_to_registry", _flaky_apply)
+
+    nc = _ScriptedMcpNats(snapshot_entries=[_entry("github", "https://api.github.com")])
+    async with AsyncExitStack() as stack:
+        state = await gateway._start_mcp_sync(nc, stack)  # type: ignore[arg-type]
+        await _wait_for(lambda: state.seeded)
+        assert calls["n"] == 2, "failed apply + successful retry"
+        assert set(reverse_proxy.get_mcp_registry()) == {"github"}
+
+
+async def test_sync_task_death_emits_error_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defence in depth behind the try: if a bug-grade exception ever
+    does kill a background sync task, the done-callback must emit an
+    ERROR — the only remaining operator signal, since /healthz keeps
+    reporting the last seeded state."""
+    errors: list[tuple[str, dict[str, Any]]] = []
+
+    class _RecordingLogger:
+        def error(self, msg: str, **kw: Any) -> None:
+            errors.append((msg, kw))
+
+        def __getattr__(self, name: str) -> Any:  # swallow other levels
+            return lambda *a, **k: None
+
+    monkeypatch.setattr(gateway, "logger", _RecordingLogger())
+
+    async def _boom() -> None:
+        raise RuntimeError("bug-grade failure")
+
+    task = asyncio.create_task(_boom(), name="egress-mcp-snapshot-seed")
+    task.add_done_callback(gateway._log_task_death)
+    with contextlib.suppress(RuntimeError):
+        await task
+    await asyncio.sleep(0)  # done-callbacks run via call_soon
+
+    assert len(errors) == 1
+    msg, kw = errors[0]
+    assert "died" in msg
+    assert kw["task"] == "egress-mcp-snapshot-seed"
+
+    # Cancellation is normal shutdown, never an ERROR.
+    errors.clear()
+    hung = asyncio.create_task(asyncio.Event().wait(), name="egress-mcp-snapshot-seed")
+    hung.add_done_callback(gateway._log_task_death)
+    await gateway._cancel_task(hung)
+    await asyncio.sleep(0)
+    assert errors == []

@@ -243,6 +243,27 @@ async def _cancel_task(task: asyncio.Task[Any]) -> None:
         await task
 
 
+def _log_task_death(task: asyncio.Task[Any]) -> None:
+    """Done-callback for the background sync tasks.
+
+    A task that dies on an unexpected exception (not cancellation)
+    would otherwise vanish silently — asyncio only surfaces the
+    exception at GC time, and /healthz keeps reporting the last seeded
+    state while seeding/reconciling has actually stopped. There is no
+    in-task recovery for a bug-grade failure; this ERROR log is the
+    operator's signal to restart the gateway.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            "gateway: background sync task died — its state stays frozen until restart",
+            task=task.get_name(),
+            error=repr(exc),
+        )
+
+
 class _McpSyncState:
     """Seed marker for the MCP registry sync, polled by /healthz.
 
@@ -281,9 +302,12 @@ async def _seed_and_reconcile_mcp(
     acceptable because this table is routing, not access control —
     egress rules gate what agents may actually reach.
 
-    A reconcile failure (orchestrator temporarily away) logs a warning
-    and waits for the next interval; fast backoff is seed-phase-only
-    behaviour. Cancellation (gateway shutdown) propagates.
+    A failed cycle — fetch or apply — logs a warning and waits for the
+    next attempt/interval; fast backoff is seed-phase-only behaviour.
+    Apply sits inside the try deliberately: an exception escaping the
+    loop would kill this task while /healthz keeps reporting the last
+    seeded state — exactly the invisible degradation this task exists
+    to prevent. Cancellation (gateway shutdown) propagates.
     """
     delay = _SNAPSHOT_RETRY_INITIAL_S
     attempt = 0
@@ -291,9 +315,10 @@ async def _seed_and_reconcile_mcp(
         attempt += 1
         try:
             entries = await fetch_mcp_snapshot_via_nats(nats_client, timeout_s=_SNAPSHOT_TIMEOUT_S)
-        except Exception as exc:  # noqa: BLE001 — any RPC failure means "retry"
+            apply_snapshot_to_registry(entries)
+        except Exception as exc:  # noqa: BLE001 — any failure means "retry"
             logger.warning(
-                "gateway: MCP snapshot fetch failed — /mcp-proxy serves 404s until seeded, retrying",
+                "gateway: MCP snapshot seed failed — /mcp-proxy serves 404s until seeded, retrying",
                 attempt=attempt,
                 retry_in_s=delay,
                 error=str(exc),
@@ -301,7 +326,6 @@ async def _seed_and_reconcile_mcp(
             await asyncio.sleep(delay)
             delay = min(delay * 2, _SNAPSHOT_RETRY_MAX_S)
             continue
-        apply_snapshot_to_registry(entries)
         state.seeded = True
         logger.info(
             "gateway: MCP registry seeded — leaving degraded mode",
@@ -313,13 +337,13 @@ async def _seed_and_reconcile_mcp(
         await asyncio.sleep(_RECONCILE_INTERVAL_S)
         try:
             entries = await fetch_mcp_snapshot_via_nats(nats_client, timeout_s=_SNAPSHOT_TIMEOUT_S)
+            apply_snapshot_to_registry(entries)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "gateway: MCP reconcile fetch failed — registry may be stale until next interval",
+                "gateway: MCP reconcile failed — registry may be stale until next interval",
                 error=str(exc),
             )
             continue
-        apply_snapshot_to_registry(entries)
         logger.debug("gateway: MCP registry reconciled", count=len(entries))
 
 
@@ -346,6 +370,7 @@ async def _start_mcp_sync(
         _seed_and_reconcile_mcp(nats_client, state),
         name="egress-mcp-snapshot-seed",
     )
+    task.add_done_callback(_log_task_death)
     stack.push_async_callback(_cancel_task, task)
     return state
 
@@ -397,6 +422,7 @@ async def main() -> None:
             _seed_rules_with_retry(nats_client, cache),
             name="egress-rule-snapshot-seed",
         )
+        seed_task.add_done_callback(_log_task_death)
         stack.push_async_callback(_cancel_task, seed_task)
 
         # --- Safety caller (audit publish via NATS) ------------------
