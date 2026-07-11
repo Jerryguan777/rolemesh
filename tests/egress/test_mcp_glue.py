@@ -253,11 +253,11 @@ class TestSnapshotUrlPassthrough:
     @pytest.mark.asyncio
     async def test_fetch_all_passes_service_name_url_verbatim(self) -> None:
         reverse_proxy.register_mcp_server(
-            "tropos-mcp", "https://tropos-mcp:8509", {}, "user"
+            "example-mcp", "https://example-mcp:8509", {}, "user"
         )
         entries = await fetch_all_mcp_servers()
         assert len(entries) == 1
-        assert entries[0].url == "https://tropos-mcp:8509"
+        assert entries[0].url == "https://example-mcp:8509"
 
     @pytest.mark.asyncio
     async def test_fetch_all_does_not_rewrite_loopback(self) -> None:
