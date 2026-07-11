@@ -20,14 +20,20 @@ the Internal=true flag on agent-net — see docs/egress/deployment.md.
 Startup is *degraded-but-serving* (docs/21-container-runtime-decoupling
 §5): once NATS is connected, every listener (reverse proxy with
 /healthz, forward proxy, DNS) binds immediately without waiting for the
-rule snapshot. The snapshot responder lives in the orchestrator, and in
-the compose deployment the gateway starts first — blocking on the
-snapshot would deadlock the whole stack. Until the snapshot arrives the
-policy plane is deny-all (an unseeded PolicyCache makes the safety
-caller block every request) and a background task retries the snapshot
-RPC with exponential backoff; /healthz reports
-``{"status": "degraded", "rules_seeded": false}`` in the meantime but
-always returns 200 — health means "NATS connected + listeners bound".
+rule or MCP snapshots. The snapshot responders live in the
+orchestrator, and in the compose deployment the gateway starts first —
+blocking on a snapshot would deadlock the whole stack. Until the rule
+snapshot arrives the policy plane is deny-all (an unseeded PolicyCache
+makes the safety caller block every request); until the MCP snapshot
+arrives ``/mcp-proxy`` answers 404. Each plane has a background task
+that retries its snapshot RPC with exponential backoff; the MCP task
+then keeps re-fetching the snapshot every _RECONCILE_INTERVAL_S — core
+NATS deltas are at-most-once, so the periodic full reconcile, not the
+delta stream, is what guarantees the registry converges (see
+``_seed_and_reconcile_mcp``). /healthz stays 200 throughout (health
+means "NATS connected + listeners bound"); its body reports
+``rules_seeded`` / ``mcp_seeded`` / ``mcp_entries``, and ``status`` is
+"ok" only when both planes are seeded.
 
 Hard prerequisites stay fail-closed: a NATS that won't connect or a
 missing EGRESS_TOKEN_SECRET raises out of ``main``, exits non-zero,
@@ -112,6 +118,12 @@ _SNAPSHOT_TIMEOUT_S = 5.0
 # window after the orchestrator comes up, and tests patch them directly.
 _SNAPSHOT_RETRY_INITIAL_S = 1.0
 _SNAPSHOT_RETRY_MAX_S = 30.0
+
+# Steady-state interval for the MCP registry reconcile loop (same
+# module-level-constant rationale as the retry schedule above). Bounds
+# how long a lost ``egress.mcp.changed`` delta can keep the registry
+# stale.
+_RECONCILE_INTERVAL_S = 300.0
 
 
 def _derive_internal_exemption(
@@ -231,6 +243,138 @@ async def _cancel_task(task: asyncio.Task[Any]) -> None:
         await task
 
 
+def _log_task_death(task: asyncio.Task[Any]) -> None:
+    """Done-callback for the background sync tasks.
+
+    A task that dies on an unexpected exception (not cancellation)
+    would otherwise vanish silently — asyncio only surfaces the
+    exception at GC time, and /healthz keeps reporting the last seeded
+    state while seeding/reconciling has actually stopped. There is no
+    in-task recovery for a bug-grade failure; this ERROR log is the
+    operator's signal to restart the gateway.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            "gateway: background sync task died — its state stays frozen until restart",
+            task=task.get_name(),
+            error=repr(exc),
+        )
+
+
+class _McpSyncState:
+    """Seed marker for the MCP registry sync, polled by /healthz.
+
+    ``seeded`` means "the snapshot RPC has succeeded at least once",
+    NOT "the registry is non-empty" — an empty registry is a legal
+    state (no MCP servers configured yet) and must not read as
+    degraded.
+    """
+
+    def __init__(self) -> None:
+        self.seeded = False
+
+
+async def _seed_and_reconcile_mcp(
+    nats_client: nats.aio.client.Client,
+    state: _McpSyncState,
+) -> None:
+    """Seed the MCP registry, then reconcile it against the
+    orchestrator forever. One task, two phases:
+
+    Seed — retry the snapshot RPC with the same exponential backoff as
+    ``_seed_rules_with_retry`` until the first success, then set
+    ``state.seeded``. Covers the cold-start race where the gateway is
+    up before the orchestrator's responder.
+
+    Reconcile — every ``_RECONCILE_INTERVAL_S``, re-fetch the snapshot
+    and apply it as a full replacement (``apply_snapshot_to_registry``
+    is replace-not-merge and idempotent). This loop is the registry's
+    ONLY correctness mechanism: core NATS pub/sub is at-most-once, so
+    ``egress.mcp.changed`` deltas dropped across a NATS reconnect
+    would otherwise leave the registry stale until a restart. The
+    delta subscription on top is purely a propagation-latency
+    optimisation — losing every delta delays convergence by at most
+    one interval. That bound also covers deletions: a removed MCP
+    server may stay routable here for up to one interval, which is
+    acceptable because this table is routing, not access control —
+    egress rules gate what agents may actually reach.
+
+    A failed cycle — fetch or apply — logs a warning and waits for the
+    next attempt/interval; fast backoff is seed-phase-only behaviour.
+    Apply sits inside the try deliberately: an exception escaping the
+    loop would kill this task while /healthz keeps reporting the last
+    seeded state — exactly the invisible degradation this task exists
+    to prevent. Cancellation (gateway shutdown) propagates.
+    """
+    delay = _SNAPSHOT_RETRY_INITIAL_S
+    attempt = 0
+    while not state.seeded:
+        attempt += 1
+        try:
+            entries = await fetch_mcp_snapshot_via_nats(nats_client, timeout_s=_SNAPSHOT_TIMEOUT_S)
+            apply_snapshot_to_registry(entries)
+        except Exception as exc:  # noqa: BLE001 — any failure means "retry"
+            logger.warning(
+                "gateway: MCP snapshot seed failed — /mcp-proxy serves 404s until seeded, retrying",
+                attempt=attempt,
+                retry_in_s=delay,
+                error=str(exc),
+            )
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, _SNAPSHOT_RETRY_MAX_S)
+            continue
+        state.seeded = True
+        logger.info(
+            "gateway: MCP registry seeded — leaving degraded mode",
+            attempt=attempt,
+            count=len(entries),
+        )
+
+    while True:
+        await asyncio.sleep(_RECONCILE_INTERVAL_S)
+        try:
+            entries = await fetch_mcp_snapshot_via_nats(nats_client, timeout_s=_SNAPSHOT_TIMEOUT_S)
+            apply_snapshot_to_registry(entries)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "gateway: MCP reconcile failed — registry may be stale until next interval",
+                error=str(exc),
+            )
+            continue
+        logger.debug("gateway: MCP registry reconciled", count=len(entries))
+
+
+async def _start_mcp_sync(
+    nats_client: nats.aio.client.Client,
+    stack: AsyncExitStack,
+) -> _McpSyncState:
+    """Wire the MCP registry sync: subscribe to change deltas FIRST,
+    then start the background seed+reconcile task.
+
+    Subscription-before-snapshot mirrors the rule-side ordering above
+    so no delta can fall between snapshot generation and subscription.
+    Unlike PolicyCache the registry dict has no unseeded deny-all gate,
+    so a delta that lands while a snapshot reply is in flight can be
+    overwritten by the slightly older snapshot — at seed time and on
+    every reconcile fetch alike. Accepted (the rule side carries the
+    same theoretical race): the periodic reconcile bounds any such
+    loss to one interval.
+    """
+    mcp_sub = await subscribe_mcp_changes(nats_client)
+    stack.push_async_callback(mcp_sub.unsubscribe)  # type: ignore[attr-defined]
+    state = _McpSyncState()
+    task = asyncio.create_task(
+        _seed_and_reconcile_mcp(nats_client, state),
+        name="egress-mcp-snapshot-seed",
+    )
+    task.add_done_callback(_log_task_death)
+    stack.push_async_callback(_cancel_task, task)
+    return state
+
+
 async def main() -> None:
     upstream_dns = _parse_upstream_dns(os.environ.get("EGRESS_UPSTREAM_DNS", _UPSTREAM_DNS_DEFAULT))
 
@@ -278,6 +422,7 @@ async def main() -> None:
             _seed_rules_with_retry(nats_client, cache),
             name="egress-rule-snapshot-seed",
         )
+        seed_task.add_done_callback(_log_task_death)
         stack.push_async_callback(_cancel_task, seed_task)
 
         # --- Safety caller (audit publish via NATS) ------------------
@@ -317,27 +462,13 @@ async def main() -> None:
             bedrock="bedrock-runtime.<region>.amazonaws.com:443",
         )
 
-        # --- MCP server registry: snapshot + hot reload --------------
-        # The MCP registry has to be seeded BEFORE start_credential_proxy
-        # binds — otherwise a client request that lands during the boot
-        # window between bind and snapshot-arrival sees the registry as
-        # empty and gets a 404 it shouldn't have. Snapshot failure is
-        # fail-soft (log + continue with empty registry); subsequent
-        # ``egress.mcp.changed`` events still fill it in as the
-        # orchestrator publishes them, and the operator sees the warning
-        # instead of crash-looping the gateway over a transient NATS
-        # blip on the orchestrator side.
-        try:
-            mcp_entries = await fetch_mcp_snapshot_via_nats(nats_client, timeout_s=_SNAPSHOT_TIMEOUT_S)
-            apply_snapshot_to_registry(mcp_entries)
-            logger.info("gateway: MCP registry seeded", count=len(mcp_entries))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "gateway: MCP snapshot fetch failed — continuing with empty registry; live change events will refill",
-                error=str(exc),
-            )
-        mcp_sub = await subscribe_mcp_changes(nats_client)
-        stack.push_async_callback(mcp_sub.unsubscribe)  # type: ignore[attr-defined]
+        # --- MCP server registry: subscribe + seed + reconcile --------
+        # Same degraded-start shape as the policy cache above: listeners
+        # bind now, /mcp-proxy answers 404 until the first snapshot
+        # lands, and /healthz reports mcp_seeded=false in the meantime.
+        # Ordering and correctness rationale live on _start_mcp_sync /
+        # _seed_and_reconcile_mcp.
+        mcp_state = await _start_mcp_sync(nats_client, stack)
 
         # --- Token vault: forward per-user MCP token requests --------
         # The orchestrator owns the DB-backed TokenVault (refresh
@@ -375,10 +506,11 @@ async def main() -> None:
             credential_resolver=credential_resolver,
             safety_caller=safety,
             token_authority=token_authority,
-            # /healthz stays 200 while degraded; the body flips from
-            # {"status": "degraded"} to {"status": "ok"} once the
-            # background snapshot retry seeds the cache.
+            # /healthz stays 200 while degraded; the body's "status"
+            # flips to "ok" once BOTH background snapshot tasks have
+            # seeded their plane (rules_seeded and mcp_seeded).
             rules_seeded=lambda: cache.seeded,
+            mcp_seeded=lambda: mcp_state.seeded,
         )
         stack.push_async_callback(reverse_runner.cleanup)
 
