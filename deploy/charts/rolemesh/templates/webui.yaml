@@ -14,6 +14,10 @@ metadata:
   labels:
     {{- include "rolemesh.labels" . | nindent 4 }}
     app.kubernetes.io/component: webui
+  {{- with .Values.webui.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   type: {{ .Values.webui.service.type }}
   selector:

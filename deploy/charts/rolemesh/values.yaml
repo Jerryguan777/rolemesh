@@ -73,6 +73,10 @@ webui:
   service:
     type: ClusterIP
     port: 8080
+    # Service annotations — how platform load-balancer controllers take
+    # their parameters (set type: LoadBalancer alongside). Rendered
+    # verbatim onto the webui Service; empty map renders nothing.
+    annotations: {}
   resources:
     requests:
       cpu: 100m

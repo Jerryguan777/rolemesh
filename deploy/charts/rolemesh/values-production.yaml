@@ -34,6 +34,12 @@ webui:
   image:
     repository: "registry.example.com/CHANGEME/rolemesh-webui"
     tag: "0.1.0"
+  # Expose the UI through the platform load balancer (annotations are
+  # controller-specific; ask your platform team for the required set):
+  # service:
+  #   type: LoadBalancer
+  #   annotations:
+  #     lb.example.com/hostname: "rolemesh.example.com"
 egressGateway:
   image:
     repository: "registry.example.com/CHANGEME/rolemesh-egress-gateway"
