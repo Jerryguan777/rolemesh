@@ -5,9 +5,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
-from rolemesh.agent.executor import AgentBackendConfig
+from rolemesh.agent.executor import BACKEND_CONFIGS, AgentBackendConfig
 from rolemesh.auth.permissions import AgentPermissions
 from rolemesh.container.runner import (
+    CONTAINER_IMAGE,
     AvailableGroup,
     ContainerInput,
     ContainerOutput,
@@ -106,10 +107,40 @@ class TestBuildContainerSpec:
         with patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"):
             spec = build_container_spec(mounts, "test-container", "job-123")
         assert spec.name == "test-container"
-        assert spec.image == "rolemesh-agent:latest"
+        # backend_config=None (evaluation CLI etc.) falls back to the
+        # deployment-layer CONTAINER_IMAGE.
+        assert spec.image == CONTAINER_IMAGE
         assert "JOB_ID" in spec.env
         assert spec.env["JOB_ID"] == "job-123"
         assert "ANTHROPIC_API_KEY" in spec.env
+
+    def test_container_image_env_reaches_spec_for_all_backends(self) -> None:
+        """CONTAINER_IMAGE is the single source of truth for the agent image.
+
+        Regression test: the real backend presets used to hardcode
+        "rolemesh-agent:latest", silently overriding the operator's
+        CONTAINER_IMAGE (Helm values / compose env) and diverging from
+        the orphan-cleanup image whitelist in main.py. Inject a
+        non-default image and assert every real backend's spawn spec
+        picks it up.
+
+        Note: runner.py imports CONTAINER_IMAGE by name at module load,
+        so the patch target must be rolemesh.container.runner, not
+        rolemesh.core.config.
+        """
+        sentinel = "registry.example.com/team/agent:1.2.3"
+        mounts = [VolumeMount(host_path="/a", container_path="/b", readonly=True)]
+        for name, config in BACKEND_CONFIGS.items():
+            with (
+                patch("rolemesh.container.runner.CONTAINER_IMAGE", sentinel),
+                patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"),
+            ):
+                spec = build_container_spec(
+                    mounts, f"test-{name}", "job-123", backend_config=config
+                )
+            assert spec.image == sentinel, (
+                f"backend {name!r} ignored CONTAINER_IMAGE (got {spec.image!r})"
+            )
 
     def test_spec_with_backend_config(self) -> None:
         mounts = [VolumeMount(host_path="/a", container_path="/b", readonly=False)]

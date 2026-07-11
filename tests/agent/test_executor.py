@@ -149,7 +149,8 @@ def test_agent_output_metadata_survives_construction() -> None:
 
 
 def test_agent_backend_config_defaults() -> None:
-    cfg = AgentBackendConfig(name="test", image="test:latest")
+    cfg = AgentBackendConfig(name="test")
+    assert cfg.image is None
     assert cfg.entrypoint is None
     assert cfg.extra_mounts == []
     assert cfg.extra_env == {}
@@ -158,7 +159,6 @@ def test_agent_backend_config_defaults() -> None:
 
 def test_claude_code_backend_preset() -> None:
     assert CLAUDE_CODE_BACKEND.name == "claude"
-    assert CLAUDE_CODE_BACKEND.image == "rolemesh-agent:latest"
     assert CLAUDE_CODE_BACKEND.entrypoint is None
     assert CLAUDE_CODE_BACKEND.skip_claude_session is False
     assert CLAUDE_CODE_BACKEND.extra_env == {"AGENT_BACKEND": "claude"}
@@ -166,10 +166,27 @@ def test_claude_code_backend_preset() -> None:
 
 def test_pi_backend_preset() -> None:
     assert PI_BACKEND.name == "pi"
-    assert PI_BACKEND.image == "rolemesh-agent:latest"
     assert PI_BACKEND.entrypoint is None
     assert PI_BACKEND.skip_claude_session is True
     assert PI_BACKEND.extra_env["AGENT_BACKEND"] == "pi"
+
+
+def test_backend_configs_have_no_hardcoded_image() -> None:
+    """Guard against re-hardcoding the agent image in backend presets.
+
+    The agent image must come from the deployment layer (Helm values /
+    compose env → CONTAINER_IMAGE): build_container_spec falls back to
+    CONTAINER_IMAGE when backend_config.image is None, and the orphan-
+    cleanup whitelist in main.py is built from the same CONTAINER_IMAGE.
+    A hardcoded image here would silently override the operator's
+    configured image (breaking private-registry deploys) AND diverge
+    from the cleanup whitelist (leaking orphaned sandboxes forever).
+    """
+    for name, cfg in BACKEND_CONFIGS.items():
+        assert cfg.image is None, (
+            f"backend {name!r} hardcodes an image; the agent image must "
+            f"come from CONTAINER_IMAGE (deployment layer)"
+        )
 
 
 def test_backend_configs_map() -> None:
