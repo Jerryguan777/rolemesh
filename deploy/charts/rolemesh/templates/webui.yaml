@@ -14,6 +14,10 @@ metadata:
   labels:
     {{- include "rolemesh.labels" . | nindent 4 }}
     app.kubernetes.io/component: webui
+  {{- with .Values.webui.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   type: {{ .Values.webui.service.type }}
   selector:
@@ -97,6 +101,34 @@ spec:
                 secretKeyRef:
                   name: {{ $secretName }}
                   key: CREDENTIAL_VAULT_KEY
+            {{- end }}
+            {{- with include "rolemesh.authEnv" . }}
+            {{- . | nindent 12 }}
+            {{- end }}
+            {{- if eq .Values.auth.mode "oidc" }}
+            {{- with .Values.auth.oidc.audience }}
+            - name: OIDC_AUDIENCE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- $redirect := .Values.auth.oidc.redirectUri | default (ternary (printf "%s/oauth2/callback" (trimSuffix "/" .Values.webui.externalUrl)) "" (ne .Values.webui.externalUrl "")) }}
+            {{- with $redirect }}
+            - name: OIDC_REDIRECT_URI
+              value: {{ . | quote }}
+            {{- end }}
+            - name: OIDC_SCOPES
+              value: {{ .Values.auth.oidc.scopes | quote }}
+            - name: OIDC_CLAIM_TENANT_ID
+              value: {{ .Values.auth.oidc.claimTenantId | quote }}
+            - name: OIDC_CLAIM_ROLE
+              value: {{ .Values.auth.oidc.claimRole | quote }}
+            - name: OIDC_COOKIE_SECURE
+              value: {{ .Values.auth.oidc.cookieSecure | quote }}
+            - name: OIDC_COOKIE_SAMESITE
+              value: {{ .Values.auth.oidc.cookieSamesite | quote }}
+            {{- end }}
+            {{- with .Values.webui.externalUrl }}
+            - name: WEBUI_BASE_URL
+              value: {{ . | quote }}
             {{- end }}
             {{- range $k, $v := .Values.webui.extraEnv }}
             - name: {{ $k }}

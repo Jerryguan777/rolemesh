@@ -37,6 +37,25 @@ kube-dns sits inside the Service CIDR; pick a nearby unused address for
 `egressGateway.clusterIP`. The API server rejects an out-of-CIDR value at
 apply time, so a wrong guess fails fast rather than silently.
 
+Two more rules when picking:
+
+* **One address per RoleMesh instance.** ClusterIPs are cluster-global,
+  not namespace-scoped — a second instance in another namespace needs its
+  own free address. The per-environment values file doubles as the
+  allocation ledger.
+* **Prefer the low band of the CIDR** (e.g. `10.43.0.x`): K8s allocates
+  dynamic ClusterIPs from the high band and reserves the low band for
+  static assignment (ServiceIPStaticSubrange), so low picks rarely collide.
+
+Pre-verify a candidate without touching cluster state — `created (server
+dry run)` means it is free; `provided IP is already allocated` means pick
+another:
+
+```sh
+kubectl -n rolemesh create service clusterip probe \
+  --tcp=53:53 --clusterip=10.43.0.53 --dry-run=server
+```
+
 ### 1.2 Label the namespace PSA restricted
 
 ```sh
@@ -59,7 +78,33 @@ kubelet-arg:
 then restart the node's RKE2 service (`systemctl restart rke2-agent`). The
 orchestrator logs a startup warning reminding operators of this.
 
-### 1.4 gVisor (optional, docs/21 §6.4)
+### 1.4 Pre-install checklist
+
+One command per prerequisite; every failure here would otherwise surface
+later as a fail-closed startup or a scheduling-dependent flake. Run before
+the first `helm install` on any new cluster or namespace:
+
+```sh
+# 1. Service CIDR + a free gateway address (see §1.1 for the two rules):
+kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}'
+kubectl -n rolemesh create service clusterip probe --tcp=53:53 \
+  --clusterip=<candidate> --dry-run=server
+
+# 2. NetworkPolicy RBAC (helm must be able to create the four policies):
+kubectl auth can-i create networkpolicies -n rolemesh
+
+# 3. CNI enforces NetworkPolicy — objects being accepted proves nothing
+#    (kindnet/plain-flannel accept and ignore). The real proof is the
+#    deny probe after install: helm test (§5.1).
+
+# 4. Storage class for the data PVC (RWX preferred, else §2.2):
+kubectl get storageclass
+
+# 5. Private registry only — the pull secret exists in the namespace:
+kubectl -n rolemesh get secret <pull-secret-name>
+```
+
+### 1.5 gVisor (optional, docs/21 §6.4)
 
 If coworkers request the `runsc` OCI runtime, register a RuntimeClass and
 set `orchestrator.runtimeClass` to its name. RKE2 can run gVisor via a
@@ -95,8 +140,7 @@ storage:
 The data PVC is ReadWriteOnce; the orchestrator mounts it directly (the
 scheduler pins it to the PVC's node), and the agent pods the orchestrator
 spawns mount the same RWO PVC and co-locate automatically (a second node
-attaching blocks with a Multi-Attach error). See
-`values-rwo-colocated.yaml`.
+attaching blocks with a Multi-Attach error).
 
 ## 3. Secrets
 
@@ -156,7 +200,9 @@ helm upgrade --install rolemesh deploy/charts/rolemesh \
 ```
 
 Minimum required overrides: `egressGateway.clusterIP`, real `secrets.*`,
-external `postgres`, a real `storage.storageClass`.
+external `postgres`, a real `storage.storageClass` — start from the
+skeleton `deploy/charts/rolemesh/values-production.yaml` (copy per
+environment, fill every CHANGEME).
 
 ### 5.1 Verify enforcement (deny probe)
 
@@ -168,6 +214,29 @@ The probe pod (labeled `rolemesh.io/role=agent`) must be BLOCKED from
 reaching the public internet. A pass means the CNI is enforcing the agent
 NetworkPolicies. Re-run after any CNI change — the startup verify checks
 that policy OBJECTS exist, not that they are enforced (docs/21 §4.2).
+
+### 5.2 Private registry: agent pods are BARE PODS
+
+Platform mutation policies that auto-inject `imagePullSecrets` (Kyverno
+and friends) typically match Deployments/StatefulSets. Chart-templated
+components are covered — but **agent pods are created directly by the
+orchestrator through the K8s API as bare Pods; no admission mutation ever
+sees them.** Do not rely on injection: set `image.pullSecret` (see
+`values-production.yaml`) — the chart forwards it to the orchestrator as
+`ROLEMESH_K8S_IMAGE_PULL_SECRET` and every spawned agent pod carries it.
+
+Beware the false green: agent pulls can succeed WITHOUT credentials on a
+node that already has the image cached (pulled earlier by a mutated
+Deployment pod). That state is fragile — new/replaced nodes and kubelet
+image GC break it at random. Acceptance check on a node that has never
+run RoleMesh (or after `crictl rmi` of the agent image there):
+
+```sh
+kubectl -n rolemesh run pull-probe --restart=Never --rm -it \
+  --image=<registry>/<repo>/rolemesh-agent:<tag> \
+  --overrides='{"spec":{"nodeName":"<cold-node>","imagePullSecrets":[{"name":"<pull-secret-name>"}]}}' \
+  --command -- /bin/true
+```
 
 ## 6. The hard contract (why startup can fail-closed)
 

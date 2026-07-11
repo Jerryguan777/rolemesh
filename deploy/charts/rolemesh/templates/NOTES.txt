@@ -43,8 +43,8 @@ RoleMesh has been installed as release {{ .Release.Name }} in namespace {{ .Rele
    Pod-level pids limits are a kubelet setting (podPidsLimit), NOT a pod
    field — this chart cannot set it. A fork-bomb in one agent can exhaust
    the node's pid space. On RKE2, set podPidsLimit in the kubelet config
-   (see the RKE2 doc: deploy/charts/rolemesh/README or docs). The
-   orchestrator logs a startup warning about this.
+   (see docs/23-rke2-production-deploy.md). The orchestrator logs a
+   startup warning about this.
 
 4. Namespace MUST be PodSecurity `restricted` (docs/21 §6.3).
    The gateway/webui/orchestrator securityContexts are written for it.
@@ -55,10 +55,19 @@ RoleMesh has been installed as release {{ .Release.Name }} in namespace {{ .Rele
 
 {{- if .Values.postgres.enabled }}
 
-   WARNING: bundled Postgres (postgres.enabled=true) is NOT compatible with
-   PSA restricted out of the box. For a restricted namespace use an external
-   Postgres (postgres.enabled=false + postgres.externalUrl) or a
-   restricted-compatible image. Bundled Postgres is a dev/PoC convenience.
+   NOTE: bundled Postgres (postgres.enabled=true) runs under PSA restricted
+   — its securityContext is written for it (see templates/postgres.yaml) —
+   but it remains a dev/PoC convenience: production should use an external
+   Postgres (postgres.enabled=false + postgres.externalUrl).
+{{- end }}
+
+{{- if eq .Values.auth.mode "oidc" }}
+5a. OIDC is enabled (auth.mode=oidc) — two IdP-side couplings:
+   * The redirect URI the browser lands on MUST be whitelisted at the
+     IdP client{{ with .Values.webui.externalUrl }} (this install derives
+     {{ trimSuffix "/" . }}/oauth2/callback){{ end }}.
+   * auth.oidc.cookieSecure=false is plain-HTTP dev ONLY; behind TLS
+     keep it true or the browser drops the refresh cookie.
 {{- end }}
 
 5. RBAC note.

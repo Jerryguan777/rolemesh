@@ -127,10 +127,6 @@ spec:
             # get it pinned as their resolver and verify asserts the match.
             - name: EGRESS_GATEWAY_DNS_IP
               value: {{ required "egressGateway.clusterIP is required" .Values.egressGateway.clusterIP | quote }}
-            # Gateway service name (informational; the runner reads
-            # EGRESS_GATEWAY_CONTAINER_NAME which defaults to this).
-            - name: EGRESS_GATEWAY_HOST
-              value: "egress-gateway"
             - name: EGRESS_TOKEN_SECRET
               valueFrom:
                 secretKeyRef:
@@ -147,6 +143,13 @@ spec:
                 secretKeyRef:
                   name: {{ $secretName }}
                   key: CREDENTIAL_VAULT_KEY
+            {{- end }}
+            {{- with include "rolemesh.authEnv" . }}
+            {{- . | nindent 12 }}
+            {{- end }}
+            {{- with .Values.webui.externalUrl }}
+            - name: WEBUI_BASE_URL
+              value: {{ . | quote }}
             {{- end }}
             {{- range $k, $v := .Values.orchestrator.extraEnv }}
             - name: {{ $k }}

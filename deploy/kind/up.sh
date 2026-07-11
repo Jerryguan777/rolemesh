@@ -71,7 +71,7 @@ check_inotify
 if kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
   log "kind cluster '$CLUSTER_NAME' already exists — skipping create."
 else
-  log "creating kind cluster '$CLUSTER_NAME' (default CNI disabled)…"
+  log "creating kind cluster '$CLUSTER_NAME' (default CNI disabled)..."
   kind create cluster --config "$SCRIPT_DIR/cluster.yaml"
 fi
 
@@ -81,13 +81,13 @@ fi
 if kubectl get daemonset -n kube-system calico-node >/dev/null 2>&1; then
   log "Calico already present — skipping install."
 else
-  log "installing Calico $CALICO_VERSION…"
+  log "installing Calico $CALICO_VERSION..."
   kubectl apply -f "https://raw.githubusercontent.com/projectcalico/calico/${CALICO_VERSION}/manifests/calico.yaml"
-  log "waiting for Calico to be ready…"
+  log "waiting for Calico to be ready..."
   kubectl -n kube-system rollout status daemonset/calico-node --timeout=180s
 fi
 
-log "waiting for nodes to be Ready…"
+log "waiting for nodes to be Ready..."
 kubectl wait --for=condition=Ready nodes --all --timeout=180s
 
 # --- 4. load images ---------------------------------------------------------
@@ -112,14 +112,14 @@ if [ "${#missing[@]}" -gt 0 ]; then
   exit 1
 fi
 
-log "loading images into the kind cluster…"
+log "loading images into the kind cluster..."
 for img in "${IMAGES[@]}"; do
   log "  kind load: $img"
   kind load docker-image "$img" --name "$CLUSTER_NAME"
 done
 
 # --- 5. namespace + PSA label + next steps ----------------------------------
-log "creating namespace '$NAMESPACE' (PodSecurity restricted)…"
+log "creating namespace '$NAMESPACE' (PodSecurity restricted)..."
 kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 kubectl label namespace "$NAMESPACE" \
   pod-security.kubernetes.io/enforce=restricted --overwrite || true

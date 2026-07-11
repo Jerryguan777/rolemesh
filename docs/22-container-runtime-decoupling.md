@@ -83,7 +83,6 @@ the cost of a new degraded-startup mode for the gateway (§5).
 |---|---|---|
 | `ROLEMESH_CONTAINER_RUNTIME` | both | `docker` \| `k8s` |
 | `EGRESS_GATEWAY_DNS_IP` | both | static: compose fixed IP / Service ClusterIP; replaces runtime discovery |
-| `EGRESS_GATEWAY_HOST` | both | gateway service name |
 | `NATS_URL` etc. | both | always service names; no localhost rewriting |
 | `ROLEMESH_HOST_DATA_DIR` | docker | host path of DATA_DIR (DooD translation, §7) |
 | `ROLEMESH_K8S_NAMESPACE` / `_DATA_PVC` / `_IMAGE_PULL_SECRET` / `_RUNTIME_CLASS` | k8s | as rev2 |

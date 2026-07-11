@@ -38,15 +38,6 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end -}}
 
 {{/*
-Image tag resolution: an explicit per-image .tag wins; otherwise fall
-back to the chart's appVersion so a fresh `helm install` pins a coherent
-release without forcing the operator to repeat the version three times.
-*/}}
-{{- define "rolemesh.imageTag" -}}
-{{- default .root.Chart.AppVersion .image.tag -}}
-{{- end -}}
-
-{{/*
 The orchestrator ServiceAccount name. The orchestrator Deployment runs
 under it and verify_infrastructure self-checks its RBAC; the Role/Binding
 target the same name.
@@ -61,6 +52,49 @@ password. Release-scoped (not a contract name).
 */}}
 {{- define "rolemesh.secretName" -}}
 {{- printf "%s-secrets" (include "rolemesh.fullname" .) -}}
+{{- end -}}
+
+{{/*
+Shared auth env for the webui AND the orchestrator Deployments. Both
+include this one block so the shared subset (AUTH_MODE + the OIDC trio)
+cannot drift between them. The orchestrator needs the trio too, not just
+the webui: without a discovery URL + client_id its create_vault_from_env()
+returns None, it never subscribes the egress.token.access.request
+responder, the gateway's RemoteTokenVault RPC gets "no responders", and
+every user-mode MCP request forwards an EMPTY Authorization header — a
+failure four hops from its cause (see the orchestrator OIDC block in
+deploy/compose/compose.yaml, where this was first learned).
+Renders nothing in external mode, keeping default manifests unchanged.
+*/}}
+{{- define "rolemesh.authEnv" -}}
+{{- $mode := .Values.auth.mode | default "external" -}}
+{{- if not (has $mode (list "external" "oidc")) -}}
+{{- fail (printf "auth.mode must be \"external\" or \"oidc\", got %q" $mode) -}}
+{{- end -}}
+{{- if eq $mode "oidc" -}}
+- name: AUTH_MODE
+  value: "oidc"
+- name: OIDC_DISCOVERY_URL
+  value: {{ required "auth.mode=oidc requires auth.oidc.discoveryUrl" .Values.auth.oidc.discoveryUrl | quote }}
+- name: OIDC_CLIENT_ID
+  value: {{ required "auth.mode=oidc requires auth.oidc.clientId" .Values.auth.oidc.clientId | quote }}
+{{- if or .Values.auth.oidc.clientSecret .Values.auth.oidc.existingSecret }}
+- name: OIDC_CLIENT_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "rolemesh.authSecretName" . }}
+      key: OIDC_CLIENT_SECRET
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{/*
+Secret carrying OIDC_CLIENT_SECRET: an explicit auth.oidc.existingSecret
+wins; otherwise the chart-wide Secret (which secret.yaml populates with
+the key when auth.oidc.clientSecret is set inline).
+*/}}
+{{- define "rolemesh.authSecretName" -}}
+{{- .Values.auth.oidc.existingSecret | default (.Values.secrets.existingSecret | default (include "rolemesh.secretName" .)) -}}
 {{- end -}}
 
 {{/*

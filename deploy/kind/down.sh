@@ -14,7 +14,7 @@ if ! command -v kind >/dev/null 2>&1; then
 fi
 
 if kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
-  echo "[down] deleting kind cluster '$CLUSTER_NAME'…"
+  echo "[down] deleting kind cluster '$CLUSTER_NAME'..."
   kind delete cluster --name "$CLUSTER_NAME"
   echo "[down] done."
 else
