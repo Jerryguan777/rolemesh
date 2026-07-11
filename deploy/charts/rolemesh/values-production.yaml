@@ -65,6 +65,18 @@ secrets:
   credentialVaultKey: "CHANGEME"
   rolemeshTokenSecret: "CHANGEME"
 
+# -- Auth: SSO via OIDC -----------------------------------------------------
+# Wires BOTH webui and orchestrator (see values.yaml `auth:` for every
+# field). redirectUri derives from webui.externalUrl when set.
+# auth:
+#   mode: oidc
+#   oidc:
+#     discoveryUrl: "https://idp.example.com/realms/CHANGEME/.well-known/openid-configuration"
+#     clientId: "rolemesh-web"
+#     existingSecret: "CHANGEME-oidc-secret"   # key: OIDC_CLIENT_SECRET
+# webui:
+#   externalUrl: "https://rolemesh.example.com"
+
 # -- Database: external Postgres -----------------------------------------
 # Bundled Postgres is a dev/PoC convenience (single replica, chart-managed
 # password). Production points at a managed instance.

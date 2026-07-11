@@ -144,6 +144,13 @@ spec:
                   name: {{ $secretName }}
                   key: CREDENTIAL_VAULT_KEY
             {{- end }}
+            {{- with include "rolemesh.authEnv" . }}
+            {{- . | nindent 12 }}
+            {{- end }}
+            {{- with .Values.webui.externalUrl }}
+            - name: WEBUI_BASE_URL
+              value: {{ . | quote }}
+            {{- end }}
             {{- range $k, $v := .Values.orchestrator.extraEnv }}
             - name: {{ $k }}
               value: {{ $v | quote }}

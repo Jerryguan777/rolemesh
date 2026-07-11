@@ -77,6 +77,11 @@ webui:
     # their parameters (set type: LoadBalancer alongside). Rendered
     # verbatim onto the webui Service; empty map renders nothing.
     annotations: {}
+  # The UI's external URL once exposed (scheme://host[:port], no trailing
+  # slash). Single source consumed by: WEBUI_BASE_URL (webui +
+  # orchestrator env) and the auth.oidc.redirectUri default. Empty =
+  # neither is rendered (port-forward / dev).
+  externalUrl: ""
   resources:
     requests:
       cpu: 100m
@@ -232,6 +237,45 @@ secrets:
   extra: {}
     # ANTHROPIC_API_KEY: ""
     # CLAUDE_CODE_OAUTH_TOKEN: ""
+
+# -- Auth (webui AND orchestrator) --------------------------------------------
+# mode external (default): an auth layer in front of the webui injects the
+# identity — the chart renders no auth env at all. mode oidc: the chart
+# wires OIDC into BOTH the webui and the orchestrator via one shared
+# helper (rolemesh.authEnv) — the orchestrator needs it too or user-mode
+# MCP token forwarding silently breaks (see the helper's comment).
+# helm install fails at template time if mode=oidc without
+# discoveryUrl + clientId. Exotic knobs not modeled here
+# (OIDC_SCOPE_ROLE_MAP, OIDC_ADAPTER, ...) go via webui.extraEnv.
+auth:
+  mode: "external"  # external | oidc
+  oidc:
+    # REQUIRED in oidc mode.
+    discoveryUrl: ""  # https://idp.../.well-known/openid-configuration
+    clientId: ""
+    # Client secret: EITHER inline (lands in the chart Secret; dev
+    # convenience) OR the name of an existing Secret carrying key
+    # OIDC_CLIENT_SECRET (production). Never rendered as a plain env
+    # value. Omit both for a public (secretless PKCE) client.
+    clientSecret: ""
+    existingSecret: ""
+    # Fallback redirect URI. Empty = derived from webui.externalUrl
+    # (<url>/oauth2/callback) when that is set; the SPA also derives it
+    # from its own origin at runtime, so this is a fallback either way.
+    # Whichever URI the browser lands on MUST be whitelisted at the IdP.
+    redirectUri: ""
+    # Empty = the application defaults the expected audience to clientId
+    # (matches a standard id_token aud).
+    audience: ""
+    scopes: "openid profile email offline_access"
+    # Names of the flat top-level ID-token claims RoleMesh maps to the
+    # tenant binding and the owner/admin/member role.
+    claimTenantId: "tenant_id"
+    claimRole: "role"
+    # cookieSecure=false is for plain-HTTP dev ONLY — behind TLS keep
+    # true, or the browser drops the refresh cookie.
+    cookieSecure: true
+    cookieSamesite: "lax"
 
 # -- Seed Job ----------------------------------------------------------------
 # Post-install/upgrade Job that runs schema creation + the initial admin
