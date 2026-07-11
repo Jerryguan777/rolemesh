@@ -38,6 +38,16 @@ from rolemesh.safety.checks.egress_domain_rule import make_egress_domain_check
 pytestmark = pytest.mark.asyncio
 
 
+@pytest.fixture(autouse=True)
+def _isolate_mcp_registry() -> None:
+    # /healthz now reports mcp_entries from the module-global MCP
+    # registry — wipe it so another module's leftovers can't skew the
+    # exact-body assertions below.
+    from rolemesh.egress import reverse_proxy
+
+    reverse_proxy._mcp_registry.clear()
+
+
 # ---------------------------------------------------------------------------
 # NATS-boundary fake (the only mock in this module)
 # ---------------------------------------------------------------------------
@@ -166,7 +176,12 @@ async def test_healthz_is_200_and_degraded_while_snapshot_missing() -> None:
         resp = await client.get("/healthz")
         assert resp.status == 200
         body = await resp.json()
-        assert body == {"status": "degraded", "rules_seeded": False}
+        assert body == {
+            "status": "degraded",
+            "rules_seeded": False,
+            "mcp_seeded": True,  # no mcp_seeded callable wired -> counts as seeded
+            "mcp_entries": 0,
+        }
 
 
 async def test_healthz_reports_ok_once_snapshot_seeded() -> None:
@@ -177,7 +192,12 @@ async def test_healthz_reports_ok_once_snapshot_seeded() -> None:
         resp = await client.get("/healthz")
         assert resp.status == 200
         body = await resp.json()
-        assert body == {"status": "ok", "rules_seeded": True}
+        assert body == {
+            "status": "ok",
+            "rules_seeded": True,
+            "mcp_seeded": True,
+            "mcp_entries": 0,
+        }
 
 
 async def test_healthz_without_seeded_callable_reports_ok() -> None:

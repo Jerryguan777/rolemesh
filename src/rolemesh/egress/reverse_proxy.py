@@ -11,8 +11,11 @@ Routes:
     /healthz                  Liveness probe. Always 200 once the listener
                               is bound ("healthy" = NATS connected +
                               listeners up); the JSON body carries the
-                              degraded-startup indicator:
-                              {"status": "ok"|"degraded", "rules_seeded": bool}.
+                              degraded-startup indicators:
+                              {"status": "ok"|"degraded",
+                               "rules_seeded": bool, "mcp_seeded": bool,
+                               "mcp_entries": int} — status is "ok" only
+                              when both planes are seeded.
 
 Credential resolution is fail-closed by design:
 
@@ -374,13 +377,16 @@ async def start_credential_proxy(
     safety_caller: EgressSafetyCaller | None = None,
     token_authority: TokenAuthority | None = None,
     rules_seeded: Callable[[], bool] | None = None,
+    mcp_seeded: Callable[[], bool] | None = None,
 ) -> web.AppRunner:
     """Start the reverse-proxy HTTP server on ``(host, port)``.
 
-    ``rules_seeded`` feeds the /healthz degraded indicator: it is polled
-    per probe and reflects whether the gateway's policy cache has been
-    seeded with the authoritative rule snapshot. ``None`` (host-side
-    deployments without the degraded-startup machinery) reports "ok".
+    ``rules_seeded`` / ``mcp_seeded`` feed the /healthz degraded
+    indicators: both are polled per probe and reflect whether the
+    gateway's policy cache / MCP registry have been seeded with their
+    authoritative snapshots. ``None`` (host-side deployments without
+    the degraded-startup machinery) counts as seeded; ``status`` is
+    "ok" only when both count as seeded.
     The HTTP status is 200 either way — health means "NATS connected and
     listeners bound", and orchestration must not restart-loop a gateway
     that is merely waiting for the orchestrator to answer the snapshot
@@ -651,9 +657,17 @@ async def start_credential_proxy(
             return web.Response(status=502, text="MCP proxy: Bad Gateway")
 
     async def handle_healthz(_request: web.Request) -> web.Response:
-        seeded = rules_seeded() if rules_seeded is not None else True
+        rules_ok = rules_seeded() if rules_seeded is not None else True
+        mcp_ok = mcp_seeded() if mcp_seeded is not None else True
         return web.json_response(
-            {"status": "ok" if seeded else "degraded", "rules_seeded": seeded},
+            {
+                "status": "ok" if rules_ok and mcp_ok else "degraded",
+                "rules_seeded": rules_ok,
+                "mcp_seeded": mcp_ok,
+                # Entry count is observability, not the seed signal —
+                # an empty registry is legal (no MCP servers configured).
+                "mcp_entries": len(_mcp_registry),
+            },
             status=200,
         )
 

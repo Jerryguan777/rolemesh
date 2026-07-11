@@ -16,10 +16,15 @@ IPC fed it, so every ``/mcp-proxy/<name>/<path>`` request returned
 This module fills that gap with the same NATS pattern safety rules
 use:
 
-  - ``egress.mcp.snapshot.request`` (request-reply): gateway boots,
-    fetches the orchestrator's current registry, seeds itself.
+  - ``egress.mcp.snapshot.request`` (request-reply): the gateway
+    seeds itself from this at boot — retrying until the
+    orchestrator's responder answers — and then re-fetches it
+    periodically to reconcile drift (``gateway._seed_and_reconcile_mcp``).
   - ``egress.mcp.changed`` (broadcast): orchestrator pushes deltas
-    so the gateway can hot-reload without a restart.
+    so the gateway can hot-reload without a restart. Core NATS is
+    at-most-once, so deltas are a propagation-latency optimisation
+    only; the periodic snapshot reconcile is what guarantees the
+    registry converges.
 
 The gateway end is intentionally thin: it just translates each
 event into a ``register_mcp_server`` / ``unregister_mcp_server``
