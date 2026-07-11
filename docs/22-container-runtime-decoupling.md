@@ -224,7 +224,7 @@ different routes per runtime:
   answers container names locally and forwards only external names to the
   gateway. Internal names never reach the gateway resolver — no exemption
   needed. (This is why the empty-allowlist default works on Docker but
-  broke on K8s when tropos first ran a full agent round-trip there.)
+  broke on K8s the first time a full agent round-trip ran there.)
 - K8s: `dnsPolicy: None` pins the agent's resolver straight at the gateway,
   so the gateway itself EXEMPTS internal names from the allowlist and
   forwards them to kube-dns. It reads both the internal-name set and the

@@ -96,10 +96,10 @@ separation, because the call site cost (frontend branching on mode
 just to log out) is real and the implementation cost (a small
 internal dispatch) is trivial.
 
-**Compared to Tropos**: Tropos's contract unifies all 5 auth
-operations under `/auth/*`. Their design works because they appear
-to have one auth mode; we have at least three (bootstrap / OIDC /
-future builtin), and the cost-benefit tilts the other way.
+**Compared to a fully unified design**: a contract that puts all 5
+auth operations under `/auth/*` works when there is a single auth
+mode; we have at least three (bootstrap / OIDC / future builtin),
+and the cost-benefit tilts the other way.
 
 A signpost comment lives at the top of the `paths:` block in
 `openapi.yaml` next to the `/api/v1/auth/*` endpoints — devs
