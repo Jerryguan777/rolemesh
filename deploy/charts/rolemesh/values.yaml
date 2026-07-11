@@ -1,8 +1,10 @@
 # RoleMesh Helm chart — default (production-leaning) values.
 #
-# Two value files ship with the chart:
+# Three value files ship with the chart:
 #   values.yaml              this file — production-leaning defaults
 #   values-kind.yaml         local kind single-node loop (docs/21 §10.3)
+#   values-production.yaml   production skeleton — copy per environment
+#                            and fill the CHANGEMEs (docs/23)
 #
 # HARD CONTRACT (docs/21 §4.2, src/rolemesh/container/k8s_runtime.py):
 # the orchestrator's verify_infrastructure() reads several object names and
@@ -98,6 +100,15 @@ egressGateway:
   #   kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}'
   # (kube-dns sits in the Service CIDR; pick a nearby unused address.)
   # kind's default Service CIDR is 10.96.0.0/12 -> see values-kind.yaml.
+  #
+  # ClusterIPs are CLUSTER-GLOBAL, not namespace-scoped: several RoleMesh
+  # instances on one cluster (per-tenant/per-branch namespaces) each need
+  # their OWN free address — the per-environment values file is the
+  # allocation ledger. Prefer LOW addresses near the start of the CIDR:
+  # K8s reserves the low band for static assignment and allocates dynamic
+  # ClusterIPs from the high band (ServiceIPStaticSubrange), which keeps
+  # collisions with dynamic allocation unlikely. Pre-verify a candidate
+  # with a server-side dry run: docs/23 §1.1.
   # ----------------------------------------------------------------------
   clusterIP: ""  # REQUIRED — e.g. "10.96.0.53"
   # K8s listens for DNS on 1053 (PSA restricted forbids NET_BIND_SERVICE,

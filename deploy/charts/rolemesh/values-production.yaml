@@ -1,0 +1,76 @@
+# RoleMesh production values SKELETON — copy per environment, fill every
+# CHANGEME, and keep one file per deployment (docs/23 §5):
+#
+#   helm upgrade --install rolemesh deploy/charts/rolemesh \
+#     -n rolemesh --create-namespace \
+#     -f my-env-values.yaml
+#
+# Everything not set here inherits the values.yaml defaults. The four
+# blocks below are the ones a production cluster MUST decide; read the
+# matching values.yaml comment for each before filling it in.
+
+# -- Images: private registry --------------------------------------------
+# Registry-QUALIFIED repository names + a PINNED tag. Short names resolve
+# to docker.io and float; ":latest" + the K8s default pullPolicy re-pulls
+# on every pod start.
+#
+# image.pullSecret is REQUIRED with a private registry even when the
+# platform auto-injects pull secrets: platform mutation policies target
+# Deployments/StatefulSets, and agent pods are created directly by the
+# orchestrator as BARE PODS — no admission mutation ever sees them. The
+# chart forwards this secret name to the orchestrator
+# (ROLEMESH_K8S_IMAGE_PULL_SECRET) so spawned agent pods carry it too.
+# The Secret (type kubernetes.io/dockerconfigjson) must exist in the
+# release namespace. Acceptance check: docs/23 §5.2 (cold-node pull).
+image:
+  pullPolicy: IfNotPresent
+  pullSecret: "CHANGEME-registry-pull-secret"
+
+orchestrator:
+  image:
+    repository: "registry.example.com/CHANGEME/rolemesh-orchestrator"
+    tag: "0.1.0"
+webui:
+  image:
+    repository: "registry.example.com/CHANGEME/rolemesh-webui"
+    tag: "0.1.0"
+egressGateway:
+  image:
+    repository: "registry.example.com/CHANGEME/rolemesh-egress-gateway"
+    tag: "0.1.0"
+  # REQUIRED — free address inside THIS cluster's Service CIDR, unique
+  # per RoleMesh instance on the cluster (ClusterIPs are cluster-global,
+  # not namespace-scoped). See values.yaml and docs/23 §1.1 for how to
+  # pick and pre-verify one.
+  clusterIP: "CHANGEME-e.g.-10.43.0.53"
+agent:
+  image:
+    repository: "registry.example.com/CHANGEME/rolemesh-agent"
+    tag: "0.1.0"
+
+# -- Secrets: rotate EVERY dev default ------------------------------------
+# Generate long random values (e.g. `openssl rand -hex 32`). Prefer
+# secrets.existingSecret + out-of-band management (sealed-secrets /
+# external-secrets) over inline values here.
+secrets:
+  create: true
+  egressTokenSecret: "CHANGEME"
+  wsTicketSecret: "CHANGEME"
+  credentialVaultKey: "CHANGEME"
+  rolemeshTokenSecret: "CHANGEME"
+
+# -- Database: external Postgres -----------------------------------------
+# Bundled Postgres is a dev/PoC convenience (single replica, chart-managed
+# password). Production points at a managed instance.
+postgres:
+  enabled: false
+  externalUrl: "postgresql://rolemesh:CHANGEME@pg.internal:5432/rolemesh"
+  externalAdminUrl: "postgresql://rolemesh_admin:CHANGEME@pg.internal:5432/rolemesh"
+
+# -- Storage ---------------------------------------------------------------
+# RWX class preferred (agents schedule on any node); if the cluster has no
+# RWX StorageClass, use mode: rwo-colocated (docs/23 §2.2).
+storage:
+  mode: rwx
+  size: 10Gi
+  storageClass: "CHANGEME-e.g.-longhorn-rwx"
