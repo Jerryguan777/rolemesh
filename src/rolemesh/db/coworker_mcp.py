@@ -27,7 +27,7 @@ import json
 from typing import TYPE_CHECKING
 
 from rolemesh.core.types import McpServerConfig
-from rolemesh.db._pool import tenant_conn
+from rolemesh.db._pool import admin_conn, tenant_conn
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     import asyncpg
 
 __all__ = [
+    "list_coworker_ids_bound_to_mcp_server",
     "list_coworker_mcp_configs",
     "replace_coworker_mcp_configs",
 ]
@@ -125,6 +126,46 @@ async def list_coworker_mcp_configs(
             coworker_id, tenant_id,
         )
     return [_row_to_mcp_config(r) for r in rows]
+
+
+async def list_coworker_ids_bound_to_mcp_server(
+    name: str,
+) -> list[tuple[str, str]]:
+    """Return ``(coworker_id, tenant_id)`` pairs bound to server ``name``.
+
+    Affected-coworker discovery for the ``egress.mcp.changed``
+    projection-refresh path (see
+    ``coworker_hot_reload.refresh_coworkers_for_mcp_server``). The
+    junction binds by ``mcp_server_id``, so this JOIN still finds every
+    bound coworker after a PATCH renames the server — the in-memory
+    projections hold the OLD name at that point and a name-based scan
+    of ``state.coworkers`` would miss them all.
+
+    Deliberately cross-tenant: the ``egress.mcp.changed`` payload
+    carries no ``tenant_id`` (see ``mcp_events._build_entry``), and
+    ``mcp_servers.name`` is only unique per tenant — so we match every
+    tenant's server of this name. That is safe by construction: the
+    caller only uses the pairs to make each coworker re-read its OWN
+    projection from DB, so refreshing a same-named neighbour tenant's
+    coworkers is a harmless no-op refresh, not a data leak. Do NOT
+    "fix" this by adding a tenant filter — there is no tenant to
+    filter by.
+    """
+    # inv-1-ok: cross-tenant by design (classification B list_*) — the
+    # change event has no tenant_id and names collide across tenants;
+    # see the docstring. Rows are only used as refresh targets.
+    async with admin_conn() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT cms.coworker_id, c.tenant_id
+            FROM coworker_mcp_servers cms
+            JOIN mcp_servers m ON m.id = cms.mcp_server_id
+            JOIN coworkers c ON c.id = cms.coworker_id
+            WHERE m.name = $1
+            """,
+            name,
+        )
+    return [(str(r["coworker_id"]), str(r["tenant_id"])) for r in rows]
 
 
 async def replace_coworker_mcp_configs(

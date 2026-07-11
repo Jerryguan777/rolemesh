@@ -170,6 +170,137 @@ async def reload_coworker_mcp_into_state(
     return True
 
 
+async def refresh_coworkers_for_mcp_server(
+    *,
+    name: str,
+    state: OrchestratorState,
+    fetch_mcp_configs: Callable[
+        [str, str], Awaitable[list[McpServerConfig]]
+    ],
+    list_bound_coworker_ids: (
+        Callable[[str], Awaitable[list[tuple[str, str]]]] | None
+    ) = None,
+) -> int:
+    """Refresh ``mcp_configs`` for every coworker affected by a change
+    to the ``mcp_servers`` row named ``name``. Returns the refresh count.
+
+    Closes the third leg of the ``egress.mcp.changed`` fan-out: the
+    gateway registry and the orchestrator's registry mirror already
+    follow ``/mcp-servers`` CRUD via ``mcp_cache.subscribe_mcp_changes``,
+    but the per-coworker projection (``CoworkerState.mcp_configs`` — the
+    JOIN snapshot handed to agents at spawn) was only refreshed by
+    link/unlink events, so a URL/headers/auth_mode edit left every bound
+    coworker spawning with a stale config until someone happened to
+    unlink/relink.
+
+    Affected-coworker discovery is the union of two sources, applied
+    unconditionally (no per-action branching needed):
+
+    * In-memory scan — coworkers whose cached projection already
+      contains ``name``. Covers ``deleted`` (the row is gone, so a DB
+      lookup finds nothing, but the stale projection still matches)
+      and ordinary ``updated``.
+    * DB reverse lookup (``list_bound_coworker_ids``) — the junction
+      binds by ``mcp_server_id``, so this also finds coworkers after a
+      PATCH *renames* the server: the event carries only the NEW name
+      while cached projections hold the OLD one, and the scan alone
+      would miss every one of them, leaving projections stale forever.
+      For ``created``/``deleted`` the lookup naturally returns nothing.
+
+    Refreshes re-read the DB (source of truth) via ``fetch_mcp_configs``
+    rather than trusting event fields — the payload's ``url`` is
+    origin-only (path stripped) and carries no tenant, so it could not
+    be copied into projections even if we wanted to. Best-effort per
+    coworker: one failing refresh logs and moves on.
+
+    Rejected alternative (do not reinvent): having the orchestrator
+    republish per-coworker ``web.coworker.mcp_changed`` events onto
+    JetStream would reuse the durable subscriber, but makes the
+    orchestrator both subscriber and publisher of the same semantic
+    chain — a loop-shaped topology for what is just a local cache
+    refresh. A direct function call is simpler and has no redelivery
+    ambiguity.
+    """
+    targets: dict[str, str] = {}
+    for cw_id, cw_state in state.coworkers.items():
+        if any(cfg.name == name for cfg in cw_state.mcp_configs):
+            targets[cw_id] = cw_state.config.tenant_id
+
+    if list_bound_coworker_ids is not None:
+        try:
+            for cw_id, tenant_id in await list_bound_coworker_ids(name):
+                targets.setdefault(cw_id, tenant_id)
+        except Exception:
+            # Degrade to scan-only discovery — still correct for every
+            # case except rename, and a failed lookup shouldn't stop
+            # the refreshes we can do.
+            logger.exception(
+                "MCP-server bound-coworker lookup failed; "
+                "refreshing in-memory matches only",
+                mcp_server=name,
+            )
+
+    refreshed = 0
+    for cw_id, tenant_id in targets.items():
+        try:
+            ok = await reload_coworker_mcp_into_state(
+                coworker_id=cw_id,
+                tenant_id=tenant_id,
+                state=state,
+                fetch_mcp_configs=fetch_mcp_configs,
+            )
+        except Exception:
+            logger.exception(
+                "Coworker MCP projection refresh failed; continuing",
+                coworker_id=cw_id,
+                mcp_server=name,
+            )
+            continue
+        if ok:
+            refreshed += 1
+    return refreshed
+
+
+async def apply_mcp_changed_event_to_projections(
+    event: object,
+    *,
+    state: OrchestratorState,
+    fetch_mcp_configs: Callable[
+        [str, str], Awaitable[list[McpServerConfig]]
+    ],
+    list_bound_coworker_ids: (
+        Callable[[str], Awaitable[list[tuple[str, str]]]] | None
+    ) = None,
+) -> int:
+    """Validate one decoded ``egress.mcp.changed`` payload and refresh.
+
+    Robustness contract mirrors ``mcp_cache.apply_change_event``: a
+    non-dict payload or a missing/empty ``name`` is dropped without
+    raising (returns 0). ``action`` is deliberately not branched on —
+    see :func:`refresh_coworkers_for_mcp_server` for why the same
+    union discovery is correct for created/updated/deleted alike.
+    """
+    if not isinstance(event, dict):
+        logger.warning(
+            "egress.mcp.changed projection event not a dict",
+            got=type(event).__name__,
+        )
+        return 0
+    name = event.get("name")
+    if not isinstance(name, str) or not name:
+        logger.warning(
+            "egress.mcp.changed projection event missing 'name'",
+            payload=event,
+        )
+        return 0
+    return await refresh_coworkers_for_mcp_server(
+        name=name,
+        state=state,
+        fetch_mcp_configs=fetch_mcp_configs,
+        list_bound_coworker_ids=list_bound_coworker_ids,
+    )
+
+
 async def subscribe_coworker_restart(
     js: JetStreamContext,
     *,
