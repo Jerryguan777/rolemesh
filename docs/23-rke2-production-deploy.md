@@ -21,7 +21,7 @@ refuses to run if they do not hold (fail-closed).
 
 | Requirement | Why | How on RKE2 |
 |---|---|---|
-| CNI enforces NetworkPolicy | agent isolation is policy-based | RKE2 ships Canal (Calico + Flannel) by default — it enforces. Cilium also fine. Do NOT run the `none` CNI. |
+| CNI enforces NetworkPolicy | agent isolation is policy-based | RKE2 ships Canal (Calico + Flannel) by default — it enforces. Cilium also fine, but set `networkPolicy.cilium.enabled=true` (Cilium's ipBlock semantics exclude pod→kube-apiserver; see values.yaml). Do NOT run the `none` CNI. |
 | PodSecurity `restricted` on the namespace | gateway/webui/orchestrator securityContexts target it | label the namespace (below) |
 | A free Service-CIDR address for the gateway | static ClusterIP == `EGRESS_GATEWAY_DNS_IP` | RKE2 default Service CIDR is `10.43.0.0/16`; pick a free address e.g. `10.43.0.53` |
 | Storage for the data PVC | shared agent/orchestrator data | RWX (Longhorn RWX / NFS) preferred; else `storage.mode=rwo-colocated` |
