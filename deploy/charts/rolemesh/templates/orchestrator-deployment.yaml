@@ -57,10 +57,12 @@ spec:
       # orchestrator mounts it directly, so the scheduler pins this pod to
       # the PVC's node. Agent pods (spawned by the orchestrator, not
       # templated here) mount the SAME RWO PVC — the runtime pins them to
-      # this pod's node via a nodeSelector built from the
-      # ROLEMESH_K8S_STORAGE_MODE + ROLEMESH_K8S_NODE_NAME env below;
-      # without that pin, an agent scheduled to another node hangs
-      # Pending forever on a Multi-Attach error.
+      # this pod's node via a nodeSelector taken from the
+      # ROLEMESH_K8S_AGENT_PIN_NODE env below (rendered only in this
+      # mode — the mode decision lives HERE, at template time; the
+      # runtime just obeys "pin to this node"); without that pin, an
+      # agent scheduled to another node hangs Pending forever on a
+      # Multi-Attach error.
       {{- end }}
       securityContext:
         runAsNonRoot: true
@@ -92,16 +94,17 @@ spec:
               value: {{ .Values.image.pullSecret | quote }}
             - name: ROLEMESH_K8S_RUNTIME_CLASS
               value: {{ .Values.orchestrator.runtimeClass | quote }}
-            # Storage mode + this pod's node: in rwo-colocated mode the
-            # runtime adds a nodeSelector pinning every spawned agent pod
-            # to this node — the only node the ReadWriteOnce data PVC can
-            # attach to (see the pod-template comment above).
-            - name: ROLEMESH_K8S_STORAGE_MODE
-              value: {{ .Values.storage.mode | quote }}
-            - name: ROLEMESH_K8S_NODE_NAME
+            {{- if $rwo }}
+            # rwo-colocated only: pin every spawned agent pod to this
+            # pod's node — the only node the ReadWriteOnce data PVC can
+            # attach to (see the pod-template comment above). The env is
+            # a decision, not a description: the runtime pins whenever
+            # it is non-empty and knows nothing about storage modes.
+            - name: ROLEMESH_K8S_AGENT_PIN_NODE
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            {{- end }}
             # Single source of truth for the cluster DNS domain: the agent
             # pod search domains (here, via k8s_runtime), the gateway's
             # internal-name exemption suffix, and the connectivity-probe
