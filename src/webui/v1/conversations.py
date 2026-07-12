@@ -24,17 +24,21 @@ import asyncpg
 from fastapi import APIRouter, Depends, Query, Response
 
 from rolemesh.db import (
-    count_conversations_for_coworker,
+    count_conversations_for_coworker_and_user,
     create_channel_binding,
     create_conversation,
     delete_conversation,
     get_channel_binding_for_coworker,
     get_conversation,
-    get_conversations_for_coworker,
+    get_conversations_for_coworker_and_user,
     list_requests_for_conversation,
     tenant_conn,
 )
-from webui.dependencies import get_current_user, require_action
+from webui.dependencies import (
+    get_current_user,
+    require_action,
+    user_can_access_conversation,
+)
 from webui.schemas_v1 import (
     ApprovalRequest,
     Conversation,
@@ -94,13 +98,26 @@ async def _ensure_web_binding(coworker_id: str, tenant_id: str) -> str:
 
 
 async def _get_conversation_or_404(
-    conversation_id: str, tenant_id: str
+    conversation_id: str,
+    tenant_id: str,
+    *,
+    user: AuthenticatedUser,
 ) -> object:
+    """Fetch one conversation; 404 on miss, wrong tenant, or not-owned.
+
+    Catches ``DataError`` (non-UUID id) so bad syntax and a legitimate
+    miss present the same 404. On top of tenant scoping the per-user
+    ownership rule (``user_can_access_conversation``) is enforced:
+    another member's conversation collapses to the SAME 404 as "does
+    not exist" so ownership never leaks existence.
+    """
     try:
         conv = await get_conversation(conversation_id, tenant_id=tenant_id)
     except asyncpg.DataError:
         conv = None
-    if conv is None:
+    if conv is None or not user_can_access_conversation(
+        conversation=conv, user=user
+    ):
         raise_error_response(
             "NOT_FOUND",
             "Conversation not found.",
@@ -125,15 +142,24 @@ async def list_coworker_conversations(
     offset: OffsetParam = 0,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> ConversationPage:
-    """List conversations for a coworker, ordered by ``created_at`` (paged)."""
+    """List the CALLER'S conversations with a coworker (oldest first, paged).
+
+    Chat privacy is per-user: the list is filtered to conversations the
+    caller owns (``conversations.user_id``), so two members chatting
+    with the same coworker never see each other's history. This applies
+    to every role — an admin's list is also just their own; moderation
+    goes through the id-addressed endpoints, which grant
+    ``coworker.manage`` holders access.
+    """
     # USE/SEE enforcement: a member may not enumerate conversations of a
     # coworker they cannot see (another member's private one) — 404.
     await _get_coworker_or_404(coworker_id, user.tenant_id, user=user)
-    convs = await get_conversations_for_coworker(
-        coworker_id, tenant_id=user.tenant_id, limit=limit, offset=offset,
+    convs = await get_conversations_for_coworker_and_user(
+        coworker_id, user.user_id, tenant_id=user.tenant_id,
+        limit=limit, offset=offset,
     )
-    total = await count_conversations_for_coworker(
-        coworker_id, tenant_id=user.tenant_id,
+    total = await count_conversations_for_coworker_and_user(
+        coworker_id, user.user_id, tenant_id=user.tenant_id,
     )
     return ConversationPage(
         items=[_conversation_to_response(c) for c in convs],
@@ -191,7 +217,9 @@ async def get_conversation_endpoint(
     conversation_id: str,
     user: AuthenticatedUser = Depends(get_current_user),
 ) -> Conversation:
-    conv = await _get_conversation_or_404(conversation_id, user.tenant_id)
+    conv = await _get_conversation_or_404(
+        conversation_id, user.tenant_id, user=user
+    )
     return _conversation_to_response(conv)
 
 
@@ -208,7 +236,7 @@ async def delete_conversation_endpoint(
     of the same id surfaces as 404 rather than 204, which matches
     the SPA's expectation when retrying.
     """
-    await _get_conversation_or_404(conversation_id, user.tenant_id)
+    await _get_conversation_or_404(conversation_id, user.tenant_id, user=user)
     await delete_conversation(conversation_id, tenant_id=user.tenant_id)
     return Response(status_code=204)
 
@@ -257,7 +285,7 @@ async def list_conversation_messages(
     intentionally omitted — the WS event stream surfaces live usage;
     persisted history only needs role / content / timestamp for re-render.
     """
-    await _get_conversation_or_404(conversation_id, user.tenant_id)
+    await _get_conversation_or_404(conversation_id, user.tenant_id, user=user)
 
     where = "conversation_id = $1::uuid AND tenant_id = $2::uuid"
     params: list[object] = [conversation_id, user.tenant_id]
@@ -341,7 +369,7 @@ async def list_conversation_approval_requests(
     chat re-renders resolved ✅/❌ cards inline on reload, not just in-flight
     ones. Tenant-scoped: a conversation outside the caller's tenant is 404.
     """
-    await _get_conversation_or_404(conversation_id, user.tenant_id)
+    await _get_conversation_or_404(conversation_id, user.tenant_id, user=user)
     rows = await list_requests_for_conversation(
         conversation_id, tenant_id=user.tenant_id
     )

@@ -687,7 +687,7 @@ async def _auto_create_telegram_1on1_conversation(
 async def _auto_create_web_conversation(
     binding_id: str, chat_id: str
 ) -> tuple[CoworkerState, ConversationState] | None:
-    """Auto-create a conversation for web channel (each browser tab gets a new chat_id)."""
+    """Resolve a web inbound's conversation, hot-loading caches as needed."""
     # First: check coworkers whose ``channel_bindings`` cache already
     # contains the binding (the startup-loaded path).
     for cw in _state.coworkers.values():
@@ -725,31 +725,30 @@ async def _auto_create_web_conversation(
 
 async def _land_web_conversation(
     cw: CoworkerState, binding_id: str, chat_id: str
-) -> tuple[CoworkerState, ConversationState]:
-    """Get-or-create + cache the conversation row for a web binding."""
-    # ws.py may have already created the conversation before the
-    # NATS message reaches the orchestrator. Check DB first to
-    # avoid a UniqueViolationError on (binding_id, chat_id).
+) -> tuple[CoworkerState, ConversationState] | None:
+    """Hot-load the conversation row for a web binding into state.
+
+    Lookup-only, never create: web conversations are minted exclusively
+    by ``POST /api/v1/coworkers/{id}/conversations``, which stamps
+    ``user_id`` from the authenticated caller. Creating here would land
+    an ownerless (``user_id IS NULL``) row that the per-user chat
+    privacy rules hide from every member, so an inbound whose
+    (binding, chat_id) has no row — deleted mid-flight, or a stale
+    client-side chat_id — is dropped instead.
+    """
     conv = await get_conversation_by_binding_and_chat(
         binding_id, chat_id, tenant_id=cw.config.tenant_id
     )
     if conv is None:
-        conv = await create_conversation(
-            tenant_id=cw.config.tenant_id,
-            coworker_id=cw.config.id,
-            channel_binding_id=binding_id,
-            channel_chat_id=chat_id,
-            name=f"Web Chat {chat_id[:8]}",
-            user_id=None,
+        logger.warning(
+            "web inbound for unknown conversation; dropping",
+            coworker=cw.config.name,
+            binding_id=binding_id,
+            chat_id=chat_id,
         )
+        return None
     conv_state = ConversationState(conversation=conv)
     cw.conversations[conv.id] = conv_state
-    logger.info(
-        "Auto-created web conversation",
-        coworker=cw.config.name,
-        chat_id=chat_id,
-        conversation_id=conv.id,
-    )
     return cw, conv_state
 
 
