@@ -932,6 +932,20 @@ async def _create_schema(conn: asyncpg.pool.PoolConnectionProxy[asyncpg.Record])
         "WHERE parent_conversation_id IS NOT NULL"
     )
 
+    # Per-user chat history: both user-facing list queries — the
+    # unified cross-coworker list (``GET /api/v1/conversations``) and
+    # the per-coworker list (filtered by owner since the per-user
+    # privacy change) — select on (tenant, user), the former ordered
+    # newest-first. Partial: ownerless rows (user_id IS NULL) and
+    # delegation children never enter those lists, so they stay out of
+    # the index. Depends on the user_id and parent_conversation_id
+    # columns added above.
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS conversations_by_user "
+        "ON conversations(tenant_id, user_id, created_at DESC) "
+        "WHERE user_id IS NOT NULL AND parent_conversation_id IS NULL"
+    )
+
     # Frontdesk v1.2: is_frontdesk marks a super_agent coworker as the
     # single user-facing entry point. routing_description is a
     # capability card written by domain agents, read by the frontdesk

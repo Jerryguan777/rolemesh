@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "count_conversations_for_coworker_and_user",
+    "count_conversations_for_user",
     "create_channel_binding",
     "create_conversation",
     "delete_channel_binding",
@@ -39,6 +40,7 @@ __all__ = [
     "get_conversation_for_notification",
     "get_conversations_for_coworker",
     "get_conversations_for_coworker_and_user",
+    "get_conversations_for_user",
     "get_messages_since",
     "get_new_messages_for_conversations",
     "get_session",
@@ -489,6 +491,53 @@ async def count_conversations_for_coworker_and_user(
             "AND tenant_id = $3::uuid "
             "AND parent_conversation_id IS NULL",
             coworker_id,
+            user_id,
+            tenant_id,
+        )
+    return int(row["n"]) if row else 0
+
+
+async def get_conversations_for_user(
+    user_id: str, *, tenant_id: str, limit: int | None = None, offset: int = 0,
+) -> list[Conversation]:
+    """Cross-coworker conversation list for one user (newest first).
+
+    Backs the unified per-user chat history
+    (``GET /api/v1/conversations``): every top-level conversation the
+    user owns, regardless of which coworker it is bound to. Newest
+    first — this is a "recent chats" surface, unlike the oldest-first
+    per-coworker list. Delegation children are excluded like every
+    user-facing list; ownerless rows (``user_id IS NULL``) can never
+    match. Served by the partial index ``conversations_by_user``.
+    """
+    sql = (
+        "SELECT * FROM conversations "
+        "WHERE user_id = $1::uuid AND tenant_id = $2::uuid "
+        "AND parent_conversation_id IS NULL "
+        "ORDER BY created_at DESC, id DESC"
+    )
+    params: list[object] = [user_id, tenant_id]
+    if limit is not None:
+        params.extend((limit, offset))
+        sql += f" LIMIT ${len(params) - 1} OFFSET ${len(params)}"
+    async with tenant_conn(tenant_id) as conn:
+        rows = await conn.fetch(sql, *params)
+    return [_record_to_conversation(row) for row in rows]
+
+
+async def count_conversations_for_user(
+    user_id: str, *, tenant_id: str,
+) -> int:
+    """Pagination-envelope total for the unified per-user list.
+
+    Applies the exact predicate of :func:`get_conversations_for_user`
+    so ``total`` always equals the rows a full page-walk yields.
+    """
+    async with tenant_conn(tenant_id) as conn:
+        row = await conn.fetchrow(
+            "SELECT COUNT(*) AS n FROM conversations "
+            "WHERE user_id = $1::uuid AND tenant_id = $2::uuid "
+            "AND parent_conversation_id IS NULL",
             user_id,
             tenant_id,
         )
