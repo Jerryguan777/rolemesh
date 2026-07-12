@@ -25,12 +25,14 @@ from fastapi import APIRouter, Depends, Query, Response
 
 from rolemesh.db import (
     count_conversations_for_coworker_and_user,
+    count_conversations_for_user,
     create_channel_binding,
     create_conversation,
     delete_conversation,
     get_channel_binding_for_coworker,
     get_conversation,
     get_conversations_for_coworker_and_user,
+    get_conversations_for_user,
     list_requests_for_conversation,
     tenant_conn,
 )
@@ -203,6 +205,42 @@ async def create_coworker_conversation(
         user_id=user.user_id,
     )
     return _conversation_to_response(conv)
+
+
+# ---------------------------------------------------------------------------
+# /api/v1/conversations
+# ---------------------------------------------------------------------------
+
+
+@conversations_router.get("", response_model=ConversationPage)
+async def list_user_conversations(
+    limit: LimitParam = DEFAULT_PAGE_LIMIT,
+    offset: OffsetParam = 0,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> ConversationPage:
+    """List the caller's conversations across ALL coworkers (newest first).
+
+    The unified per-user chat history: one list, every coworker's
+    conversations merged, each row still carrying its ``coworker_id``
+    so the client can badge it and route sends. Ownership IS the
+    filter — no coworker-visibility check applies, so a conversation
+    the caller opened stays listed even if the coworker was later
+    unshared. Delegation children and ownerless rows never appear
+    (see ``get_conversations_for_user``). The per-coworker endpoint
+    above remains for the scoped, oldest-first view.
+    """
+    convs = await get_conversations_for_user(
+        user.user_id, tenant_id=user.tenant_id, limit=limit, offset=offset,
+    )
+    total = await count_conversations_for_user(
+        user.user_id, tenant_id=user.tenant_id,
+    )
+    return ConversationPage(
+        items=[_conversation_to_response(c) for c in convs],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 # ---------------------------------------------------------------------------

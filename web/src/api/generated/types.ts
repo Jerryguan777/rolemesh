@@ -275,6 +275,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/conversations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the caller's conversations across all coworkers (newest first)
+         * @description The unified per-user chat history — every top-level conversation
+         *     the caller owns, across all coworkers, merged and ordered
+         *     newest-first. Each row carries its `coworker_id` so the client
+         *     can badge it and route sends. Ownership is the filter
+         *     (`conversations.user_id` = caller); delegation child
+         *     conversations and ownerless rows are excluded, and no
+         *     coworker-visibility check applies. The per-coworker list
+         *     endpoint remains for the scoped, oldest-first view.
+         */
+        get: operations["listUserConversations"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/conversations/{id}": {
         parameters: {
             query?: never;
@@ -3569,6 +3596,32 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    listUserConversations: {
+        parameters: {
+            query?: {
+                /** @description Maximum number of items to return (default 50, max 200). */
+                limit?: components["parameters"]["LimitParam"];
+                /** @description Number of items to skip from the start of the ordered set. */
+                offset?: components["parameters"]["OffsetParam"];
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationPage"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
         };
     };
     getConversation: {

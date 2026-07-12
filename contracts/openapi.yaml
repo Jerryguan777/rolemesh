@@ -447,6 +447,33 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /api/v1/conversations:
+    get:
+      tags: [Conversations]
+      operationId: listUserConversations
+      summary: List the caller's conversations across all coworkers (newest first)
+      description: |
+        The unified per-user chat history — every top-level conversation
+        the caller owns, across all coworkers, merged and ordered
+        newest-first. Each row carries its `coworker_id` so the client
+        can badge it and route sends. Ownership is the filter
+        (`conversations.user_id` = caller); delegation child
+        conversations and ownerless rows are excluded, and no
+        coworker-visibility check applies. The per-coworker list
+        endpoint remains for the scoped, oldest-first view.
+      security: [ { bearerAuth: [] } ]
+      parameters:
+        - { $ref: '#/components/parameters/LimitParam' }
+        - { $ref: '#/components/parameters/OffsetParam' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConversationPage' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
   /api/v1/conversations/{id}:
     parameters:
       - $ref: '#/components/parameters/IdInPath'

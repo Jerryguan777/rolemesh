@@ -60,6 +60,9 @@ AUTH_ONLY_V1_ROUTES: dict[tuple[str, str], str] = {
         "Read of one tenant coworker.",
     ("GET", "/api/v1/coworkers/{coworker_id}/conversations"):
         "Read of a coworker's conversations within the tenant.",
+    ("GET", "/api/v1/conversations"):
+        "Unified list of the caller's OWN conversations; the DB query "
+        "filters on user_id so nothing beyond the caller's rows can leak.",
     ("GET", "/api/v1/coworkers/{coworker_id}/bindings"):
         "Read of a coworker's channel bindings (write-only creds omitted).",
     ("GET", "/api/v1/coworkers/{coworker_id}/bindings/{binding_id}"):
