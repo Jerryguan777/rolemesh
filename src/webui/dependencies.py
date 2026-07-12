@@ -150,3 +150,35 @@ def user_can_see_resource(
     if created_by is not None and created_by == user.user_id:
         return True
     return user_can(user.role, manage_action)  # type: ignore[arg-type]
+
+
+def user_can_access_conversation(
+    *, conversation: object, user: AuthenticatedUser
+) -> bool:
+    """May this user read/delete/attach-to this conversation?
+
+    Chat privacy is per-user: a conversation belongs to the user who
+    opened it (``conversations.user_id``), not to everyone who can see
+    the coworker it is bound to. Accessible when EITHER holds:
+
+    * the caller owns it (``user_id == user.user_id``), OR
+    * the caller holds ``coworker.manage`` — owner / admin /
+      platform_admin reach every conversation in the tenant (cleanup,
+      moderation).
+
+    Same three-valued logic as ``require_manage_or_owner``: a row with
+    ``user_id IS NULL`` (Telegram sender not yet linked, legacy rows)
+    is nobody's — NULL never equals the caller, so it falls through to
+    requiring the manage capability rather than becoming tenant-public.
+
+    Every conversation fetch path — REST detail / messages / approvals
+    / delete AND the WS-ticket mint — routes through this predicate;
+    the list paths mirror the ownership half in SQL
+    (``rolemesh.db.chat.get_conversations_for_coworker_and_user``).
+    Callers collapse a False to the same 404 as "does not exist" so
+    ownership never becomes an existence oracle.
+    """
+    conv_user_id = getattr(conversation, "user_id", None)
+    if conv_user_id is not None and conv_user_id == user.user_id:
+        return True
+    return user_can(user.role, "coworker.manage")  # type: ignore[arg-type]

@@ -28,7 +28,7 @@ from fastapi import APIRouter, Depends, Response
 from rolemesh.auth.permissions import role_capabilities
 from rolemesh.auth.ws_ticket import WsTicketError, issue_ws_ticket
 from rolemesh.db import get_conversation
-from webui.dependencies import get_current_user
+from webui.dependencies import get_current_user, user_can_access_conversation
 from webui.schemas_v1 import (
     AuthConfig,
     Me,
@@ -101,12 +101,21 @@ async def post_ws_ticket(
     ``get_conversation`` returns ``None`` when the tenant_id
     doesn't match — we collapse that to 404 NOT_FOUND rather than
     403 so the existence isn't leaked.
+
+    Within the tenant the per-user ownership rule applies with the
+    same weight: the WS handshake trusts this ticket without
+    re-checking, so minting is where "may this user attach to this
+    conversation" is decided. Without it a member could stream — and
+    send into — another member's conversation that every REST path
+    correctly 404s. Not-owned collapses to the same 404.
     """
     try:
         conv = await get_conversation(body.conversation_id, tenant_id=user.tenant_id)
     except asyncpg.DataError:
         conv = None
-    if conv is None:
+    if conv is None or not user_can_access_conversation(
+        conversation=conv, user=user
+    ):
         raise_error_response(
             "NOT_FOUND",
             "Conversation not found.",

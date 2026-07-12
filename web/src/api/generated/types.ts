@@ -42,6 +42,11 @@ export interface paths {
          *     bound to one `conversation_id`; the handshake compares it
          *     against the path so it cannot be reused across conversations
          *     (design §4 / 01a Open Question 1).
+         *
+         *     Ownership is enforced at mint time: the conversation must
+         *     belong to the caller (or the caller holds `coworker.manage`).
+         *     A conversation that exists but is another member's returns the
+         *     same 404 as a non-existent one.
          */
         post: operations["createWsTicket"];
         delete?: never;
@@ -253,6 +258,14 @@ export interface paths {
             };
             cookie?: never;
         };
+        /**
+         * List the caller's own conversations with a coworker
+         * @description Chat privacy is per-user: the page contains only conversations
+         *     the caller owns (`user_id` = caller), oldest first. Two members
+         *     chatting with the same coworker never see each other's history;
+         *     this applies to admins' lists too. Delegation child
+         *     conversations are excluded.
+         */
         get: operations["listCoworkerConversations"];
         put?: never;
         post: operations["createCoworkerConversation"];
@@ -271,6 +284,13 @@ export interface paths {
             };
             cookie?: never;
         };
+        /**
+         * @description Ownership-scoped: 404 unless the conversation belongs to the
+         *     caller or the caller holds `coworker.manage`. Another member's
+         *     conversation is indistinguishable from a non-existent one. The
+         *     same rule guards the messages / approval-requests sub-resources,
+         *     DELETE, and WS-ticket minting.
+         */
         get: operations["getConversation"];
         put?: never;
         post?: never;

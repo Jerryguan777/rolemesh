@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     import asyncpg
 
 __all__ = [
-    "count_conversations_for_coworker",
+    "count_conversations_for_coworker_and_user",
     "create_channel_binding",
     "create_conversation",
     "delete_channel_binding",
@@ -38,6 +38,7 @@ __all__ = [
     "get_conversation_by_binding_and_chat",
     "get_conversation_for_notification",
     "get_conversations_for_coworker",
+    "get_conversations_for_coworker_and_user",
     "get_messages_since",
     "get_new_messages_for_conversations",
     "get_session",
@@ -437,15 +438,58 @@ async def get_conversations_for_coworker(
     return [_record_to_conversation(row) for row in rows]
 
 
-async def count_conversations_for_coworker(
-    coworker_id: str, *, tenant_id: str,
+async def get_conversations_for_coworker_and_user(
+    coworker_id: str, user_id: str, *, tenant_id: str,
+    limit: int | None = None, offset: int = 0,
+) -> list[Conversation]:
+    """One user's conversations under one coworker (oldest first, paged).
+
+    The per-user variant of :func:`get_conversations_for_coworker`,
+    backing ``GET /api/v1/coworkers/{id}/conversations``: chat privacy
+    is per-user, so the web list shows the caller ONLY their own
+    conversations with the coworker. The unfiltered variant above
+    remains for orchestrator-internal state loading, which must see
+    every conversation regardless of owner.
+
+    Delegation children (``parent_conversation_id IS NOT NULL``) are
+    excluded unconditionally — this feeds a user-facing list, never
+    ``_state``. Ownerless rows (``user_id IS NULL``) can never match.
+    """
+    sql = (
+        "SELECT * FROM conversations "
+        "WHERE coworker_id = $1::uuid AND user_id = $2::uuid "
+        "AND tenant_id = $3::uuid "
+        "AND parent_conversation_id IS NULL "
+        "ORDER BY created_at"
+    )
+    params: list[object] = [coworker_id, user_id, tenant_id]
+    if limit is not None:
+        params.extend((limit, offset))
+        sql += f" LIMIT ${len(params) - 1} OFFSET ${len(params)}"
+    async with tenant_conn(tenant_id) as conn:
+        rows = await conn.fetch(sql, *params)
+    return [_record_to_conversation(row) for row in rows]
+
+
+async def count_conversations_for_coworker_and_user(
+    coworker_id: str, user_id: str, *, tenant_id: str,
 ) -> int:
-    """Total conversation count for a coworker (for the pagination envelope)."""
+    """Pagination-envelope total for the per-user coworker list.
+
+    Must apply the exact predicate of
+    :func:`get_conversations_for_coworker_and_user` — the old
+    coworker-wide count skipped the child-exclusion its list applied,
+    so ``total`` overcounted by the delegation children and clients
+    paged into empty pages.
+    """
     async with tenant_conn(tenant_id) as conn:
         row = await conn.fetchrow(
             "SELECT COUNT(*) AS n FROM conversations "
-            "WHERE coworker_id = $1::uuid AND tenant_id = $2::uuid",
+            "WHERE coworker_id = $1::uuid AND user_id = $2::uuid "
+            "AND tenant_id = $3::uuid "
+            "AND parent_conversation_id IS NULL",
             coworker_id,
+            user_id,
             tenant_id,
         )
     return int(row["n"]) if row else 0
