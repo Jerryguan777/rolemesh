@@ -235,8 +235,7 @@ def spec_to_pod_manifest(
     image_pull_secret: str = "",
     image_pull_policy: str = "IfNotPresent",
     runtime_class: str = "",
-    storage_mode: str = "",
-    node_name: str = "",
+    pin_node: str = "",
 ) -> dict[str, Any]:
     """Map a ContainerSpec to a bare-Pod manifest (docs/21 §4.4).
 
@@ -367,27 +366,20 @@ def spec_to_pod_manifest(
     if image_pull_secret:
         pod_spec["imagePullSecrets"] = [{"name": image_pull_secret}]
 
-    # rwo-colocated (docs/21 §7.2): the data PVC is ReadWriteOnce, only
-    # attachable on one node — the orchestrator's own (it mounts the PVC
-    # directly). Without a scheduling constraint the scheduler places
-    # agent pods freely; any pod landing on another node hangs Pending
-    # forever on a Multi-Attach error ("starting container..." with no
-    # failure signal). Pin to the orchestrator's node by NAME (Downward
-    # API via ROLEMESH_K8S_NODE_NAME) rather than podAffinity on the
-    # orchestrator's labels: the node IS the constraint (it's where the
-    # volume lives), no label selector can be hijacked by an unrelated
-    # pod carrying the same labels, and a mismatch fails as a clear
-    # unschedulable event instead of a volume attach timeout.
-    if storage_mode == "rwo-colocated":
-        if node_name:
-            pod_spec["nodeSelector"] = {"kubernetes.io/hostname": node_name}
-        else:
-            logger.warning(
-                "storage_mode=rwo-colocated but no node name provided — "
-                "agent pods are unpinned and may hang on Multi-Attach; "
-                "check the ROLEMESH_K8S_NODE_NAME Downward API env",
-                pod=spec.name,
-            )
+    # Node pinning (docs/21 §7.2). ``pin_node`` is a DECISION handed down
+    # by the deployment layer (ROLEMESH_K8S_AGENT_PIN_NODE — the chart
+    # renders it only in rwo-colocated storage mode, where the
+    # ReadWriteOnce data PVC attaches on exactly one node and an agent
+    # scheduled elsewhere hangs Pending forever on a Multi-Attach error).
+    # This function deliberately knows nothing about storage modes; it
+    # pins whenever told to. nodeSelector by node NAME rather than
+    # podAffinity on the orchestrator's labels: the node IS the
+    # constraint (it's where the volume lives), no label selector can be
+    # matched by an unrelated pod carrying the same labels, and a
+    # mismatch fails as a clear unschedulable event instead of a volume
+    # attach timeout.
+    if pin_node:
+        pod_spec["nodeSelector"] = {"kubernetes.io/hostname": pin_node}
 
     return {
         "apiVersion": "v1",
@@ -706,13 +698,12 @@ class K8sRuntime:
         core = self._ensure_core()
         from rolemesh.core.config import (
             DATA_DIR,
+            ROLEMESH_K8S_AGENT_PIN_NODE,
             ROLEMESH_K8S_DATA_PVC,
             ROLEMESH_K8S_IMAGE_PULL_POLICY,
             ROLEMESH_K8S_IMAGE_PULL_SECRET,
             ROLEMESH_K8S_NAMESPACE,
-            ROLEMESH_K8S_NODE_NAME,
             ROLEMESH_K8S_RUNTIME_CLASS,
-            ROLEMESH_K8S_STORAGE_MODE,
         )
 
         manifest = spec_to_pod_manifest(
@@ -723,8 +714,7 @@ class K8sRuntime:
             image_pull_secret=ROLEMESH_K8S_IMAGE_PULL_SECRET,
             image_pull_policy=ROLEMESH_K8S_IMAGE_PULL_POLICY,
             runtime_class=ROLEMESH_K8S_RUNTIME_CLASS,
-            storage_mode=ROLEMESH_K8S_STORAGE_MODE,
-            node_name=ROLEMESH_K8S_NODE_NAME,
+            pin_node=ROLEMESH_K8S_AGENT_PIN_NODE,
         )
 
         await self._delete_and_wait_gone(spec.name, ROLEMESH_K8S_NAMESPACE)
