@@ -633,14 +633,19 @@ def _convert_messages(
 
 
 # Bedrock Converse tool-name contract:
-#   - max 64 chars
-#   - first char a letter, then letters/digits/underscore/hyphen only
-# Source: AWS Bedrock Runtime API ToolSpecification.name documentation.
+#   - 1..64 chars, letters/digits/underscore/hyphen only
+# Source: AWS Bedrock Runtime API ToolSpecification.name documentation
+# (pattern ``[a-zA-Z0-9_-]+``, max length 64 — mirrored exactly; an
+# earlier revision additionally required a leading letter, which AWS
+# does not, and mis-rejected valid names like ``_private_tool``).
 # We validate both shape AND length client-side so the failure surfaces
 # in rolemesh's stack with our error message, not as an opaque
-# Bedrock 400 with AWS-flavoured wording. Anthropic / OpenAI / Google
-# providers do their own thing — this is a Bedrock-only contract.
-_BEDROCK_TOOL_NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,63}$")
+# Bedrock 400 with AWS-flavoured wording. This is a LAST-RESORT guard:
+# MCP tool names are already normalised to this contract for every
+# provider by ``pi.mcp_naming.compose_llm_tool_name``, so a trip here
+# means a mis-named non-MCP custom tool — a bug, not an operator
+# configuration problem.
+_BEDROCK_TOOL_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 
 def _convert_tool_config(
@@ -650,15 +655,15 @@ def _convert_tool_config(
     """Convert tools and tool_choice to Bedrock ToolConfiguration format.
 
     Bedrock Converse imposes both a 64-char cap and a restricted
-    character set (``^[a-zA-Z][a-zA-Z0-9_-]*$``). Anthropic native
-    and OpenAI accept names up to 128 chars and a wider charset.
+    character set (``[a-zA-Z0-9_-]+``). Anthropic native and OpenAI
+    accept names up to 128 chars and a wider charset.
 
-    We do NOT silently truncate / sanitise here — a hidden mapping
-    layer would just defer the failure to a confusing point
-    downstream (the agent would call a name that no longer matches
-    its tool registry). Fail loudly with the offending name so
-    operators know to apply the short-prefix MCP naming scheme (and
-    avoid disallowed characters) upstream.
+    We do NOT truncate / sanitise here — that normalisation already
+    happened for MCP tools in ``pi.mcp_naming.compose_llm_tool_name``
+    (with a dispatch-safe alias registry), so anything still violating
+    the contract at this point is a mis-named custom tool. Fail loudly
+    with the offending name so the bug surfaces in our stack instead
+    of as an opaque AWS ValidationException.
     """
     if not tools or tool_choice == "none":
         return None
@@ -668,10 +673,10 @@ def _convert_tool_config(
             raise ValueError(
                 f"Bedrock Converse: tool name {tool.name!r} is invalid "
                 f"(len={len(tool.name)}). Must match "
-                f"^[a-zA-Z][a-zA-Z0-9_-]{{0,63}}$ — at most 64 chars, "
-                f"start with an ASCII letter, then letters/digits/"
-                f"underscore/hyphen only. Apply the upstream short-prefix "
-                f"MCP naming scheme before sending to this provider."
+                f"^[a-zA-Z0-9_-]{{1,64}}$ — at most 64 chars of letters/"
+                f"digits/underscore/hyphen. MCP tool names are normalised "
+                f"upstream (pi.mcp_naming); a failure here indicates a "
+                f"mis-named custom tool."
             )
 
     bedrock_tools: list[dict[str, Any]] = [

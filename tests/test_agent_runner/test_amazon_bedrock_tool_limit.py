@@ -1,10 +1,12 @@
-"""Bedrock Converse tool-name length contract.
+"""Bedrock Converse tool-name length contract (provider-side guard).
 
-Bedrock's Converse API caps tool names at 64 characters; Anthropic
-native and OpenAI accept up to 128. The provider raises rather than
-silently truncating because a hidden mapping layer would defer the
-failure to a confusing point downstream — the agent would call a
-tool name that no longer matches the registry it built locally.
+Bedrock's Converse API caps tool names at 64 characters with pattern
+``[a-zA-Z0-9_-]+``; Anthropic native and OpenAI accept up to 128.
+MCP tool names are normalised to this contract upstream for every
+provider (``pi.mcp_naming`` — with a dispatch-safe alias registry, see
+``test_mcp_tool_naming``), so this validator is the LAST-RESORT guard:
+anything tripping it is a mis-named non-MCP custom tool, and raising
+with the offending name beats an opaque AWS ValidationException.
 """
 
 from __future__ import annotations
@@ -89,16 +91,17 @@ def test_at_sign_in_name_raises() -> None:
         _convert_tool_config([_tool("scope@v1")], "auto")
 
 
-def test_starting_digit_raises() -> None:
-    # First char must be a letter — ``[a-zA-Z]``. Names like
-    # ``2fa_setup`` would slip past a length-only check.
-    with pytest.raises(ValueError, match="Bedrock Converse"):
-        _convert_tool_config([_tool("2fa_setup")], "auto")
+def test_starting_digit_is_accepted() -> None:
+    # AWS's documented pattern is ``[a-zA-Z0-9_-]+`` — no leading-letter
+    # requirement. An earlier revision of our validator added one and
+    # mis-rejected valid names like this.
+    cfg = _convert_tool_config([_tool("2fa_setup")], "auto")
+    assert cfg is not None
 
 
-def test_starting_underscore_raises() -> None:
-    with pytest.raises(ValueError, match="Bedrock Converse"):
-        _convert_tool_config([_tool("_private_tool")], "auto")
+def test_starting_underscore_is_accepted() -> None:
+    cfg = _convert_tool_config([_tool("_private_tool")], "auto")
+    assert cfg is not None
 
 
 def test_double_underscore_mcp_style_is_accepted() -> None:

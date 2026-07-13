@@ -457,11 +457,20 @@ class MCPServerCreate(BaseModel):
     ``auth_mode`` is required at the API even though the column has
     a ``'service'`` DB default — making it explicit avoids the
     "what mode did I create this in" question on the operator side.
+
+    ``name`` is rolemesh's local label for the connection, and it is
+    embedded verbatim in every LLM-visible tool name as
+    ``mcp__{name}__{tool}`` under a 64-char/``[a-zA-Z0-9_-]`` contract
+    (Bedrock's cap — see ``pi.mcp_naming``). The short-name/charset
+    validation here keeps the tool segment's budget ≥37 chars so
+    third-party tool names rarely need lossy aliasing.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(min_length=1, max_length=200)
+    name: str = Field(
+        min_length=1, max_length=20, pattern=r"^[a-zA-Z][a-zA-Z0-9_-]*$"
+    )
     type: MCPType
     url: str = Field(min_length=1)
     auth_mode: MCPAuthMode
@@ -480,7 +489,12 @@ class MCPServerUpdate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str | None = Field(default=None, min_length=1, max_length=200)
+    name: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=20,
+        pattern=r"^[a-zA-Z][a-zA-Z0-9_-]*$",
+    )
     type: MCPType | None = None
     url: str | None = Field(default=None, min_length=1)
     auth_mode: MCPAuthMode | None = None

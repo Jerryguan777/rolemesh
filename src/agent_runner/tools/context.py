@@ -135,9 +135,19 @@ class ToolContext:
         # the tool-context module at import time — callers that don't
         # register any safety hooks (zero-rule agents) keep the old
         # cold-start cost.
+        # Reversibility overrides are keyed by ORIGINAL remote tool
+        # names; if the tool-name contract aliased the LLM-visible name
+        # (pi.mcp_naming), restore it before the lookup — otherwise an
+        # aliased tool always falls through to the fail-safe False.
+        from agent_runner.hooks.handlers.approval import parse_mcp_tool_name
         from rolemesh.safety.tool_reversibility import (
             resolve_from_full_tool_name,
         )
+
+        parsed = parse_mcp_tool_name(tool_name)
+        if parsed is not None:
+            server, original_tool = parsed
+            tool_name = f"mcp__{server}__{original_tool}"
 
         return resolve_from_full_tool_name(
             tool_name, self.mcp_tool_reversibility
