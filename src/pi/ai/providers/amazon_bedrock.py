@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import os
 import re
 import time
@@ -56,6 +57,8 @@ from pi.ai.types import (
 )
 from pi.ai.utils.json_parse import parse_streaming_json
 from pi.ai.utils.sanitize_unicode import sanitize_surrogates
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -108,6 +111,10 @@ def stream_bedrock(
     partial_json: dict[int, str] = {}
 
     async def _do_stream() -> None:
+        # Set when the Converse terminal marker (messageStop) has been
+        # processed — from that point the assistant turn is complete
+        # and a later transport failure must not fail the whole turn.
+        saw_message_stop = False
         try:
             region = (
                 options.region or os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
@@ -182,21 +189,27 @@ def stream_bedrock(
             # Process the event stream - iterate in executor since boto3 streaming is sync
             event_stream = response.get("stream", [])
 
-            def _iter_events() -> list[dict[str, Any]]:
+            def _iter_events() -> list[Any]:
                 """Collect a batch of events from the sync iterator."""
-                events: list[dict[str, Any]] = []
+                events: list[Any] = []
                 try:
                     for item in event_stream:
                         events.append(item)
                 except Exception as exc:
-                    events.append({"_error": str(exc)})
+                    # Preserve the exception OBJECT. Flattening to
+                    # str(exc) loses the type, and the common tail
+                    # exceptions here (TimeoutError / socket.timeout
+                    # while draining the stream) stringify to "" —
+                    # which left an undebuggable empty errorMessage
+                    # in session files.
+                    events.append(exc)
                 return events
 
             events = await loop.run_in_executor(None, _iter_events)
 
             for item in events:
-                if "_error" in item:
-                    raise RuntimeError(item["_error"])
+                if isinstance(item, Exception):
+                    raise item
 
                 if "messageStart" in item:
                     msg_start = item["messageStart"]
@@ -212,6 +225,7 @@ def stream_bedrock(
                 elif "messageStop" in item:
                     msg_stop = item["messageStop"]
                     output.stop_reason = _map_stop_reason(msg_stop.get("stopReason"))
+                    saw_message_stop = True
                 elif "metadata" in item:
                     _handle_metadata(item["metadata"], model, output)
                 elif "internalServerException" in item:
@@ -235,8 +249,34 @@ def stream_bedrock(
             stream.end()
 
         except Exception as exc:
-            output.stop_reason = "aborted" if (options.signal is not None and options.signal.is_set()) else "error"
-            output.error_message = str(exc)
+            aborted = options.signal is not None and options.signal.is_set()
+            if (
+                saw_message_stop
+                and not aborted
+                and output.stop_reason not in ("error", "aborted")
+            ):
+                # The turn already completed (messageStop arrived with a
+                # normal terminal reason); only the tail failed — e.g. a
+                # read timeout while draining the stream before the
+                # final ``metadata`` (usage) event. Degrade instead of
+                # discarding a fully delivered response: usage may be
+                # missing, but the reply and the real stop reason stand.
+                # The stop_reason guard keeps refusal/guardrail stops
+                # (mapped to "error") on the error path.
+                _log.warning(
+                    "Bedrock stream failed after messageStop; keeping "
+                    "completed turn (stop_reason=%s): %r",
+                    output.stop_reason,
+                    exc,
+                )
+                stream.push(DoneEvent(reason=output.stop_reason, message=output))
+                stream.end()
+                return
+            output.stop_reason = "aborted" if aborted else "error"
+            # ``or repr(exc)``: TimeoutError / socket.timeout stringify
+            # to "" — never record an empty diagnostic.
+            output.error_message = str(exc) or repr(exc)
+            _log.exception("Bedrock stream failed")
             stream.push(ErrorEvent(reason=output.stop_reason, error=output))
             stream.end()
 
@@ -487,7 +527,18 @@ def _map_stop_reason(reason: str | None) -> StopReason:
         return "length"
     if reason == "tool_use":
         return "toolUse"
-    return "error"
+    if reason in ("guardrail_intervened", "content_filtered"):
+        # Deliberate error mapping — the Bedrock analogue of the
+        # Anthropic mapper's refusal/"sensitive" entries.
+        return "error"
+    # Unknown values must NOT fall back to "error": Bedrock grows new
+    # stopReason enums over time (per-model/per-feature), and "error"
+    # here trips the pre-Done sentinel in ``_do_stream``, converting a normal
+    # completion (full content delivered) into a failed run with
+    # "An unknown error occurred". Match the Anthropic mapper: default
+    # to "stop" and log the raw value so a mapping can be added.
+    _log.warning("Unknown Bedrock stopReason %r, defaulting to 'stop'", reason)
+    return "stop"
 
 
 def _convert_messages(

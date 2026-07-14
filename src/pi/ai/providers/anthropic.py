@@ -545,6 +545,12 @@ async def stream_anthropic(
         timestamp=int(time.time() * 1000),
     )
 
+    # Set once the API's terminal signal (message_delta carrying a
+    # stop_reason) has been processed — from that point the assistant
+    # turn is complete and a later transport failure must not fail
+    # the whole turn.
+    saw_terminal = False
+
     try:
         api_key = (options.api_key if options and options.api_key else None) or get_env_api_key(model.provider) or ""
 
@@ -699,6 +705,13 @@ async def stream_anthropic(
                     delta = event.delta
                     if getattr(delta, "stop_reason", None):
                         output.stop_reason = _map_stop_reason(delta.stop_reason)
+                        # Terminal signal received — the turn is
+                        # complete from here on (see except below).
+                        # Explicit flag rather than checking
+                        # output.stop_reason: its default is already
+                        # "stop", which would be indistinguishable
+                        # from "never heard back".
+                        saw_terminal = True
                     usage = event.usage
                     if getattr(usage, "input_tokens", None) is not None:
                         output.usage.input = usage.input_tokens
@@ -725,12 +738,33 @@ async def stream_anthropic(
         )
 
     except Exception as exc:
-        output.stop_reason = (
-            "aborted"
-            if options and options.signal is not None and options.signal.is_set()
-            else "error"
+        aborted = bool(
+            options and options.signal is not None and options.signal.is_set()
         )
-        output.error_message = str(exc)
+        if (
+            saw_terminal
+            and not aborted
+            and output.stop_reason not in ("error", "aborted")
+        ):
+            # The turn already completed (the API sent its terminal
+            # stop_reason); only the tail failed — e.g. a timeout while
+            # the SDK closed the stream. Degrade instead of discarding
+            # a fully delivered response. The stop_reason guard keeps
+            # refusal/"sensitive" stops (mapped to "error") on the
+            # error path.
+            _log.warning(
+                "Anthropic stream failed after terminal stop_reason=%s; "
+                "keeping completed turn: %r",
+                output.stop_reason,
+                exc,
+            )
+            yield DoneEvent(reason=output.stop_reason, message=output)
+            return
+        output.stop_reason = "aborted" if aborted else "error"
+        # ``or repr(exc)``: timeout-family exceptions stringify to "" —
+        # never record an empty diagnostic.
+        output.error_message = str(exc) or repr(exc)
+        _log.exception("Anthropic stream failed")
         yield ErrorEvent(reason=output.stop_reason, error=output)
 
 
