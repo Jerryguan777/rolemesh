@@ -2008,6 +2008,7 @@ export interface components {
             updated_at: string;
         };
         MCPServerCreate: {
+            /** @description Local label for the connection; embedded verbatim in every LLM-visible tool name as `mcp__{name}__{tool}` under a 64-char tool-name contract, hence the short length and restricted charset. */
             name: string;
             type: components["schemas"]["MCPType"];
             url: string;
@@ -2021,6 +2022,7 @@ export interface components {
             description?: string | null;
         };
         MCPServerUpdate: {
+            /** @description Local label for the connection; embedded verbatim in every LLM-visible tool name as `mcp__{name}__{tool}` under a 64-char tool-name contract, hence the short length and restricted charset. */
             name?: string;
             type?: components["schemas"]["MCPType"];
             url?: string;

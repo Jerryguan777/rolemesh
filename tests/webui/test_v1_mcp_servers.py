@@ -389,3 +389,52 @@ async def test_mcp_servers_isolated_per_tenant() -> None:
         )
     assert listing.status_code == 200
     assert listing.json()["items"] == []
+
+
+# ---------------------------------------------------------------------------
+# Name contract (fix/mcp-tool-name-length): the server name is embedded
+# verbatim in every LLM-visible tool name as ``mcp__{name}__{tool}``
+# under a 64-char/[a-zA-Z0-9_-] provider contract (Bedrock's cap), so
+# it must be short and charset-safe AT REGISTRATION — a long or dotted
+# name would force lossy aliasing onto every tool of the server.
+# ---------------------------------------------------------------------------
+
+
+async def test_create_rejects_name_over_20_chars_as_422() -> None:
+    user = await _make_user()
+    async with _client(_build_app(user)) as ac:
+        resp = await ac.post(
+            "/api/v1/mcp-servers", json=_payload(name="a" * 21)
+        )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_create_rejects_illegal_charset_as_422() -> None:
+    user = await _make_user()
+    async with _client(_build_app(user)) as ac:
+        for bad in ("github.search", "my server", "1st-server"):
+            resp = await ac.post(
+                "/api/v1/mcp-servers", json=_payload(name=bad)
+            )
+            assert resp.status_code == 422, (bad, resp.text)
+
+
+async def test_patch_rejects_bad_name_as_422() -> None:
+    user = await _make_user()
+    async with _client(_build_app(user)) as ac:
+        created = await ac.post("/api/v1/mcp-servers", json=_payload())
+        assert created.status_code == 201, created.text
+        sid = created.json()["id"]
+        resp = await ac.patch(
+            f"/api/v1/mcp-servers/{sid}", json={"name": "b" * 21}
+        )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_create_accepts_20_char_safe_name() -> None:
+    user = await _make_user()
+    async with _client(_build_app(user)) as ac:
+        resp = await ac.post(
+            "/api/v1/mcp-servers", json=_payload(name="A" + "b" * 18 + "-")
+        )
+    assert resp.status_code == 201, resp.text

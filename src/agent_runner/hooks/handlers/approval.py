@@ -77,6 +77,13 @@ def parse_mcp_tool_name(tool_name: str) -> tuple[str, str] | None:
     ``__`` separators are structural. An empty server or empty tool is
     treated as not-well-formed so a degenerate ``"mcp__"`` does not match a
     server-wide ``"*"`` policy by accident.
+
+    The returned tool component is the ORIGINAL remote tool name: when the
+    64-char tool-name contract forced an alias on the LLM-visible name
+    (``pi.mcp_naming``), the alias is mapped back here. Without this, an
+    aliased tool would silently slip past every approval policy and
+    reversibility override written against the real name — the policy
+    gate, not just cosmetics.
     """
     if not tool_name.startswith(_MCP_PREFIX):
         return None
@@ -84,7 +91,11 @@ def parse_mcp_tool_name(tool_name: str) -> tuple[str, str] | None:
     server, sep, tool = rest.partition("__")
     if not sep or not server or not tool:
         return None
-    return server, tool
+    # stdlib-only module (safe in every runtime); identity when no alias
+    # was composed in this process (e.g. the claude backend).
+    from pi.mcp_naming import restore_bare_tool_name
+
+    return server, restore_bare_tool_name(server, tool)
 
 
 class ApprovalHookHandler:

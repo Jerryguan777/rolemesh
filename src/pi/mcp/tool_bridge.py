@@ -2,7 +2,10 @@
 MCP tool bridge — discovers tools from external MCP servers and wraps them
 as Pi AgentTool instances.
 
-Tool names follow the convention: mcp__{server_name}__{tool_name}
+Tool names follow the convention: mcp__{server_name}__{tool_name},
+subject to the 64-char/charset contract in ``pi.mcp_naming`` (remote
+tool names that don't fit are exposed under a deterministic alias;
+dispatch always uses the original remote name).
 """
 
 from __future__ import annotations
@@ -14,6 +17,7 @@ from typing import Any
 
 from pi.agent.types import AgentTool, AgentToolResult
 from pi.ai.types import TextContent
+from pi.mcp_naming import compose_llm_tool_name
 
 from .client import McpServerConnection
 
@@ -95,16 +99,28 @@ async def _connect_one(
         await conn.connect()
         remote_tools = await conn.list_tools()
         logger.info("MCP server '%s': %d tools discovered", spec.name, len(remote_tools))
-        tools: list[AgentTool] = [
-            McpProxiedTool(
-                tool_name=f"mcp__{spec.name}__{tool_info['name']}",
-                tool_description=tool_info["description"],
-                tool_parameters=tool_info["inputSchema"],
-                connection=conn,
-                remote_tool_name=tool_info["name"],
+        tools: list[AgentTool] = []
+        for tool_info in remote_tools:
+            llm_name = compose_llm_tool_name(spec.name, tool_info["name"])
+            description = tool_info["description"]
+            if llm_name != f"mcp__{spec.name}__{tool_info['name']}":
+                # Aliased (too long / illegal chars for the tool-name
+                # contract) — keep the real name in the description so
+                # the model retains the tool's semantics.
+                description = (
+                    f"{description}\n\n(Exposed under a shortened alias; "
+                    f"the actual tool on server '{spec.name}' is "
+                    f"'{tool_info['name']}'.)"
+                )
+            tools.append(
+                McpProxiedTool(
+                    tool_name=llm_name,
+                    tool_description=description,
+                    tool_parameters=tool_info["inputSchema"],
+                    connection=conn,
+                    remote_tool_name=tool_info["name"],
+                )
             )
-            for tool_info in remote_tools
-        ]
         return tools, conn
     # Catch CancelledError explicitly: mcp library uses anyio TaskGroup and
     # AsyncExitStack-based teardown can surface failures as CancelledError
