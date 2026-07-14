@@ -527,7 +527,18 @@ def _map_stop_reason(reason: str | None) -> StopReason:
         return "length"
     if reason == "tool_use":
         return "toolUse"
-    return "error"
+    if reason in ("guardrail_intervened", "content_filtered"):
+        # Deliberate error mapping — the Bedrock analogue of the
+        # Anthropic mapper's refusal/"sensitive" entries.
+        return "error"
+    # Unknown values must NOT fall back to "error": Bedrock grows new
+    # stopReason enums over time (per-model/per-feature), and "error"
+    # here trips the pre-Done sentinel in ``_do_stream``, converting a normal
+    # completion (full content delivered) into a failed run with
+    # "An unknown error occurred". Match the Anthropic mapper: default
+    # to "stop" and log the raw value so a mapping can be added.
+    _log.warning("Unknown Bedrock stopReason %r, defaulting to 'stop'", reason)
+    return "stop"
 
 
 def _convert_messages(

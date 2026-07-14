@@ -148,6 +148,40 @@ async def test_bedrock_error_mapped_stop_reason_is_not_rescued() -> None:
     assert final.error.stop_reason == "error"
 
 
+@pytest.mark.asyncio
+async def test_bedrock_unknown_stop_reason_is_a_normal_completion() -> None:
+    """Latent twin of the tail-error bug: Bedrock grows new stopReason
+    enums (per-model/per-feature), and the mapper used to fall back to
+    "error" — which tripped the pre-Done sentinel and converted a CLEAN
+    stream with full content into a failed run reading "An unknown
+    error occurred" (with non-zero usage — a different signature than
+    the transport-tail incident). Unknown must default to "stop"."""
+    stop = {"messageStop": {"stopReason": "some_future_reason"}}
+    metadata = {"metadata": {"usage": {"inputTokens": 10, "outputTokens": 5}}}
+    final = await _bedrock_final([*_BEDROCK_BODY, stop, metadata], None)
+    assert isinstance(final, DoneEvent)
+    assert final.message.stop_reason == "stop"
+    assert _text(final.message) == "Hello, world!"
+    # Clean stream: metadata was processed, usage must be populated.
+    assert final.message.usage.input == 10
+    assert final.message.usage.output == 5
+
+
+def test_bedrock_stop_reason_mapping_contract() -> None:
+    """Explicit mapping table: guardrail/content-filter are DELIBERATE
+    error mappings (the Anthropic mapper's refusal/"sensitive"
+    analogues); unknown values are normal completions, not errors."""
+    from pi.ai.providers.amazon_bedrock import _map_stop_reason
+
+    assert _map_stop_reason("end_turn") == "stop"
+    assert _map_stop_reason("tool_use") == "toolUse"
+    assert _map_stop_reason("max_tokens") == "length"
+    assert _map_stop_reason("guardrail_intervened") == "error"
+    assert _map_stop_reason("content_filtered") == "error"
+    assert _map_stop_reason("some_future_reason") == "stop"
+    assert _map_stop_reason(None) == "stop"
+
+
 # ---------------------------------------------------------------------------
 # Anthropic
 # ---------------------------------------------------------------------------
