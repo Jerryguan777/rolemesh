@@ -79,6 +79,13 @@ class ContainerOutput:
     # this to a dedicated WS frame without writing to the messages
     # table — blocks are already audited in safety_decisions.
     is_final: bool = True
+    # Only meaningful for status="error". False means the failure is a
+    # deterministic configuration error (pi.ai.types.NonRetryableConfigError):
+    # the orchestrator should fail the message once and surface it to the
+    # user instead of walking the retry/backoff ladder. Default True keeps
+    # every unclassified error on the existing retry path (fail-open to
+    # retry), and absence on the wire means True for older containers.
+    retryable: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"status": self.status, "result": self.result}
@@ -92,6 +99,9 @@ class ContainerOutput:
         # consumers keep seeing the same JSON shape.
         if not self.is_final:
             d["isFinal"] = False
+        # Same convention: only non-default (False) goes on the wire.
+        if not self.retryable:
+            d["retryable"] = False
         return d
 
 
@@ -110,6 +120,23 @@ async def publish_output(js: JetStreamContext, job_id: str, output: ContainerOut
         f"agent.{job_id}.results",
         json.dumps(output.to_dict()).encode(),
     )
+
+
+def is_retryable_error(exc: BaseException) -> bool:
+    """Classify an exception that killed the agent turn.
+
+    Whitelist-by-type: only ``pi.ai.types.NonRetryableConfigError`` (raised
+    at deterministic local validation points — provider tool-name/schema
+    checks, unresolvable model ids) is non-retryable. Everything else —
+    including errors we can't classify because the ``pi`` package isn't
+    importable in this runtime — stays retryable, so a transient fault can
+    never be misclassified as permanent (fail-open to retry).
+    """
+    try:
+        from pi.ai.types import NonRetryableConfigError
+    except ImportError:  # runtime without the pi package
+        return True
+    return not isinstance(exc, NonRetryableConfigError)
 
 
 async def drain_nats_input(sub: Any) -> list[str]:
@@ -602,10 +629,16 @@ async def main() -> None:
         await run_query_loop(init, nc, js, JOB_ID)
     except Exception as exc:  # noqa: BLE001
         error_message = str(exc)
-        log(f"Agent error: {error_message}")
+        retryable = is_retryable_error(exc)
+        log(f"Agent error (retryable={retryable}): {error_message}")
         await publish_output(
             js, JOB_ID,
-            ContainerOutput(status="error", result=None, error=error_message),
+            ContainerOutput(
+                status="error",
+                result=None,
+                error=error_message,
+                retryable=retryable,
+            ),
         )
         await nc.close()
         sys.exit(1)

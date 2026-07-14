@@ -30,6 +30,7 @@ from pi.ai.types import (
     ErrorEvent,
     ImageContent,
     Model,
+    NonRetryableConfigError,
     SimpleStreamOptions,
     StartEvent,
     StopReason,
@@ -670,7 +671,11 @@ def _convert_tool_config(
 
     for tool in tools:
         if not _BEDROCK_TOOL_NAME_RE.match(tool.name):
-            raise ValueError(
+            # NonRetryableConfigError: the name is a static property of the
+            # configuration — respawning the agent cannot change it, so the
+            # orchestrator should fail the message once instead of walking
+            # the retry/backoff ladder.
+            raise NonRetryableConfigError(
                 f"Bedrock Converse: tool name {tool.name!r} is invalid "
                 f"(len={len(tool.name)}). Must match "
                 f"^[a-zA-Z0-9_-]{{1,64}}$ — at most 64 chars of letters/"

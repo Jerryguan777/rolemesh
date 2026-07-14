@@ -78,6 +78,13 @@ class AgentOutput:
     error: str | None = None
     metadata: dict[str, object] | None = None
     is_final: bool = True
+    # Only meaningful for status="error". False marks a deterministic
+    # configuration error the container classified at the source
+    # (pi.ai.types.NonRetryableConfigError): the orchestrator fails the
+    # message once, surfaces the error to the user, and skips the
+    # retry/backoff ladder. Default True — an unmarked error (including
+    # every event from older containers) keeps the existing retry path.
+    retryable: bool = True
 
     def is_progress(self) -> bool:
         return self.status in PROGRESS_STATUSES

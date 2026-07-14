@@ -9,6 +9,30 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal
 
+# --- Errors ---
+
+
+class NonRetryableConfigError(ValueError):
+    """Deterministic configuration error — retrying cannot succeed.
+
+    Raised at local validation points where the failure is a property
+    of the coworker/tool configuration, not of the environment: a tool
+    name violating a provider contract, a model id that resolves to no
+    provider, a schema the provider rejects before any network call.
+    The agent runner propagates this classification to the orchestrator
+    (``retryable=False`` on the error event) so the message fails once,
+    surfaces a clear error to the user, and skips the retry/backoff
+    ladder that exists for transient faults.
+
+    Subclasses ``ValueError`` so existing ``except ValueError`` call
+    sites keep working. Keep this for errors that are provably
+    deterministic — anything that *might* be transient (401 from an
+    expiring token, 5xx, timeouts) must NOT use it: a transient error
+    misclassified as permanent silently drops a recoverable message,
+    which is worse than a permanent error being retried six times.
+    """
+
+
 # --- API and Provider enums ---
 
 
