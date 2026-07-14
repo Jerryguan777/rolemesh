@@ -1045,9 +1045,14 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
 
     had_error = False
     output_sent_to_user = False
+    # Set when the container reports a deterministic configuration error
+    # (status="error", retryable=False). Carries the error text; the post-run
+    # branch drops the message once with a user-visible explanation instead
+    # of walking the retry/backoff ladder.
+    non_retryable_error: str | None = None
 
     async def _on_output(result: AgentOutput) -> None:
-        nonlocal had_error, output_sent_to_user
+        nonlocal had_error, output_sent_to_user, non_retryable_error
         # Progress events (running / tool_use / queued / container_starting)
         # are transient UX indicators — route to web gateway as status and
         # early-return. Don't touch idle timer or notify_idle.
@@ -1216,13 +1221,26 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
                     await gw.send_stream_done(binding.id, conv.channel_chat_id)
             _queue.notify_idle(conversation_id)
         if result.status == "error":
-            had_error = True
-            await _terminate_run_safe(
-                active_run_id,
-                conv.tenant_id,
-                success=False,
-                error={"code": "AGENT_ERROR", "message": result.error or "agent run failed"},
-            )
+            if result.retryable:
+                had_error = True
+                await _terminate_run_safe(
+                    active_run_id,
+                    conv.tenant_id,
+                    success=False,
+                    error={"code": "AGENT_ERROR", "message": result.error or "agent run failed"},
+                )
+            else:
+                # Deterministic configuration error, classified at the source
+                # (pi.ai.types.NonRetryableConfigError). Respawning cannot fix
+                # it — record it and let the post-run branch drop the message
+                # once with a user-visible explanation.
+                non_retryable_error = result.error or "agent configuration error"
+                await _terminate_run_safe(
+                    active_run_id,
+                    conv.tenant_id,
+                    success=False,
+                    error={"code": "CONFIG_ERROR", "message": non_retryable_error},
+                )
 
     output = await _run_agent(cw_state, conv_state, prompt, _on_output)
 
@@ -1231,6 +1249,32 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
         with contextlib.suppress(OSError, RuntimeError, TypeError, ValueError):
             await gw.set_typing(binding.id, conv.channel_chat_id, False)
     _queue.cancel_idle_timer(conversation_id)
+
+    if non_retryable_error is not None:
+        # Checked BEFORE the retryable branch: the container exiting after a
+        # config error also makes ``output == "error"``, and the retryable
+        # branch would roll the cursor back into the retry ladder. Here the
+        # message is consumed as-is (no rollback → scheduler sees success →
+        # no backoff, no new pod) and the user gets an explanation instead
+        # of a silent drop after six identical failures.
+        logger.error(
+            "Agent error",
+            coworker=config.name,
+            retryable=False,
+            action="drop",
+            error=non_retryable_error[:200],
+        )
+        await _notify_conversation_error(
+            cw_state,
+            conv,
+            binding,
+            gw,
+            "⚠️ Configuration error: "
+            f"{non_retryable_error[:200]}\n\n"
+            "This failure is deterministic and will not be retried — "
+            "please fix the coworker's configuration.",
+        )
+        return True
 
     if output == "error" or had_error:
         if output_sent_to_user:
@@ -1243,7 +1287,12 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
         await update_conversation_last_invocation(
             conv.id, previous_cursor, tenant_id=conv.tenant_id
         )
-        logger.warning("Agent error, rolled back message cursor for retry", coworker=config.name)
+        logger.warning(
+            "Agent error, rolled back message cursor for retry",
+            coworker=config.name,
+            retryable=True,
+            action="schedule_retry",
+        )
         return False
 
     return True
@@ -2192,6 +2241,7 @@ async def main() -> None:
     _queue.set_process_messages_fn(_process_conversation_messages)
     _queue.set_on_queued(_emit_queued_status)
     _queue.set_on_container_starting(_emit_container_starting_status)
+    _queue.set_on_messages_dropped(_notify_messages_dropped)
     _web_gw.set_on_stop(_handle_web_stop)
     await _recover_pending_messages()
 
@@ -2364,6 +2414,68 @@ async def _persist_web_assistant_message(
         timestamp=datetime.now(UTC).isoformat(),
         is_from_me=True,
         is_bot_message=True,
+    )
+
+
+async def _notify_conversation_error(
+    cw_state: CoworkerState,
+    conv: Conversation,
+    binding: ChannelBinding | None,
+    gw: object,
+    text: str,
+) -> None:
+    """Deliver an error explanation into the conversation's channel.
+
+    Used when a message is dropped without an assistant reply (non-retryable
+    config error, retry budget exhausted) so the user sees WHY instead of a
+    silent spinner. Sent as an ordinary bot message — persisted for web so
+    it survives a reload — and best-effort: a delivery failure must not mask
+    the original error path.
+    """
+    if not (binding and gw):
+        logger.warning(
+            "No channel to deliver agent error notice",
+            conversation_id=conv.id,
+            coworker=cw_state.config.name,
+        )
+        return
+    with contextlib.suppress(OSError, RuntimeError, TypeError, ValueError):
+        await gw.send_message(binding.id, conv.channel_chat_id, text)  # type: ignore[attr-defined]
+        if isinstance(gw, WebNatsGateway):
+            await _persist_web_assistant_message(conv, cw_state.config.name, text)
+            # Finalize the streaming bubble so the SPA exits the spinner.
+            await gw.send_stream_done(binding.id, conv.channel_chat_id)
+
+
+async def _notify_messages_dropped(conversation_id: str) -> None:
+    """Scheduler callback: retry budget exhausted, messages dropped.
+
+    The other half of the failure UX: non-retryable errors explain
+    themselves inline (``_process_conversation_messages``), but a RETRYABLE
+    error that survives every backoff attempt used to end in a silent drop —
+    the user's spinner just never resolved. Push the explanation through the
+    conversation's channel so both terminal outcomes are visible.
+    """
+    for cw_state in _state.coworkers.values():
+        conv_state = cw_state.conversations.get(conversation_id)
+        if conv_state is None:
+            continue
+        conv = conv_state.conversation
+        channel_type = _get_channel_type_for_conv(cw_state, conv)
+        binding = cw_state.channel_bindings.get(channel_type)
+        gw = _gateways.get(channel_type) if binding else None
+        await _notify_conversation_error(
+            cw_state,
+            conv,
+            binding,
+            gw,
+            "⚠️ The agent failed repeatedly and this message was dropped "
+            "after exhausting all retries. Check the coworker's logs and "
+            "configuration, then send the message again.",
+        )
+        return
+    logger.warning(
+        "Messages dropped for unknown conversation", conversation_id=conversation_id
     )
 
 

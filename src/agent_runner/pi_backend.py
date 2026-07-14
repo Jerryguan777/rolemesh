@@ -564,7 +564,18 @@ class PiBackend:
                         _log(f"Routing {model.provider} through proxy: {proxy_url}")
                 _log(f"Using model: {model.provider}/{model.id}")
             else:
-                _log(f"Warning: model '{model_id}' not found in any provider")
+                # The coworker names a model no provider knows. Previously
+                # this warned and silently fell back to the session default
+                # model — running the WRONG model without telling anyone.
+                # It is a deterministic configuration error: fail once,
+                # non-retryable, so the orchestrator surfaces it to the
+                # user instead of retrying (or silently mis-serving).
+                from pi.ai.types import NonRetryableConfigError
+
+                raise NonRetryableConfigError(
+                    f"Model '{model_id}' (PI_MODEL_ID) not found in any "
+                    f"provider — check the coworker's model configuration."
+                )
 
         # Extension runner injection point. Ref is adopted by
         # create_agent_session() so tools get wrapped with lazy

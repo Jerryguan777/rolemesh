@@ -111,6 +111,7 @@ class GroupQueue:
         self._process_messages_fn: Callable[[str], Awaitable[bool]] | None = None
         self._on_queued: Callable[[str], Awaitable[None]] | None = None
         self._on_container_starting: Callable[[str], Awaitable[None]] | None = None
+        self._on_messages_dropped: Callable[[str], Awaitable[None]] | None = None
         self._shutting_down: bool = False
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._transport = transport
@@ -218,6 +219,17 @@ class GroupQueue:
         off the waiting queue.
         """
         self._on_container_starting = fn
+
+    def set_on_messages_dropped(self, fn: Callable[[str], Awaitable[None]]) -> None:
+        """Callback invoked when the retry budget is exhausted and the
+        group's messages are dropped.
+
+        This is the terminal outcome of the retryable-error path — without
+        it the drop is invisible to the user (the UI spins until it gives
+        up). The orchestrator wires this to push an explanatory message
+        into the conversation's channel.
+        """
+        self._on_messages_dropped = fn
 
     def _fire(self, cb: Callable[[str], Awaitable[None]] | None, group_jid: str) -> None:
         if cb is None:
@@ -758,8 +770,10 @@ class GroupQueue:
                 "Max retries exceeded, dropping messages",
                 group_jid=group_jid,
                 retry_count=state.retry_count,
+                action="drop",
             )
             state.retry_count = 0
+            self._fire(self._on_messages_dropped, group_jid)
             return
 
         delay_s = (_BASE_RETRY_MS * math.pow(2, state.retry_count - 1)) / 1000.0

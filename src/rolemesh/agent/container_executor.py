@@ -106,6 +106,11 @@ def _parse_container_output(raw: dict[str, object]) -> AgentOutput:
     # (False) to say; absence means True (legacy single-reply-per-turn).
     is_final_val = raw.get("isFinal")
     is_final = bool(is_final_val) if isinstance(is_final_val, bool) else True
+    # Same wire convention as isFinal: only an explicit False means
+    # non-retryable; absence (older containers) defaults to retryable so
+    # the classification can never accidentally suppress a retry.
+    retryable_val = raw.get("retryable")
+    retryable = bool(retryable_val) if isinstance(retryable_val, bool) else True
     return AgentOutput(
         status=str(raw.get("status", "error")),  # type: ignore[arg-type]
         result=str(result_val) if result_val is not None else None,
@@ -113,6 +118,7 @@ def _parse_container_output(raw: dict[str, object]) -> AgentOutput:
         error=str(err_val) if err_val is not None else None,
         metadata=meta_val if isinstance(meta_val, dict) else None,
         is_final=is_final,
+        retryable=retryable,
     )
 
 
