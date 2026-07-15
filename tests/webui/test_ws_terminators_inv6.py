@@ -247,3 +247,107 @@ async def test_helpers_swallow_db_errors_to_keep_forwarder_alive() -> None:
         tenant_id=tenant_id,
         error={"code": "X"},
     )
+
+
+# ---------------------------------------------------------------------------
+# fix/ws-completed-frame-on-failed-run — the ``done`` frame must reflect
+# the AUTHORITATIVE run row, not the stream's optimism.
+#
+# Field trace that motivated this: a provider content-filter killed the
+# stream mid-generation AFTER partial output reached the browser; the
+# orchestrator marked the run failed (AGENT_ERROR), but a ``done`` chunk
+# still arrived and the WS blindly emitted ``event.run.completed`` — a
+# truncated answer under a green check, contradicted only by
+# ``GET /api/v1/runs/{id}``. The completed-terminator's idempotent guard
+# already refused the second write; the frame just never consulted it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_completed_helper_returns_true_on_transition() -> None:
+    tenant_id, run_id = await _seed_run()
+    transitioned = await _terminate_run_completed(
+        run_id=run_id, tenant_id=tenant_id, usage=None
+    )
+    assert transitioned is True
+
+
+@pytest.mark.asyncio
+async def test_completed_helper_returns_false_when_already_failed() -> None:
+    """The lost-race signal the frame selection rides on."""
+    tenant_id, run_id = await _seed_run()
+    await _terminate_run_errored(
+        run_id=run_id,
+        tenant_id=tenant_id,
+        error={"code": "AGENT_ERROR", "message": "content filter"},
+    )
+    transitioned = await _terminate_run_completed(
+        run_id=run_id, tenant_id=tenant_id, usage=None
+    )
+    assert transitioned is False
+    row = await _read_run(tenant_id, run_id)
+    assert row["status"] == "failed", "authoritative status must survive"
+
+
+@pytest.mark.asyncio
+async def test_done_frame_reports_error_when_row_already_failed() -> None:
+    """The observed bug: failed row + done chunk → error frame, not completed."""
+    from webui.v1.ws_stream import _done_frame
+
+    tenant_id, run_id = await _seed_run()
+    await _terminate_run_errored(
+        run_id=run_id,
+        tenant_id=tenant_id,
+        error={
+            "code": "AGENT_ERROR",
+            "message": "Output blocked by content filtering policy",
+        },
+    )
+    transitioned = await _terminate_run_completed(
+        run_id=run_id, tenant_id=tenant_id, usage=None
+    )
+    frame = await _done_frame(run_id, tenant_id, transitioned)
+
+    assert frame["type"] == "event.run.error"
+    assert frame["run_id"] == run_id
+    assert frame["code"] == "AGENT_ERROR"
+    assert "content filtering" in frame["message"]
+
+
+@pytest.mark.asyncio
+async def test_done_frame_redelivery_on_completed_row_stays_completed() -> None:
+    """NATS redelivery of ``done`` on an already-completed row must NOT
+    morph into a phantom error — the idempotent-redelivery contract."""
+    from webui.v1.ws_stream import _done_frame
+
+    tenant_id, run_id = await _seed_run()
+    first = await _terminate_run_completed(
+        run_id=run_id, tenant_id=tenant_id, usage=None
+    )
+    assert first is True
+    redelivered = await _terminate_run_completed(
+        run_id=run_id, tenant_id=tenant_id, usage=None
+    )
+    assert redelivered is False
+    frame = await _done_frame(run_id, tenant_id, redelivered)
+    assert frame["type"] == "event.run.completed"
+
+
+@pytest.mark.asyncio
+async def test_done_frame_happy_path_skips_row_lookup() -> None:
+    """transitioned=True → completed frame with no extra DB read."""
+    from webui.v1.ws_stream import _done_frame
+
+    frame = await _done_frame(str(uuid.uuid4()), str(uuid.uuid4()), True)
+    assert frame["type"] == "event.run.completed"
+
+
+@pytest.mark.asyncio
+async def test_done_frame_lookup_miss_falls_back_to_completed() -> None:
+    """transitioned=False but the row can't be read (unknown id) → keep
+    the legacy completed frame rather than fabricating an error."""
+    from webui.v1.ws_stream import _done_frame
+
+    tenant_id, _run_id = await _seed_run()
+    frame = await _done_frame(str(uuid.uuid4()), tenant_id, False)
+    assert frame["type"] == "event.run.completed"

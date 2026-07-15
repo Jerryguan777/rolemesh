@@ -2689,6 +2689,7 @@ export interface components {
              */
             delta: string;
         };
+        /** @description Sent only when the run actually reached `completed` (or the terminal write could not be confirmed). When the underlying run was already terminal `failed`/`awaiting_reauth` — e.g. the orchestrator recorded an agent error after partial output streamed — the stream ends with `event.run.error` carrying the run's recorded error instead, matching what `GET /api/v1/runs/{id}` reports. */
         WsServerEventRunCompleted: {
             /**
              * @description discriminator enum property added by openapi-typescript
