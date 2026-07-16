@@ -1008,16 +1008,16 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
 
     prompt = format_messages(missed_messages, TIMEZONE)
 
-    # INV-6 path 1/2 (server-side): the run this turn answers. Web sends carry a
-    # run_id on the inbound message; the most recent one is the active run (same
-    # single-active-run model as ws_stream). Writing the terminal status here, at
-    # is_final/error, means a browser that disconnected mid-turn no longer
-    # strands the row at 'running'. Idempotent with the WS-side writer via the
-    # lifecycle helper's WHERE status='running' guard. (Limitation: follow-ups
-    # piped into a warm container via send_message are not threaded here, so
-    # their runs still rely on the WS path / reaper — the dominant
-    # disconnect-mid-cold-start case is covered.)
-    active_run_id = next((m.run_id for m in reversed(missed_messages) if m.run_id), None)
+    # INV-6 paths 1/2 (server-side): the run this turn answers. Web sends carry
+    # a run_id on the inbound message; the most recent one is the active run
+    # (same single-active-run model as ws_stream). Stored on conv_state — NOT a
+    # local — because a warm container outlives this call: follow-ups piped via
+    # send_message update the field so the _on_output closure below attributes
+    # their terminal events to the right run instead of the one captured at
+    # cold start. See ConversationState.active_run_id for the full rationale.
+    conv_state.active_run_id = next(
+        (m.run_id for m in reversed(missed_messages) if m.run_id), None
+    )
 
     previous_cursor = conv_state.last_agent_timestamp
     conv_state.last_agent_timestamp = missed_messages[-1].timestamp
@@ -1102,7 +1102,7 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
             if result.is_final:
                 _queue.notify_idle(conversation_id)
                 await _terminate_run_safe(
-                    active_run_id,
+                    conv_state.active_run_id,
                     conv.tenant_id,
                     success=False,
                     error={
@@ -1202,7 +1202,7 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
                 _queue.notify_idle(conversation_id)
                 usage_dict = result.metadata.get("usage") if result.metadata else None
                 await _terminate_run_safe(
-                    active_run_id,
+                    conv_state.active_run_id,
                     conv.tenant_id,
                     success=True,
                     usage=usage_dict if isinstance(usage_dict, dict) else None,
@@ -1224,7 +1224,7 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
             if result.retryable:
                 had_error = True
                 await _terminate_run_safe(
-                    active_run_id,
+                    conv_state.active_run_id,
                     conv.tenant_id,
                     success=False,
                     error={"code": "AGENT_ERROR", "message": result.error or "agent run failed"},
@@ -1236,7 +1236,7 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
                 # once with a user-visible explanation.
                 non_retryable_error = result.error or "agent configuration error"
                 await _terminate_run_safe(
-                    active_run_id,
+                    conv_state.active_run_id,
                     conv.tenant_id,
                     success=False,
                     error={"code": "CONFIG_ERROR", "message": non_retryable_error},
@@ -1757,6 +1757,17 @@ async def _message_loop(shutdown_event: asyncio.Event) -> None:
                     )
                     if all_pending:
                         formatted = format_messages(all_pending, TIMEZONE)
+                        # Re-point the conversation's active run BEFORE the
+                        # pipe: these messages join the warm container's
+                        # in-flight batch, and the _on_output closure from
+                        # cold start reads conv_state.active_run_id live —
+                        # without this update it would terminal-write the
+                        # PREVIOUS turn's run when this batch settles. Same
+                        # "last message's run" convention as turn start.
+                        conv_state.active_run_id = next(
+                            (m.run_id for m in reversed(all_pending) if m.run_id),
+                            None,
+                        )
                         if _queue.send_message(conv_id, formatted):
                             logger.debug("Piped messages to active container", conv_id=conv_id)
                             conv_state.last_agent_timestamp = all_pending[-1].timestamp

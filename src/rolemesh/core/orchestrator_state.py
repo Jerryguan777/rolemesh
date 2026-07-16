@@ -27,6 +27,21 @@ class ConversationState:
     conversation: Conversation
     session_id: str | None = None
     last_agent_timestamp: str = ""
+    # The ``runs`` row the conversation's in-flight turn answers ("last
+    # message's run" convention — web sends stamp a run_id on the inbound
+    # message; IM channels leave it None). Lives HERE, not in a local
+    # variable of ``_process_conversation_messages``, because a warm
+    # container outlives that call: follow-ups piped via
+    # ``send_message`` join the in-flight batch, and the ``_on_output``
+    # closure captured at cold start must attribute their terminal
+    # events to the NEW run. The warm-pipe path updates this field; the
+    # closure reads it live. (Known small window: a message piped at
+    # the exact moment the previous batch's final marker is being
+    # processed can attribute that marker to the new run. Accepted —
+    # the alternative is threading run ids through the container
+    # protocol, which is not warranted while the product allows one
+    # active web run per conversation.)
+    active_run_id: str | None = None
 
 
 @dataclass
