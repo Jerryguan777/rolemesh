@@ -187,6 +187,47 @@ class WebNatsGateway:
             chunk.to_bytes(),
         )
 
+    async def send_run_completed(
+        self, binding_id: str, chat_id: str, *, run_id: str
+    ) -> None:
+        """Publish the run-terminal success marker (single-writer contract).
+
+        Emitted by the orchestrator exactly once per run, AFTER the
+        terminal DB write, so the WS projection (``event.run.completed``)
+        can never contradict ``GET /api/v1/runs/{id}``. Rides the same
+        ``web.stream.*`` subject as text/done so it stays ordered after
+        the tokens it certifies.
+        """
+        chunk = WebStreamChunk(
+            type="run_completed", content=json.dumps({"run_id": run_id})
+        )
+        await self._transport.js.publish(
+            f"web.stream.{binding_id}.{chat_id}",
+            chunk.to_bytes(),
+        )
+
+    async def send_run_error(
+        self,
+        binding_id: str,
+        chat_id: str,
+        *,
+        run_id: str,
+        error: dict[str, object],
+    ) -> None:
+        """Publish the run-terminal failure marker (single-writer contract).
+
+        ``error`` mirrors the runs row's error JSONB ({code, message, ...}).
+        Same ordering and once-per-run contract as ``send_run_completed``.
+        """
+        chunk = WebStreamChunk(
+            type="run_error",
+            content=json.dumps({"run_id": run_id, "error": error}),
+        )
+        await self._transport.js.publish(
+            f"web.stream.{binding_id}.{chat_id}",
+            chunk.to_bytes(),
+        )
+
     async def send_safety_block(
         self,
         binding_id: str,

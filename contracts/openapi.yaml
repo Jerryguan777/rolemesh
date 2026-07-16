@@ -4274,8 +4274,33 @@ components:
             event. Always a (possibly empty) string — never a chunk
             schema or structured content.
 
+    WsServerEventRunOutputDone:
+      type: object
+      description: >-
+        One assistant reply (one chat bubble) is complete. In a batched
+        turn — the user queued follow-ups while the agent was busy —
+        several of these arrive before the single run-terminal event, one
+        per reply, so the client can close each bubble separately. Says
+        nothing about the run's terminal state: the run may still be
+        serving queued messages. Run-level state changes ride
+        `event.run.completed` / `event.run.error` exclusively.
+      required: [type, run_id]
+      properties:
+        type: { type: string, enum: [event.run.output_done] }
+        run_id: { type: string, format: uuid }
+
     WsServerEventRunCompleted:
       type: object
+      description: >-
+        The run reached its terminal state `completed`. Emitted exactly
+        once per run, projected from the orchestrator's explicit
+        run-terminal marker which is published AFTER the terminal DB
+        write (single-writer refactor) — so this event can never
+        contradict `GET /api/v1/runs/{id}`. When the underlying run was
+        already terminal `failed`/`awaiting_reauth` — e.g. the
+        orchestrator recorded an agent error after partial output
+        streamed — the stream ends with `event.run.error` carrying the
+        run's recorded error instead.
       required: [type, run_id]
       properties:
         type: { type: string, enum: [event.run.completed] }
@@ -4535,6 +4560,7 @@ components:
       oneOf:
         - $ref: '#/components/schemas/WsServerEventRunStarted'
         - $ref: '#/components/schemas/WsServerEventRunToken'
+        - $ref: '#/components/schemas/WsServerEventRunOutputDone'
         - $ref: '#/components/schemas/WsServerEventRunCompleted'
         - $ref: '#/components/schemas/WsServerEventRunError'
         - $ref: '#/components/schemas/WsServerEventRunProgress'
@@ -4550,6 +4576,7 @@ components:
         mapping:
           event.run.started: '#/components/schemas/WsServerEventRunStarted'
           event.run.token: '#/components/schemas/WsServerEventRunToken'
+          event.run.output_done: '#/components/schemas/WsServerEventRunOutputDone'
           event.run.completed: '#/components/schemas/WsServerEventRunCompleted'
           event.run.error: '#/components/schemas/WsServerEventRunError'
           event.run.progress: '#/components/schemas/WsServerEventRunProgress'

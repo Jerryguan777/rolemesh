@@ -58,6 +58,8 @@ export type RunStartedEvent =
   components['schemas']['WsServerEventRunStarted'];
 export type RunTokenEvent =
   components['schemas']['WsServerEventRunToken'];
+export type RunOutputDoneEvent =
+  components['schemas']['WsServerEventRunOutputDone'];
 export type RunCompletedEvent =
   components['schemas']['WsServerEventRunCompleted'];
 export type RunErrorEvent =

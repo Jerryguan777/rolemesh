@@ -57,11 +57,7 @@ from rolemesh.db import (
     tenant_conn,
 )
 from rolemesh.ipc.web_protocol import WebInboundMessage
-from rolemesh.runs import (
-    create_run,
-    terminate_run_via_ws_completed,
-    terminate_run_via_ws_error,
-)
+from rolemesh.runs import create_run
 from webui.v1.idempotency import cache as idempotency_cache
 from webui.v1.run_events import publish_run_cancel
 
@@ -357,51 +353,41 @@ def _build_approval_frame_or_none(
     return None
 
 
-async def _terminate_run_completed(
-    *, run_id: str, tenant_id: str, usage: Any | None
-) -> None:
-    """Fire INV-6 path 1 (ws_completed) inside a tenant-scoped txn.
+def _run_terminal_frame_or_none(
+    kind: str, active_run_id: str, content: str
+) -> dict[str, Any] | None:
+    """Project an explicit run-terminal chunk (``run_completed`` /
+    ``run_error``) to its ``event.run.*`` frame.
 
-    Wrapped in :class:`contextlib.suppress` so a transient DB
-    hiccup never crashes the forwarding loop — the run row stays
-    ``running`` and a future GET ``/api/v1/runs/{id}`` will report
-    the (now-incorrect) state until the operator notices. The
-    lifecycle helper's ``WHERE status='running'`` guard makes the
-    UPDATE idempotent in case the NATS chunk redelivers and we run
-    here twice.
+    Single-writer contract: the orchestrator terminal-writes
+    the runs row and THEN publishes one of these chunks mirroring the
+    authoritative outcome, so this projection is a dumb pipe — no DB
+    read, no write, no inference. The chunk's own ``run_id`` — stamped
+    by the orchestrator from its live per-conversation attribution
+    (ConversationState.active_run_id) — wins over the closure-tracked
+    ``active_run_id`` here, which goes stale on warm-container
+    follow-ups.
+
+    Field whitelisting matches the progress/approval posture: only
+    ``code`` / ``message`` / ``details`` reach the browser, with
+    conservative defaults for malformed payloads.
     """
-    usage_dict: dict[str, Any] | None = (
-        usage if isinstance(usage, dict) else None
-    )
-    try:
-        async with tenant_conn(tenant_id) as conn:
-            await terminate_run_via_ws_completed(
-                run_id=run_id, usage=usage_dict, conn=conn
-            )
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "ws_stream: terminator UPDATE failed (run stays 'running'); "
-            "investigate orchestrator side",
-            run_id=run_id,
-            exc_info=True,
-        )
-
-
-async def _terminate_run_errored(
-    *, run_id: str, tenant_id: str, error: dict[str, Any]
-) -> None:
-    """Symmetric helper for INV-6 path 2 (ws_error)."""
-    try:
-        async with tenant_conn(tenant_id) as conn:
-            await terminate_run_via_ws_error(
-                run_id=run_id, error=error, conn=conn
-            )
-    except Exception:  # noqa: BLE001
-        logger.warning(
-            "ws_stream: error terminator UPDATE failed",
-            run_id=run_id,
-            exc_info=True,
-        )
+    inner = json.loads(content or "{}")
+    if not isinstance(inner, dict):
+        inner = {}
+    rid = inner.get("run_id")
+    run_id = rid if isinstance(rid, str) and rid else active_run_id
+    if kind == "run_completed":
+        return {"type": "event.run.completed", "run_id": run_id}
+    err = inner.get("error")
+    err = err if isinstance(err, dict) else {}
+    return {
+        "type": "event.run.error",
+        "run_id": run_id,
+        "code": str(err.get("code") or "AGENT_ERROR"),
+        "message": str(err.get("message") or "run failed"),
+        "details": err,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -496,20 +482,22 @@ async def stream(
     async def _forward_stream() -> None:
         """Fan NATS stream chunks to ``event.run.*`` frames.
 
-        The legacy ``web.stream.*`` carrier is reused here so this
-        endpoint can interoperate with the existing orchestrator
-        emitter — replacing the emitter would be another session.
+        Single-writer contract: this loop is a PURE
+        projection — it never touches the runs table. The orchestrator
+        owns every terminal write (INV-6 paths 1/2) and publishes
+        explicit ``run_completed`` / ``run_error`` chunks AFTER the
+        write, so the frames forwarded here can't contradict
+        ``GET /api/v1/runs/{id}``. A ``done`` chunk means "one
+        assistant reply (one bubble) is complete" and nothing more —
+        it projects to ``event.run.output_done``, never to a terminal
+        frame. Disconnect-mid-turn is therefore harmless to the DB:
+        the orchestrator's writer doesn't live in this handler.
+
         ``run_id`` is stamped from the closure's ``active_run_id``;
         when ``None``, the frame is dropped because no client
-        side-effect could meaningfully consume it.
-
-        INV-6 happy-path UPDATE: on ``done`` / ``safety_blocked`` the
-        terminator fires here so ``runs.{status, completed_at}`` lands
-        in the DB. Disconnect-mid-turn still leaves the row at
-        ``running`` (the ``finally`` in :func:`stream` cancels this
-        task — the WS handler does not survive a closed socket). A
-        durable orchestrator-side terminator for that case is on the
-        backlog (see 01c smoke Findings — design §11 INV-6 path 1).
+        side-effect could meaningfully consume it. Terminal chunks
+        carry their own (orchestrator-stamped) run_id which wins over
+        the closure — see ``_run_terminal_frame_or_none``.
         """
         async for msg in stream_sub.messages:
             try:
@@ -529,31 +517,21 @@ async def stream(
                         },
                     )
                 elif kind == "done":
-                    # INV-6 path 1: write the terminal status FIRST so
-                    # the UPDATE survives even if the client closes
-                    # the WS the moment it sees ``event.run.completed``
-                    # (the disconnect cancels ``_forward_stream`` —
-                    # without ordering this before ``_send_event``, a
-                    # fast-close races the cancellation against the
-                    # DB write and the row stays at ``running``). We
-                    # also wrap in ``asyncio.shield`` so cancellation
-                    # mid-UPDATE doesn't strand the row. Lifecycle
-                    # helper is idempotent on the ``WHERE
-                    # status='running'`` guard, so re-delivery is safe.
-                    await asyncio.shield(
-                        _terminate_run_completed(
-                            run_id=run_id,
-                            tenant_id=payload.tenant_id,
-                            usage=data.get("usage"),
-                        )
-                    )
+                    # Bubble terminator: the current assistant reply is
+                    # complete. In a batched turn (queued follow-ups)
+                    # several of these arrive before the single
+                    # run-terminal chunk; the SPA closes the streaming
+                    # bubble but keeps the run state untouched.
                     await _send_event(
                         ws,
-                        {
-                            "type": "event.run.completed",
-                            "run_id": run_id,
-                        },
+                        {"type": "event.run.output_done", "run_id": run_id},
                     )
+                elif kind in ("run_completed", "run_error"):
+                    frame = _run_terminal_frame_or_none(
+                        kind, run_id, data.get("content", "")
+                    )
+                    if frame is not None:
+                        await _send_event(ws, frame)
                 elif kind == "status":
                     # Per-turn progress indicator (running / tool_use /
                     # queued / container_starting). Legacy ``/ws/chat``
@@ -580,20 +558,12 @@ async def stream(
                         if progress is not None:
                             await _send_event(ws, progress)
                 elif kind == "safety_blocked":
+                    # Frame-only: the orchestrator already terminal-wrote
+                    # SAFETY_BLOCKED before publishing this chunk (its
+                    # write-only safety site) — projecting is all that's
+                    # left. The SPA renders the dedicated safety bubble
+                    # from code=SAFETY_BLOCKED.
                     inner = json.loads(data.get("content", "{}"))
-                    # Same ordering rationale as ``done`` above.
-                    await asyncio.shield(
-                        _terminate_run_errored(
-                            run_id=run_id,
-                            tenant_id=payload.tenant_id,
-                            error={
-                                "code": "SAFETY_BLOCKED",
-                                "message": inner.get("reason") or "blocked",
-                                "stage": inner.get("stage"),
-                                "rule_id": inner.get("rule_id"),
-                            },
-                        )
-                    )
                     await _send_event(
                         ws,
                         {
