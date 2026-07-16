@@ -108,7 +108,7 @@ class EgressSafetyCaller:
         checks: dict[str, CheckFunc],
         audit_publisher: AuditPublisher,
         platform_allow: Callable[[str, int], bool] | None = None,
-        mcp_allow: Callable[[str, int], bool] | None = None,
+        mcp_allow: Callable[[str, str, int], bool] | None = None,
     ) -> None:
         self._cache = cache
         self._checks = checks
@@ -118,10 +118,12 @@ class EgressSafetyCaller:
         # without a per-tenant egress allowlist. ``None`` disables it (the
         # gateway always wires it; unit tests opt in).
         self._platform_allow = platform_allow
-        # Registry-managed allow layer: a host/port predicate for origins
-        # of admin-registered MCP servers, so a configured MCP server works
-        # without a hand-written egress.domain_rule. Same reverse-mode-only
-        # scoping and safety argument as ``platform_allow``. ``None``
+        # Registry-managed allow layer: a (tenant_id, host, port) predicate
+        # for origins of admin-registered MCP servers, so a configured MCP
+        # server works without a hand-written egress.domain_rule. Same
+        # reverse-mode-only scoping and safety argument as
+        # ``platform_allow``, but tenant-scoped: one tenant registering an
+        # origin must not grant egress to it for anyone else. ``None``
         # disables it.
         self._mcp_allow = mcp_allow
         self._audit_tasks: set[asyncio.Task[None]] = set()
@@ -200,7 +202,7 @@ class EgressSafetyCaller:
         if (
             request.mode == "reverse"
             and self._mcp_allow is not None
-            and self._mcp_allow(request.host, request.port)
+            and self._mcp_allow(identity.tenant_id, request.host, request.port)
         ):
             decision = EgressDecision(
                 action="allow",

@@ -231,7 +231,7 @@ Editing `coworkers.tools` through the admin REST API is therefore a hot operatio
 | Container access | Container only knows the proxy URL — no token, no upstream host |
 | Token expiry | TokenVault auto-refreshes against the IdP; permanent failure forces re-login |
 | MCP server validation | MCP server validates the token via OIDC discovery — RoleMesh is a passthrough, not an issuer |
-| Proxy scope | The MCP route only forwards to **registered** server names — unknown names return 404 |
+| Proxy scope | The MCP route only forwards to server names **the caller's tenant registered** — the registry keys on `(tenant_id, name)` and the tenant comes from the verified egress token, so another tenant's server (same name or not) is indistinguishable from a nonexistent one (404) |
 | Egress allowlist | Registered MCP origins are allowed automatically on the reverse path (`EGRESS.MCP_REGISTRY_ALLOWED` in the audit trail) — registering the server through the admin API *is* the egress approval, no hand-written `egress.domain_rule` needed. The same host stays default-denied on the agent-controlled forward/DNS paths |
 
 ### What a compromised container can do

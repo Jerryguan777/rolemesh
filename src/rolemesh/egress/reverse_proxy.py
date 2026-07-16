@@ -269,41 +269,55 @@ def is_known_provider_host(host: str, port: int) -> bool:
 # MCP server registry
 # ---------------------------------------------------------------------------
 
-_mcp_registry: dict[str, tuple[str, dict[str, str], str]] = {}
+# Keyed by ``(tenant_id, name)``. MCP servers are tenant resources
+# (``UNIQUE (tenant_id, name)`` in the DB); a name-only key let two
+# tenants' same-named servers overwrite each other AND let any tenant
+# reach — with the owner's injected service credentials — a server
+# another tenant registered. The composite key makes both impossible
+# structurally: ``handle_mcp_proxy`` looks up with the VERIFIED token
+# identity's tenant, so a foreign entry is simply not found (404).
+_mcp_registry: dict[tuple[str, str], tuple[str, dict[str, str], str]] = {}
 
 
 def register_mcp_server(
+    tenant_id: str,
     name: str,
     url: str,
     headers: dict[str, str] | None = None,
     auth_mode: str = "user",
 ) -> None:
-    """Register an MCP server for proxy forwarding."""
-    _mcp_registry[name] = (url, headers or {}, auth_mode)
-    logger.info("MCP server registered", name=name, url=url, auth_mode=auth_mode)
+    """Register an MCP server for proxy forwarding, scoped to *tenant_id*."""
+    _mcp_registry[(tenant_id, name)] = (url, headers or {}, auth_mode)
+    logger.info(
+        "MCP server registered",
+        tenant_id=tenant_id,
+        name=name,
+        url=url,
+        auth_mode=auth_mode,
+    )
 
 
-def unregister_mcp_server(name: str) -> bool:
-    """Remove an MCP server from the registry. Returns True if it was present.
+def unregister_mcp_server(tenant_id: str, name: str) -> bool:
+    """Remove one tenant's MCP server. Returns True if it was present.
 
     Used by the gateway-side hot-reload subscriber when the orchestrator
     publishes ``egress.mcp.changed action=deleted``. Idempotent: a
     redundant delete (e.g. the same broadcast arriving twice) returns
     False rather than raising.
     """
-    removed = _mcp_registry.pop(name, None)
+    removed = _mcp_registry.pop((tenant_id, name), None)
     if removed is None:
         return False
-    logger.info("MCP server unregistered", name=name)
+    logger.info("MCP server unregistered", tenant_id=tenant_id, name=name)
     return True
 
 
-def get_mcp_registry() -> dict[str, tuple[str, dict[str, str], str]]:
+def get_mcp_registry() -> dict[tuple[str, str], tuple[str, dict[str, str], str]]:
     return dict(_mcp_registry)
 
 
-def registered_mcp_origins() -> set[tuple[str, int]]:
-    """``(host, port)`` endpoints of every registered MCP server origin.
+def registered_mcp_origins(tenant_id: str) -> set[tuple[str, int]]:
+    """``(host, port)`` endpoints of *tenant_id*'s registered MCP origins.
 
     Recomputed from ``_mcp_registry`` on every call — same pattern as
     :func:`known_provider_endpoints` — so the set follows registry
@@ -312,22 +326,26 @@ def registered_mcp_origins() -> set[tuple[str, int]]:
     this yields nothing during the gateway's degraded-startup window.
     """
     out: set[tuple[str, int]] = set()
-    for url, _headers, _auth_mode in _mcp_registry.values():
+    for (entry_tenant, _name), (url, _headers, _auth_mode) in _mcp_registry.items():
+        if entry_tenant != tenant_id:
+            continue
         hp = _upstream_host_port(url)
         if hp is not None:
             out.add(hp)
     return out
 
 
-def is_registered_mcp_origin(host: str, port: int) -> bool:
-    """True when ``host:port`` is the origin of a registered MCP server.
+def is_registered_mcp_origin(tenant_id: str, host: str, port: int) -> bool:
+    """True when ``host:port`` is the origin of an MCP server *tenant_id*
+    registered.
 
     Used by the egress gateway as a registry-managed allow layer on the
     REVERSE path only (see ``EgressSafetyCaller.decide``): the MCP proxy
     derives its upstream from the registry entry, so an origin an admin
-    registered is by construction an authorised destination.
+    registered is by construction an authorised destination — for the
+    registering tenant's coworkers, not anyone else's.
     """
-    return (host.lower().rstrip("."), port) in registered_mcp_origins()
+    return (host.lower().rstrip("."), port) in registered_mcp_origins(tenant_id)
 
 
 def _collapse_trailing_slash(path: str) -> str:
@@ -614,6 +632,15 @@ async def start_credential_proxy(
         rest = request.match_info.get("path_info", "")
         identity, server_name, upstream_path = _resolve(request, first_seg, rest)
 
+        # Identity must resolve BEFORE the registry lookup: the registry
+        # is keyed by (tenant_id, name) and the tenant comes from the
+        # verified token — same 401 the provider route returns, and what
+        # this route's docstring always promised. (Previously an
+        # identity-less request only failed later at the safety gate,
+        # or not at all on host-side deployments without one.)
+        if identity is None:
+            return web.Response(status=401, text="UNKNOWN_SOURCE")
+
         # Collapse a redundant trailing slash (``/mcp/`` → ``/mcp``) so the
         # FastMCP/Starlette 307 redirect never fires in the common case;
         # _stream_upstream still follows any other redirect with the
@@ -622,7 +649,11 @@ async def start_credential_proxy(
         if request.query_string:
             remaining_path += "?" + request.query_string
 
-        entry = _mcp_registry.get(server_name)
+        # Tenant-scoped lookup: another tenant's server — same name or
+        # not — is indistinguishable from a nonexistent one (404), so the
+        # response also can't be used to probe what other tenants have
+        # configured.
+        entry = _mcp_registry.get((identity.tenant_id, server_name))
         if not entry:
             return web.Response(status=404, text=f"MCP server not found: {server_name}")
 

@@ -99,6 +99,7 @@ async def _proxy(authority: TokenAuthority) -> web.AppRunner:
 
 def _register(origin: str) -> None:
     register_mcp_server(
+        "t1",
         "srv",
         origin,
         headers={
@@ -141,7 +142,7 @@ async def test_redirect_preserves_injected_headers(
         assert headers.get("X-Actor-Id") == _ACTOR_ID
         assert headers.get("X-Actor-Role") == _ACTOR_ROLE
     finally:
-        unregister_mcp_server("srv")
+        unregister_mcp_server("t1", "srv")
         await client.close()
         await runner.cleanup()
         await upstream.close()
@@ -171,7 +172,7 @@ async def test_trailing_slash_collapsed_no_redirect() -> None:
         assert headers.get("Authorization") == _SERVICE_TOKEN
         assert headers.get("X-Actor-Id") == _ACTOR_ID
     finally:
-        unregister_mcp_server("srv")
+        unregister_mcp_server("t1", "srv")
         await client.close()
         await runner.cleanup()
         await upstream.close()
@@ -187,4 +188,4 @@ async def test_collapse_trailing_slash_unit() -> None:
     assert _collapse_trailing_slash("/") == "/"
     assert _collapse_trailing_slash("") == ""
     # Registry stays clean across the test module.
-    assert "srv" not in get_mcp_registry()
+    assert ("t1", "srv") not in get_mcp_registry()

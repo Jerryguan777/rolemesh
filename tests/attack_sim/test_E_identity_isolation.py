@@ -23,6 +23,13 @@ That dead-code gap is exactly why a deterministic white-box pin is needed.
                 forged header has no effect (control — pins the path that
                 is already correct, and shows the pattern the MCP path
                 must follow).
+  E8 (MCP)      a tenant-a token must not reach an MCP server tenant-b
+                registered — by name or at all. Before the registry was
+                keyed on (tenant_id, name) this succeeded WITH tenant-b's
+                injected service credentials (cross-tenant credential use).
+  E9 (MCP)      two tenants' same-named servers route independently — the
+                name-only registry let the later registration overwrite
+                the earlier one, silently cross-wiring tenants.
 """
 
 from __future__ import annotations
@@ -175,7 +182,9 @@ async def test_E7_mcp_forged_user_id_header_does_not_select_another_users_token(
     await echo.start()
     vault = _StubVault({"userA": "token-A", "userB": "token-B"})
     rp.set_token_vault(vault)
-    register_mcp_server("acme", f"http://127.0.0.1:{echo.port}", auth_mode="user")
+    register_mcp_server(
+        "tenant-a", "acme", f"http://127.0.0.1:{echo.port}", auth_mode="user"
+    )
     runner, port = await _start_proxy(_NullResolver())
     try:
         token = _token(user_id="userA", tenant_id="tenant-a")
@@ -242,3 +251,101 @@ async def test_E7_provider_credential_selection_ignores_forged_user_id_header(
     finally:
         await runner.cleanup()
         await echo.stop()
+
+
+# ---------------------------------------------------------------------------
+# E8 — MCP path: another tenant's server must be unreachable (404), with
+# no upstream contact and no injected credentials
+# ---------------------------------------------------------------------------
+
+
+async def test_E8_mcp_cross_tenant_server_name_is_unreachable() -> None:
+    """Attacker: a tenant-a container guesses the name of an MCP server
+    tenant-b registered ("victim") and calls it through the proxy. Before
+    the registry keyed on (tenant_id, name) this request was FORWARDED —
+    with tenant-b's admin-configured service Authorization injected, i.e.
+    cross-tenant use of another tenant's credential. Defense: the lookup
+    key includes the verified token's tenant, so the name simply does not
+    exist for tenant-a — 404, upstream never contacted."""
+    echo = _Echo()
+    await echo.start()
+    register_mcp_server(
+        "tenant-b",
+        "victim",
+        f"http://127.0.0.1:{echo.port}",
+        headers={"Authorization": "Bearer tenant-b-service-key"},
+        auth_mode="service",
+    )
+    runner, port = await _start_proxy(_NullResolver())
+    try:
+        token = _token(user_id="userA", tenant_id="tenant-a")
+        url = f"http://127.0.0.1:{port}/mcp-proxy/{token}/victim/mcp"
+        async with (
+            aiohttp.ClientSession() as session,
+            session.post(url, data=b"{}") as resp,
+        ):
+            assert resp.status == 404, (
+                f"cross-tenant MCP access returned {resp.status}; another "
+                "tenant's server must be indistinguishable from a nonexistent one"
+            )
+        assert echo.received == [], (
+            "tenant-b's upstream was contacted on a tenant-a request — "
+            "cross-tenant forwarding (with tenant-b's service key injected)"
+        )
+    finally:
+        await runner.cleanup()
+        await echo.stop()
+
+
+# ---------------------------------------------------------------------------
+# E9 — MCP path: same-named servers in two tenants route independently
+# ---------------------------------------------------------------------------
+
+
+async def test_E9_mcp_same_name_across_tenants_routes_to_own_upstream() -> None:
+    """Two tenants register the same server name ("jira"). The name-only
+    registry let the later registration silently overwrite the earlier one,
+    cross-wiring tenant-a's traffic (and injected headers) to tenant-b's
+    upstream. With the composite key each tenant's calls reach exactly the
+    upstream that tenant configured."""
+    echo_a, echo_b = _Echo(), _Echo()
+    await echo_a.start()
+    await echo_b.start()
+    register_mcp_server(
+        "tenant-a",
+        "jira",
+        f"http://127.0.0.1:{echo_a.port}",
+        headers={"Authorization": "Bearer key-a"},
+        auth_mode="service",
+    )
+    register_mcp_server(
+        "tenant-b",
+        "jira",
+        f"http://127.0.0.1:{echo_b.port}",
+        headers={"Authorization": "Bearer key-b"},
+        auth_mode="service",
+    )
+    runner, port = await _start_proxy(_NullResolver())
+    try:
+        for tenant, echo, other_echo, key in (
+            ("tenant-a", echo_a, echo_b, "Bearer key-a"),
+            ("tenant-b", echo_b, echo_a, "Bearer key-b"),
+        ):
+            other_before = len(other_echo.received)
+            token = _token(user_id="userX", tenant_id=tenant)
+            url = f"http://127.0.0.1:{port}/mcp-proxy/{token}/jira/mcp"
+            async with (
+                aiohttp.ClientSession() as session,
+                session.post(url, data=b"{}") as resp,
+            ):
+                assert resp.status == 200
+            assert echo.last_headers().get("authorization") == key, (
+                f"{tenant}'s request must carry {tenant}'s own service key"
+            )
+            assert len(other_echo.received) == other_before, (
+                f"{tenant}'s request leaked to the other tenant's upstream"
+            )
+    finally:
+        await runner.cleanup()
+        await echo_a.stop()
+        await echo_b.stop()

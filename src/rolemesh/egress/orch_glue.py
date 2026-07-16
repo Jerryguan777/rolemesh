@@ -64,21 +64,30 @@ async def publish_mcp_registry_changed(
     action: str,
     entry: McpEntry | None = None,
     name: str | None = None,
+    tenant_id: str | None = None,
 ) -> None:
     """Push a single MCP registry delta to the gateway.
 
     For ``created`` / ``updated``: pass ``entry`` with the full payload.
-    For ``deleted``: pass ``name`` (the only field the consumer needs).
+    For ``deleted``: pass ``tenant_id`` + ``name`` — the registry keys
+    on the pair, so a delete without the tenant could only ever target
+    the unreachable "" slot (and would leave the real entry alive).
 
     Best-effort publish: a failure here means the gateway misses one
     delta, but its next snapshot fetch on restart still recovers full
     state.
     """
     if action == "deleted":
-        if not name:
-            logger.warning("mcp_registry publish: deleted without name")
+        if not name or not tenant_id:
+            logger.warning(
+                "mcp_registry publish: deleted without tenant_id+name"
+            )
             return
-        payload: dict[str, Any] = {"action": "deleted", "name": name}
+        payload: dict[str, Any] = {
+            "action": "deleted",
+            "tenant_id": tenant_id,
+            "name": name,
+        }
     else:
         if entry is None:
             logger.warning(
@@ -204,13 +213,14 @@ async def fetch_all_mcp_servers() -> list[McpEntry]:
     from rolemesh.egress.reverse_proxy import get_mcp_registry
 
     out: list[McpEntry] = []
-    for name, (url, headers, auth_mode) in get_mcp_registry().items():
+    for (tenant_id, name), (url, headers, auth_mode) in get_mcp_registry().items():
         out.append(
             McpEntry(
                 name=name,
                 url=url,
                 headers=dict(headers),
                 auth_mode=auth_mode,
+                tenant_id=tenant_id,
             )
         )
     return out

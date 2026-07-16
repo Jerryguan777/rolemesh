@@ -214,5 +214,7 @@ async def delete_endpoint(
             status_code=404,
             details={"mcp_server_id": mcp_id},
         )
-    await mcp_events.publish_mcp_server_deleted(name=row.name)
+    await mcp_events.publish_mcp_server_deleted(
+        name=row.name, tenant_id=row.tenant_id,
+    )
     return Response(status_code=204)
