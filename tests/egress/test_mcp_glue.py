@@ -93,6 +93,7 @@ async def test_publish_created_carries_full_entry(nc: FakeNats) -> None:
         url="https://api.github.com",
         headers={"X-T": "v"},
         auth_mode="user",
+        tenant_id="t1",
     )
     await publish_mcp_registry_changed(nc, action="created", entry=entry)
     assert len(nc.published) == 1
@@ -105,17 +106,28 @@ async def test_publish_created_carries_full_entry(nc: FakeNats) -> None:
         "url": "https://api.github.com",
         "headers": {"X-T": "v"},
         "auth_mode": "user",
+        "tenant_id": "t1",
     }
 
 
 @pytest.mark.asyncio
-async def test_publish_deleted_only_carries_name(nc: FakeNats) -> None:
+async def test_publish_deleted_carries_tenant_and_name(nc: FakeNats) -> None:
     # Deleted events are intentionally minimal — the consumer just
-    # needs to know which name to drop, the rest of the row was
-    # already removed.
-    await publish_mcp_registry_changed(nc, action="deleted", name="github")
+    # needs the (tenant_id, name) registry key to drop; the rest of
+    # the row was already removed.
+    await publish_mcp_registry_changed(
+        nc, action="deleted", name="github", tenant_id="t1"
+    )
     payload = json.loads(nc.published[0][1])
-    assert payload == {"action": "deleted", "name": "github"}
+    assert payload == {"action": "deleted", "name": "github", "tenant_id": "t1"}
+
+
+@pytest.mark.asyncio
+async def test_publish_deleted_without_tenant_is_no_op(nc: FakeNats) -> None:
+    # A tenant-less delete could only ever target the unreachable ""
+    # slot while leaving the real entry alive — refuse to publish it.
+    await publish_mcp_registry_changed(nc, action="deleted", name="github")
+    assert nc.published == []
 
 
 @pytest.mark.asyncio
@@ -128,7 +140,9 @@ async def test_publish_created_without_entry_is_no_op(nc: FakeNats) -> None:
 
 @pytest.mark.asyncio
 async def test_publish_deleted_without_name_is_no_op(nc: FakeNats) -> None:
-    await publish_mcp_registry_changed(nc, action="deleted", name=None)
+    await publish_mcp_registry_changed(
+        nc, action="deleted", name=None, tenant_id="t1"
+    )
     assert nc.published == []
 
 
@@ -159,7 +173,7 @@ async def test_fetch_all_mcp_servers_reads_registry() -> None:
     # registry-pass-through. The loopback-rewrite contract has its
     # own dedicated test class below (Bug 5 regression).
     reverse_proxy.register_mcp_server(
-        "internal", "https://api.example.com", {"X-Tenant": "t1"}, "service"
+        "t1", "internal", "https://api.example.com", {"X-Tenant": "t1"}, "service"
     )
     entries = await fetch_all_mcp_servers()
     assert len(entries) == 1
@@ -168,6 +182,7 @@ async def test_fetch_all_mcp_servers_reads_registry() -> None:
         url="https://api.example.com",
         headers={"X-Tenant": "t1"},
         auth_mode="service",
+        tenant_id="t1",
     )
 
 
@@ -183,7 +198,7 @@ async def test_fetch_all_mcp_servers_returns_empty_when_unregistered() -> None:
 
 @pytest.mark.asyncio
 async def test_responder_returns_current_registry(nc: FakeNats) -> None:
-    reverse_proxy.register_mcp_server("x", "https://x", {}, "user")
+    reverse_proxy.register_mcp_server("t1", "x", "https://x", {}, "user")
 
     async def _rules_fetcher() -> list[dict[str, Any]]:
         return []
@@ -198,7 +213,13 @@ async def test_responder_returns_current_registry(nc: FakeNats) -> None:
     payload = json.loads(msg.replies[0])
     assert payload == {
         "entries": [
-            {"name": "x", "url": "https://x", "headers": {}, "auth_mode": "user"}
+            {
+                "name": "x",
+                "url": "https://x",
+                "headers": {},
+                "auth_mode": "user",
+                "tenant_id": "t1",
+            }
         ]
     }
 
@@ -253,7 +274,7 @@ class TestSnapshotUrlPassthrough:
     @pytest.mark.asyncio
     async def test_fetch_all_passes_service_name_url_verbatim(self) -> None:
         reverse_proxy.register_mcp_server(
-            "example-mcp", "https://example-mcp:8509", {}, "user"
+            "t1", "example-mcp", "https://example-mcp:8509", {}, "user"
         )
         entries = await fetch_all_mcp_servers()
         assert len(entries) == 1
@@ -267,7 +288,7 @@ class TestSnapshotUrlPassthrough:
         # (and are simply wrong config the operator must fix — never
         # silently "repaired").
         reverse_proxy.register_mcp_server(
-            "local-mcp", "http://127.0.0.1:9100", {}, "service"
+            "t1", "local-mcp", "http://127.0.0.1:9100", {}, "service"
         )
         entries = await fetch_all_mcp_servers()
         assert entries[0].url == "http://127.0.0.1:9100"
@@ -275,7 +296,7 @@ class TestSnapshotUrlPassthrough:
     @pytest.mark.asyncio
     async def test_fetch_all_leaves_external_host_unchanged(self) -> None:
         reverse_proxy.register_mcp_server(
-            "github", "https://api.github.com", {}, "user"
+            "t1", "github", "https://api.github.com", {}, "user"
         )
         entries = await fetch_all_mcp_servers()
         assert entries[0].url == "https://api.github.com"

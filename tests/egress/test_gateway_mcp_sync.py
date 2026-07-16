@@ -61,8 +61,14 @@ class _Sub:
         return None
 
 
-def _entry(name: str, url: str) -> dict[str, Any]:
-    return {"name": name, "url": url, "headers": {}, "auth_mode": "user"}
+def _entry(name: str, url: str, tenant: str = "t1") -> dict[str, Any]:
+    return {
+        "name": name,
+        "url": url,
+        "headers": {},
+        "auth_mode": "user",
+        "tenant_id": tenant,
+    }
 
 
 class _ScriptedMcpNats:
@@ -140,7 +146,7 @@ async def test_cold_start_race_converges_when_responder_appears(
         # loop must land the snapshot on the next attempt.
         await _wait_for(lambda: state.seeded)
         assert nc.request_count == 4, "3 failures + 1 success"
-        assert set(reverse_proxy.get_mcp_registry()) == {"github"}
+        assert set(reverse_proxy.get_mcp_registry()) == {("t1", "github")}
 
 
 async def test_seed_success_with_empty_snapshot_still_counts_as_seeded() -> None:
@@ -179,12 +185,15 @@ async def test_reconcile_heals_registry_drift(
         await _wait_for(lambda: state.seeded)
 
         # Drift: one entry vanished, one points at the wrong origin.
-        reverse_proxy.unregister_mcp_server("github")
-        reverse_proxy.register_mcp_server("jira", "https://wrong", {}, "user")
+        reverse_proxy.unregister_mcp_server("t1", "github")
+        reverse_proxy.register_mcp_server("t1", "jira", "https://wrong", {}, "user")
 
         def _healed() -> bool:
             reg = reverse_proxy.get_mcp_registry()
-            return set(reg) == {"github", "jira"} and reg["jira"][0] == "https://jira.internal"
+            return (
+                set(reg) == {("t1", "github"), ("t1", "jira")}
+                and reg[("t1", "jira")][0] == "https://jira.internal"
+            )
 
         await _wait_for(_healed)
 
@@ -203,9 +212,9 @@ async def test_reconcile_failure_keeps_task_alive_until_next_interval(
         await _wait_for(lambda: state.seeded)
 
         nc.fail_next = 1  # one orchestrator hiccup
-        reverse_proxy.unregister_mcp_server("github")  # drift during the hiccup
+        reverse_proxy.unregister_mcp_server("t1", "github")  # drift during the hiccup
 
-        await _wait_for(lambda: "github" in reverse_proxy.get_mcp_registry())
+        await _wait_for(lambda: ("t1", "github") in reverse_proxy.get_mcp_registry())
         assert state.seeded
 
 
@@ -297,7 +306,7 @@ async def test_healthz_combines_both_seed_flags_and_stays_200() -> None:
             "mcp_entries": 0,
         }
 
-        reverse_proxy.register_mcp_server("github", "https://api.github.com", {}, "user")
+        reverse_proxy.register_mcp_server("t1", "github", "https://api.github.com", {}, "user")
         assert await _body() == {
             "status": "ok",
             "rules_seeded": True,
@@ -338,7 +347,7 @@ async def test_apply_failure_is_retried_not_fatal(
         state = await gateway._start_mcp_sync(nc, stack)  # type: ignore[arg-type]
         await _wait_for(lambda: state.seeded)
         assert calls["n"] == 2, "failed apply + successful retry"
-        assert set(reverse_proxy.get_mcp_registry()) == {"github"}
+        assert set(reverse_proxy.get_mcp_registry()) == {("t1", "github")}
 
 
 async def test_sync_task_death_emits_error_log(

@@ -306,10 +306,10 @@ async def test_patch_publishes_updated_event(monkeypatch) -> None:
 
 async def test_delete_publishes_deleted_event(monkeypatch) -> None:
     user = await _make_user()
-    deleted: list[str] = []
+    deleted: list[tuple[str, str]] = []
 
-    async def _capture(*, name: str) -> None:
-        deleted.append(name)
+    async def _capture(*, name: str, tenant_id: str) -> None:
+        deleted.append((name, tenant_id))
 
     monkeypatch.setattr(
         "webui.v1.mcp_servers.mcp_events.publish_mcp_server_deleted",
@@ -327,16 +327,18 @@ async def test_delete_publishes_deleted_event(monkeypatch) -> None:
             headers={"Authorization": "Bearer x"},
         )
     assert resp.status_code == 204
-    assert deleted == ["to-delete"]
+    # The event carries the registry key: (name, OWNING tenant) — the
+    # gateway needs both to drop the right (tenant_id, name) entry.
+    assert deleted == [("to-delete", user.tenant_id)]
 
 
 async def test_delete_409_does_not_emit_event(monkeypatch) -> None:
     """409 path must not announce an absent change to the gateway."""
     user = await _make_user()
-    deleted: list[str] = []
+    deleted: list[tuple[str, str]] = []
 
-    async def _capture(*, name: str) -> None:
-        deleted.append(name)
+    async def _capture(*, name: str, tenant_id: str) -> None:
+        deleted.append((name, tenant_id))
 
     monkeypatch.setattr(
         "webui.v1.mcp_servers.mcp_events.publish_mcp_server_deleted",

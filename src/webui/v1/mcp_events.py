@@ -64,6 +64,7 @@ def _build_entry(row: MCPServerRow):
         url=origin,
         headers={str(k): str(v) for k, v in (row.extra_headers or {}).items()},
         auth_mode=row.auth_mode,
+        tenant_id=row.tenant_id,
     )
 
 
@@ -102,18 +103,21 @@ async def publish_mcp_server_changed(*, action: str, row: MCPServerRow) -> None:
         )
 
 
-async def publish_mcp_server_deleted(*, name: str) -> None:
-    """Publish ``egress.mcp.changed action=deleted`` for ``name``."""
+async def publish_mcp_server_deleted(*, name: str, tenant_id: str) -> None:
+    """Publish ``egress.mcp.changed action=deleted`` for ``(tenant_id, name)``."""
     nc = _get_publisher()
     if nc is None:
         return
     from rolemesh.egress.orch_glue import publish_mcp_registry_changed
 
     try:
-        await publish_mcp_registry_changed(nc, action="deleted", name=name)
+        await publish_mcp_registry_changed(
+            nc, action="deleted", name=name, tenant_id=tenant_id,
+        )
     except Exception:  # noqa: BLE001
         logger.warning(
             "Failed to publish egress.mcp.changed (deleted)",
             name=name,
+            tenant_id=tenant_id,
             exc_info=True,
         )

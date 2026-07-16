@@ -45,13 +45,13 @@ pytestmark = pytest.mark.asyncio
 def _isolated_registry():
     """Snapshot + restore the module-global MCP registry around each test."""
     saved = reverse_proxy.get_mcp_registry()
-    for name in list(saved):
-        unregister_mcp_server(name)
+    for tenant_id, name in list(saved):
+        unregister_mcp_server(tenant_id, name)
     yield
-    for name in list(reverse_proxy.get_mcp_registry()):
-        unregister_mcp_server(name)
-    for name, (url, headers, auth_mode) in saved.items():
-        register_mcp_server(name, url, headers, auth_mode)
+    for tenant_id, name in list(reverse_proxy.get_mcp_registry()):
+        unregister_mcp_server(tenant_id, name)
+    for (tenant_id, name), (url, headers, auth_mode) in saved.items():
+        register_mcp_server(tenant_id, name, url, headers, auth_mode)
 
 
 @dataclass
@@ -102,10 +102,10 @@ async def _drain_audit(nc: _FakeNats) -> None:
 
 async def test_registered_origins_default_ports() -> None:
     """Scheme-default ports match the ports the proxy actually dials."""
-    register_mcp_server("a", "https://mcp.example.com")
-    register_mcp_server("b", "http://intranet.local")
-    register_mcp_server("c", "http://host.docker.internal:9100")
-    assert registered_mcp_origins() == {
+    register_mcp_server("tenant-a", "a", "https://mcp.example.com")
+    register_mcp_server("tenant-a", "b", "http://intranet.local")
+    register_mcp_server("tenant-a", "c", "http://host.docker.internal:9100")
+    assert registered_mcp_origins("tenant-a") == {
         ("mcp.example.com", 443),
         ("intranet.local", 80),
         ("host.docker.internal", 9100),
@@ -114,10 +114,10 @@ async def test_registered_origins_default_ports() -> None:
 
 async def test_predicate_normalises_host() -> None:
     """Case and trailing-dot differences must not defeat the match."""
-    register_mcp_server("a", "https://mcp.example.com")
-    assert is_registered_mcp_origin("MCP.Example.COM.", 443)
-    assert not is_registered_mcp_origin("mcp.example.com", 8443)
-    assert not is_registered_mcp_origin("evil-mcp.example.com", 443)
+    register_mcp_server("tenant-a", "a", "https://mcp.example.com")
+    assert is_registered_mcp_origin("tenant-a", "MCP.Example.COM.", 443)
+    assert not is_registered_mcp_origin("tenant-a", "mcp.example.com", 8443)
+    assert not is_registered_mcp_origin("tenant-a", "evil-mcp.example.com", 443)
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +128,7 @@ async def test_predicate_normalises_host() -> None:
 async def test_registered_origin_allowed_on_reverse() -> None:
     """The user-facing fix: adding an MCP server is enough for its calls
     to pass the egress gate — no separate egress.domain_rule needed."""
-    register_mcp_server("jira", "http://mcp.example.com:9100")
+    register_mcp_server("tenant-a", "jira", "http://mcp.example.com:9100")
     nc = _FakeNats(published=[])
     caller = await _make_caller(nc=nc)
     decision = await caller.decide(
@@ -151,11 +151,25 @@ async def test_unregistered_origin_still_blocked_on_reverse() -> None:
     assert "No egress allowlist rule matched" in decision.reason
 
 
+async def test_other_tenants_origin_not_allowed() -> None:
+    """Tenant isolation: an origin tenant-b registered must NOT grant
+    egress to tenant-a's coworkers — the allow layer is keyed on the
+    verified identity's tenant, same as the routing lookup."""
+    register_mcp_server("tenant-b", "jira", "http://mcp.example.com:9100")
+    nc = _FakeNats(published=[])
+    caller = await _make_caller(nc=nc)
+    decision = await caller.decide(
+        identity=_identity(),  # tenant-a
+        request=EgressRequest(host="mcp.example.com", port=9100, mode="reverse"),
+    )
+    assert decision.action == "block"
+
+
 async def test_mcp_allow_does_not_apply_to_forward_proxy() -> None:
     """Security boundary: the forward CONNECT target is agent-controlled,
     so a registered MCP host must NOT be reachable that way — only via
     the /mcp-proxy route whose upstream is server-derived."""
-    register_mcp_server("jira", "http://mcp.example.com:9100")
+    register_mcp_server("tenant-a", "jira", "http://mcp.example.com:9100")
     nc = _FakeNats(published=[])
     caller = await _make_caller(nc=nc)
     decision = await caller.decide(
@@ -169,7 +183,7 @@ async def test_mcp_allow_does_not_apply_to_forward_proxy() -> None:
 
 async def test_mcp_allow_does_not_apply_to_dns() -> None:
     """Same boundary for the DNS plane: the queried name is agent-controlled."""
-    register_mcp_server("jira", "http://mcp.example.com:9100")
+    register_mcp_server("tenant-a", "jira", "http://mcp.example.com:9100")
     nc = _FakeNats(published=[])
     caller = await _make_caller(nc=nc)
     decision = await caller.decide(
@@ -189,11 +203,11 @@ async def test_mcp_allow_does_not_apply_to_dns() -> None:
 async def test_url_edit_drops_old_origin_and_allows_new() -> None:
     """Editing a server's URL (same registry semantics as the
     egress.mcp.changed hot-reload) must revoke the old origin at once."""
-    register_mcp_server("jira", "http://old.example.com:9100")
+    register_mcp_server("tenant-a", "jira", "http://old.example.com:9100")
     nc = _FakeNats(published=[])
     caller = await _make_caller(nc=nc)
 
-    register_mcp_server("jira", "http://new.example.com:9200")
+    register_mcp_server("tenant-a", "jira", "http://new.example.com:9200")
 
     old = await caller.decide(
         identity=_identity(),
@@ -208,10 +222,10 @@ async def test_url_edit_drops_old_origin_and_allows_new() -> None:
 
 
 async def test_delete_revokes_origin() -> None:
-    register_mcp_server("jira", "http://mcp.example.com:9100")
+    register_mcp_server("tenant-a", "jira", "http://mcp.example.com:9100")
     nc = _FakeNats(published=[])
     caller = await _make_caller(nc=nc)
-    unregister_mcp_server("jira")
+    unregister_mcp_server("tenant-a", "jira")
     decision = await caller.decide(
         identity=_identity(),
         request=EgressRequest(host="mcp.example.com", port=9100, mode="reverse"),
@@ -221,11 +235,11 @@ async def test_delete_revokes_origin() -> None:
 
 async def test_shared_origin_survives_deleting_one_server() -> None:
     """Two servers on one origin: deleting one must not revoke the other."""
-    register_mcp_server("jira", "http://mcp.example.com:9100")
-    register_mcp_server("wiki", "http://mcp.example.com:9100")
+    register_mcp_server("tenant-a", "jira", "http://mcp.example.com:9100")
+    register_mcp_server("tenant-a", "wiki", "http://mcp.example.com:9100")
     nc = _FakeNats(published=[])
     caller = await _make_caller(nc=nc)
-    unregister_mcp_server("jira")
+    unregister_mcp_server("tenant-a", "jira")
     decision = await caller.decide(
         identity=_identity(),
         request=EgressRequest(host="mcp.example.com", port=9100, mode="reverse"),
@@ -241,7 +255,7 @@ async def test_shared_origin_survives_deleting_one_server() -> None:
 async def test_mcp_allow_works_during_rules_degraded_window() -> None:
     """MCP egress depends on the MCP registry snapshot, not the tenant-rule
     snapshot — a registered origin is allowed even before rules seed."""
-    register_mcp_server("jira", "http://mcp.example.com:9100")
+    register_mcp_server("tenant-a", "jira", "http://mcp.example.com:9100")
     nc = _FakeNats(published=[])
     caller = await _make_caller(nc=nc, seeded=False)
     decision = await caller.decide(
@@ -264,7 +278,7 @@ async def test_empty_registry_blocks_during_degraded_window() -> None:
 
 
 async def test_mcp_allow_decision_is_audited() -> None:
-    register_mcp_server("jira", "http://mcp.example.com:9100")
+    register_mcp_server("tenant-a", "jira", "http://mcp.example.com:9100")
     nc = _FakeNats(published=[])
     caller = await _make_caller(nc=nc)
     await caller.decide(

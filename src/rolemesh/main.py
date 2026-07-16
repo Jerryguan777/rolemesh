@@ -606,12 +606,19 @@ async def _load_state() -> None:
 
         _state.coworkers[cw.id] = cw_state
 
-    # Register MCP servers with the credential proxy.
+    # Register MCP servers with the credential proxy, scoped to the
+    # owning coworker's tenant — the registry keys on (tenant_id, name).
     for cw_state in _state.coworkers.values():
         for tool_cfg in cw_state.mcp_configs:
             parsed = urlparse(tool_cfg.url)
             origin = f"{parsed.scheme}://{parsed.netloc}"
-            register_mcp_server(tool_cfg.name, origin, tool_cfg.headers, tool_cfg.auth_mode)
+            register_mcp_server(
+                cw_state.config.tenant_id,
+                tool_cfg.name,
+                origin,
+                tool_cfg.headers,
+                tool_cfg.auth_mode,
+            )
 
     logger.info(
         "State loaded",

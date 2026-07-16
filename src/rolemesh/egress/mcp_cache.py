@@ -63,12 +63,20 @@ class McpEntry:
     orchestrator computes it as ``urlparse(tool.url).scheme + ://
     + .netloc`` before publishing — same shape ``register_mcp_server``
     has stored historically.
+
+    ``tenant_id`` scopes the entry: MCP servers are tenant resources
+    (``UNIQUE (tenant_id, name)`` in the DB) and the registry keys on
+    ``(tenant_id, name)``. An empty tenant_id (a pre-tenancy publisher
+    during a rolling upgrade) still registers but can never match a
+    verified identity's tenant, so it is unreachable — fail-closed
+    per request rather than a parse error.
     """
 
     name: str
     url: str
     headers: dict[str, str]
     auth_mode: str
+    tenant_id: str = ""
 
 
 def entry_to_dict(entry: McpEntry) -> dict[str, Any]:
@@ -78,18 +86,28 @@ def entry_to_dict(entry: McpEntry) -> dict[str, Any]:
         "url": entry.url,
         "headers": dict(entry.headers),
         "auth_mode": entry.auth_mode,
+        "tenant_id": entry.tenant_id,
     }
 
 
 def entry_from_dict(d: dict[str, Any]) -> McpEntry:
     """Parse one wire entry. Raises on missing required keys; the
     snapshot/event handlers catch + log so a single malformed entry
-    can't poison the rest."""
+    can't poison the rest. A missing ``tenant_id`` (old wire format)
+    parses as "" — see the McpEntry docstring for why that is safe."""
+    tenant_id = str(d.get("tenant_id") or "")
+    if not tenant_id:
+        logger.warning(
+            "mcp_cache: entry without tenant_id — registered but "
+            "unreachable until the publisher is upgraded",
+            name=str(d.get("name") or ""),
+        )
     return McpEntry(
         name=str(d["name"]),
         url=str(d["url"]),
         headers={str(k): str(v) for k, v in (d.get("headers") or {}).items()},
         auth_mode=str(d.get("auth_mode") or "user"),
+        tenant_id=tenant_id,
     )
 
 
@@ -154,12 +172,12 @@ def apply_snapshot_to_registry(entries: list[McpEntry]) -> None:
         unregister_mcp_server,
     )
 
-    new_names = {e.name for e in entries}
-    for stale in set(get_mcp_registry()) - new_names:
-        unregister_mcp_server(stale)
+    new_keys = {(e.tenant_id, e.name) for e in entries}
+    for stale_tenant, stale_name in set(get_mcp_registry()) - new_keys:
+        unregister_mcp_server(stale_tenant, stale_name)
     for entry in entries:
         register_mcp_server(
-            entry.name, entry.url, entry.headers, entry.auth_mode
+            entry.tenant_id, entry.name, entry.url, entry.headers, entry.auth_mode
         )
 
 
@@ -168,13 +186,17 @@ def apply_change_event(event: dict[str, Any]) -> None:
 
     Event shape:
         {"action": "created" | "updated" | "deleted",
+         "tenant_id": "<tenant>",
          "name": "<name>",
          "url": "<origin>",
          "headers": {...},
          "auth_mode": "user" | "service" | "both"}
 
-    For ``deleted``, only ``name`` is required; other fields are
-    ignored if present.
+    For ``deleted``, only ``tenant_id`` + ``name`` are required; other
+    fields are ignored if present. A delete without tenant_id (old wire
+    format) targets the "" tenant slot, matching where the same old
+    publisher's creates landed — old and new publishers cannot delete
+    each other's entries.
     """
     from rolemesh.egress.reverse_proxy import (
         register_mcp_server,
@@ -190,7 +212,7 @@ def apply_change_event(event: dict[str, Any]) -> None:
         return
 
     if action == "deleted":
-        unregister_mcp_server(name)
+        unregister_mcp_server(str(event.get("tenant_id") or ""), name)
         return
 
     if action not in ("created", "updated"):
@@ -206,7 +228,9 @@ def apply_change_event(event: dict[str, Any]) -> None:
             name=name,
         )
         return
-    register_mcp_server(entry.name, entry.url, entry.headers, entry.auth_mode)
+    register_mcp_server(
+        entry.tenant_id, entry.name, entry.url, entry.headers, entry.auth_mode
+    )
 
 
 async def subscribe_mcp_changes(

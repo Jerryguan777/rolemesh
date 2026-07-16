@@ -53,6 +53,7 @@ CHANGE_EVENT = {
     "url": NEW_URL,
     "headers": {"X-Key": "v2"},
     "auth_mode": "service",
+    "tenant_id": "t1",
 }
 
 
@@ -64,7 +65,7 @@ def _isolate_registry() -> None:
 
 
 def _apply_to_registry() -> None:
-    register_mcp_server("X", OLD_URL, {"X-Key": "v1"}, "user")
+    register_mcp_server("t1", "X", OLD_URL, {"X-Key": "v1"}, "user")
     apply_change_event(CHANGE_EVENT)
 
 
@@ -76,7 +77,7 @@ def _apply_to_registry() -> None:
 async def test_view_converges_after_mcp_server_update(view: str) -> None:
     if view in ("gateway-registry", "orch-registry-mirror"):
         _apply_to_registry()
-        url, headers, auth_mode = get_mcp_registry()["X"]
+        url, headers, auth_mode = get_mcp_registry()[("t1", "X")]
         assert url == NEW_URL
         assert headers == {"X-Key": "v2"}
         assert auth_mode == "service"
