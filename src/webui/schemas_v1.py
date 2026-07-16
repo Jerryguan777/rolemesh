@@ -1091,6 +1091,19 @@ class WsServerEventRunToken(BaseModel):
     delta: str
 
 
+class WsServerEventRunOutputDone(BaseModel):
+    """One assistant reply (bubble) finished — NOT a run-terminal event.
+
+    Several arrive per run when follow-ups were batched; the run-level
+    terminal is exclusively event.run.completed / event.run.error
+    (single-writer refactor, phase B).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["event.run.output_done"]
+    run_id: str
+
+
 class WsServerEventRunCompleted(BaseModel):
     model_config = ConfigDict(extra="forbid")
     type: Literal["event.run.completed"]
@@ -1247,6 +1260,7 @@ class WsServerEventDelegationCompleted(BaseModel):
 WsServerEventModel = (
     WsServerEventRunStarted
     | WsServerEventRunToken
+    | WsServerEventRunOutputDone
     | WsServerEventRunCompleted
     | WsServerEventRunError
     | WsServerEventRunProgress

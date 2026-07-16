@@ -2689,7 +2689,17 @@ export interface components {
              */
             delta: string;
         };
-        /** @description Sent only when the run actually reached `completed` (or the terminal write could not be confirmed). When the underlying run was already terminal `failed`/`awaiting_reauth` — e.g. the orchestrator recorded an agent error after partial output streamed — the stream ends with `event.run.error` carrying the run's recorded error instead, matching what `GET /api/v1/runs/{id}` reports. */
+        /** @description One assistant reply (one chat bubble) is complete. In a batched turn — the user queued follow-ups while the agent was busy — several of these arrive before the single run-terminal event, one per reply, so the client can close each bubble separately. Says nothing about the run's terminal state: the run may still be serving queued messages. Run-level state changes ride `event.run.completed` / `event.run.error` exclusively. */
+        WsServerEventRunOutputDone: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            type: "event.run.output_done";
+            /** Format: uuid */
+            run_id: string;
+        };
+        /** @description The run reached its terminal state `completed`. Emitted exactly once per run, projected from the orchestrator's explicit run-terminal marker which is published AFTER the terminal DB write (single-writer refactor) — so this event can never contradict `GET /api/v1/runs/{id}`. When the underlying run was already terminal `failed`/`awaiting_reauth` — e.g. the orchestrator recorded an agent error after partial output streamed — the stream ends with `event.run.error` carrying the run's recorded error instead. */
         WsServerEventRunCompleted: {
             /**
              * @description discriminator enum property added by openapi-typescript
@@ -2930,7 +2940,7 @@ export interface components {
             final_status: string;
             duration_ms?: number | null;
         };
-        WsServerEvent: components["schemas"]["WsServerEventRunStarted"] | components["schemas"]["WsServerEventRunToken"] | components["schemas"]["WsServerEventRunCompleted"] | components["schemas"]["WsServerEventRunError"] | components["schemas"]["WsServerEventRunProgress"] | components["schemas"]["WsServerEventMessageAppended"] | components["schemas"]["WsServerEventApprovalRequested"] | components["schemas"]["WsServerEventApprovalResolved"] | components["schemas"]["WsServerEventDelegationStarted"] | components["schemas"]["WsServerEventDelegationProgress"] | components["schemas"]["WsServerEventDelegationToolUse"] | components["schemas"]["WsServerEventDelegationCompleted"];
+        WsServerEvent: components["schemas"]["WsServerEventRunStarted"] | components["schemas"]["WsServerEventRunToken"] | components["schemas"]["WsServerEventRunOutputDone"] | components["schemas"]["WsServerEventRunCompleted"] | components["schemas"]["WsServerEventRunError"] | components["schemas"]["WsServerEventRunProgress"] | components["schemas"]["WsServerEventMessageAppended"] | components["schemas"]["WsServerEventApprovalRequested"] | components["schemas"]["WsServerEventApprovalResolved"] | components["schemas"]["WsServerEventDelegationStarted"] | components["schemas"]["WsServerEventDelegationProgress"] | components["schemas"]["WsServerEventDelegationToolUse"] | components["schemas"]["WsServerEventDelegationCompleted"];
         WsClientFrameRequestRun: {
             /**
              * @description discriminator enum property added by openapi-typescript

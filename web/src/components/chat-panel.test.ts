@@ -223,6 +223,45 @@ describe('ChatPanel — side-channel events (PR #38)', () => {
     }
   });
 
+  it('event.run.output_done closes the streaming bubble without ending the run', () => {
+    // Single-writer refactor: `done` chunks became per-bubble
+    // event.run.output_done. In a batched turn (queued follow-ups)
+    // several arrive before the one true run-terminal frame — the
+    // bubble must close (so the next reply spawns a fresh one) while
+    // Stop stays available and the run state stays 'running'.
+    const { i: base } = makePanel();
+    const i = base as unknown as InternalsWithEvents;
+    i.runState = 'running';
+    i.runTerminal = false;
+    i.activeRunId = 'run-1';
+    i.messages = [
+      { role: 'user', content: 'first question' },
+      { role: 'assistant', content: 'first answer', streaming: true },
+    ];
+
+    i.handleV1Event({ type: 'event.run.output_done', run_id: 'run-1' });
+
+    expect(i.messages[1].streaming).toBeFalsy();
+    expect(i.runState).toBe('running');
+    expect(i.runTerminal).toBe(false);
+
+    // Next reply's token spawns a NEW bubble instead of appending to
+    // the closed one — the exact behavior the split exists to keep.
+    i.handleV1Event({ type: 'event.run.token', run_id: 'run-1', delta: 'second' });
+    expect(i.messages).toHaveLength(3);
+    expect(i.messages[2]).toMatchObject({
+      role: 'assistant',
+      content: 'second',
+      streaming: true,
+    });
+
+    // Only the run-terminal frame flips the run state.
+    i.handleV1Event({ type: 'event.run.completed', run_id: 'run-1' });
+    expect(i.runState).toBe('idle');
+    expect(i.runTerminal).toBe(true);
+    expect(i.messages[2].streaming).toBeFalsy();
+  });
+
   it('event.run.progress from a stale run is ignored', () => {
     // JetStream redelivery on reconnect can replay an old progress
     // frame after the user has moved on to a new turn. Without the

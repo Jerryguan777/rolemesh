@@ -556,6 +556,9 @@ def test_backends_endpoint_advertises_cache_control_header_in_yaml() -> None:
 _EXPECTED_SERVER_EVENTS: dict[str, str] = {
     "event.run.started": "WsServerEventRunStarted",
     "event.run.token": "WsServerEventRunToken",
+    # Bubble terminator (single-writer refactor phase B): one reply
+    # finished; NOT a run-terminal event.
+    "event.run.output_done": "WsServerEventRunOutputDone",
     "event.run.completed": "WsServerEventRunCompleted",
     "event.run.error": "WsServerEventRunError",
     "event.run.progress": "WsServerEventRunProgress",
@@ -663,6 +666,7 @@ def test_ws_server_event_pydantic_round_trips_each_member() -> None:
     from webui.schemas_v1 import (
         WsServerEventRunCompleted,
         WsServerEventRunError,
+        WsServerEventRunOutputDone,
         WsServerEventRunStarted,
         WsServerEventRunToken,
     )
@@ -670,6 +674,7 @@ def test_ws_server_event_pydantic_round_trips_each_member() -> None:
     union = Annotated[
         WsServerEventRunStarted
         | WsServerEventRunToken
+        | WsServerEventRunOutputDone
         | WsServerEventRunCompleted
         | WsServerEventRunError,
         PField(discriminator="type"),
@@ -681,6 +686,9 @@ def test_ws_server_event_pydantic_round_trips_each_member() -> None:
         ),
         WsServerEventRunToken(
             type="event.run.token", run_id="r", delta="hi",
+        ),
+        WsServerEventRunOutputDone(
+            type="event.run.output_done", run_id="r",
         ),
         WsServerEventRunCompleted(
             type="event.run.completed", run_id="r",

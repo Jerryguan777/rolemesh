@@ -48,13 +48,26 @@ class WebStreamChunk:
     """Streaming chunk from Orchestrator to FastAPI (web.stream.{binding_id}.{chat_id}).
 
     type="text"           — content carries a text fragment
-    type="done"           — end-of-stream marker (content ignored)
+    type="done"           — end-of-OUTPUT marker: one assistant reply
+                            (one chat bubble) is complete (content
+                            ignored). Emitted once per reply in a
+                            batched turn — it says nothing about the
+                            run's terminal state.
     type="status"         — content carries a JSON-encoded progress payload
     type="safety_blocked" — content carries a JSON-encoded safety block
                             payload with keys {reason, stage, rule_id?}
+    type="run_completed"  — run-terminal marker (single-writer refactor,
+                            phase B): the orchestrator terminal-wrote the
+                            run and it ended ``completed``. content is
+                            JSON ``{run_id}``. Emitted exactly once per
+                            run, after the terminal DB write, so the
+                            frame can never contradict ``GET /runs/{id}``.
+    type="run_error"      — run-terminal marker, failure side. content is
+                            JSON ``{run_id, error: {code, message, ...}}``
+                            mirroring the authoritative runs row.
     """
 
-    type: str  # "text" | "done" | "status" | "safety_blocked"
+    type: str  # "text" | "done" | "status" | "safety_blocked" | "run_completed" | "run_error"
     content: str = ""
 
     def to_bytes(self) -> bytes:

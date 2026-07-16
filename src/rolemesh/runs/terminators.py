@@ -22,12 +22,17 @@ guarantee — comment out the ``update_run_terminal`` call inside
 one wrapper, watch pytest turn red — is what makes this list
 load-bearing rather than informational.
 
-Wire-up status (2026-05-20, post 01b):
+Wire-up status (2026-07-16, single-writer refactor phase B):
 
-* Paths 1, 2 (WS completed / error) — orchestrator NATS handler
-  + 01b WS forwarding path (see :mod:`webui.v1.ws_stream`). The
-  webui forwards stream events; the orchestrator-side terminal
-  writer calls one of these wrappers.
+* Paths 1, 2 (turn completed / error) — the orchestrator's
+  ``_on_output`` terminal sites are the ONLY callers
+  (``rolemesh.main._terminate_run_safe``). The WS handler
+  (:mod:`webui.v1.ws_stream`) is a pure frame projection and never
+  writes the runs table; the orchestrator publishes explicit
+  ``run_completed`` / ``run_error`` stream chunks AFTER the write
+  so the browser frame mirrors the row. (The ``via_ws`` names are
+  historical — kept because they name the *path semantics* in the
+  design's seven-path table, not the caller.)
 * Path 3 (HTTP cancel) — :mod:`webui.v1.runs` publishes
   ``web.run.cancel.{run_id}``; the orchestrator-side subscriber
   calls :func:`terminate_run_via_user_cancel`.
