@@ -59,6 +59,7 @@ from rolemesh.db import (
 from rolemesh.ipc.web_protocol import WebInboundMessage
 from rolemesh.runs import (
     create_run,
+    get_run,
     terminate_run_via_ws_completed,
     terminate_run_via_ws_error,
 )
@@ -359,23 +360,30 @@ def _build_approval_frame_or_none(
 
 async def _terminate_run_completed(
     *, run_id: str, tenant_id: str, usage: Any | None
-) -> None:
+) -> bool | None:
     """Fire INV-6 path 1 (ws_completed) inside a tenant-scoped txn.
 
-    Wrapped in :class:`contextlib.suppress` so a transient DB
-    hiccup never crashes the forwarding loop — the run row stays
-    ``running`` and a future GET ``/api/v1/runs/{id}`` will report
-    the (now-incorrect) state until the operator notices. The
-    lifecycle helper's ``WHERE status='running'`` guard makes the
-    UPDATE idempotent in case the NATS chunk redelivers and we run
-    here twice.
+    Returns the lifecycle helper's outcome: ``True`` when THIS call
+    moved the row to ``completed``, ``False`` when the row was already
+    terminal (the ``WHERE status='running'`` guard did not match —
+    e.g. the orchestrator marked it ``failed`` after partial output
+    streamed), ``None`` on a DB error. The caller uses ``False`` to
+    reflect the authoritative state in the frame it sends instead of
+    blindly certifying success.
+
+    Exceptions are swallowed so a transient DB hiccup never crashes
+    the forwarding loop — the run row stays ``running`` and a future
+    GET ``/api/v1/runs/{id}`` will report the (now-incorrect) state
+    until the operator notices. The lifecycle helper's guard makes
+    the UPDATE idempotent in case the NATS chunk redelivers and we
+    run here twice.
     """
     usage_dict: dict[str, Any] | None = (
         usage if isinstance(usage, dict) else None
     )
     try:
         async with tenant_conn(tenant_id) as conn:
-            await terminate_run_via_ws_completed(
+            return await terminate_run_via_ws_completed(
                 run_id=run_id, usage=usage_dict, conn=conn
             )
     except Exception:  # noqa: BLE001
@@ -385,6 +393,65 @@ async def _terminate_run_completed(
             run_id=run_id,
             exc_info=True,
         )
+        return None
+
+
+async def _get_run_snapshot(run_id: str, tenant_id: str) -> dict[str, Any] | None:
+    """Best-effort read of the authoritative run row (status + error).
+
+    Only consulted on the cold path — a ``done`` frame whose
+    completed-write lost to an earlier terminal writer. ``None`` on
+    any failure; the caller then falls back to the legacy frame.
+    """
+    try:
+        async with tenant_conn(tenant_id) as conn:
+            return await get_run(run_id=run_id, tenant_id=tenant_id, conn=conn)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "ws_stream: run snapshot lookup failed",
+            run_id=run_id,
+            exc_info=True,
+        )
+        return None
+
+
+async def _done_frame(
+    run_id: str, tenant_id: str, transitioned: bool | None
+) -> dict[str, Any]:
+    """Pick the terminal WS frame for a ``done`` stream chunk.
+
+    ``transitioned`` is the completed-terminator's outcome. ``True``
+    (this call moved the row to ``completed``) and ``None`` (DB
+    hiccup — keep legacy best-effort behavior) emit
+    ``event.run.completed``. ``False`` means the ``WHERE
+    status='running'`` guard did not match: another terminal writer
+    beat this ``done`` — typically the orchestrator marking
+    AGENT_ERROR after partial output already streamed (e.g. a
+    provider content-filter kill mid-generation). The frame must then
+    reflect the AUTHORITATIVE row, not the stream's optimism: a
+    failed run whose stream ends with ``completed`` shows the user a
+    truncated answer under a green check, and only the (rarely
+    consulted) ``GET /api/v1/runs/{id}`` disagrees.
+
+    Only ``failed`` / ``awaiting_reauth`` divert to an error frame —
+    a redelivered ``done`` on an already-completed/stopped/cancelled
+    row must NOT morph into a phantom error, and a lookup failure
+    falls back to the legacy completed frame.
+    """
+    if transitioned is False:
+        snapshot = await _get_run_snapshot(run_id, tenant_id)
+        status = (snapshot or {}).get("status")
+        if status in ("failed", "awaiting_reauth"):
+            err = (snapshot or {}).get("error")
+            err = err if isinstance(err, dict) else {}
+            return {
+                "type": "event.run.error",
+                "run_id": run_id,
+                "code": str(err.get("code") or "AGENT_ERROR"),
+                "message": str(err.get("message") or "run failed"),
+                "details": err,
+            }
+    return {"type": "event.run.completed", "run_id": run_id}
 
 
 async def _terminate_run_errored(
@@ -540,19 +607,20 @@ async def stream(
                     # mid-UPDATE doesn't strand the row. Lifecycle
                     # helper is idempotent on the ``WHERE
                     # status='running'`` guard, so re-delivery is safe.
-                    await asyncio.shield(
+                    transitioned = await asyncio.shield(
                         _terminate_run_completed(
                             run_id=run_id,
                             tenant_id=payload.tenant_id,
                             usage=data.get("usage"),
                         )
                     )
+                    # Frame reflects the AUTHORITATIVE row, not the
+                    # stream's optimism — see ``_done_frame``.
                     await _send_event(
                         ws,
-                        {
-                            "type": "event.run.completed",
-                            "run_id": run_id,
-                        },
+                        await _done_frame(
+                            run_id, payload.tenant_id, transitioned
+                        ),
                     )
                 elif kind == "status":
                     # Per-turn progress indicator (running / tool_use /
