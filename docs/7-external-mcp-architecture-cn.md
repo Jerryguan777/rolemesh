@@ -232,6 +232,7 @@ MCP 注册表存在于两个必须保持一致的位置：orchestrator 在宿主
 | Token 过期 | TokenVault 对 IdP 自动刷新；永久失败时强制重新登录 |
 | MCP 服务器校验 | MCP 服务器通过 OIDC discovery 校验 token——RoleMesh 是穿透方，不是签发方 |
 | 代理范围 | MCP 路由只转发到**已注册**的服务器名——未知名称返回 404 |
+| 出口白名单 | 已注册 MCP 的 origin 在反向代理路径上自动放行（审计记录 `EGRESS.MCP_REGISTRY_ALLOWED`）——通过管理 API 注册服务器本身即出口授权，无需再手写 `egress.domain_rule`。同一域名走 agent 可控的 forward/DNS 路径时仍默认拒绝 |
 
 ### 被攻陷的容器能做什么
 
