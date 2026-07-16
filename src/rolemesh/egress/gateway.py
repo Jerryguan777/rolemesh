@@ -85,6 +85,7 @@ from .remote_credentials import RemoteCredentialResolver
 from .remote_token_vault import RemoteTokenVault
 from .reverse_proxy import (
     is_known_provider_host,
+    is_registered_mcp_origin,
     known_provider_endpoints,
     set_token_vault,
     start_credential_proxy,
@@ -448,13 +449,18 @@ async def main() -> None:
 
         # Platform-managed provider allow layer: known LLM-provider hosts
         # are always permitted egress so a tenant's BYOK credential works
-        # without hand-configuring an egress allowlist. Per-tenant rules in
-        # the policy cache still govern MCP and any custom egress.
+        # without hand-configuring an egress allowlist. Registered MCP
+        # server origins get the same reverse-only treatment via
+        # ``mcp_allow`` — adding an MCP server through the admin API is
+        # itself the egress approval, no hand-written egress.domain_rule
+        # needed. Per-tenant rules in the policy cache still govern any
+        # custom egress.
         safety = EgressSafetyCaller(
             cache=cache,
             checks=check_map,
             audit_publisher=audit,
             platform_allow=is_known_provider_host,
+            mcp_allow=is_registered_mcp_origin,
         )
         logger.info(
             "gateway: platform provider allowlist active",

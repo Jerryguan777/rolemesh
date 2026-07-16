@@ -108,6 +108,7 @@ class EgressSafetyCaller:
         checks: dict[str, CheckFunc],
         audit_publisher: AuditPublisher,
         platform_allow: Callable[[str, int], bool] | None = None,
+        mcp_allow: Callable[[str, int], bool] | None = None,
     ) -> None:
         self._cache = cache
         self._checks = checks
@@ -117,6 +118,12 @@ class EgressSafetyCaller:
         # without a per-tenant egress allowlist. ``None`` disables it (the
         # gateway always wires it; unit tests opt in).
         self._platform_allow = platform_allow
+        # Registry-managed allow layer: a host/port predicate for origins
+        # of admin-registered MCP servers, so a configured MCP server works
+        # without a hand-written egress.domain_rule. Same reverse-mode-only
+        # scoping and safety argument as ``platform_allow``. ``None``
+        # disables it.
+        self._mcp_allow = mcp_allow
         self._audit_tasks: set[asyncio.Task[None]] = set()
 
     async def decide(
@@ -168,6 +175,42 @@ class EgressSafetyCaller:
                         "severity": "info",
                         "message": (
                             f"platform-managed provider host "
+                            f"{request.host}:{request.port}"
+                        ),
+                        "metadata": {"host": request.host, "port": request.port},
+                    }
+                ],
+            )
+            self._publish_audit(identity=identity, request=request, decision=decision)
+            return decision
+
+        # Registry-managed MCP allow — reverse proxy ONLY, for the same
+        # reason as the provider layer above: on the /mcp-proxy route the
+        # upstream host is looked up from the registered server entry
+        # (server-derived), never taken from the agent, so an origin an
+        # admin registered via ``mcp.configure`` is already an authorised
+        # destination. Registering the server IS the approval; requiring a
+        # second, hand-written egress.domain_rule for the same origin was
+        # the papercut this layer removes. Forward/DNS requests to the very
+        # same host stay on the default-deny path below. Also ahead of the
+        # ``seeded`` gate: the MCP registry has its own snapshot lifecycle
+        # (an unseeded registry is empty, so this predicate cannot match
+        # during that window), and MCP egress must not additionally wait
+        # for the tenant-rule snapshot.
+        if (
+            request.mode == "reverse"
+            and self._mcp_allow is not None
+            and self._mcp_allow(request.host, request.port)
+        ):
+            decision = EgressDecision(
+                action="allow",
+                reason="Registered MCP server origin",
+                findings=[
+                    {
+                        "code": "EGRESS.MCP_REGISTRY_ALLOWED",
+                        "severity": "info",
+                        "message": (
+                            f"registered MCP server origin "
                             f"{request.host}:{request.port}"
                         ),
                         "metadata": {"host": request.host, "port": request.port},

@@ -204,9 +204,10 @@ def _bedrock_upstream(cred: dict[str, Any]) -> str:
 # Known LLM-provider upstreams the platform always allows egress to, so a
 # tenant's BYOK credential works without anyone hand-configuring an
 # ``egress.domain_rule``. The gateway consumes ``is_known_provider_host``
-# as its platform-allow layer (see ``EgressSafetyCaller.decide``); the
-# per-tenant ``safety_rules`` allowlist is left for everything else (MCP,
-# tenant-custom egress).
+# as its platform-allow layer (see ``EgressSafetyCaller.decide``);
+# registered MCP origins get the same treatment via
+# ``is_registered_mcp_origin`` below. The per-tenant ``safety_rules``
+# allowlist is left for tenant-custom egress.
 #
 # Hosts are derived from the SAME routing source the reverse proxy dials —
 # ``_provider_upstream`` / ``_anthropic_upstream`` — so deployment
@@ -299,6 +300,34 @@ def unregister_mcp_server(name: str) -> bool:
 
 def get_mcp_registry() -> dict[str, tuple[str, dict[str, str], str]]:
     return dict(_mcp_registry)
+
+
+def registered_mcp_origins() -> set[tuple[str, int]]:
+    """``(host, port)`` endpoints of every registered MCP server origin.
+
+    Recomputed from ``_mcp_registry`` on every call — same pattern as
+    :func:`known_provider_endpoints` — so the set follows registry
+    hot-reload (``egress.mcp.changed`` / snapshot reconcile) with no
+    cache of its own to invalidate. An unseeded registry is empty, so
+    this yields nothing during the gateway's degraded-startup window.
+    """
+    out: set[tuple[str, int]] = set()
+    for url, _headers, _auth_mode in _mcp_registry.values():
+        hp = _upstream_host_port(url)
+        if hp is not None:
+            out.add(hp)
+    return out
+
+
+def is_registered_mcp_origin(host: str, port: int) -> bool:
+    """True when ``host:port`` is the origin of a registered MCP server.
+
+    Used by the egress gateway as a registry-managed allow layer on the
+    REVERSE path only (see ``EgressSafetyCaller.decide``): the MCP proxy
+    derives its upstream from the registry entry, so an origin an admin
+    registered is by construction an authorised destination.
+    """
+    return (host.lower().rstrip("."), port) in registered_mcp_origins()
 
 
 def _collapse_trailing_slash(path: str) -> str:
@@ -720,7 +749,9 @@ __all__ = [
     "AuthMode",
     "detect_auth_mode",
     "get_mcp_registry",
+    "is_registered_mcp_origin",
     "register_mcp_server",
+    "registered_mcp_origins",
     "set_token_vault",
     "start_credential_proxy",
     "unregister_mcp_server",
