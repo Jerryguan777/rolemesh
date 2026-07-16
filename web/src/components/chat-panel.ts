@@ -449,7 +449,23 @@ export class ChatPanel extends LitElement {
         }
         break;
       }
+      case 'event.run.output_done': {
+        // Bubble terminator (single-writer refactor): one assistant
+        // reply is complete. In a batched turn several of these arrive
+        // before the single run-terminal event — close the streaming
+        // bubble so the next reply's tokens spawn a fresh one, but do
+        // NOT touch run state; the run may still be serving queued
+        // follow-ups. Run-level transitions ride event.run.completed /
+        // event.run.error exclusively.
+        this.finalizeStreamingBubble();
+        break;
+      }
       case 'event.run.completed': {
+        // Run terminal: emitted exactly once per run, after the
+        // orchestrator's terminal DB write — so this can never
+        // contradict GET /runs/{id}. finalizeStreamingBubble() stays
+        // as a belt-and-braces close for the last bubble (no-op when
+        // output_done already closed it).
         this.finalizeStreamingBubble();
         this.runState = 'idle';
         this.runTerminal = true;
