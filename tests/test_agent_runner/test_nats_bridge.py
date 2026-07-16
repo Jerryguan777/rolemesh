@@ -245,18 +245,25 @@ class TestChannel3FollowUpInput:
         _nc, js = nats_conn
         job_id = _unique_job_id()
 
-        # Publish 3 pending messages
+        # Publish 3 pending messages; one carries run attribution.
         for i in range(3):
+            payload: dict[str, str] = {"type": "message", "text": f"pending-{i}"}
+            if i == 1:
+                payload["run_id"] = "run-1"
             await js.publish(
                 f"agent.{job_id}.input",
-                json.dumps({"type": "message", "text": f"pending-{i}"}).encode(),
+                json.dumps(payload).encode(),
             )
         await asyncio.sleep(0.1)
 
         sub = await js.subscribe(f"agent.{job_id}.input")
         messages = await drain_nats_input(sub)
         await sub.unsubscribe()
-        assert messages == ["pending-0", "pending-1", "pending-2"]
+        assert messages == [
+            ("pending-0", None),
+            ("pending-1", "run-1"),
+            ("pending-2", None),
+        ]
 
     async def test_drain_empty_returns_empty(self, nats_conn: tuple) -> None:
         _nc, js = nats_conn
@@ -528,6 +535,59 @@ class TestBridgeFullCycle:
             assert "run backup" in backend.prompts[0]
         finally:
             bridge_mod._create_backend = original_create
+
+    async def test_run_id_echoed_on_results(self, nats_conn: tuple) -> None:
+        """Attribution end-to-end: the initial prompt's run (from
+        AgentInitData) is echoed on its result and on the batch-final
+        marker; a between-query follow-up carrying a different run_id gets
+        ITS run echoed — the exact case the orchestrator's stale closure
+        used to misattribute."""
+        nc, js = nats_conn
+        job_id = _unique_job_id()
+        init = _make_init(job_id, prompt="first question", run_id="run-cold")
+
+        backend = FakeBackend()
+        backend.prompt_delay = 0.05
+
+        sub = await js.subscribe(f"agent.{job_id}.results")
+
+        import agent_runner.main as bridge_mod
+        original_create = bridge_mod._create_backend
+
+        bridge_mod._create_backend = lambda _: backend
+        try:
+            loop_task = asyncio.create_task(run_query_loop(init, nc, js, job_id))
+
+            # Wait for first query to finish, then send a follow-up bound
+            # to a different run (warm-container continuation).
+            await asyncio.sleep(0.3)
+            await js.publish(
+                f"agent.{job_id}.input",
+                json.dumps(
+                    {"type": "message", "text": "second question", "run_id": "run-warm"}
+                ).encode(),
+            )
+            await asyncio.sleep(0.3)
+
+            await nc.request(f"agent.{job_id}.shutdown", b"", timeout=2)
+            await asyncio.wait_for(loop_task, timeout=5)
+
+            results: list[dict] = []
+            with contextlib.suppress(Exception):
+                while True:
+                    msg = await asyncio.wait_for(sub.next_msg(timeout=1), timeout=2)
+                    await msg.ack()
+                    results.append(json.loads(msg.data))
+
+            successes = [r for r in results if r.get("status") == "success"]
+            # First query: per-prompt result + batch-final marker → run-cold.
+            # Second query: same pair → run-warm.
+            assert [r.get("runId") for r in successes] == [
+                "run-cold", "run-cold", "run-warm", "run-warm",
+            ]
+        finally:
+            bridge_mod._create_backend = original_create
+            await sub.unsubscribe()
 
     async def test_second_prompt_after_follow_up_message(self, nats_conn: tuple) -> None:
         """After first query ends, a new NATS input message triggers a second prompt."""

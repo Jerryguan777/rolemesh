@@ -547,7 +547,9 @@ class GroupQueue:
         state.idle_handle = None
         self._drain_group(group_jid)
 
-    def send_message(self, group_jid: str, text: str) -> bool:
+    def send_message(
+        self, group_jid: str, text: str, run_id: str | None = None
+    ) -> bool:
         """Deliver a message to this group's live container via NATS.
 
         Two cases (slot-follows-turn rework):
@@ -558,6 +560,11 @@ class GroupQueue:
           It needs turn admission: if granted, acquire a turn slot, leave the
           warm pool, cancel idle reaping, then deliver; if denied, return False
           so the caller queues it for a later drain.
+
+        ``run_id`` is the ``runs`` row this message answers; the container
+        echoes it back on output events so the orchestrator terminal-writes
+        the right run (single-writer refactor). None keeps the
+        legacy payload shape for callers with nothing to attribute.
 
         Returns False when there is no live container, it is a task container,
         no transport is wired, or a warm resume is refused by admission.
@@ -584,9 +591,12 @@ class GroupQueue:
             async def _send() -> None:
                 assert self._transport is not None
                 assert state.job_id is not None
+                payload: dict[str, str] = {"type": "message", "text": text}
+                if run_id is not None:
+                    payload["run_id"] = run_id
                 await self._transport.js.publish(
                     f"agent.{state.job_id}.input",
-                    json.dumps({"type": "message", "text": text}).encode(),
+                    json.dumps(payload).encode(),
                 )
 
             bg = asyncio.ensure_future(_send())

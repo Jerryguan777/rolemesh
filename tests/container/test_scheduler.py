@@ -92,6 +92,62 @@ async def test_interrupt_current_turn_active_no_transport() -> None:
     assert state.job_id == "job-abc"
 
 
+class _CapturingJs:
+    def __init__(self) -> None:
+        self.published: list[tuple[str, bytes]] = []
+
+    async def publish(self, subject: str, data: bytes) -> None:
+        self.published.append((subject, data))
+
+
+class _CapturingTransport:
+    def __init__(self) -> None:
+        self.js = _CapturingJs()
+
+
+async def test_send_message_includes_run_id_in_payload() -> None:
+    """Run attribution (single-writer refactor): the input payload
+    carries the run the piped message answers so the container can echo it
+    on output events."""
+    import json
+
+    queue = GroupQueue()
+    transport = _CapturingTransport()
+    queue._transport = transport  # type: ignore[assignment]
+    state = queue._get_group("group1")
+    state.active = True
+    state.job_id = "job-abc"
+    state.processing = True  # mid-turn: skips warm-resume admission
+
+    assert queue.send_message("group1", "hello", run_id="run-1") is True
+    await asyncio.sleep(0)  # let the background publish run
+
+    subject, data = transport.js.published[0]
+    assert subject == "agent.job-abc.input"
+    assert json.loads(data) == {"type": "message", "text": "hello", "run_id": "run-1"}
+    await queue.shutdown()
+
+
+async def test_send_message_without_run_id_keeps_legacy_payload() -> None:
+    """No attribution → byte-identical payload shape to before the change."""
+    import json
+
+    queue = GroupQueue()
+    transport = _CapturingTransport()
+    queue._transport = transport  # type: ignore[assignment]
+    state = queue._get_group("group1")
+    state.active = True
+    state.job_id = "job-abc"
+    state.processing = True
+
+    assert queue.send_message("group1", "hello") is True
+    await asyncio.sleep(0)
+
+    _subject, data = transport.js.published[0]
+    assert json.loads(data) == {"type": "message", "text": "hello"}
+    await queue.shutdown()
+
+
 async def test_enqueue_message_while_active() -> None:
     queue = GroupQueue()
     call_count = 0

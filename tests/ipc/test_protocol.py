@@ -54,6 +54,31 @@ def test_agent_init_data_optional_fields() -> None:
     assert restored.system_prompt is None
     assert restored.role_config is None
     assert restored.user_id == ""
+    assert restored.run_id is None
+
+
+def test_agent_init_data_run_id_roundtrip() -> None:
+    """Run attribution seed (single-writer refactor) survives the
+    KV wire, and its absence — an orchestrator predating the field —
+    deserializes to None rather than erroring."""
+    perms = AgentPermissions().to_dict()
+    init = AgentInitData(
+        prompt="Test",
+        group_folder="group",
+        chat_jid="jid",
+        permissions=perms,
+        run_id="run-abc",
+    )
+    restored = AgentInitData.deserialize(init.serialize())
+    assert restored.run_id == "run-abc"
+
+    # Payload from an older orchestrator: no run_id key at all.
+    import json
+
+    raw = json.loads(init.serialize())
+    del raw["run_id"]
+    legacy = AgentInitData.deserialize(json.dumps(raw).encode())
+    assert legacy.run_id is None
 
 
 def test_agent_init_data_frozen() -> None:

@@ -49,6 +49,13 @@ class AgentInitData:
     conversation_id: str = ""
     user_id: str = ""
     session_id: str | None = None
+    # Run attribution (single-writer refactor): the ``runs`` row
+    # this initial prompt answers. The container echoes it (and the ids of
+    # queued follow-ups) back on every output event so the orchestrator can
+    # terminal-write the RIGHT run without relying on a closure variable
+    # that goes stale on warm-container follow-ups. None = older
+    # orchestrator or a turn with no run (scheduled task).
+    run_id: str | None = None
     is_scheduled_task: bool = False
     assistant_name: str | None = None
     system_prompt: str | None = None

@@ -111,6 +111,8 @@ def _parse_container_output(raw: dict[str, object]) -> AgentOutput:
     # the classification can never accidentally suppress a retry.
     retryable_val = raw.get("retryable")
     retryable = bool(retryable_val) if isinstance(retryable_val, bool) else True
+    # Run attribution echo — absent on events from older containers.
+    run_id_val = raw.get("runId")
     return AgentOutput(
         status=str(raw.get("status", "error")),  # type: ignore[arg-type]
         result=str(result_val) if result_val is not None else None,
@@ -119,6 +121,7 @@ def _parse_container_output(raw: dict[str, object]) -> AgentOutput:
         metadata=meta_val if isinstance(meta_val, dict) else None,
         is_final=is_final,
         retryable=retryable,
+        run_id=str(run_id_val) if isinstance(run_id_val, str) and run_id_val else None,
     )
 
 
@@ -457,6 +460,7 @@ class ContainerAgentExecutor:
             conversation_id=conversation_id,
             user_id=inp.user_id,
             session_id=inp.session_id,
+            run_id=inp.run_id,
             is_scheduled_task=inp.is_scheduled_task,
             assistant_name=inp.assistant_name,
             system_prompt=effective_system_prompt,
