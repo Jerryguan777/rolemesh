@@ -86,6 +86,13 @@ class ContainerOutput:
     # every unclassified error on the existing retry path (fail-open to
     # retry), and absence on the wire means True for older containers.
     retryable: bool = True
+    # Run attribution (single-writer refactor, phase A): the ``runs`` row
+    # this event belongs to — the run of the prompt the backend was serving
+    # when it emitted the event. Seeded from ``AgentInitData.run_id``,
+    # updated from the ``run_id`` on follow-up input payloads (see
+    # ``_RunAttribution``). None when the turn has no run (scheduled task)
+    # or the orchestrator predates the field.
+    run_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {"status": self.status, "result": self.result}
@@ -102,6 +109,9 @@ class ContainerOutput:
         # Same convention: only non-default (False) goes on the wire.
         if not self.retryable:
             d["retryable"] = False
+        # Same convention: absent when there is nothing to attribute.
+        if self.run_id is not None:
+            d["runId"] = self.run_id
         return d
 
 
@@ -139,19 +149,61 @@ def is_retryable_error(exc: BaseException) -> bool:
     return not isinstance(exc, NonRetryableConfigError)
 
 
-async def drain_nats_input(sub: Any) -> list[str]:
-    """Drain any pending input messages from an existing subscription."""
-    messages: list[str] = []
+async def drain_nats_input(sub: Any) -> list[tuple[str, str | None]]:
+    """Drain any pending input messages from an existing subscription.
+
+    Returns ``(text, run_id)`` pairs; ``run_id`` is None on payloads from
+    an orchestrator that predates run attribution.
+    """
+    messages: list[tuple[str, str | None]] = []
     while True:
         try:
             msg = await asyncio.wait_for(sub.next_msg(timeout=0.1), timeout=0.1)
             data = json.loads(msg.data)
             await msg.ack()
             if data.get("type") == "message" and data.get("text"):
-                messages.append(data["text"])
+                rid = data.get("run_id")
+                messages.append(
+                    (data["text"], rid if isinstance(rid, str) and rid else None)
+                )
         except TimeoutError:
             break
     return messages
+
+
+class _RunAttribution:
+    """Maps backend output events to the ``runs`` row they answer.
+
+    The container serves prompts strictly in order: the initial prompt
+    (possibly covering several drained messages — attributed to the LAST
+    drained run, mirroring the orchestrator's ``active_run_id``
+    convention), then queued follow-ups FIFO. Each per-prompt ResultEvent
+    consumes one entry; every other event (progress, error, stop,
+    safety-block) is attributed to the prompt currently being served
+    without consuming it. ``last`` covers events that arrive after the
+    queue drained (e.g. the batch-final marker).
+
+    When a prompt dies mid-serving (error), the remaining queued runs are
+    left un-terminated — parity with pre-refactor behavior, where the
+    retry path re-reads those messages anyway.
+    """
+
+    def __init__(self) -> None:
+        self._pending: list[str | None] = []
+        self._last: str | None = None
+
+    def enqueue(self, run_id: str | None) -> None:
+        self._pending.append(run_id)
+
+    def current(self) -> str | None:
+        """Run of the prompt being served right now (non-consuming)."""
+        return self._pending[0] if self._pending else self._last
+
+    def consume(self) -> str | None:
+        """Attribute a per-prompt result and advance to the next prompt."""
+        rid = self._pending.pop(0) if self._pending else self._last
+        self._last = rid
+        return rid
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +373,11 @@ async def run_query_loop(
     # Track session ID from backend events
     session_id: str | None = init.session_id
 
+    # Maps each output event to the ``runs`` row of the prompt being served.
+    # Seeded below (after the input drain) with the initial prompt's run;
+    # follow-up intake points enqueue as messages arrive.
+    attribution = _RunAttribution()
+
     async def on_event(event: BackendEvent) -> None:
         nonlocal session_id
         output, session_id = event_to_output(event, session_id)
@@ -331,6 +388,13 @@ async def run_query_loop(
         elif isinstance(event, ErrorEvent):
             log(f"Backend error: {event.error}")
         if output is not None:
+            # Per-prompt result: consume the queue entry (next event belongs
+            # to the next prompt). Everything else — progress, error, stop,
+            # safety block — describes the prompt still being served.
+            if isinstance(event, ResultEvent):
+                output.run_id = attribution.consume()
+            else:
+                output.run_id = attribution.current()
             await publish_output(js, job_id, output)
 
     # Build the unified hook registry. TranscriptArchiveHandler replaces
@@ -500,10 +564,20 @@ async def run_query_loop(
             "[SCHEDULED TASK - The following message was sent automatically "
             "and is not coming directly from the user or group.]\n\n" + prompt
         )
+    # Run attribution: the merged initial prompt (init + drained messages)
+    # is served as ONE prompt, answered by ONE ResultEvent, so it gets ONE
+    # queue entry. When drained messages carry run ids, the last non-None
+    # one wins — same "last message's run" convention the orchestrator uses
+    # for active_run_id when it batches messages into a single prompt.
+    initial_run_id = init.run_id
     pending = await drain_nats_input(input_sub)
     if pending:
         log(f"Draining {len(pending)} pending NATS messages into initial prompt")
-        prompt += "\n" + "\n".join(pending)
+        prompt += "\n" + "\n".join(text for text, _ in pending)
+        for _, drained_run_id in pending:
+            if drained_run_id is not None:
+                initial_run_id = drained_run_id
+    attribution.enqueue(initial_run_id)
 
     # Main query loop
     try:
@@ -528,6 +602,10 @@ async def run_query_loop(
                         await msg.ack()
                         if data.get("type") == "message" and data.get("text"):
                             text = data["text"]
+                            rid = data.get("run_id")
+                            attribution.enqueue(
+                                rid if isinstance(rid, str) and rid else None
+                            )
                             log(f"Follow-up message received ({len(text)} chars)")
                             await backend.handle_follow_up(text)
                     except TimeoutError:
@@ -561,6 +639,11 @@ async def run_query_loop(
                     result=None,
                     new_session_id=session_id,
                     is_final=True,
+                    # The batch has settled: attribute the marker to the last
+                    # prompt served (attribution.current() falls back to
+                    # ``last`` once the queue is empty). This is the event
+                    # the orchestrator terminal-writes the run from.
+                    run_id=attribution.current(),
                 ),
             )
 
@@ -577,6 +660,10 @@ async def run_query_loop(
                     await msg.ack()
                     if data.get("type") == "message" and data.get("text"):
                         next_message = data["text"]
+                        rid = data.get("run_id")
+                        attribution.enqueue(
+                            rid if isinstance(rid, str) and rid else None
+                        )
                         break
                 except TimeoutError:
                     pass

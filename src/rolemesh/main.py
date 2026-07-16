@@ -1013,10 +1013,16 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
     # single-active-run model as ws_stream). Writing the terminal status here, at
     # is_final/error, means a browser that disconnected mid-turn no longer
     # strands the row at 'running'. Idempotent with the WS-side writer via the
-    # lifecycle helper's WHERE status='running' guard. (Limitation: follow-ups
-    # piped into a warm container via send_message are not threaded here, so
-    # their runs still rely on the WS path / reaper — the dominant
-    # disconnect-mid-cold-start case is covered.)
+    # lifecycle helper's WHERE status='running' guard.
+    #
+    # Attribution precedence (single-writer refactor, phase A): the container
+    # now echoes the run of the prompt it actually served on each output
+    # event (AgentOutput.run_id — seeded via AgentInitData, updated from
+    # follow-up input payloads), so ``result.run_id or active_run_id`` at the
+    # terminal-write sites prefers the echoed id. The closure value below is
+    # the fallback for older containers and covers this turn's cold start;
+    # it goes stale when follow-ups are piped into a warm container, which
+    # is exactly what the echo fixes.
     active_run_id = next((m.run_id for m in reversed(missed_messages) if m.run_id), None)
 
     previous_cursor = conv_state.last_agent_timestamp
@@ -1102,7 +1108,7 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
             if result.is_final:
                 _queue.notify_idle(conversation_id)
                 await _terminate_run_safe(
-                    active_run_id,
+                    result.run_id or active_run_id,
                     conv.tenant_id,
                     success=False,
                     error={
@@ -1202,7 +1208,7 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
                 _queue.notify_idle(conversation_id)
                 usage_dict = result.metadata.get("usage") if result.metadata else None
                 await _terminate_run_safe(
-                    active_run_id,
+                    result.run_id or active_run_id,
                     conv.tenant_id,
                     success=True,
                     usage=usage_dict if isinstance(usage_dict, dict) else None,
@@ -1224,7 +1230,7 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
             if result.retryable:
                 had_error = True
                 await _terminate_run_safe(
-                    active_run_id,
+                    result.run_id or active_run_id,
                     conv.tenant_id,
                     success=False,
                     error={"code": "AGENT_ERROR", "message": result.error or "agent run failed"},
@@ -1236,13 +1242,13 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
                 # once with a user-visible explanation.
                 non_retryable_error = result.error or "agent configuration error"
                 await _terminate_run_safe(
-                    active_run_id,
+                    result.run_id or active_run_id,
                     conv.tenant_id,
                     success=False,
                     error={"code": "CONFIG_ERROR", "message": non_retryable_error},
                 )
 
-    output = await _run_agent(cw_state, conv_state, prompt, _on_output)
+    output = await _run_agent(cw_state, conv_state, prompt, _on_output, run_id=active_run_id)
 
     # Stop typing
     if binding and gw:
@@ -1318,8 +1324,14 @@ async def _run_agent(
     conv_state: ConversationState,
     prompt: str,
     on_output: Callable[[AgentOutput], Awaitable[None]] | None = None,
+    run_id: str | None = None,
 ) -> str:
-    """Run agent in a container. Returns 'success' or 'error'."""
+    """Run agent in a container. Returns 'success' or 'error'.
+
+    ``run_id`` is the ``runs`` row the initial prompt answers; it seeds the
+    container's run attribution (AgentInitData.run_id) so output events echo
+    the right run back. None for turns with no run (scheduled tasks).
+    """
     config = cw_state.config
     conv = conv_state.conversation
     permissions = config.permissions
@@ -1384,6 +1396,7 @@ async def _run_agent(
                 tenant_id=config.tenant_id,
                 coworker_id=config.id,
                 conversation_id=conv.id,
+                run_id=run_id,
             ),
             lambda container_name, job_id: _queue.register_process(
                 conv.id, container_name, config.folder, job_id
@@ -1757,7 +1770,16 @@ async def _message_loop(shutdown_event: asyncio.Event) -> None:
                     )
                     if all_pending:
                         formatted = format_messages(all_pending, TIMEZONE)
-                        if _queue.send_message(conv_id, formatted):
+                        # Same "last message's run" convention as _process_
+                        # conversation_messages' active_run_id. The container
+                        # enqueues this id and echoes it on the outputs that
+                        # answer this batch — the warm-container follow-up is
+                        # exactly the case the stale closure could not cover.
+                        pipe_run_id = next(
+                            (m.run_id for m in reversed(all_pending) if m.run_id),
+                            None,
+                        )
+                        if _queue.send_message(conv_id, formatted, run_id=pipe_run_id):
                             logger.debug("Piped messages to active container", conv_id=conv_id)
                             conv_state.last_agent_timestamp = all_pending[-1].timestamp
                             await update_conversation_last_invocation(

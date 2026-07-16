@@ -31,6 +31,10 @@ class AgentInput:
     assistant_name: str | None = None
     system_prompt: str | None = None
     role_config: dict[str, object] | None = None
+    # The ``runs`` row this prompt answers (None when the turn has no run,
+    # e.g. scheduled tasks). Threaded into AgentInitData so the container
+    # can echo it on output events — see AgentOutput.run_id.
+    run_id: str | None = None
 
 
 # Progress statuses are transient UX indicators; terminal statuses carry the
@@ -78,6 +82,14 @@ class AgentOutput:
     error: str | None = None
     metadata: dict[str, object] | None = None
     is_final: bool = True
+    # Run attribution echoed by the container: which ``runs`` row this
+    # event belongs to. The container tracks the run of the prompt it is
+    # currently serving (initial run from AgentInitData, follow-ups from
+    # the input payload) so batch replies attribute correctly instead of
+    # all landing on whatever the orchestrator's closure last saw. None =
+    # older container or a turn with no run; consumers fall back to their
+    # legacy closure-tracked id.
+    run_id: str | None = None
     # Only meaningful for status="error". False marks a deterministic
     # configuration error the container classified at the source
     # (pi.ai.types.NonRetryableConfigError): the orchestrator fails the
