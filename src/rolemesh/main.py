@@ -99,6 +99,7 @@ from rolemesh.db import (
     store_message as db_store_message,
 )
 from rolemesh.runs import (
+    get_run,
     terminate_run_via_ws_completed,
     terminate_run_via_ws_error,
 )
@@ -964,25 +965,134 @@ async def _terminate_run_safe(
     success: bool,
     usage: dict[str, object] | None = None,
     error: dict[str, object] | None = None,
-) -> None:
-    """Write a run's terminal status server-side (INV-6 path 1/2), suppressing
+) -> bool | None:
+    """Write a run's terminal status server-side (INV-6 paths 1/2), suppressing
     errors so a DB hiccup never crashes the processing loop. No-op when there is
-    no run_id (IM channels, or a turn with no associated run)."""
+    no run_id (IM channels, or a turn with no associated run).
+
+    Single-writer contract: this is now the ONLY writer for
+    paths 1/2 — the WS handler no longer touches the runs table.
+
+    Returns the lifecycle helper's outcome: ``True`` when THIS call moved
+    the row to terminal, ``False`` when the ``WHERE status='running'``
+    guard did not match (an earlier terminal writer won — e.g. the run
+    failed mid-batch and the batch-final marker's completed write lost),
+    ``None`` when there was nothing to write or the write errored. The
+    caller uses ``False`` to mirror the authoritative row in the frame it
+    emits instead of blindly certifying its own intent.
+    """
     if not run_id:
-        return
+        return None
     try:
         async with tenant_conn(tenant_id) as conn:
             if success:
-                await terminate_run_via_ws_completed(run_id=run_id, usage=usage, conn=conn)
-            else:
-                await terminate_run_via_ws_error(
-                    run_id=run_id,
-                    error=error or {"code": "AGENT_ERROR", "message": "agent run failed"},
-                    conn=conn,
+                return await terminate_run_via_ws_completed(
+                    run_id=run_id, usage=usage, conn=conn
                 )
+            return await terminate_run_via_ws_error(
+                run_id=run_id,
+                error=error or {"code": "AGENT_ERROR", "message": "agent run failed"},
+                conn=conn,
+            )
     except Exception:  # noqa: BLE001 — terminal write must never crash the loop
         logger.warning(
             "orchestrator-side run terminator failed (run stays 'running')",
+            run_id=run_id,
+            exc_info=True,
+        )
+        return None
+
+
+async def _run_terminal_error_or_none(
+    run_id: str,
+    tenant_id: str,
+    *,
+    transitioned: bool | None,
+    intent_error: dict[str, object] | None,
+) -> dict[str, object] | None:
+    """Pick what the run-terminal frame must report: ``None`` for
+    completed, an error dict for a failure.
+
+    ``transitioned`` is `_terminate_run_safe`'s outcome for the write this
+    frame certifies; ``intent_error`` is what that write TRIED to record
+    (``None`` for a completed write). When the write won (``True``) or
+    could not be confirmed (``None`` — DB hiccup, keep legacy best-effort
+    optimism), the intent is the truth. When it LOST (``False``), an
+    earlier terminal writer owns the row — e.g. the run failed on a
+    content-filter kill mid-batch and this is the batch-final marker's
+    completed write — so read the row and mirror it: ``failed`` /
+    ``awaiting_reauth`` report the row's recorded error, every other
+    terminal state (a redelivered write on an already-completed or
+    cancelled row) reports completed rather than fabricating a phantom
+    error. A snapshot miss falls back to the intent.
+
+    Living at the single writer — where the race is decided — is what
+    lets the WS stay a pure projection that never infers terminal state
+    from stream chunks at all.
+    """
+    if transitioned is not False:
+        return intent_error
+    snapshot: dict[str, object] | None = None
+    try:
+        async with tenant_conn(tenant_id) as conn:
+            snapshot = await get_run(run_id=run_id, tenant_id=tenant_id, conn=conn)
+    except Exception:  # noqa: BLE001 — frame selection must never crash the loop
+        logger.warning(
+            "run snapshot lookup failed; terminal frame keeps write intent",
+            run_id=run_id,
+            exc_info=True,
+        )
+    if snapshot is None:
+        return intent_error
+    status = snapshot.get("status")
+    if status in ("failed", "awaiting_reauth"):
+        err = snapshot.get("error")
+        return err if isinstance(err, dict) else {}
+    return None
+
+
+async def _terminate_and_emit_run_terminal(
+    gw: object,
+    binding: object,
+    chat_id: str,
+    *,
+    run_id: str | None,
+    tenant_id: str,
+    success: bool,
+    usage: dict[str, object] | None = None,
+    error: dict[str, object] | None = None,
+) -> None:
+    """Terminal-write a run AND publish the explicit run-terminal chunk
+    (single-writer contract).
+
+    Ordering is load-bearing: the DB write happens first, then the frame
+    mirrors the authoritative outcome — so a browser can never see
+    ``event.run.completed`` while ``GET /runs/{id}`` says ``failed``
+    (the field trace that motivated this refactor). Non-web channels and
+    turns with no run write the DB only; there is no stream to notify.
+    """
+    transitioned = await _terminate_run_safe(
+        run_id, tenant_id, success=success, usage=usage, error=error
+    )
+    if not run_id or binding is None or not isinstance(gw, WebNatsGateway):
+        return
+    intent_error = None if success else (
+        error or {"code": "AGENT_ERROR", "message": "agent run failed"}
+    )
+    frame_error = await _run_terminal_error_or_none(
+        run_id, tenant_id, transitioned=transitioned, intent_error=intent_error
+    )
+    try:
+        if frame_error is None:
+            await gw.send_run_completed(binding.id, chat_id, run_id=run_id)  # type: ignore[attr-defined]
+        else:
+            await gw.send_run_error(
+                binding.id, chat_id, run_id=run_id, error=frame_error  # type: ignore[attr-defined]
+            )
+    except (OSError, RuntimeError):
+        logger.warning(
+            "run-terminal chunk publish failed (DB already terminal; "
+            "client reconciles via GET /runs/{id})",
             run_id=run_id,
             exc_info=True,
         )
@@ -1008,12 +1118,15 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
 
     prompt = format_messages(missed_messages, TIMEZONE)
 
-    # INV-6 path 1/2 (server-side): the run this turn answers. Web sends carry a
-    # run_id on the inbound message; the most recent one is the active run (same
-    # single-active-run model as ws_stream). Writing the terminal status here, at
-    # is_final/error, means a browser that disconnected mid-turn no longer
-    # strands the row at 'running'. Idempotent with the WS-side writer via the
-    # lifecycle helper's WHERE status='running' guard.
+    # INV-6 paths 1/2 (server-side): the run this turn answers. Web sends carry
+    # a run_id on the inbound message; the most recent one is the active run
+    # (same single-active-run model as ws_stream). Since the single-writer
+    # refactor the orchestrator is the ONLY terminal writer for these
+    # paths — the WS handler forwards frames but never touches the runs table —
+    # so a browser that disconnected mid-turn cannot strand the row at
+    # 'running'. The lifecycle helper's WHERE status='running' guard still
+    # makes double-termination across the orchestrator's own sites safe
+    # (first write wins).
     #
     # Attribution precedence (single-writer refactor): the container
     # now echoes the run of the prompt it actually served on each output
@@ -1092,6 +1205,25 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
                 rule_id=rule_id,
                 chars=len(reason),
             )
+            # Write-only site, and write-FIRST: the single-writer rule is
+            # "frames follow the DB" — the terminal row must exist before
+            # any frame that implies it. The safety chunk below is the
+            # user-facing frame, and the batch-final marker that follows a
+            # safety block mirrors this row into the run-terminal frame
+            # (its completed write loses to this one, so the marker emits
+            # run_error SAFETY_BLOCKED).
+            if result.is_final:
+                await _terminate_run_safe(
+                    result.run_id or active_run_id,
+                    conv.tenant_id,
+                    success=False,
+                    error={
+                        "code": "SAFETY_BLOCKED",
+                        "message": reason,
+                        "stage": stage,
+                        "rule_id": rule_id if isinstance(rule_id, str) else None,
+                    },
+                )
             if binding and isinstance(gw, WebNatsGateway):
                 with contextlib.suppress(OSError, RuntimeError, TypeError, ValueError):
                     await gw.send_safety_block(
@@ -1107,17 +1239,6 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
             _reset_idle_timer()
             if result.is_final:
                 _queue.notify_idle(conversation_id)
-                await _terminate_run_safe(
-                    result.run_id or active_run_id,
-                    conv.tenant_id,
-                    success=False,
-                    error={
-                        "code": "SAFETY_BLOCKED",
-                        "message": reason,
-                        "stage": stage,
-                        "rule_id": rule_id if isinstance(rule_id, str) else None,
-                    },
-                )
             return
         if result.result:
             raw = result.result
@@ -1207,9 +1328,18 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
             if result.is_final:
                 _queue.notify_idle(conversation_id)
                 usage_dict = result.metadata.get("usage") if result.metadata else None
-                await _terminate_run_safe(
-                    result.run_id or active_run_id,
-                    conv.tenant_id,
+                # Single-writer contract: terminal write + explicit
+                # run-terminal chunk in one ordered step. When the
+                # completed write loses to an earlier failure (e.g. a
+                # content-filter kill mid-batch already marked the run
+                # failed), the emitted chunk mirrors the row — the SPA
+                # sees event.run.error, matching GET /runs/{id}.
+                await _terminate_and_emit_run_terminal(
+                    gw,
+                    binding,
+                    conv.channel_chat_id,
+                    run_id=result.run_id or active_run_id,
+                    tenant_id=conv.tenant_id,
                     success=True,
                     usage=usage_dict if isinstance(usage_dict, dict) else None,
                 )
@@ -1229,6 +1359,14 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
         if result.status == "error":
             if result.retryable:
                 had_error = True
+                # Write-only site — deliberately NO run-terminal frame.
+                # The retry ladder may still produce an answer on a fresh
+                # container; pushing event.run.error now would flash a
+                # terminal error at the user per attempt. The row is
+                # already failed (first-write-wins), so whichever later
+                # write certifies the turn (the retry's batch-final
+                # marker) loses the race and mirrors THIS row into the
+                # frame — the stream still ends truthfully.
                 await _terminate_run_safe(
                     result.run_id or active_run_id,
                     conv.tenant_id,
@@ -1239,11 +1377,16 @@ async def _process_conversation_messages(conversation_id: str) -> bool:
                 # Deterministic configuration error, classified at the source
                 # (pi.ai.types.NonRetryableConfigError). Respawning cannot fix
                 # it — record it and let the post-run branch drop the message
-                # once with a user-visible explanation.
+                # once with a user-visible explanation. Unlike the retryable
+                # branch, the container is done and no batch-final marker is
+                # coming, so this site emits the run-terminal frame itself.
                 non_retryable_error = result.error or "agent configuration error"
-                await _terminate_run_safe(
-                    result.run_id or active_run_id,
-                    conv.tenant_id,
+                await _terminate_and_emit_run_terminal(
+                    gw,
+                    binding,
+                    conv.channel_chat_id,
+                    run_id=result.run_id or active_run_id,
+                    tenant_id=conv.tenant_id,
                     success=False,
                     error={"code": "CONFIG_ERROR", "message": non_retryable_error},
                 )
