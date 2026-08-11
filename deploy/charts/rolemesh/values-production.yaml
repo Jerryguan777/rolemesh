@@ -46,10 +46,12 @@ egressGateway:
   image:
     repository: "registry.example.com/CHANGEME/rolemesh-egress-gateway"
     tag: "0.1.0"
-  # REQUIRED — free address inside THIS cluster's Service CIDR, unique
-  # per RoleMesh instance on the cluster (ClusterIPs are cluster-global,
-  # not namespace-scoped). See values.yaml and docs/23 §1.1 for how to
-  # pick and pre-verify one.
+  # Production: a free address inside THIS cluster's Service CIDR,
+  # unique per RoleMesh instance on the cluster (ClusterIPs are
+  # cluster-global, not namespace-scoped). See values.yaml and docs/23
+  # §1.1 for how to pick and pre-verify one. (Ephemeral/feature-branch
+  # instances may instead leave this "" for dynamic discovery — see
+  # values.yaml for the trade-offs; production should pin.)
   clusterIP: "CHANGEME-e.g.-10.43.0.53"
 agent:
   image:

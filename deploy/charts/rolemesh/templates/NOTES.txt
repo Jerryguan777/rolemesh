@@ -29,9 +29,16 @@ RoleMesh has been installed as release {{ .Release.Name }} in namespace {{ .Rele
 
 2. EGRESS_GATEWAY_DNS_IP / Service ClusterIP contract.
 {{- if not .Values.egressGateway.clusterIP }}
-   *** egressGateway.clusterIP is UNSET. The install template should have
-   *** failed — if you see this, something is wrong. Set it to a free
-   *** address inside the cluster Service CIDR.
+   egressGateway.clusterIP is UNSET -> DYNAMIC mode: K8s allocated the
+   gateway ClusterIP and the orchestrator discovers it at runtime
+   (re-reading before every agent spawn). Intended for ephemeral
+   multi-instance deployments. Notes:
+     * the connectivity-probe helm test is SKIPPED in this mode (it
+       needs the IP at template time) — only the deny-probe runs;
+     * deleting/recreating the gateway Service changes the IP: new
+       spawns converge, agents spawned before it keep a dead resolver
+       until respawned (the orchestrator logs an ERROR);
+     * production should pin a static clusterIP instead.
 {{- else }}
    The gateway Service holds the static ClusterIP {{ .Values.egressGateway.clusterIP }}.
    The orchestrator's verify_infrastructure asserts this equals

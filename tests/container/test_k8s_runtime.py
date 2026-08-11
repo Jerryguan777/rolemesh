@@ -1311,3 +1311,67 @@ def test_no_pin_node_means_no_node_selector() -> None:
         "nodeSelector"
         not in _manifest(ContainerSpec(name="a", image="img"), pin_node="")["spec"]
     )
+
+
+# ===========================================================================
+# Dynamic gateway ClusterIP (docs/21 §4.2, hybrid mode).
+# With EGRESS_GATEWAY_DNS_IP empty, the runtime discovers the Service's
+# allocated ClusterIP and substitutes the freshest value into the spec's
+# DNS just before the manifest is built (resolv.conf is immutable after
+# pod creation).
+# ===========================================================================
+
+
+def test_spec_with_dns_replaces_differing_servers() -> None:
+    from rolemesh.container.k8s_runtime import _spec_with_dns
+
+    spec = ContainerSpec(name="a", image="img", dns=["10.96.0.53"])
+    fresh = _spec_with_dns(spec, ["10.96.9.9"])
+    assert fresh.dns == ["10.96.9.9"]
+    assert fresh is not spec
+    assert spec.dns == ["10.96.0.53"]  # frozen original untouched
+
+
+def test_spec_with_dns_is_noop_when_equal() -> None:
+    from rolemesh.container.k8s_runtime import _spec_with_dns
+
+    spec = ContainerSpec(name="a", image="img", dns=["10.96.0.53"])
+    assert _spec_with_dns(spec, ["10.96.0.53"]) is spec
+
+
+class _FakeCoreServices:
+    """Stub of the CoreV1 client surface _read_gateway_cluster_ip uses."""
+
+    def __init__(self, cluster_ip: str | None) -> None:
+        self._cluster_ip = cluster_ip
+        self.calls: list[tuple[str, str]] = []
+
+    async def read_namespaced_service(self, name: str, namespace: str) -> Any:
+        self.calls.append((name, namespace))
+
+        class _Spec:
+            cluster_ip = self._cluster_ip
+
+        class _Svc:
+            spec = _Spec()
+
+        return _Svc()
+
+
+@pytest.mark.asyncio
+async def test_read_gateway_cluster_ip_returns_service_ip() -> None:
+    rt = K8sRuntime()
+    rt._core = _FakeCoreServices("10.96.7.42")
+    ip = await rt._read_gateway_cluster_ip(_NS, service_name="egress-gateway")
+    assert ip == "10.96.7.42"
+    assert rt._core.calls == [("egress-gateway", _NS)]
+
+
+@pytest.mark.asyncio
+async def test_read_gateway_cluster_ip_empty_when_headless() -> None:
+    # A headless/None ClusterIP must surface as "" so callers can
+    # fail-close (verify) or keep the last known address (spawn path)
+    # instead of pinning agents to the string "None".
+    rt = K8sRuntime()
+    rt._core = _FakeCoreServices(None)
+    assert await rt._read_gateway_cluster_ip(_NS, service_name="egress-gateway") == ""

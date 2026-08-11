@@ -199,10 +199,12 @@ helm upgrade --install rolemesh deploy/charts/rolemesh \
   -f my-production-values.yaml      # your overrides on top of values.yaml
 ```
 
-Minimum required overrides: `egressGateway.clusterIP`, real `secrets.*`,
-external `postgres`, a real `storage.storageClass` — start from the
-skeleton `deploy/charts/rolemesh/values-production.yaml` (copy per
-environment, fill every CHANGEME).
+Minimum required overrides: `egressGateway.clusterIP` (static pin —
+recommended for production; ephemeral instances may leave it unset for
+runtime discovery, see values.yaml), real `secrets.*`, external
+`postgres`, a real `storage.storageClass` — start from the skeleton
+`deploy/charts/rolemesh/values-production.yaml` (copy per environment,
+fill every CHANGEME).
 
 ### 5.1 Verify enforcement (deny probe)
 

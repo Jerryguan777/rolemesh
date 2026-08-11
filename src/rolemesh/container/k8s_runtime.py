@@ -14,6 +14,7 @@ install hint when the extra is missing.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import os
 import re
 import time
@@ -25,6 +26,10 @@ from rolemesh.container.docker_runtime import (
     _check_tcp_reachable,
     _normalize_image_ref,
     _parse_memory,
+)
+from rolemesh.container.gateway_address import (
+    get_gateway_dns_ip,
+    set_gateway_dns_ip,
 )
 from rolemesh.core.logger import get_logger
 
@@ -224,6 +229,19 @@ def _security_context(spec: ContainerSpec) -> dict[str, Any]:
         if gid_str:
             ctx["runAsGroup"] = int(gid_str)
     return ctx
+
+
+def _spec_with_dns(spec: ContainerSpec, dns: list[str]) -> ContainerSpec:
+    """Return ``spec`` with its DNS servers replaced (no-op if equal).
+
+    Dynamic-gateway support: the spec's ``dns`` was computed from the
+    address known at spec-build time; the K8s runtime substitutes the
+    freshly re-read ClusterIP just before the manifest is generated so
+    the pod's immutable resolv.conf carries the newest address.
+    """
+    if list(spec.dns) == dns:
+        return spec
+    return dataclasses.replace(spec, dns=dns)
 
 
 def spec_to_pod_manifest(
@@ -698,6 +716,8 @@ class K8sRuntime:
         core = self._ensure_core()
         from rolemesh.core.config import (
             DATA_DIR,
+            EGRESS_GATEWAY_CONTAINER_NAME,
+            EGRESS_GATEWAY_DNS_IP,
             ROLEMESH_K8S_AGENT_PIN_NODE,
             ROLEMESH_K8S_DATA_PVC,
             ROLEMESH_K8S_IMAGE_PULL_POLICY,
@@ -705,6 +725,41 @@ class K8sRuntime:
             ROLEMESH_K8S_NAMESPACE,
             ROLEMESH_K8S_RUNTIME_CLASS,
         )
+
+        # Dynamic gateway mode (EGRESS_GATEWAY_DNS_IP empty): the pod's
+        # resolv.conf is immutable after creation, so re-read the
+        # gateway Service's ClusterIP at the last moment before the
+        # manifest is built. A drift (Service recreated -> new IP) is
+        # loud: agents spawned before it keep a dead resolver until
+        # respawned, but every pod from HERE on gets the fresh address.
+        # A failed re-read falls back to the last known address rather
+        # than blocking the spawn — verify established it once.
+        if not EGRESS_GATEWAY_DNS_IP and spec.dns:
+            try:
+                fresh = await self._read_gateway_cluster_ip(
+                    ROLEMESH_K8S_NAMESPACE,
+                    service_name=EGRESS_GATEWAY_CONTAINER_NAME,
+                )
+            except Exception as exc:  # noqa: BLE001 — degrade, don't block
+                logger.warning(
+                    "Pre-spawn gateway ClusterIP re-read failed — using last known address",
+                    pod=spec.name,
+                    error=str(exc),
+                )
+            else:
+                if fresh:
+                    current = get_gateway_dns_ip()
+                    if fresh != current:
+                        logger.error(
+                            "Gateway ClusterIP CHANGED (Service recreated?) — "
+                            "agents spawned before this point hold a dead "
+                            "resolver until respawned; new spawns use the "
+                            "fresh address",
+                            old=current,
+                            new=fresh,
+                        )
+                        set_gateway_dns_ip(fresh)
+                    spec = _spec_with_dns(spec, [fresh])
 
         manifest = spec_to_pod_manifest(
             spec,
@@ -848,7 +903,12 @@ class K8sRuntime:
           (b) the data PVC is Bound;
           (c) the gateway Service exists and its ClusterIP equals
               ``EGRESS_GATEWAY_DNS_IP`` (the value agents get pinned as
-              their resolver);
+              their resolver). With EGRESS_GATEWAY_DNS_IP empty (K8s
+              dynamic mode — the chart left egressGateway.clusterIP
+              unset), this degrades to "Service exists and holds an
+              IP": the allocated ClusterIP is DISCOVERED here and
+              seeded into ``container.gateway_address`` for the spawn
+              path; there is no configured value to compare against.
           (d) the gateway answers healthz through that Service IP;
           (e) NATS is TCP-reachable at ``NATS_URL``;
           (f) RBAC self-check: pods create/delete/get/list/watch and
@@ -885,13 +945,41 @@ class K8sRuntime:
         # The gateway Service shares its name with the docker-side
         # container (default "egress-gateway") — one config knob, both
         # backends.
-        await self._check_gateway_service(
-            namespace,
-            service_name=EGRESS_GATEWAY_CONTAINER_NAME,
-            expected_cluster_ip=EGRESS_GATEWAY_DNS_IP,
-        )
+        if EGRESS_GATEWAY_DNS_IP:
+            # Static mode: the configured value is the contract — strict
+            # equality, fail-closed on drift (the recommended production
+            # mode; a statically pinned Service survives recreation with
+            # the same IP, so running agents' resolv.conf stays valid).
+            await self._check_gateway_service(
+                namespace,
+                service_name=EGRESS_GATEWAY_CONTAINER_NAME,
+                expected_cluster_ip=EGRESS_GATEWAY_DNS_IP,
+            )
+            gateway_ip = EGRESS_GATEWAY_DNS_IP
+        else:
+            # Dynamic mode: no configured value exists — discover the
+            # allocated ClusterIP and seed the runtime provider. The
+            # spawn path re-reads before every pod creation (see run()),
+            # so a Service recreation mid-run only strands agents
+            # spawned BEFORE it — loudly, not silently.
+            gateway_ip = await self._read_gateway_cluster_ip(
+                namespace, service_name=EGRESS_GATEWAY_CONTAINER_NAME
+            )
+            if not gateway_ip:
+                msg = (
+                    f"Egress gateway Service "
+                    f"{EGRESS_GATEWAY_CONTAINER_NAME!r} exists but holds "
+                    f"no ClusterIP (headless?). Agents need an IP to pin "
+                    f"as their resolver. {_HELM_HINT}"
+                )
+                raise RuntimeError(msg)
+            set_gateway_dns_ip(gateway_ip)
+            logger.info(
+                "Gateway ClusterIP discovered (dynamic mode)",
+                gateway_cluster_ip=gateway_ip,
+            )
 
-        healthz_url = f"http://{EGRESS_GATEWAY_DNS_IP}:{CREDENTIAL_PROXY_PORT}/healthz"
+        healthz_url = f"http://{gateway_ip}:{CREDENTIAL_PROXY_PORT}/healthz"
         await _retry_within_budget(
             lambda: _check_http_healthz(healthz_url, hint=_HELM_HINT),
             what="egress gateway /healthz",
@@ -909,7 +997,7 @@ class K8sRuntime:
             network_policies=REQUIRED_AGENT_NETWORK_POLICIES
             + REQUIRED_COMPONENT_NETWORK_POLICIES,
             data_pvc=ROLEMESH_K8S_DATA_PVC,
-            gateway_cluster_ip=EGRESS_GATEWAY_DNS_IP,
+            gateway_cluster_ip=gateway_ip,
         )
 
     @staticmethod
@@ -1003,9 +1091,15 @@ class K8sRuntime:
             )
             raise RuntimeError(msg)
 
-    async def _check_gateway_service(
-        self, namespace: str, *, service_name: str, expected_cluster_ip: str
-    ) -> None:
+    async def _read_gateway_cluster_ip(
+        self, namespace: str, *, service_name: str
+    ) -> str:
+        """Read the gateway Service's ClusterIP (RBAC: services get).
+
+        Shared by the static-mode verify (compare against the configured
+        value) and the dynamic-mode paths (discover at verify, re-read
+        before each spawn). 404 raises with chart guidance.
+        """
         from kubernetes_asyncio.client.exceptions import ApiException
 
         try:
@@ -1018,7 +1112,14 @@ class K8sRuntime:
                 )
                 raise RuntimeError(msg) from exc
             raise
-        actual_ip = str(getattr(getattr(service, "spec", None), "cluster_ip", "") or "")
+        return str(getattr(getattr(service, "spec", None), "cluster_ip", "") or "")
+
+    async def _check_gateway_service(
+        self, namespace: str, *, service_name: str, expected_cluster_ip: str
+    ) -> None:
+        actual_ip = await self._read_gateway_cluster_ip(
+            namespace, service_name=service_name
+        )
         if actual_ip != expected_cluster_ip:
             msg = (
                 f"Egress gateway Service ClusterIP mismatch: configured "

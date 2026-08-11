@@ -5,9 +5,11 @@ HARD CONTRACT with verify_infrastructure:
   * Service NAME == EGRESS_GATEWAY_CONTAINER_NAME (default "egress-gateway").
     NOT release-scoped — agents reach it by this service name and the
     orchestrator reads the Service by this exact name. Keep it literal.
-  * Service has a STATIC clusterIP == EGRESS_GATEWAY_DNS_IP
-    (.Values.egressGateway.clusterIP). verify compares the two and refuses
-    to start on drift.
+  * clusterIP set (static mode, production-recommended): Service holds
+    that exact ClusterIP == EGRESS_GATEWAY_DNS_IP; verify compares the
+    two and refuses to start on drift. clusterIP unset (dynamic mode):
+    K8s allocates; verify degrades to "exists + holds an IP" and the
+    orchestrator discovers the address at runtime.
   * healthz lives at clusterIP:3001 (CREDENTIAL_PROXY_PORT).
 The pod carries app.kubernetes.io/component: egress-gateway so the
 gateway-policy NetworkPolicy selects it (and the agent/orchestrator
@@ -27,9 +29,14 @@ metadata:
     app.kubernetes.io/component: egress-gateway
 spec:
   type: ClusterIP
-  # Static ClusterIP == EGRESS_GATEWAY_DNS_IP. Must be inside the cluster
-  # Service CIDR and free. See values.yaml egressGateway.clusterIP.
-  clusterIP: {{ required "egressGateway.clusterIP is REQUIRED (= EGRESS_GATEWAY_DNS_IP, a free address in the cluster Service CIDR). See values.yaml." .Values.egressGateway.clusterIP | quote }}
+  # Static ClusterIP == EGRESS_GATEWAY_DNS_IP (recommended for
+  # production: survives Service recreation, strict startup verify).
+  # UNSET = dynamic mode: K8s allocates the ClusterIP and the
+  # orchestrator discovers it at runtime — for e.g. many ephemeral
+  # instances on one cluster. See values.yaml egressGateway.clusterIP.
+  {{- with .Values.egressGateway.clusterIP }}
+  clusterIP: {{ . | quote }}
+  {{- end }}
   selector:
     app.kubernetes.io/component: egress-gateway
     app.kubernetes.io/instance: {{ .Release.Name }}

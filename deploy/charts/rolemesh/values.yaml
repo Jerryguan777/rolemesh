@@ -125,7 +125,19 @@ egressGateway:
   # collisions with dynamic allocation unlikely. Pre-verify a candidate
   # with a server-side dry run: docs/23 §1.1.
   # ----------------------------------------------------------------------
-  clusterIP: ""  # REQUIRED — e.g. "10.96.0.53"
+  #
+  # UNSET (dynamic mode): K8s allocates the ClusterIP and the
+  # orchestrator DISCOVERS it at runtime (re-reading before every agent
+  # spawn). Use for ephemeral multi-instance deployments (feature
+  # branches / per-PR namespaces) where per-instance static allocation
+  # is impractical — instances never collide because nothing is pinned.
+  # Trade-offs vs static: startup verify degrades from strict equality
+  # to existence, the connectivity-probe helm test is skipped (it needs
+  # the IP at template time), and a Service recreation mid-run changes
+  # the IP — new spawns converge, agents spawned before it keep a dead
+  # resolver until respawned (loud ERROR in the orchestrator log).
+  # Production should pin.
+  clusterIP: ""  # static IP (production), or leave "" for dynamic mode
   # K8s listens for DNS on 1053 (PSA restricted forbids NET_BIND_SERVICE,
   # so the privileged port 53 is unreachable inside the pod). The Service
   # maps the well-known 53 -> 1053. Do not change without changing both.
