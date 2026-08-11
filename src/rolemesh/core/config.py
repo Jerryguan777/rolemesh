@@ -217,12 +217,21 @@ EGRESS_GATEWAY_CONTAINER_NAME: str = os.environ.get(
 EGRESS_GATEWAY_IMAGE: str = os.environ.get(
     "EGRESS_GATEWAY_IMAGE", "rolemesh-egress-gateway:latest"
 )
-# Static address of the egress gateway on the agent bridge. The
-# deployment layer declares it (compose ipam fixed IP today; K8s
-# Service ClusterIP later) and the orchestrator only VERIFIES it at
-# startup (ContainerRuntime.verify_infrastructure) — replacing the old
-# runtime discovery via docker-inspect after gateway launch. The
-# default matches the compose subnet in deploy/compose/compose.yaml
+# Address of the egress gateway on the agent network. The deployment
+# layer declares it (compose ipam fixed IP; K8s Service static
+# ClusterIP) and the orchestrator VERIFIES it at startup
+# (ContainerRuntime.verify_infrastructure).
+#
+# K8s dynamic mode: the chart always renders this env — a present-but-
+# EMPTY value means "egressGateway.clusterIP was left unset, discover
+# the dynamically allocated ClusterIP at runtime" (K8sRuntime seeds
+# container.gateway_address at verify and re-reads before each spawn).
+# The empty string never occurs on docker: compose either sets the env
+# or leaves it absent, and an absent env falls back to the fixed
+# bridge default below — which is also why the K8s chart must render
+# the env EXPLICITLY empty rather than omit it (an omitted env would
+# silently look like the docker default).
+# The default matches the compose subnet in deploy/compose/compose.yaml
 # (agent-net 172.28.100.0/24); override the env var if you override
 # the subnet. Consumers: runner (pins it as each agent's DNS resolver)
 # and docker_runtime (verifies the gateway actually holds this IP).

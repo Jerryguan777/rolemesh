@@ -134,8 +134,12 @@ spec:
               value: {{ if .Values.postgres.enabled }}{{ include "rolemesh.databaseUrl" . | quote }}{{ else }}{{ .Values.postgres.externalAdminUrl | default .Values.postgres.externalUrl | quote }}{{ end }}
             # EGRESS_GATEWAY_DNS_IP == the gateway Service ClusterIP; agents
             # get it pinned as their resolver and verify asserts the match.
+            # ALWAYS rendered, possibly as "": present-but-empty tells the
+            # K8s runtime "discover the dynamic ClusterIP"; omitting the env
+            # would fall back to the config default (a docker bridge IP) and
+            # silently masquerade as static mode.
             - name: EGRESS_GATEWAY_DNS_IP
-              value: {{ required "egressGateway.clusterIP is required" .Values.egressGateway.clusterIP | quote }}
+              value: {{ .Values.egressGateway.clusterIP | quote }}
             - name: EGRESS_TOKEN_SECRET
               valueFrom:
                 secretKeyRef:

@@ -24,8 +24,13 @@ is portable to kind and RKE2 alike. Any failure exits non-zero -> helm test
 fails. Host-search-domain pollution (an exfil-class regression) is
 environment-specific and is locked by the dns_internal unit tests instead.
 */ -}}
+{{- /* Dynamic-gateway mode (clusterIP unset): the probe's dnsConfig
+needs the gateway IP at TEMPLATE time, which does not exist until K8s
+allocates it — the probe cannot render and is skipped (NOTES points
+this out). The deny-probe (no dnsConfig) still runs. */ -}}
+{{- if .Values.egressGateway.clusterIP }}
 {{- $clusterDomain := .Values.clusterDomain | default "cluster.local" -}}
-{{- $gwIP := required "egressGateway.clusterIP is REQUIRED for the connectivity probe (= EGRESS_GATEWAY_DNS_IP)." .Values.egressGateway.clusterIP -}}
+{{- $gwIP := .Values.egressGateway.clusterIP -}}
 {{- $nats := include "rolemesh.natsServiceName" . -}}
 apiVersion: v1
 kind: Pod
@@ -134,3 +139,4 @@ spec:
               sys.exit(1)
           print("PASS: internal names resolve + reachable (NATS, gateway); "
                 "external blocked")
+{{- end }}

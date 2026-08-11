@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from rolemesh.auth.permissions import AgentPermissions
 from rolemesh.container.docker_runtime import _parse_memory
+from rolemesh.container.gateway_address import get_gateway_dns_ip
 from rolemesh.container.runtime import (
     ContainerSpec,
     VolumeMount,
@@ -31,7 +32,6 @@ from rolemesh.core.config import (
     CREDENTIAL_PROXY_PORT,
     DATA_DIR,
     EGRESS_GATEWAY_CONTAINER_NAME,
-    EGRESS_GATEWAY_DNS_IP,
     EGRESS_GATEWAY_FORWARD_PORT,
     NATS_URL,
     TIMEZONE,
@@ -330,10 +330,11 @@ def compute_egress_routing(egress_token: str | None) -> EgressRouting:
     (compose / Helm declare it; the URL is passed through verbatim);
     LLM/MCP calls go to the gateway container by service name;
     HTTP(S)_PROXY points every client at the forward proxy; DNS is
-    pinned to the gateway's resolver — a static address declared by
-    the deployment layer (``EGRESS_GATEWAY_DNS_IP``, verified against
-    the running gateway at startup by ``verify_infrastructure``); only
-    the metadata blackhole rides in extra_hosts.
+    pinned to the gateway's resolver — an address the deployment layer
+    declares statically or, on K8s with a dynamically allocated gateway
+    ClusterIP, discovers at runtime (``container.gateway_address``:
+    verify_infrastructure seeds it, the K8s runtime refreshes it before
+    each spawn); only the metadata blackhole rides in extra_hosts.
 
     The signed token rides in two places (spike-verified): the
     forward-proxy userinfo (clients emit Proxy-Authorization
@@ -363,7 +364,7 @@ def compute_egress_routing(egress_token: str | None) -> EgressRouting:
         # ``or None`` keeps an empty bridge name mapping to the
         # default bridge instead of an empty NetworkMode string.
         network_name=CONTAINER_NETWORK_NAME or None,
-        dns_servers=[EGRESS_GATEWAY_DNS_IP],
+        dns_servers=[get_gateway_dns_ip()],
         extra_hosts=extra_hosts,
         mcp_proxy_host=EGRESS_GATEWAY_CONTAINER_NAME,
     )

@@ -228,14 +228,19 @@ class TestBuildContainerSpec:
         ContainerSpec.dns so agent containers actually use the
         authoritative resolver. Pre-fix the field didn't exist and
         Docker fell back to 127.0.0.11 — the DNS exfil protection was
-        dead code."""
-        from rolemesh.container import runner
+        dead code. (The address now flows through the
+        container.gateway_address provider so the K8s dynamic mode can
+        override it at runtime — the test pins it there.)"""
+        from rolemesh.container import gateway_address
 
-        with (
-            patch.object(runner, "EGRESS_GATEWAY_DNS_IP", "172.22.0.2"),
-            patch("rolemesh.container.runner.detect_auth_mode", return_value="api-key"),
-        ):
-            spec = build_container_spec([], "c", "j")
+        gateway_address.set_gateway_dns_ip("172.22.0.2")
+        try:
+            with patch(
+                "rolemesh.container.runner.detect_auth_mode", return_value="api-key"
+            ):
+                spec = build_container_spec([], "c", "j")
+        finally:
+            gateway_address.reset_gateway_dns_ip()
         assert spec.dns == ["172.22.0.2"], (
             f"agent spec must pin gateway IP as DNS; got {spec.dns!r}"
         )
@@ -524,15 +529,18 @@ class TestComputeEgressRouting:
     """Single source of truth for the spawn-path network topology."""
 
     def test_routing_with_token(self) -> None:
-        from rolemesh.container import runner
+        from rolemesh.container import gateway_address, runner
 
         # Pin the bridge name against developer-.env pollution (see
-        # test_custom_network_name_applied_from_config).
-        with (
-            patch.object(runner, "CONTAINER_NETWORK_NAME", "rolemesh-agent-net"),
-            patch.object(runner, "EGRESS_GATEWAY_DNS_IP", "172.20.0.2"),
-        ):
-            r = compute_egress_routing("TOK")
+        # test_custom_network_name_applied_from_config). The gateway
+        # address is pinned via its provider (the runner reads it at
+        # call time so the K8s dynamic mode can override at runtime).
+        gateway_address.set_gateway_dns_ip("172.20.0.2")
+        try:
+            with patch.object(runner, "CONTAINER_NETWORK_NAME", "rolemesh-agent-net"):
+                r = compute_egress_routing("TOK")
+        finally:
+            gateway_address.reset_gateway_dns_ip()
 
         assert r.proxy_base == "http://egress-gateway:3001"
         assert r.provider_prefix == "/proxy/TOK"
