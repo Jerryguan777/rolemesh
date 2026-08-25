@@ -50,7 +50,12 @@ pi = [
     "filelock>=3.0",
     "pyyaml>=6.0",
     "Pillow",
-    "mcp>=1.6",
+    # <2: mcp 2.x is a breaking major (httpx -> httpx2, FastMCP ->
+    # MCPServer). src/pi/mcp/client.py, tests/mock_mcp_server.py and the
+    # redteam/mcp/* servers are all 1.x code; without this cap a
+    # ``uv lock --upgrade`` drifts them to 2.x. Mirrored in
+    # container/Dockerfile, which installs mcp with bare pip.
+    "mcp>=1.6,<2",
 ]
 dev = [
     "pytest>=8.0",

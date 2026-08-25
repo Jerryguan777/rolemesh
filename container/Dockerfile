@@ -42,9 +42,24 @@ RUN git config --system http.proxyAuthMethod basic
 # ``structlog`` is needed by the rolemesh.core.logger shim that the safety
 # loader + hook handler imports at module load — without it, agent_runner
 # crashes at boot with ``No module named 'structlog'``.
+#
+# ``mcp`` is capped below 2.0 to match ``pyproject.toml`` / ``uv.lock``
+# (every non-container code path resolves to 1.x). mcp 2.x is a breaking
+# major: it drops the ``httpx`` dependency for ``httpx2`` and renames
+# ``FastMCP`` to ``MCPServer``. pi/mcp/client.py builds its transport with
+# ``create_mcp_http_client(...)`` and hands the resulting client to
+# ``streamable_http_client(url, http_client=...)``; under 2.x that client is
+# an ``httpx`` (0.28) object where the SDK expects ``httpx2``, the transport
+# dies on the first POST, and ``session.initialize()`` raises
+# ``MCPError: Connection closed``. tool_bridge catches that per server and
+# logs "MCP server '<name>' unavailable, skipping" — so an unpinned rebuild
+# silently strips every MCP tool from the agent instead of failing loudly.
+# Lift the cap only together with a real port of src/pi/mcp/client.py
+# (see https://py.sdk.modelcontextprotocol.io/v2/migration/) — and note the
+# quotes: bare ``mcp<2`` is a shell redirect.
 RUN pip install --no-cache-dir \
     claude-agent-sdk croniter nats-py \
-    anthropic openai google-genai boto3 httpx mcp \
+    anthropic openai google-genai boto3 httpx 'mcp>=1.6,<2' \
     partial-json-parser pyyaml filelock Pillow mistune wcwidth \
     structlog
 

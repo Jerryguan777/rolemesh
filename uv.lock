@@ -2971,7 +2971,7 @@ requires-dist = [
     { name = "inspect-ai", marker = "extra == 'eval'", specifier = ">=0.3" },
     { name = "kubernetes-asyncio", marker = "extra == 'k8s'", specifier = ">=32.0" },
     { name = "llm-guard", marker = "extra == 'safety-ml'", specifier = ">=0.3" },
-    { name = "mcp", marker = "extra == 'pi'", specifier = ">=1.6" },
+    { name = "mcp", marker = "extra == 'pi'", specifier = ">=1.6,<2" },
     { name = "mistune", marker = "extra == 'pi'", specifier = ">=3.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.13" },
     { name = "nats-py", specifier = ">=2.9" },
