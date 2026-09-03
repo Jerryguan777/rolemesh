@@ -80,6 +80,17 @@ def container_solver(runner: EvalRunner, coworker: Coworker) -> Solver:
         )
         state.output.completion = execution.output_text
         state.metadata["observed_tool_calls"] = list(execution.observed_tool_calls)
+        # Diagnostic-only triage fields (never graded): the per-call
+        # trail with ts_ms offsets + input previews, and the container
+        # identifiers that link this sample to its container-side
+        # transcript (container-<name>.log, NATS subjects by job_id).
+        state.metadata["observed_tool_events"] = list(
+            execution.observed_tool_events,
+        )
+        if execution.container_name is not None:
+            state.metadata["container_name"] = execution.container_name
+        if execution.job_id is not None:
+            state.metadata["job_id"] = execution.job_id
         state.metadata["usage"] = execution.usage
         state.metadata["latency_ms"] = execution.latency_ms
         state.metadata["sample_status"] = execution.status
