@@ -340,8 +340,8 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     frozen = await freeze_coworker_config(coworker.id, tenant_id=tenant_id)
 
     # Container + NATS setup deferred to import time of inspect_glue,
-    # so we only pay the Docker import when actually running. The CLI's
-    # other subcommands (list / show) don't need this.
+    # so we only pay the Docker import when actually running a dataset
+    # (argparse errors and pre-flight failures stay fast).
     from rolemesh.container.runtime import get_runtime
     from rolemesh.evaluation.inspect_glue import build_eval_task
     from rolemesh.evaluation.runner import EvalRunner
