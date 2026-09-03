@@ -125,7 +125,7 @@ WebUI 展示实时进度事件 (`container_starting`、`running`、`tool_use`)�
 
 ### 评估框架
 
-`rolemesh-eval` CLI（基于 Inspect AI）衡量在不同 `system_prompt` / `tools` / `skills` / `agent_backend` / `model` 配置下 Coworker 行为的变化。它复用生产级的 `ContainerAgentExecutor`，所以评估运行的是与处理真实流量完全相同的代码路径 —— 不存在一个会和生产飘移的并行 orchestrator。每次运行都用 sha256 对 Coworker 的完整配置进行快照，因此 `rolemesh-eval list` 可以将共享同一份配置的运行聚类在一起。
+`rolemesh-eval` CLI（基于 Inspect AI）衡量在不同 `system_prompt` / `tools` / `skills` / `agent_backend` / `model` 配置下 Coworker 行为的变化。它复用生产级的 `ContainerAgentExecutor`，所以评估运行的是与处理真实流量完全相同的代码路径 —— 不存在一个会和生产飘移的并行 orchestrator。每次运行都用 sha256 对 Coworker 的完整配置进行快照，写入 Inspect `.eval` 日志旁的 `<run_id>.run.json` sidecar，因此即便线上 Coworker 随后被修改，历史运行依然可复现、可按配置聚类。
 
 （暂时还没有独立的文档 —— 见 README 的 "Evaluation" 一节和 `src/rolemesh/evaluation/`。）
 

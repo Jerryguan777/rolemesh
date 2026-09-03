@@ -169,7 +169,6 @@ async def _init_test_database(
         # Drop all tables for a clean slate
         await conn.execute("DROP TABLE IF EXISTS approval_requests CASCADE")
         await conn.execute("DROP TABLE IF EXISTS approval_policies CASCADE")
-        await conn.execute("DROP TABLE IF EXISTS eval_runs CASCADE")
         await conn.execute("DROP TABLE IF EXISTS runs CASCADE")
         await conn.execute("DROP TABLE IF EXISTS coworker_skills CASCADE")
         await conn.execute("DROP TABLE IF EXISTS coworker_mcp_servers CASCADE")

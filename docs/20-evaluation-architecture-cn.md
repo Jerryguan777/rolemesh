@@ -1,5 +1,23 @@
 # 评测模块架构
 
+> **状态注记(2026-09,`eval/inspect-cleanup`)。** 本文是最初的设计稿;
+> 实现(`src/rolemesh/evaluation/`)已有意偏离:
+>
+> - **编排由 Inspect AI 驱动。** 当年否决的方案 A 实际上以精简形式被采
+>   用:`inspect_glue.py` 构造 Inspect `Task`(容器化 solver),并发、
+>   `.eval` 日志与指标聚合都由 `eval_async` 负责;rolemesh 自建的只有
+>   per-sample 容器执行。
+> - **只评结果(outcome-only)。** 工具调用准确率轴
+>   (precision / recall / order / args)及后来的 `tool_trace`、
+>   `routing_accuracy` scorer 均已移除——只对结果打分
+>   (`final_answer`:exact / regex / LLM-judge);工具调用轨迹仍记录在
+>   `.eval` 日志中供排查,但不参与打分。
+> - **不建数据库表。** run 记录仅存文件系统(本文当初的主张):Inspect
+>   `.eval` 日志 + `<run_id>.run.json` sidecar(冻结的 coworker 配置、
+>   sha、指标)。过渡期的 `eval_runs` Postgres 表已删除。`eval diff` /
+>   `doctor` / 失败模式分类未建;跨 run 分析用 `inspect view` 与
+>   `inspect_ai.analysis`。
+
 本文档介绍 RoleMesh 的评测模块——一种让 coworker 作者针对垂直领域任务数据集，量化测量、对比、并迭代 AI coworker 质量的机制。
 
 文档涵盖了为什么评测数据放在业务数据库之外、为什么把 Inspect AI 作为 library 复用而非整体采用、rolemesh 专属 runner 与借用的 scoring 层之间的职责拆分，以及让首版保持精简的分阶段发布策略。

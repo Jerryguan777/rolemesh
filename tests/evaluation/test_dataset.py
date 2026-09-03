@@ -101,28 +101,15 @@ def test_judge_mode_requires_non_empty_criterion(tmp_path: Path) -> None:
         load_dataset(p)
 
 
-def test_tool_trace_optional_and_validates(tmp_path: Path) -> None:
-    row = _ok_row(0)
-    row["scoring"]["tool_trace"] = {
-        "required_tools": ["bash"],
-        "forbidden_tools": ["rm"],
-        "expected_order": ["read", "edit"],
-    }
-    p = _write(tmp_path, [row])
-    ds = load_dataset(p)
-    assert ds.samples[0].tool_trace is not None
-    assert ds.samples[0].tool_trace.required_tools == ["bash"]
-    assert ds.samples[0].tool_trace.expected_order == ["read", "edit"]
-
-
-def test_tool_trace_rejects_non_string_list(tmp_path: Path) -> None:
-    """Type confusion (numbers in a tool name list) silently mangles
-    LCS output later — fail at load time."""
-    row = _ok_row(0)
-    row["scoring"]["tool_trace"] = {"required_tools": ["bash", 42]}
-    p = _write(tmp_path, [row])
-    with pytest.raises(ValueError, match="tool_trace"):
-        load_dataset(p)
+def test_legacy_scoring_keys_rejected(tmp_path: Path) -> None:
+    """tool_trace / routing specs are no longer graded; silently
+    loading them would let a dataset author believe they still are."""
+    for legacy in ("tool_trace", "routing"):
+        row = _ok_row(0)
+        row["scoring"][legacy] = {"anything": True}
+        p = _write(tmp_path, [row])
+        with pytest.raises(ValueError, match="outcome-only"):
+            load_dataset(p)
 
 
 def test_blank_lines_skipped(tmp_path: Path) -> None:

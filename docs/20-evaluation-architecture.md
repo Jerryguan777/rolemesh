@@ -1,5 +1,26 @@
 # Evaluation Architecture
 
+> **Status note (2026-09, `eval/inspect-cleanup`).** This document is the
+> original design; the implementation (`src/rolemesh/evaluation/`) has
+> since diverged deliberately:
+>
+> - **Inspect AI drives orchestration.** Rejected option A was, in
+>   practice, adopted in slim form: `inspect_glue.py` builds an Inspect
+>   `Task` (our container-backed solver) and `eval_async` owns
+>   concurrency, `.eval` logging, and metric aggregation. Only the
+>   per-sample container execution is rolemesh code.
+> - **Scoring is outcome-only.** The tool-call accuracy axis
+>   (precision / recall / order / args) and the later `tool_trace` and
+>   `routing_accuracy` scorers were removed — outcomes are graded
+>   (`final_answer`: exact / regex / LLM-judge), paths are recorded in
+>   the `.eval` log for triage but not scored.
+> - **No database tables.** Run records are filesystem-only, as this
+>   document argued: the Inspect `.eval` log plus a `<run_id>.run.json`
+>   sidecar (frozen coworker config + shas + metrics). The interim
+>   `eval_runs` Postgres table was removed. `eval diff` / `doctor` /
+>   failure-mode classification remain unbuilt; use `inspect view` and
+>   `inspect_ai.analysis` for cross-run analysis.
+
 This document describes RoleMesh's evaluation module — the mechanism that lets coworker authors measure, compare, and iterate on the quality of an AI coworker against a domain-specific task dataset.
 
 It covers why evaluation lives outside the business database, why we reuse Inspect AI as a library instead of adopting it whole, the split between the rolemesh-specific runner and the borrowed scoring layer, and the staged rollout that keeps the first cut small.

@@ -294,83 +294,23 @@ with the SAME user_id as the parent turn, so per-user MCP scoping
 (approval policies, safety rules, OIDC token mirroring) all apply
 normally inside the delegated call.
 
-## Routing eval (release-blocking)
+## Routing eval (removed — outcome-only scoring)
 
-The routing-accuracy scorer
-(`src/rolemesh/evaluation/scorers/routing_accuracy.py`) reads the
-trace and scores per handbook §6 Step 8.3:
+v1.2 shipped a dedicated `routing_accuracy` scorer plus a 55-case
+routing dataset as a release-blocking gate on the frontdesk's
+`delegate_to_agent` target choice. Both were removed in
+`eval/inspect-cleanup`: the eval framework now scores **outcomes
+only** (`final_answer` on the reply the user ends up with), not which
+specialist the frontdesk picked along the way. A delegation to the
+"wrong" specialist that still produces a correct, grounded answer is
+a pass; a delegation to the "right" specialist that produces a wrong
+answer is a fail — which is the judgement users actually experience.
 
-- `delegate_to_agent` called with matching `target` → 1.
-- `delegate_to_agent` called with wrong `target` → 0.
-- No `delegate_to_agent` but `expected_target` set → 0.
-- No `delegate_to_agent` and `expected_target=null` → 1.
-
-Plus two multi-delegate behaviours not derivable from the rule
-statement:
-
-- A spurious `delegate_to_agent` on an `expected_target=null` sample
-  scores 0 (catches the "broadcast greeting to portfolio" failure).
-- Multi-delegate with the correct target AND any wrong target scores
-  0 (disincentivizes hedge-by-broadcast — even when one of the
-  fan-outs is right, the wasted ones are operationally expensive).
-
-### Dataset
-
-`tests/data/routing_dataset.jsonl` — v1.2 launches at **55 cases**
-with the composition floor pinned by
-`tests/evaluation/test_routing_dataset.py`:
-
-| Slice                       | Floor    | Current |
-|-----------------------------|----------|---------|
-| Total                       | >= 50    | 55      |
-| Adversarial (`metadata.adversarial=True`) | >= 20%   | 22%     |
-| Per-target (trading/portfolio/accounting) | >= 5 each | 14 / 14 / 17 |
-| No-match (`expected_target=null`) | 5-10     | 8       |
-| Failure-passthrough contract | >= 5     | 5       |
-
-### Three-month growth plan
-
-50 cases is the **minimum** a release-blocking gate can run on without
-flapping. Within 3 months of shipping v1.2, the dataset MUST grow to:
-
-- **>= 150 total cases.**
-- **>= 30 adversarial.**
-
-Sources for growth:
-
-1. Real user prompts that produced routing mistakes in prod — mined
-   from the `delegations` audit table by looking for sequences where
-   the user's next turn corrected the target.
-2. Adversarial templates for each new domain agent added to the
-   catalog.
-3. Hard no-match cases as new domain capabilities encroach on each
-   other's territory.
-
-The dataset size should be tracked on the rolemesh-eval dashboard.
-A release-blocking gate that never grows past 50 becomes a rubber
-stamp; the growth commitment is what keeps the gate honest.
-
-### How to run the gate
-
-There's no scheduled nightly slot in the project's CI today
-(`.github/workflows/ci.yml` runs per-PR). The intended invocation:
-
-```bash
-uv run rolemesh-eval run \
-  --tenant <uuid> \
-  --coworker <frontdesk-id-or-folder> \
-  --dataset tests/data/routing_dataset.jsonl \
-  --threshold scorers.routing_accuracy_scorer.accuracy>=0.85
-```
-
-Exit codes: 0 = pass, 2 = threshold violated, 1 = infrastructure error.
-A future scheduled workflow consumes exit-code 2 as the gate signal
-on:
-
-- Any change to the frontdesk system prompt or FRONTDESK_RULES.
-- Any new domain agent added to the tenant catalog.
-- Any `routing_description` edit on an existing specialist.
-- Any frontdesk model swap.
+Routing quality therefore rides on ordinary eval datasets whose
+prompts exercise the frontdesk end-to-end. Operational routing
+telemetry (who delegated to whom) still lives in the `delegations`
+audit table and the WebUI delegation chips; it is observability,
+not a graded metric.
 
 ## Known v1 trade-offs
 

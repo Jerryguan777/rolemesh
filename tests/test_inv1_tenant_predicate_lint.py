@@ -47,7 +47,6 @@ TENANT_SCOPED_TABLES: frozenset[str] = frozenset({
     "channel_bindings",
     "conversations",
     "coworkers",
-    "eval_runs",
     "external_tenant_map",
     "mcp_servers",
     "messages",

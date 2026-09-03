@@ -1,9 +1,10 @@
 """Freeze a Coworker's behavior-affecting config into a JSON-able dict.
 
-Inlined into ``eval_runs.coworker_config`` so an eval is reproducible
-even after the live Coworker is edited or deleted. The hash over a
-canonical JSON serialization (``coworker_config_sha256``) lets the
-``rolemesh-eval list`` command cluster runs that share a configuration.
+Inlined into the run's ``<run_id>.run.json`` sidecar (next to the
+Inspect ``.eval`` log) so an eval is reproducible even after the live
+Coworker is edited or deleted. The hash over a canonical JSON
+serialization (``coworker_config_sha256``) lets tooling cluster runs
+that share a configuration.
 
 MCP bindings are read via ``list_coworker_mcp_configs`` (the
 ``coworker_mcp_servers`` JOIN ``mcp_servers`` projection) so the

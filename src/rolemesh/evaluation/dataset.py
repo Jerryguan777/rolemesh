@@ -29,38 +29,12 @@ class FinalAnswerSpec:
 
 
 @dataclass(frozen=True)
-class ToolTraceSpec:
-    """Optional tool-call shape requirements."""
-
-    required_tools: list[str] = field(default_factory=list)
-    forbidden_tools: list[str] = field(default_factory=list)
-    expected_order: list[str] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class RoutingSpec:
-    """Frontdesk v1.2 routing expectation for one sample.
-
-    ``expected_target`` is the agent id (folder slug) the frontdesk
-    should hand off to via ``delegate_to_agent``. ``None`` encodes a
-    "no-match" case where the frontdesk SHOULD answer itself
-    (greeting, meta question) — the scorer treats a delegate call in
-    that case as wrong, and a missing delegate call when one was
-    expected as also wrong.
-    """
-
-    expected_target: str | None = None
-
-
-@dataclass(frozen=True)
 class Sample:
     """One row of the dataset."""
 
     id: str
     input: str
     final_answer: FinalAnswerSpec
-    tool_trace: ToolTraceSpec | None = None
-    routing: RoutingSpec | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -111,57 +85,6 @@ def _parse_final_answer(raw: Any, sample_id: str) -> FinalAnswerSpec:
     return FinalAnswerSpec(mode="llm_judge", criterion=criterion)
 
 
-def _parse_tool_trace(raw: Any, sample_id: str) -> ToolTraceSpec | None:
-    if raw is None:
-        return None
-    if not isinstance(raw, dict):
-        msg = f"sample {sample_id!r}: scoring.tool_trace must be a dict or null"
-        raise ValueError(msg)
-
-    def _str_list(key: str) -> list[str]:
-        val = raw.get(key, [])
-        if not isinstance(val, list) or not all(isinstance(x, str) for x in val):
-            msg = (
-                f"sample {sample_id!r}: scoring.tool_trace.{key} must "
-                f"be a list[str]"
-            )
-            raise ValueError(msg)
-        return list(val)
-
-    return ToolTraceSpec(
-        required_tools=_str_list("required_tools"),
-        forbidden_tools=_str_list("forbidden_tools"),
-        expected_order=_str_list("expected_order"),
-    )
-
-
-def _parse_routing(raw: Any, sample_id: str) -> RoutingSpec | None:
-    if raw is None:
-        return None
-    if not isinstance(raw, dict):
-        msg = f"sample {sample_id!r}: scoring.routing must be a dict or null"
-        raise ValueError(msg)
-    if "expected_target" not in raw:
-        msg = (
-            f"sample {sample_id!r}: scoring.routing.expected_target is "
-            f"required when scoring.routing is present (use null for a "
-            f"no-match case)"
-        )
-        raise ValueError(msg)
-    target = raw["expected_target"]
-    # Explicit null is the "frontdesk should answer itself" case; any
-    # other value must be a non-empty string (the target's agent id).
-    if target is not None and (
-        not isinstance(target, str) or not target.strip()
-    ):
-        msg = (
-            f"sample {sample_id!r}: scoring.routing.expected_target "
-            f"must be null or a non-empty string"
-        )
-        raise ValueError(msg)
-    return RoutingSpec(expected_target=target)
-
-
 def _parse_sample(line_no: int, raw: dict[str, Any]) -> Sample:
     sample_id = raw.get("id")
     if not isinstance(sample_id, str) or not sample_id.strip():
@@ -175,9 +98,18 @@ def _parse_sample(line_no: int, raw: dict[str, Any]) -> Sample:
     if not isinstance(scoring, dict):
         msg = f"sample {sample_id!r}: 'scoring' must be a dict"
         raise ValueError(msg)
+    # Scoring is outcome-only. tool_trace / routing specs were removed
+    # (eval/inspect-cleanup); rejecting the keys beats silently loading
+    # a dataset whose author still expects them to be graded.
+    unknown = sorted(set(scoring) - {"final_answer"})
+    if unknown:
+        msg = (
+            f"sample {sample_id!r}: unsupported scoring key(s) {unknown} — "
+            f"scoring is outcome-only ('final_answer'); tool_trace/routing "
+            f"specs are no longer graded"
+        )
+        raise ValueError(msg)
     final_answer = _parse_final_answer(scoring.get("final_answer"), sample_id)
-    tool_trace = _parse_tool_trace(scoring.get("tool_trace"), sample_id)
-    routing = _parse_routing(scoring.get("routing"), sample_id)
     metadata = raw.get("metadata") or {}
     if not isinstance(metadata, dict):
         msg = f"sample {sample_id!r}: 'metadata' must be a dict if provided"
@@ -186,8 +118,6 @@ def _parse_sample(line_no: int, raw: dict[str, Any]) -> Sample:
         id=sample_id,
         input=inp,
         final_answer=final_answer,
-        tool_trace=tool_trace,
-        routing=routing,
         metadata=metadata,
     )
 

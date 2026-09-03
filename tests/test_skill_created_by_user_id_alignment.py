@@ -9,10 +9,6 @@ This suite pins the post-rename world. Anti-mirror: we assert the
 surfaces, not the presence of the new name in the same surface that
 produced it.
 
-Out of scope:
-* ``eval_runs.created_by`` — a different field on a different entity.
-  Guarded by the include-filter on the audited paths so a future
-  caller in that table doesn't fail this check.
 """
 
 from __future__ import annotations
@@ -66,8 +62,7 @@ _LEGACY_SKILL_CREATED_BY = re.compile(
 
 # Audited modules: every site that historically read Skill.created_by.
 # Adding a new caller imports the legacy attribute and trips this
-# guard. ``eval_runs`` / ``EvalRun`` is intentionally untouched —
-# different entity, retained name.
+# guard.
 _AUDITED_FILES = [
     _PROJECT_ROOT / "src/rolemesh/db/skill.py",
     _PROJECT_ROOT / "src/rolemesh/core/types.py",
@@ -94,16 +89,3 @@ def test_no_legacy_skill_created_by_attribute_in_audited_files(
         + "\n".join(f"  L{n}: {ln}" for n, ln in offenders)
     )
 
-
-def test_eval_runs_created_by_is_not_affected() -> None:
-    """Negative control: ``eval_runs.created_by`` is a separate entity
-    and must keep its original column name. If a refactor accidentally
-    lifted both, this test surfaces it as a separate failure.
-    """
-    store = (_PROJECT_ROOT / "src/rolemesh/evaluation/store.py").read_text()
-    # ``created_by`` (no suffix) must still appear — it is the
-    # column name on the eval_runs table.
-    assert re.search(r"\bcreated_by\b", store), (
-        "eval_runs.created_by appears to have been renamed too — "
-        "PR 2 was supposed to be skills-only."
-    )

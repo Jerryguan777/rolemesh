@@ -127,7 +127,7 @@ per test so a red test names the bug.
 | Invariant / property-style sweep (no hypothesis dep) | `tests/container/test_hardening_invariants.py` |
 | FastAPI surface + real DB, validation + isolation | `tests/webui/test_skills_api.py` |
 | Wire-format round-trip (serialize → DB → read back) | `tests/test_e2e_usage_pipeline.py` |
-| Boundary / off-by-one / mutation-minded asserts | `tests/evaluation/test_scorers_tool_trace.py` |
+| Boundary / off-by-one / mutation-minded asserts | `tests/evaluation/test_scorers_final_answer.py` |
 | Fail-close hook dispatch with explicit mutation notes | `tests/test_agent_runner/test_hook_registry.py` |
 | Adversarial / attack-surface tests | `tests/attack_sim/`, `tests/safety/` |
 

@@ -252,12 +252,10 @@ def tool_input_preview(tool_name: str, tool_input: dict[str, Any]) -> str:
         val = tool_input.get("description") or tool_input.get("taskId") or ""
         return str(val)[:80]
     if tn == "delegate_to_agent":
-        # Frontdesk v1.2 — the routing-accuracy eval scorer reads this
-        # preview to decide whether the LLM picked the right specialist
-        # (handbook §6 Step 8.3). Return the target verbatim and untruncated
-        # so the scorer can compare with `expected_target` directly; agent
-        # folder slugs are bounded at the admin layer, well under the
-        # 80-char display budget the other branches use.
+        # Frontdesk — surface the delegate target in the WebUI tool chip.
+        # Returned verbatim and untruncated; agent folder slugs are
+        # bounded at the admin layer, well under the 80-char display
+        # budget the other branches use.
         target = tool_input.get("target")
         return str(target) if isinstance(target, str) else ""
     if tn == "list_agents":
