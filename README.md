@@ -62,9 +62,9 @@ RoleMesh is built for that gap:
 ### 7. Evaluation framework
 
 - `rolemesh-eval` CLI — Inspect AI based, manual / nightly tool for measuring how coworker behavior changes across `system_prompt` / `tools` / `skills` / `agent_backend` / `model` configurations.
-- Four orthogonal scorers: `final_answer` (exact / regex / LLM-judge), `tool_trace` (required / forbidden / expected order), `routing_accuracy` (frontdesk delegate-target check), `cost` (per-sample latency + token spend).
+- Outcome-only scoring: one `final_answer` scorer (exact / regex / LLM-judge) grades the reply the user ends up with. Tool-call traces are recorded in the Inspect `.eval` log for triage but not graded; latency + token spend are recorded per sample and aggregated post-run.
 - Reuses the production `ContainerAgentExecutor` so eval runs the same code path that handles real traffic.
-- Coworker config snapshot inlined into each run with a sha256 over the canonical form, so `rolemesh-eval list` clusters runs that share a configuration.
+- Run records live on the filesystem: the Inspect `.eval` log (browse with `inspect view`) plus a `<run_id>.run.json` sidecar carrying the sha256-hashed coworker config snapshot and dataset sha, so any run is reproducible after the live coworker changes.
 
 ---
 

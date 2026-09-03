@@ -125,7 +125,7 @@ The WebUI shows real-time progress events (`container_starting`, `running`, `too
 
 ### Evaluation framework
 
-`rolemesh-eval` CLI (Inspect AI based) measures how coworker behavior changes across `system_prompt` / `tools` / `skills` / `agent_backend` / `model` configurations. Reuses the production `ContainerAgentExecutor` so eval runs the same code path that handles real traffic — no parallel orchestrator that drifts away from prod. Each run snapshots the coworker's full config with a sha256, so `rolemesh-eval list` clusters runs that share a configuration.
+`rolemesh-eval` CLI (Inspect AI based) measures how coworker behavior changes across `system_prompt` / `tools` / `skills` / `agent_backend` / `model` configurations. Reuses the production `ContainerAgentExecutor` so eval runs the same code path that handles real traffic — no parallel orchestrator that drifts away from prod. Each run snapshots the coworker's full config with a sha256 into a `<run_id>.run.json` sidecar next to the Inspect `.eval` log, so runs stay reproducible and clusterable after the live coworker changes.
 
 (No standalone doc yet — see the README "Evaluation" section and `src/rolemesh/evaluation/`.)
 
