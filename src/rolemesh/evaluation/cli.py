@@ -1,10 +1,17 @@
-"""rolemesh-eval CLI — run / list / show.
+"""rolemesh-eval CLI — run.
 
 Manual / nightly tool. Assumes external infrastructure is already up:
-PostgreSQL reachable from ``DATABASE_URL``, NATS reachable from
-``NATS_URL``, Docker daemon available (for ``run``). Eval does not
-launch the gateway / orchestrator on its own — operators run those
+PostgreSQL reachable from ``DATABASE_URL`` (coworker lookup only),
+NATS reachable from ``NATS_URL``, Docker daemon available. Eval does
+not launch the gateway / orchestrator on its own — operators run those
 separately if MCP tools or egress filtering matters for the dataset.
+
+Run records live on the filesystem, not in the business database:
+Inspect AI writes the canonical ``.eval`` log per run (browse with
+``inspect view --log-dir <dir>``; aggregate across runs with
+``inspect_ai.analysis``), and this CLI drops a ``<run_id>.run.json``
+sidecar next to it carrying what Inspect can't know — the frozen
+coworker config snapshot, dataset sha, and rolemesh-side metrics.
 
 Tenant resolution is intentionally strict: ``--tenant`` flag wins over
 ``ROLEMESH_TENANT_ID`` env, and missing both is fatal. Silently
@@ -25,7 +32,8 @@ import contextlib
 import json
 import os
 import sys
-from datetime import UTC
+import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -46,11 +54,6 @@ from rolemesh.db import (
 )
 from rolemesh.evaluation.dataset import load_dataset
 from rolemesh.evaluation.freeze import freeze_coworker_config
-from rolemesh.evaluation.store import (
-    finalize_eval_run,
-    get_eval_run,
-    list_eval_runs,
-)
 
 logger = get_logger()
 
@@ -87,8 +90,8 @@ async def _resolve_coworker(coworker_arg: str, tenant_id: str) -> Any:
         cw = await get_coworker(coworker_arg, tenant_id=tenant_id)
         if cw is not None:
             return cw
-    # Fall back to folder name lookup. Matches what users see in
-    # ``rolemesh-eval list`` and on disk under data/tenants/<t>/coworkers/.
+    # Fall back to folder name lookup. Matches what users see on disk
+    # under data/tenants/<t>/coworkers/.
     return await get_coworker_by_folder(tenant_id, coworker_arg)
 
 
@@ -213,6 +216,28 @@ def _aggregate_metrics(
             "cache_write": cache_write_tokens,
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Run sidecar
+# ---------------------------------------------------------------------------
+
+
+def _write_run_sidecar(log_dir: Path, record: dict[str, Any]) -> Path:
+    """Write ``<run_id>.run.json`` next to the Inspect ``.eval`` log.
+
+    Written twice per run — once at start (status=running) so a crashed
+    run still leaves a record of what was attempted, and once at the end
+    with metrics. Atomic-ish via temp file + rename so a reader never
+    sees a half-written JSON.
+    """
+    path = log_dir / f"{record['run_id']}.run.json"
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(
+        json.dumps(record, indent=2, default=str) + "\n", encoding="utf-8",
+    )
+    tmp.rename(path)
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -361,24 +386,33 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     log_dir = Path(args.log_dir).resolve()
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    run_row = None
+    run_id = str(uuid.uuid4())
+    started_at = datetime.now(UTC).isoformat()
+    record: dict[str, Any] = {
+        "run_id": run_id,
+        "tenant_id": tenant_id,
+        "coworker_id": coworker.id,
+        "coworker_folder": coworker.folder,
+        "coworker_config_sha256": frozen.sha256,
+        "coworker_config": frozen.config,
+        "dataset_path": dataset.path,
+        "dataset_sha256": dataset.sha256,
+        "status": "running",
+        "started_at": started_at,
+        "finished_at": None,
+        "metrics": None,
+        "eval_log_uri": None,
+    }
     try:
-        run_row = await _create_run_row(
-            tenant_id=tenant_id,
-            coworker_id=coworker.id,
-            frozen_config=frozen.config,
-            frozen_sha=frozen.sha256,
-            dataset_path=dataset.path,
-            dataset_sha=dataset.sha256,
-        )
-        print(f"Created eval_runs row {run_row.id} (status=running)")
+        sidecar = _write_run_sidecar(log_dir, record)
+        print(f"Run {run_id} (sidecar: {sidecar})")
 
         runner = EvalRunner(
             runtime=runtime,
             transport=transport,
             get_coworker=_get_coworker,
             get_mcp_configs=_get_mcp_configs,
-            run_id=run_row.id,
+            run_id=run_id,
             timeout_s=float(args.timeout_s),
             user_id=user_id,
         )
@@ -415,21 +449,21 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         )
         eval_log_uri = getattr(result, "location", None) or str(log_dir)
 
-        await finalize_eval_run(
-            run_row.id,
-            tenant_id=tenant_id,
+        record.update(
             status="completed",
             metrics=metrics,
             eval_log_uri=str(eval_log_uri) if eval_log_uri else None,
+            finished_at=datetime.now(UTC).isoformat(),
         )
+        _write_run_sidecar(log_dir, record)
 
         if args.json:
             print(json.dumps(
-                {"run_id": run_row.id, "metrics": metrics,
+                {"run_id": run_id, "metrics": metrics,
                  "eval_log_uri": str(eval_log_uri)}
                 , indent=2))
         else:
-            _print_run_summary(run_row.id, metrics, eval_log_uri)
+            _print_run_summary(run_id, metrics, eval_log_uri)
 
         violations = _check_thresholds(metrics, args.threshold or [])
         if violations:
@@ -442,42 +476,18 @@ async def _cmd_run(args: argparse.Namespace) -> int:
 
     except Exception:
         logger.exception("eval run failed")
-        if run_row is not None:
-            try:
-                await finalize_eval_run(
-                    run_row.id,
-                    tenant_id=tenant_id,
-                    status="failed",
-                    metrics=None,
-                    eval_log_uri=None,
-                )
-            except Exception:
-                logger.exception("failed to mark eval_run failed")
+        try:
+            record.update(
+                status="failed",
+                finished_at=datetime.now(UTC).isoformat(),
+            )
+            _write_run_sidecar(log_dir, record)
+        except Exception:
+            logger.exception("failed to write failed-run sidecar")
         return 1
     finally:
         with contextlib.suppress(Exception):
             await transport.close()
-
-
-async def _create_run_row(
-    *,
-    tenant_id: str,
-    coworker_id: str,
-    frozen_config: dict[str, Any],
-    frozen_sha: str,
-    dataset_path: str,
-    dataset_sha: str,
-) -> Any:
-    from rolemesh.evaluation.store import create_eval_run
-
-    return await create_eval_run(
-        tenant_id=tenant_id,
-        coworker_id=coworker_id,
-        coworker_config=frozen_config,
-        coworker_config_sha256=frozen_sha,
-        dataset_path=dataset_path,
-        dataset_sha256=dataset_sha,
-    )
 
 
 def _print_run_summary(
@@ -501,114 +511,6 @@ def _print_run_summary(
     cost_str = f"${cost:.4f}" if isinstance(cost, (int, float)) else "n/a"
     print(f"cost_usd      : {cost_str} (coverage={cov * 100:.1f}%)")
     print(f"\nView per-sample detail: inspect view {eval_log_uri}")
-
-
-async def _cmd_list(args: argparse.Namespace) -> int:
-    tenant_id = _resolve_tenant(args)
-    await init_database()
-
-    coworker_id: str | None = None
-    if args.coworker:
-        cw = await _resolve_coworker(args.coworker, tenant_id)
-        if cw is None:
-            print(
-                f"ERROR: coworker {args.coworker!r} not found",
-                file=sys.stderr,
-            )
-            return 1
-        coworker_id = cw.id
-
-    runs = await list_eval_runs(
-        tenant_id=tenant_id, coworker_id=coworker_id, limit=args.limit,
-    )
-    if args.json:
-        out = [
-            {
-                "id": r.id,
-                "coworker_id": r.coworker_id,
-                "status": r.status,
-                "started_at": r.started_at.isoformat(),
-                "finished_at": (
-                    r.finished_at.isoformat() if r.finished_at else None
-                ),
-                "metrics": r.metrics,
-                "dataset_path": r.dataset_path,
-                "config_sha256": r.coworker_config_sha256,
-            }
-            for r in runs
-        ]
-        print(json.dumps(out, indent=2))
-        return 0
-
-    if not runs:
-        print("(no eval runs)")
-        return 0
-
-    print(
-        f"{'run_id':36s}  {'status':10s}  {'started':20s}  "
-        f"{'accuracy':>9s}  {'cost_usd':>10s}"
-    )
-    for r in runs:
-        ts = r.started_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
-        acc_val = "-"
-        cost_val = "-"
-        if isinstance(r.metrics, dict):
-            scorers = r.metrics.get("scorers") or {}
-            fa = scorers.get("final_answer_scorer") or {}
-            if isinstance(fa.get("accuracy"), (int, float)):
-                acc_val = f"{fa['accuracy']:.4f}"
-            cost = r.metrics.get("cost_usd_total")
-            if isinstance(cost, (int, float)):
-                cost_val = f"${cost:.4f}"
-        print(
-            f"{r.id:36s}  {r.status:10s}  {ts:20s}  "
-            f"{acc_val:>9s}  {cost_val:>10s}"
-        )
-    return 0
-
-
-async def _cmd_show(args: argparse.Namespace) -> int:
-    tenant_id = _resolve_tenant(args)
-    await init_database()
-    run = await get_eval_run(args.run_id, tenant_id=tenant_id)
-    if run is None:
-        print(f"ERROR: run {args.run_id} not found", file=sys.stderr)
-        return 1
-
-    if args.format == "json":
-        out = {
-            "id": run.id,
-            "tenant_id": run.tenant_id,
-            "coworker_id": run.coworker_id,
-            "status": run.status,
-            "dataset_path": run.dataset_path,
-            "dataset_sha256": run.dataset_sha256,
-            "coworker_config_sha256": run.coworker_config_sha256,
-            "coworker_config": run.coworker_config,
-            "metrics": run.metrics,
-            "eval_log_uri": run.eval_log_uri,
-            "started_at": run.started_at.isoformat(),
-            "finished_at": (
-                run.finished_at.isoformat() if run.finished_at else None
-            ),
-        }
-        print(json.dumps(out, indent=2))
-        return 0
-
-    print(f"run_id          : {run.id}")
-    print(f"status          : {run.status}")
-    print(f"started         : {run.started_at.isoformat()}")
-    if run.finished_at:
-        print(f"finished        : {run.finished_at.isoformat()}")
-    print(f"coworker_id     : {run.coworker_id}")
-    print(f"config_sha256   : {run.coworker_config_sha256}")
-    print(f"dataset_path    : {run.dataset_path}")
-    print(f"dataset_sha256  : {run.dataset_sha256}")
-    print(f"eval_log_uri    : {run.eval_log_uri}")
-    if isinstance(run.metrics, dict):
-        print("\nmetrics:")
-        print(json.dumps(run.metrics, indent=2))
-    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -658,22 +560,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     pr.add_argument(
         "--log-dir", default="./eval-logs",
-        help="directory to write Inspect AI .eval logs",
+        help="directory to write Inspect AI .eval logs and the "
+             "<run_id>.run.json sidecar (frozen coworker config, dataset "
+             "sha, metrics). Browse runs with `inspect view --log-dir`.",
     )
     pr.add_argument("--json", action="store_true", help="emit JSON summary")
-
-    pl = sub.add_parser("list", help="list past eval runs")
-    pl.add_argument(
-        "--coworker", default=None, help="filter by coworker id or folder",
-    )
-    pl.add_argument("--limit", type=int, default=20)
-    pl.add_argument("--json", action="store_true")
-
-    ps = sub.add_parser("show", help="show details of a single run")
-    ps.add_argument("run_id", help="eval_run UUID")
-    ps.add_argument(
-        "--format", choices=("text", "json"), default="text",
-    )
     return p
 
 
@@ -681,7 +572,7 @@ def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
 
-    handlers = {"run": _cmd_run, "list": _cmd_list, "show": _cmd_show}
+    handlers = {"run": _cmd_run}
     handler = handlers.get(args.command)
     if handler is None:
         parser.error(f"unknown command {args.command!r}")
