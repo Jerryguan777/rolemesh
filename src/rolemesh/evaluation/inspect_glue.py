@@ -15,10 +15,7 @@ from inspect_ai.dataset import MemoryDataset
 from inspect_ai.dataset import Sample as InspectSample
 from inspect_ai.solver import Generate, Solver, TaskState, solver
 
-from rolemesh.evaluation.scorers import (
-    final_answer_scorer,
-    tool_trace_scorer,
-)
+from rolemesh.evaluation.scorers import final_answer_scorer
 
 if TYPE_CHECKING:
     from rolemesh.core.types import Coworker
@@ -52,12 +49,6 @@ def _sample_to_inspect(sample: Sample, sample_idx: int) -> InspectSample:
             },
         },
     }
-    if sample.tool_trace is not None:
-        metadata["scoring"]["tool_trace"] = {
-            "required_tools": list(sample.tool_trace.required_tools),
-            "forbidden_tools": list(sample.tool_trace.forbidden_tools),
-            "expected_order": list(sample.tool_trace.expected_order),
-        }
     if sample.metadata:
         metadata["sample_metadata"] = dict(sample.metadata)
 
@@ -123,8 +114,5 @@ def build_eval_task(
         name=task_name,
         dataset=MemoryDataset(samples=inspect_samples),
         solver=container_solver(runner, coworker),
-        scorer=[
-            final_answer_scorer(judge_model=judge_model),
-            tool_trace_scorer(),
-        ],
+        scorer=[final_answer_scorer(judge_model=judge_model)],
     )

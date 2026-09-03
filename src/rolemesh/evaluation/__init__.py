@@ -9,6 +9,6 @@ Public surface:
   - rolemesh.evaluation.dataset: JSONL loader
   - rolemesh.evaluation.freeze: coworker_config snapshot
   - rolemesh.evaluation.runner: per-sample container execution
-  - rolemesh.evaluation.scorers: final_answer / tool_trace / cost
+  - rolemesh.evaluation.scorers: final_answer (outcome-only)
   - rolemesh.evaluation.cli: argparse entry (rolemesh-eval)
 """
