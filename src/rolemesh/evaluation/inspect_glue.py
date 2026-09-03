@@ -17,7 +17,6 @@ from inspect_ai.solver import Generate, Solver, TaskState, solver
 
 from rolemesh.evaluation.scorers import (
     final_answer_scorer,
-    routing_accuracy_scorer,
     tool_trace_scorer,
 )
 
@@ -59,14 +58,6 @@ def _sample_to_inspect(sample: Sample, sample_idx: int) -> InspectSample:
             "forbidden_tools": list(sample.tool_trace.forbidden_tools),
             "expected_order": list(sample.tool_trace.expected_order),
         }
-    if sample.routing is not None:
-        # Frontdesk v1.2 — the routing_accuracy scorer reads this back
-        # off ``state.metadata["scoring"]["routing"]``. Carrying it
-        # through inspect_glue (rather than stuffing into sample_metadata)
-        # keeps scoring specs uniformly under one key.
-        metadata["scoring"]["routing"] = {
-            "expected_target": sample.routing.expected_target,
-        }
     if sample.metadata:
         metadata["sample_metadata"] = dict(sample.metadata)
 
@@ -98,9 +89,6 @@ def container_solver(runner: EvalRunner, coworker: Coworker) -> Solver:
         )
         state.output.completion = execution.output_text
         state.metadata["observed_tool_calls"] = list(execution.observed_tool_calls)
-        state.metadata["observed_tool_inputs"] = list(
-            execution.observed_tool_inputs,
-        )
         state.metadata["usage"] = execution.usage
         state.metadata["latency_ms"] = execution.latency_ms
         state.metadata["sample_status"] = execution.status
@@ -138,6 +126,5 @@ def build_eval_task(
         scorer=[
             final_answer_scorer(judge_model=judge_model),
             tool_trace_scorer(),
-            routing_accuracy_scorer(),
         ],
     )
