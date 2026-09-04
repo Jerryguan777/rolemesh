@@ -93,8 +93,14 @@ def test_threshold_invalid_spec_loud() -> None:
 
 
 class _FakeSample:
-    def __init__(self, **metadata: Any) -> None:
+    def __init__(self, scores: dict[str, Any] | None = None, **metadata: Any) -> None:
         self.metadata = metadata
+        self.scores = scores or {}
+
+
+class _FakeSampleScore:
+    def __init__(self, value: Any) -> None:
+        self.value = value
 
 
 class _FakeMetric:
@@ -203,6 +209,38 @@ def test_aggregate_epochs_coverage_uses_trial_count() -> None:
     )
     assert abs(metrics["cost_usd_coverage"] - 1.0) < 1e-6
     assert metrics["cost_usd_total"] == pytest.approx(0.04)
+
+
+def test_aggregate_counts_noanswer_per_scorer() -> None:
+    """NOANSWER marks grading-infrastructure failure; Inspect's
+    accuracy folds it in as 0, so the count must be surfaced or an
+    outage silently reads as agent regression."""
+    samples = [
+        _FakeSample(scores={
+            "answer_check": _FakeSampleScore("C"),
+            "state_check": _FakeSampleScore("N"),
+        }),
+        _FakeSample(scores={
+            "answer_check": _FakeSampleScore("N"),
+            "state_check": _FakeSampleScore("N"),
+        }),
+        _FakeSample(scores={
+            "answer_check": _FakeSampleScore("I"),
+            "state_check": _FakeSampleScore(0.5),
+        }),
+    ]
+    log = _FakeEvalLog(samples=samples, scores=[])
+    metrics = _aggregate_metrics(inspect_results=log, sample_count=3)
+    assert metrics["noanswer"] == {"answer_check": 1, "state_check": 2}
+
+
+def test_aggregate_noanswer_empty_when_all_graded() -> None:
+    samples = [
+        _FakeSample(scores={"answer_check": _FakeSampleScore("C")}),
+    ]
+    log = _FakeEvalLog(samples=samples, scores=[])
+    metrics = _aggregate_metrics(inspect_results=log, sample_count=1)
+    assert metrics["noanswer"] == {}
 
 
 def test_threshold_with_reducer_qualified_key() -> None:

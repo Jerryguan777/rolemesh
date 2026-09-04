@@ -10,7 +10,8 @@
 > - **只评结果(outcome-only)。** 工具调用准确率轴
 >   (precision / recall / order / args)及后来的 `tool_trace`、
 >   `routing_accuracy` scorer 均已移除——只对结果打分
->   (`final_answer`:exact / regex / LLM-judge);工具调用轨迹仍记录在
+>   (`answer_check`:Inspect 的 model_graded_qa;`state_check`:
+>   staging 后端状态探针);工具调用轨迹仍记录在
 >   `.eval` 日志中供排查,但不参与打分。
 > - **不建数据库表。** run 记录仅存文件系统(本文当初的主张):Inspect
 >   `.eval` 日志 + `<run_id>.run.json` sidecar(冻结的 coworker 配置、

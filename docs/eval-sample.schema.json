@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rolemesh.dev/schemas/eval-sample.schema.json",
+  "title": "RoleMesh eval dataset row",
+  "description": "One JSONL line of a rolemesh-eval dataset. Datasets are homogeneous: every row has scoring.state_check, or none do (split mixed task types into separate files). Associate this schema with *.jsonl eval datasets in your editor for autocomplete and inline validation; the loader (src/rolemesh/evaluation/dataset.py) is the authority and enforces additional cross-row rules.",
+  "type": "object",
+  "required": ["id", "input", "target"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique sample id within the dataset."
+    },
+    "input": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Prompt for the agent. May contain {{trial_id}}, which the runner replaces with the per-trial isolation key — required whenever a probe references {{trial_id}}, so the agent knows which entity to operate on."
+    },
+    "target": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Judge criterion: what a correct final reply looks like. Graded by Inspect's model_graded_qa (answer_check scorer)."
+    },
+    "scoring": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "state_check": {
+          "type": "object",
+          "description": "Environment-state acceptance criteria, verified host-side against the staging backend after the trial. GET-only.",
+          "required": ["probes"],
+          "additionalProperties": false,
+          "properties": {
+            "probes": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "required": ["url"],
+                "additionalProperties": false,
+                "properties": {
+                  "url": {
+                    "type": "string",
+                    "pattern": "^https?://",
+                    "description": "HTTP GET target. May contain {{trial_id}} and ${ENV_VAR} references."
+                  },
+                  "headers": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"},
+                    "description": "Request headers. Values must reference secrets as ${ENV_VAR} — literal credentials are rejected by the loader (datasets are git content)."
+                  },
+                  "expect_status": {
+                    "type": "integer",
+                    "minimum": 100,
+                    "maximum": 599,
+                    "default": 200,
+                    "description": "Expected HTTP status. Counts as one graded check; a mismatched status that arrives is evidence (graded fail), not infrastructure failure."
+                  },
+                  "assert": {
+                    "type": "array",
+                    "description": "Checks against the JSON response body. All are evaluated (no short-circuit); the sample's state_check score is the fraction passed.",
+                    "items": {
+                      "type": "object",
+                      "required": ["path", "op"],
+                      "additionalProperties": false,
+                      "properties": {
+                        "path": {
+                          "type": "string",
+                          "minLength": 1,
+                          "description": "Dotted path into the response body; integer segments index lists (e.g. items.0.status)."
+                        },
+                        "op": {
+                          "enum": ["equals", "contains", "exists", "absent", "gte", "matches"],
+                          "description": "equals: ==; contains: substring or list membership; exists/absent: path presence (no value); gte: numeric >=; matches: regex search on a string."
+                        },
+                        "value": {
+                          "description": "Expected value. Required for all ops except exists/absent. String values may contain {{trial_id}}. gte needs a number, matches needs a regex string."
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Free-form annotations — tags for slicing analysis, provenance of the task (which production failure it came from), difficulty. Never graded; flows into the .eval log."
+    }
+  }
+}
