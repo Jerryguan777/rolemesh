@@ -28,9 +28,10 @@ if TYPE_CHECKING:
 def _sample_to_inspect(sample: Sample, sample_idx: int) -> InspectSample:
     """Convert our Sample to an Inspect Sample with metadata payload.
 
-    ``target`` carries the judge criterion verbatim — that is the field
-    Inspect's model_graded_qa grades against, and the .eval per-sample
-    summary surfaces it in the UI.
+    ``target`` carries the judge rubric list verbatim (Inspect targets
+    are natively str-or-list) — answer_check judges each entry
+    independently, and the .eval per-sample summary surfaces them in
+    the UI.
     """
     metadata: dict[str, Any] = {"sample_idx": sample_idx}
     if sample.state_check is not None:

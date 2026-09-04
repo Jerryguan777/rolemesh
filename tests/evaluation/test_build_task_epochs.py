@@ -38,7 +38,7 @@ def _dataset(*, state_check: bool = False) -> Dataset:
             Sample(
                 id="q1",
                 input="hello",
-                target="the reply greets the user",
+                target=["the reply greets the user"],
                 state_check=spec,
             ),
         ],

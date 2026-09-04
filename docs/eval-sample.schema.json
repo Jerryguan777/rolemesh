@@ -18,9 +18,15 @@
       "description": "Prompt for the agent. May contain {{trial_id}}, which the runner replaces with the per-trial isolation key — required whenever a probe references {{trial_id}}, so the agent knows which entity to operate on."
     },
     "target": {
-      "type": "string",
-      "minLength": 1,
-      "description": "Judge criterion: what a correct final reply looks like. Graded by Inspect's model_graded_qa (answer_check scorer)."
+      "oneOf": [
+        {"type": "string", "minLength": 1},
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        }
+      ],
+      "description": "Judge rubric(s): what a correct final reply looks like. One string or a list; each entry is judged independently by Inspect's model_graded_qa (answer_check scorer) and the score is the fraction of rubrics satisfied — pass^k reducers only count a trial that satisfies all of them."
     },
     "scoring": {
       "type": "object",

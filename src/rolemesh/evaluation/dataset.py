@@ -10,9 +10,10 @@ Row shape (outcome-only, two grading axes):
 
   id       unique sample id
   input    prompt for the agent; may contain {{trial_id}}
-  target   judge criterion — what a correct reply looks like. Becomes
-           the Inspect Sample.target that model_graded_qa grades
-           against.
+  target   judge rubric(s) — what a correct reply looks like. A string
+           or a non-empty list of strings; normalized to a list. Each
+           entry is judged independently by model_graded_qa and the
+           answer_check score is the fraction satisfied.
   scoring.state_check
            optional environment-state acceptance spec (see below).
            Homogeneous per dataset: every sample has one, or none do.
@@ -84,11 +85,16 @@ class StateCheckSpec:
 
 @dataclass(frozen=True)
 class Sample:
-    """One row of the dataset."""
+    """One row of the dataset.
+
+    ``target`` is always a list after loading — a single-string row is
+    normalized to a one-element list, so downstream code has exactly
+    one shape to handle.
+    """
 
     id: str
     input: str
-    target: str
+    target: list[str]
     state_check: StateCheckSpec | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -248,11 +254,19 @@ def _parse_sample(line_no: int, raw: dict[str, Any]) -> Sample:
     if not isinstance(inp, str) or not inp.strip():
         msg = f"sample {sample_id!r}: 'input' must be a non-empty string"
         raise ValueError(msg)
-    target = raw.get("target")
-    if not isinstance(target, str) or not target.strip():
+    target_raw = raw.get("target")
+    if isinstance(target_raw, str):
+        target = [target_raw]
+    elif isinstance(target_raw, list):
+        target = target_raw
+    else:
+        target = []
+    if not target or not all(
+        isinstance(t, str) and t.strip() for t in target
+    ):
         msg = (
-            f"sample {sample_id!r}: 'target' (judge criterion) must be a "
-            f"non-empty string"
+            f"sample {sample_id!r}: 'target' (judge rubrics) must be a "
+            f"non-empty string or a non-empty list of non-empty strings"
         )
         raise ValueError(msg)
 

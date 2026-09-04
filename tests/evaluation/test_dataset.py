@@ -66,7 +66,7 @@ def test_loads_minimal_row(tmp_path: Path) -> None:
     ds = load_dataset(p)
     assert len(ds.samples) == 2
     assert ds.samples[0].id == "q0"
-    assert ds.samples[0].target.startswith("the reply")
+    assert ds.samples[0].target[0].startswith("the reply")
     assert ds.samples[0].state_check is None
     assert not ds.has_state_check
 
@@ -100,6 +100,33 @@ def test_missing_target_rejected(tmp_path: Path) -> None:
 def test_blank_target_rejected(tmp_path: Path) -> None:
     row = _ok_row()
     row["target"] = "   "
+    with pytest.raises(ValueError, match="target"):
+        load_dataset(_write(tmp_path, [row]))
+
+
+def test_string_target_normalized_to_list(tmp_path: Path) -> None:
+    """Single-string rows keep working; downstream sees one shape."""
+    ds = load_dataset(_write(tmp_path, [_ok_row()]))
+    assert ds.samples[0].target == ["the reply states the answer is 4"]
+
+
+def test_multi_rubric_target_list(tmp_path: Path) -> None:
+    row = _ok_row()
+    row["target"] = ["mentions the answer 4", "shows the working"]
+    ds = load_dataset(_write(tmp_path, [row]))
+    assert ds.samples[0].target == ["mentions the answer 4", "shows the working"]
+
+
+def test_empty_target_list_rejected(tmp_path: Path) -> None:
+    row = _ok_row()
+    row["target"] = []
+    with pytest.raises(ValueError, match="target"):
+        load_dataset(_write(tmp_path, [row]))
+
+
+def test_blank_rubric_in_target_list_rejected(tmp_path: Path) -> None:
+    row = _ok_row()
+    row["target"] = ["fine", "  "]
     with pytest.raises(ValueError, match="target"):
         load_dataset(_write(tmp_path, [row]))
 
