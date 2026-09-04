@@ -12,7 +12,8 @@
 > - **Scoring is outcome-only.** The tool-call accuracy axis
 >   (precision / recall / order / args) and the later `tool_trace` and
 >   `routing_accuracy` scorers were removed — outcomes are graded
->   (`final_answer`: exact / regex / LLM-judge), paths are recorded in
+>   (`answer_check`: Inspect's model_graded_qa; `state_check`:
+>   staging-backend probes), paths are recorded in
 >   the `.eval` log for triage but not scored.
 > - **No database tables.** Run records are filesystem-only, as this
 >   document argued: the Inspect `.eval` log plus a `<run_id>.run.json`

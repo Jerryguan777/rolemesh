@@ -62,7 +62,7 @@ RoleMesh is built for that gap:
 ### 7. Evaluation framework
 
 - `rolemesh-eval` CLI — Inspect AI based, manual / nightly tool for measuring how coworker behavior changes across `system_prompt` / `tools` / `skills` / `agent_backend` / `model` configurations.
-- Outcome-only scoring: one `final_answer` scorer (exact / regex / LLM-judge) grades the reply the user ends up with. Tool-call traces are recorded in the Inspect `.eval` log for triage but not graded; latency + token spend are recorded per sample and aggregated post-run.
+- Outcome-only scoring, two axes: `answer_check` (Inspect's `model_graded_qa` judging the final reply against the row's `target` criterion) and — for state-mutating datasets — `state_check` (declarative HTTP probes verifying the staging backend's actual state, with partial credit and `{{trial_id}}` per-trial isolation). Datasets are homogeneous per axis. Tool-call traces are recorded in the Inspect `.eval` log for triage but not graded; latency + token spend are recorded per sample and aggregated post-run.
 - `--epochs N` runs every sample N times (isolated trials) and reports both the per-trial pass rate (`/mean`, = pass@1) and the all-trials-passed rate (`/at_least_N`, the pass^k-style consistency gate for customer-facing coworkers).
 - Reuses the production `ContainerAgentExecutor` so eval runs the same code path that handles real traffic.
 - Run records live on the filesystem: the Inspect `.eval` log (browse with `inspect view`) plus a `<run_id>.run.json` sidecar carrying the sha256-hashed coworker config snapshot and dataset sha, so any run is reproducible after the live coworker changes.
@@ -319,7 +319,7 @@ Manual / nightly measurement of coworker behavior under different configurations
 rolemesh-eval --tenant <tenant_uuid> run \
   --coworker <coworker_id_or_folder> \
   --dataset path/to/dataset.jsonl \
-  --threshold "scorers.final_answer_scorer.accuracy>=0.9"
+  --threshold "scorers.answer_check.accuracy>=0.9"
 
 # List past runs (filter by coworker, get JSON)
 rolemesh-eval --tenant <tenant_uuid> list --coworker <id_or_folder> --json

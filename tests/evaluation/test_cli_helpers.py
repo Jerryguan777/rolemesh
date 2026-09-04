@@ -48,16 +48,16 @@ def test_percentile_empty_returns_none() -> None:
 
 
 def test_threshold_passes_when_value_meets_bar() -> None:
-    metrics = {"scorers": {"final_answer_scorer": {"accuracy": 0.91}}}
+    metrics = {"scorers": {"answer_check": {"accuracy": 0.91}}}
     assert _check_thresholds(
-        metrics, ["scorers.final_answer_scorer.accuracy>=0.9"]
+        metrics, ["scorers.answer_check.accuracy>=0.9"]
     ) == []
 
 
 def test_threshold_fails_when_value_below() -> None:
-    metrics = {"scorers": {"final_answer_scorer": {"accuracy": 0.85}}}
+    metrics = {"scorers": {"answer_check": {"accuracy": 0.85}}}
     failures = _check_thresholds(
-        metrics, ["scorers.final_answer_scorer.accuracy>=0.9"]
+        metrics, ["scorers.answer_check.accuracy>=0.9"]
     )
     assert len(failures) == 1
     assert "0.8500" in failures[0]
@@ -66,9 +66,9 @@ def test_threshold_fails_when_value_below() -> None:
 def test_threshold_boundary_inclusive() -> None:
     """``>=`` is the operator — equality must pass. Mutation guard
     against ``>``."""
-    metrics = {"scorers": {"final_answer_scorer": {"accuracy": 0.9}}}
+    metrics = {"scorers": {"answer_check": {"accuracy": 0.9}}}
     assert _check_thresholds(
-        metrics, ["scorers.final_answer_scorer.accuracy>=0.9"]
+        metrics, ["scorers.answer_check.accuracy>=0.9"]
     ) == []
 
 
@@ -93,8 +93,14 @@ def test_threshold_invalid_spec_loud() -> None:
 
 
 class _FakeSample:
-    def __init__(self, **metadata: Any) -> None:
+    def __init__(self, scores: dict[str, Any] | None = None, **metadata: Any) -> None:
         self.metadata = metadata
+        self.scores = scores or {}
+
+
+class _FakeSampleScore:
+    def __init__(self, value: Any) -> None:
+        self.value = value
 
 
 class _FakeMetric:
@@ -134,7 +140,7 @@ def test_aggregate_handles_partial_cost_coverage() -> None:
     ]
     log = _FakeEvalLog(
         samples=samples,
-        scores=[_FakeScore("final_answer_scorer", accuracy=0.66)],
+        scores=[_FakeScore("answer_check", accuracy=0.66)],
     )
     metrics = _aggregate_metrics(inspect_results=log, sample_count=3)
     assert metrics["cost_usd_total"] == 0.03
@@ -160,9 +166,9 @@ def test_aggregate_multi_reducer_keys_do_not_collide() -> None:
     log = _FakeEvalLog(
         samples=[],
         scores=[
-            _FakeScore("final_answer_scorer", accuracy=0.8, reducer="mean"),
+            _FakeScore("answer_check", accuracy=0.8, reducer="mean"),
             _FakeScore(
-                "final_answer_scorer", accuracy=0.4, reducer="at_least_5",
+                "answer_check", accuracy=0.4, reducer="at_least_5",
             ),
         ],
     )
@@ -170,8 +176,8 @@ def test_aggregate_multi_reducer_keys_do_not_collide() -> None:
         inspect_results=log, sample_count=10, epochs=5,
     )
     scorers = metrics["scorers"]
-    assert scorers["final_answer_scorer/mean"]["accuracy"] == 0.8
-    assert scorers["final_answer_scorer/at_least_5"]["accuracy"] == 0.4
+    assert scorers["answer_check/mean"]["accuracy"] == 0.8
+    assert scorers["answer_check/at_least_5"]["accuracy"] == 0.4
     assert metrics["epochs"] == 5
     assert metrics["trial_count"] == 50
 
@@ -181,10 +187,10 @@ def test_aggregate_single_epoch_keeps_bare_scorer_names() -> None:
     existing --threshold specs stay valid."""
     log = _FakeEvalLog(
         samples=[],
-        scores=[_FakeScore("final_answer_scorer", accuracy=0.9)],
+        scores=[_FakeScore("answer_check", accuracy=0.9)],
     )
     metrics = _aggregate_metrics(inspect_results=log, sample_count=3)
-    assert "final_answer_scorer" in metrics["scorers"]
+    assert "answer_check" in metrics["scorers"]
     assert metrics["epochs"] == 1
     assert metrics["trial_count"] == 3
 
@@ -205,16 +211,48 @@ def test_aggregate_epochs_coverage_uses_trial_count() -> None:
     assert metrics["cost_usd_total"] == pytest.approx(0.04)
 
 
+def test_aggregate_counts_noanswer_per_scorer() -> None:
+    """NOANSWER marks grading-infrastructure failure; Inspect's
+    accuracy folds it in as 0, so the count must be surfaced or an
+    outage silently reads as agent regression."""
+    samples = [
+        _FakeSample(scores={
+            "answer_check": _FakeSampleScore("C"),
+            "state_check": _FakeSampleScore("N"),
+        }),
+        _FakeSample(scores={
+            "answer_check": _FakeSampleScore("N"),
+            "state_check": _FakeSampleScore("N"),
+        }),
+        _FakeSample(scores={
+            "answer_check": _FakeSampleScore("I"),
+            "state_check": _FakeSampleScore(0.5),
+        }),
+    ]
+    log = _FakeEvalLog(samples=samples, scores=[])
+    metrics = _aggregate_metrics(inspect_results=log, sample_count=3)
+    assert metrics["noanswer"] == {"answer_check": 1, "state_check": 2}
+
+
+def test_aggregate_noanswer_empty_when_all_graded() -> None:
+    samples = [
+        _FakeSample(scores={"answer_check": _FakeSampleScore("C")}),
+    ]
+    log = _FakeEvalLog(samples=samples, scores=[])
+    metrics = _aggregate_metrics(inspect_results=log, sample_count=1)
+    assert metrics["noanswer"] == {}
+
+
 def test_threshold_with_reducer_qualified_key() -> None:
     """The '/' in reducer-qualified keys must survive the dotted-path
     lookup (split is on '.', not '/')."""
     metrics = {
-        "scorers": {"final_answer_scorer/at_least_5": {"accuracy": 0.75}},
+        "scorers": {"answer_check/at_least_5": {"accuracy": 0.75}},
     }
     assert _check_thresholds(
-        metrics, ["scorers.final_answer_scorer/at_least_5.accuracy>=0.7"],
+        metrics, ["scorers.answer_check/at_least_5.accuracy>=0.7"],
     ) == []
     failures = _check_thresholds(
-        metrics, ["scorers.final_answer_scorer/at_least_5.accuracy>=0.8"],
+        metrics, ["scorers.answer_check/at_least_5.accuracy>=0.8"],
     )
     assert len(failures) == 1

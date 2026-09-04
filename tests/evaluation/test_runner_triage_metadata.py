@@ -179,6 +179,40 @@ async def test_epochs_get_distinct_isolation_keys(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_trial_id_rendered_into_prompt(monkeypatch) -> None:
+    """{{trial_id}} in the input becomes the per-trial isolation key —
+    the same string the state_check scorer later substitutes into its
+    probes, so agent and grader agree on entity names by construction."""
+    captured: list[Any] = []
+
+    class _CapturingExecutor:
+        def __init__(self, **_kw: Any) -> None:
+            pass
+
+        async def execute(
+            self, agent_input: Any, *, on_process: Any, on_output: Any,
+        ) -> AgentOutput:
+            captured.append(agent_input)
+            on_process("cont-abc", "job-42")
+            await on_output(
+                AgentOutput(status="success", result="ok", is_final=True),
+            )
+            return AgentOutput(status="success", result=None)
+
+    monkeypatch.setattr(
+        runner_mod, "ContainerAgentExecutor", _CapturingExecutor,
+    )
+    execution = await _make_runner().execute_sample(
+        coworker=_coworker(),
+        sample_idx=3,
+        prompt="close the ticket for {{trial_id}} please",
+        epoch=2,
+    )
+    assert execution.trial_id == "eval-run-1-3-e2"
+    assert captured[0].prompt == "close the ticket for eval-run-1-3-e2 please"
+
+
+@pytest.mark.asyncio
 async def test_error_path_keeps_triage_fields(monkeypatch) -> None:
     """Fields captured before the failure survive the exception return —
     a crashed sample is exactly when the triage trail matters most."""

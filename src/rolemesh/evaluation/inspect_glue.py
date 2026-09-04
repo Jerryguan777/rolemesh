@@ -8,6 +8,7 @@ so the scorers can read them.
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 from inspect_ai import Epochs, Task
@@ -16,7 +17,7 @@ from inspect_ai.dataset import Sample as InspectSample
 from inspect_ai.scorer import at_least
 from inspect_ai.solver import Generate, Solver, TaskState, solver
 
-from rolemesh.evaluation.scorers import final_answer_scorer
+from rolemesh.evaluation.scorers import answer_check, state_check
 
 if TYPE_CHECKING:
     from rolemesh.core.types import Coworker
@@ -27,36 +28,26 @@ if TYPE_CHECKING:
 def _sample_to_inspect(sample: Sample, sample_idx: int) -> InspectSample:
     """Convert our Sample to an Inspect Sample with metadata payload.
 
-    target is set to a stable string (the criterion / pattern / target
-    text, depending on mode) so the .eval file's per-sample summary
-    surfaces it in Inspect's UI without us reaching into metadata.
+    ``target`` carries the judge rubric list verbatim (Inspect targets
+    are natively str-or-list) — answer_check judges each entry
+    independently, and the .eval per-sample summary surfaces them in
+    the UI.
     """
-    fa = sample.final_answer
-    if fa.mode == "exact":
-        target = fa.target or ""
-    elif fa.mode == "regex":
-        target = f"regex: {fa.pattern}"
-    else:
-        target = f"criterion: {fa.criterion}"
-
-    metadata: dict[str, Any] = {
-        "sample_idx": sample_idx,
-        "scoring": {
-            "final_answer": {
-                "mode": fa.mode,
-                "target": fa.target,
-                "pattern": fa.pattern,
-                "criterion": fa.criterion,
-            },
-        },
-    }
+    metadata: dict[str, Any] = {"sample_idx": sample_idx}
+    if sample.state_check is not None:
+        # Serialized into the sample metadata so the spec travels into
+        # the .eval log: the state_check scorer reads it back at score
+        # time, offline re-scoring (`inspect score`) works without the
+        # original dataset file, and triage sees spec and verdict side
+        # by side in inspect view.
+        metadata["state_check"] = asdict(sample.state_check)
     if sample.metadata:
         metadata["sample_metadata"] = dict(sample.metadata)
 
     return InspectSample(
         id=sample.id,
         input=sample.input,
-        target=target,
+        target=sample.target,
         metadata=metadata,
     )
 
@@ -88,6 +79,9 @@ def container_solver(runner: EvalRunner, coworker: Coworker) -> Solver:
             epoch=state.epoch,
         )
         state.output.completion = execution.output_text
+        # Same value the runner rendered into the prompt's {{trial_id}}
+        # slots — the state_check scorer substitutes it into probes.
+        state.metadata["trial_id"] = execution.trial_id
         state.metadata["observed_tool_calls"] = list(execution.observed_tool_calls)
         # Diagnostic-only triage fields (never graded): the per-call
         # trail with ts_ms offsets + input previews, and the container
@@ -140,11 +134,17 @@ def build_eval_task(
     inspect_samples = [
         _sample_to_inspect(s, idx) for idx, s in enumerate(dataset.samples)
     ]
+    # Datasets are homogeneous (loader-enforced): the state axis is
+    # attached for all samples or none, so neither column is diluted
+    # by filler grades.
+    scorers = [answer_check(judge_model=judge_model)]
+    if dataset.has_state_check:
+        scorers.append(state_check())
     return Task(
         name=task_name,
         dataset=MemoryDataset(samples=inspect_samples),
         solver=container_solver(runner, coworker),
-        scorer=[final_answer_scorer(judge_model=judge_model)],
+        scorer=scorers,
         epochs=(
             Epochs(epochs, ["mean", at_least(epochs)])
             if epochs > 1 else None

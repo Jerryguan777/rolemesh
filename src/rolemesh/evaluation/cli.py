@@ -150,6 +150,12 @@ def _aggregate_metrics(
     """
     samples = getattr(inspect_results, "samples", None) or []
     trial_count = sample_count * max(epochs, 1)
+    # NOANSWER ("N") marks grading-infrastructure failure — judge API
+    # down, staging unreachable — never agent failure. Inspect's
+    # accuracy metric folds it in as 0, so an outage silently reads as
+    # regression unless the count is surfaced. Literal "N" to avoid an
+    # inspect_ai import in this always-importable module.
+    noanswer_counts: dict[str, int] = {}
     latencies: list[float] = []
     costs: list[float] = []
     cost_seen = 0
@@ -159,6 +165,11 @@ def _aggregate_metrics(
     cache_read_tokens = 0
     cache_write_tokens = 0
     for s in samples:
+        for scorer_name, sc in (getattr(s, "scores", None) or {}).items():
+            if getattr(sc, "value", None) == "N":
+                noanswer_counts[scorer_name] = (
+                    noanswer_counts.get(scorer_name, 0) + 1
+                )
         meta = getattr(s, "metadata", {}) or {}
         lat = meta.get("latency_ms")
         if isinstance(lat, (int, float)):
@@ -223,6 +234,7 @@ def _aggregate_metrics(
         },
         "cost_usd_total": cost_total if cost_seen > 0 else None,
         "cost_usd_coverage": coverage,
+        "noanswer": noanswer_counts,
         "tokens": {
             "input": input_tokens,
             "output": output_tokens,
@@ -276,7 +288,7 @@ def _check_thresholds(
             failures.append(f"non-numeric threshold {raw!r}")
             continue
         # Lookup nested keys via dotted path (e.g.
-        # ``scorers.final_answer_scorer.accuracy``).
+        # ``scorers.answer_check.accuracy``).
         node: Any = metrics
         for part in key.split("."):
             if isinstance(node, dict):
@@ -539,6 +551,16 @@ def _print_run_summary(
     cov = metrics.get("cost_usd_coverage", 0.0)
     cost_str = f"${cost:.4f}" if isinstance(cost, (int, float)) else "n/a"
     print(f"cost_usd      : {cost_str} (coverage={cov * 100:.1f}%)")
+    noanswer = metrics.get("noanswer") or {}
+    if any(noanswer.values()):
+        detail = ", ".join(f"{k}: {v}" for k, v in noanswer.items() if v)
+        print(
+            f"\nWARNING: {sum(noanswer.values())} trial(s) were NOT "
+            f"graded ({detail}) — judge API or staging backend was "
+            f"unreachable. Accuracy counts them as 0; treat this run's "
+            f"numbers as unreliable and re-run (or `inspect score`) "
+            f"once the infrastructure is back."
+        )
     print(f"\nView per-sample detail: inspect view {eval_log_uri}")
 
 
@@ -588,13 +610,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     pr.add_argument(
         "--threshold", action="append",
-        help="threshold spec like 'scorers.final_answer_scorer.accuracy>=0.9' "
+        help="threshold spec like 'scorers.answer_check.accuracy>=0.9' "
              "(with --epochs N, keys gain a reducer suffix, e.g. "
-             "'scorers.final_answer_scorer/at_least_5.accuracy>=0.8')",
+             "'scorers.answer_check/at_least_5.accuracy>=0.8')",
     )
     pr.add_argument(
         "--judge-model", default=None,
-        help="model id for llm_judge mode (default: EVAL_JUDGE_MODEL or "
+        help="judge model for answer_check (default: EVAL_JUDGE_MODEL or "
              "anthropic/claude-sonnet-4-5)",
     )
     pr.add_argument(

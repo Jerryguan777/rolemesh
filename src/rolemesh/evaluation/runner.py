@@ -44,6 +44,7 @@ from rolemesh.agent.executor import (
 )
 from rolemesh.auth.permissions import AgentPermissions
 from rolemesh.core.logger import get_logger
+from rolemesh.evaluation.dataset import TRIAL_VAR
 
 if TYPE_CHECKING:
     from rolemesh.container.runtime import ContainerRuntime
@@ -81,6 +82,11 @@ class SampleExecution:
     # when the sample failed before a container process was reported.
     container_name: str | None = None
     job_id: str | None = None
+    # The per-trial isolation key rendered into the prompt's
+    # {{trial_id}} slots. The state_check scorer substitutes the same
+    # value into its probes, so agent and grader necessarily agree on
+    # which entities this trial owns.
+    trial_id: str = ""
 
 
 def _backend_for_coworker(coworker: Coworker) -> AgentBackendConfig:
@@ -177,6 +183,12 @@ class EvalRunner:
         # is pinned to None so each trial opens a fresh backend session.
         group_folder = f"eval-{self._run_id}-{sample_idx}-e{epoch}"
         chat_jid = _safe_chat_jid(group_folder)
+        # The isolation key doubles as the trial id: entities the agent
+        # creates carry it in their names, state_check probes look them
+        # up by it, and the eval- prefix keeps them greppable in the
+        # staging backend for cleanup.
+        trial_id = group_folder
+        prompt = prompt.replace(TRIAL_VAR, trial_id)
 
         # Use the live coworker's permissions so eval mirrors what the
         # production user would see; the eval framework does not try to
@@ -399,6 +411,7 @@ class EvalRunner:
                 observed_tool_events=observed_tool_events,
                 container_name=captured_container_name,
                 job_id=captured_job_id,
+                trial_id=trial_id,
                 usage=last_usage,
                 latency_ms=latency_ms,
                 status="error",
@@ -417,6 +430,7 @@ class EvalRunner:
                 observed_tool_events=observed_tool_events,
                 container_name=captured_container_name,
                 job_id=captured_job_id,
+                trial_id=trial_id,
                 usage=last_usage,
                 latency_ms=latency_ms,
                 status="error",
@@ -443,6 +457,7 @@ class EvalRunner:
             observed_tool_events=observed_tool_events,
             container_name=captured_container_name,
             job_id=captured_job_id,
+            trial_id=trial_id,
             usage=last_usage,
             latency_ms=latency_ms,
             status=status,
