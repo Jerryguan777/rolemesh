@@ -9,5 +9,6 @@ the .eval log for triage but never graded: outcomes, not paths.
 """
 
 from rolemesh.evaluation.scorers.answer_check import answer_check
+from rolemesh.evaluation.scorers.state_check import state_check
 
-__all__ = ["answer_check"]
+__all__ = ["answer_check", "state_check"]

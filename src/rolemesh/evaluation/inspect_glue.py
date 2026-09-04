@@ -8,6 +8,7 @@ so the scorers can read them.
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 from inspect_ai import Epochs, Task
@@ -16,7 +17,7 @@ from inspect_ai.dataset import Sample as InspectSample
 from inspect_ai.scorer import at_least
 from inspect_ai.solver import Generate, Solver, TaskState, solver
 
-from rolemesh.evaluation.scorers import answer_check
+from rolemesh.evaluation.scorers import answer_check, state_check
 
 if TYPE_CHECKING:
     from rolemesh.core.types import Coworker
@@ -32,6 +33,13 @@ def _sample_to_inspect(sample: Sample, sample_idx: int) -> InspectSample:
     summary surfaces it in the UI.
     """
     metadata: dict[str, Any] = {"sample_idx": sample_idx}
+    if sample.state_check is not None:
+        # Serialized into the sample metadata so the spec travels into
+        # the .eval log: the state_check scorer reads it back at score
+        # time, offline re-scoring (`inspect score`) works without the
+        # original dataset file, and triage sees spec and verdict side
+        # by side in inspect view.
+        metadata["state_check"] = asdict(sample.state_check)
     if sample.metadata:
         metadata["sample_metadata"] = dict(sample.metadata)
 
@@ -70,6 +78,9 @@ def container_solver(runner: EvalRunner, coworker: Coworker) -> Solver:
             epoch=state.epoch,
         )
         state.output.completion = execution.output_text
+        # Same value the runner rendered into the prompt's {{trial_id}}
+        # slots — the state_check scorer substitutes it into probes.
+        state.metadata["trial_id"] = execution.trial_id
         state.metadata["observed_tool_calls"] = list(execution.observed_tool_calls)
         # Diagnostic-only triage fields (never graded): the per-call
         # trail with ts_ms offsets + input previews, and the container
@@ -119,19 +130,20 @@ def build_eval_task(
     signal to gate customer-facing coworkers on). epochs == 1 passes
     no Epochs at all, keeping today's behavior bit-for-bit.
     """
-    if dataset.has_state_check:
-        # Wired up in the state_check commit of this branch; failing
-        # loud beats silently skipping the state axis.
-        msg = "state_check scoring is not wired into the Task yet"
-        raise NotImplementedError(msg)
     inspect_samples = [
         _sample_to_inspect(s, idx) for idx, s in enumerate(dataset.samples)
     ]
+    # Datasets are homogeneous (loader-enforced): the state axis is
+    # attached for all samples or none, so neither column is diluted
+    # by filler grades.
+    scorers = [answer_check(judge_model=judge_model)]
+    if dataset.has_state_check:
+        scorers.append(state_check())
     return Task(
         name=task_name,
         dataset=MemoryDataset(samples=inspect_samples),
         solver=container_solver(runner, coworker),
-        scorer=[answer_check(judge_model=judge_model)],
+        scorer=scorers,
         epochs=(
             Epochs(epochs, ["mean", at_least(epochs)])
             if epochs > 1 else None
