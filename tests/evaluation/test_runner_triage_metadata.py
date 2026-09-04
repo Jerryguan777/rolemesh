@@ -137,6 +137,48 @@ async def test_non_string_preview_becomes_empty(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_epochs_get_distinct_isolation_keys(monkeypatch) -> None:
+    """Inspect reuses one Sample across epochs — the runner must give
+    each trial its own group_folder (and with it chat_jid, the
+    conversation_id / Pi session file, container name, KV keys), or
+    trials share transcript state and pass@k's independent-repeats
+    premise silently breaks.
+    """
+    captured: list[Any] = []
+
+    class _CapturingExecutor:
+        def __init__(self, **_kw: Any) -> None:
+            pass
+
+        async def execute(
+            self, agent_input: Any, *, on_process: Any, on_output: Any,
+        ) -> AgentOutput:
+            captured.append(agent_input)
+            on_process("cont-abc", "job-42")
+            await on_output(
+                AgentOutput(status="success", result="ok", is_final=True),
+            )
+            return AgentOutput(status="success", result=None)
+
+    monkeypatch.setattr(
+        runner_mod, "ContainerAgentExecutor", _CapturingExecutor,
+    )
+    runner = _make_runner()
+    for epoch in (1, 2):
+        await runner.execute_sample(
+            coworker=_coworker(), sample_idx=7, prompt="x", epoch=epoch,
+        )
+
+    a, b = captured
+    assert a.group_folder == "eval-run-1-7-e1"
+    assert b.group_folder == "eval-run-1-7-e2"
+    # chat_jid and conversation_id both derive from group_folder — the
+    # single isolation source — so they must diverge too.
+    assert a.chat_jid != b.chat_jid
+    assert a.conversation_id != b.conversation_id
+
+
+@pytest.mark.asyncio
 async def test_error_path_keeps_triage_fields(monkeypatch) -> None:
     """Fields captured before the failure survive the exception return —
     a crashed sample is exactly when the triage trail matters most."""

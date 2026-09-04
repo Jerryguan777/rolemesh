@@ -76,7 +76,15 @@ def container_solver(runner: EvalRunner, coworker: Coworker) -> Solver:
             prompt_raw if isinstance(prompt_raw, str) else str(prompt_raw)
         )
         execution = await runner.execute_sample(
-            coworker=coworker, sample_idx=sample_idx, prompt=prompt,
+            coworker=coworker,
+            sample_idx=sample_idx,
+            prompt=prompt,
+            # Inspect reuses the same Sample across epochs (1-based
+            # state.epoch is the only difference); the runner folds it
+            # into the isolation key. Direct attribute access on
+            # purpose: if the field ever vanishes we want a loud
+            # AttributeError, not epochs silently sharing state again.
+            epoch=state.epoch,
         )
         state.output.completion = execution.output_text
         state.metadata["observed_tool_calls"] = list(execution.observed_tool_calls)
