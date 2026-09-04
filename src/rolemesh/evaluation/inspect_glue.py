@@ -16,7 +16,7 @@ from inspect_ai.dataset import Sample as InspectSample
 from inspect_ai.scorer import at_least
 from inspect_ai.solver import Generate, Solver, TaskState, solver
 
-from rolemesh.evaluation.scorers import final_answer_scorer
+from rolemesh.evaluation.scorers import answer_check
 
 if TYPE_CHECKING:
     from rolemesh.core.types import Coworker
@@ -27,36 +27,18 @@ if TYPE_CHECKING:
 def _sample_to_inspect(sample: Sample, sample_idx: int) -> InspectSample:
     """Convert our Sample to an Inspect Sample with metadata payload.
 
-    target is set to a stable string (the criterion / pattern / target
-    text, depending on mode) so the .eval file's per-sample summary
-    surfaces it in Inspect's UI without us reaching into metadata.
+    ``target`` carries the judge criterion verbatim — that is the field
+    Inspect's model_graded_qa grades against, and the .eval per-sample
+    summary surfaces it in the UI.
     """
-    fa = sample.final_answer
-    if fa.mode == "exact":
-        target = fa.target or ""
-    elif fa.mode == "regex":
-        target = f"regex: {fa.pattern}"
-    else:
-        target = f"criterion: {fa.criterion}"
-
-    metadata: dict[str, Any] = {
-        "sample_idx": sample_idx,
-        "scoring": {
-            "final_answer": {
-                "mode": fa.mode,
-                "target": fa.target,
-                "pattern": fa.pattern,
-                "criterion": fa.criterion,
-            },
-        },
-    }
+    metadata: dict[str, Any] = {"sample_idx": sample_idx}
     if sample.metadata:
         metadata["sample_metadata"] = dict(sample.metadata)
 
     return InspectSample(
         id=sample.id,
         input=sample.input,
-        target=target,
+        target=sample.target,
         metadata=metadata,
     )
 
@@ -137,6 +119,11 @@ def build_eval_task(
     signal to gate customer-facing coworkers on). epochs == 1 passes
     no Epochs at all, keeping today's behavior bit-for-bit.
     """
+    if dataset.has_state_check:
+        # Wired up in the state_check commit of this branch; failing
+        # loud beats silently skipping the state axis.
+        msg = "state_check scoring is not wired into the Task yet"
+        raise NotImplementedError(msg)
     inspect_samples = [
         _sample_to_inspect(s, idx) for idx, s in enumerate(dataset.samples)
     ]
@@ -144,7 +131,7 @@ def build_eval_task(
         name=task_name,
         dataset=MemoryDataset(samples=inspect_samples),
         solver=container_solver(runner, coworker),
-        scorer=[final_answer_scorer(judge_model=judge_model)],
+        scorer=[answer_check(judge_model=judge_model)],
         epochs=(
             Epochs(epochs, ["mean", at_least(epochs)])
             if epochs > 1 else None

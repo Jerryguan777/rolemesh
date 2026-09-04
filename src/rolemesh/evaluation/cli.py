@@ -276,7 +276,7 @@ def _check_thresholds(
             failures.append(f"non-numeric threshold {raw!r}")
             continue
         # Lookup nested keys via dotted path (e.g.
-        # ``scorers.final_answer_scorer.accuracy``).
+        # ``scorers.answer_check.accuracy``).
         node: Any = metrics
         for part in key.split("."):
             if isinstance(node, dict):
@@ -588,13 +588,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     pr.add_argument(
         "--threshold", action="append",
-        help="threshold spec like 'scorers.final_answer_scorer.accuracy>=0.9' "
+        help="threshold spec like 'scorers.answer_check.accuracy>=0.9' "
              "(with --epochs N, keys gain a reducer suffix, e.g. "
-             "'scorers.final_answer_scorer/at_least_5.accuracy>=0.8')",
+             "'scorers.answer_check/at_least_5.accuracy>=0.8')",
     )
     pr.add_argument(
         "--judge-model", default=None,
-        help="model id for llm_judge mode (default: EVAL_JUDGE_MODEL or "
+        help="judge model for answer_check (default: EVAL_JUDGE_MODEL or "
              "anthropic/claude-sonnet-4-5)",
     )
     pr.add_argument(

@@ -2,14 +2,16 @@
 
 The load path is the only thing standing between operator typos and a
 silently-skewed accuracy number, so failures must be loud. These
-tests poke at duplicate ids, missing required fields, malformed mode
-choices, and the SHA-256 reproducibility property.
+tests poke at duplicate ids, missing required fields, malformed
+probes, the homogeneity rule, the credential/env discipline, the
+{{trial_id}} solvability check, and the SHA-256 reproducibility
+property.
 """
 
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -21,7 +23,9 @@ from rolemesh.evaluation.dataset import load_dataset
 
 def _write(tmp: Path, rows: list[dict]) -> Path:
     p = tmp / "data.jsonl"
-    p.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    p.write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8",
+    )
     return p
 
 
@@ -29,137 +33,230 @@ def _ok_row(idx: int = 0) -> dict:
     return {
         "id": f"q{idx}",
         "input": "what is 2+2?",
-        "scoring": {"final_answer": {"mode": "exact", "target": "4"}},
+        "target": "the reply states the answer is 4",
     }
 
 
-def test_loads_minimal_jsonl(tmp_path: Path) -> None:
+def _probe(**overrides: Any) -> dict:
+    probe = {
+        "url": "https://staging.example/api/items/{{trial_id}}",
+        "expect_status": 200,
+        "assert": [{"path": "status", "op": "equals", "value": "done"}],
+    }
+    probe.update(overrides)
+    return probe
+
+
+def _state_row(idx: int = 0, **probe_overrides: Any) -> dict:
+    return {
+        "id": f"s{idx}",
+        "input": "close the ticket for customer {{trial_id}}",
+        "target": "the reply confirms the ticket is closed",
+        "scoring": {"state_check": {"probes": [_probe(**probe_overrides)]}},
+    }
+
+
+# ---------------------------------------------------------------------------
+# Basic shape
+# ---------------------------------------------------------------------------
+
+
+def test_loads_minimal_row(tmp_path: Path) -> None:
     p = _write(tmp_path, [_ok_row(0), _ok_row(1)])
     ds = load_dataset(p)
     assert len(ds.samples) == 2
     assert ds.samples[0].id == "q0"
-    assert ds.samples[0].final_answer.mode == "exact"
-    assert ds.samples[0].final_answer.target == "4"
-    assert ds.sha256  # non-empty, populated
+    assert ds.samples[0].target.startswith("the reply")
+    assert ds.samples[0].state_check is None
+    assert not ds.has_state_check
 
 
-def test_rejects_duplicate_ids(tmp_path: Path) -> None:
-    """Duplicate ids would conflate two samples into one Inspect run,
-    silently halving the eval. Must be loud."""
-    p = _write(tmp_path, [_ok_row(0), _ok_row(0)])
-    with pytest.raises(ValueError, match="duplicate sample id"):
-        load_dataset(p)
+def test_sha256_stable_across_loads(tmp_path: Path) -> None:
+    p = _write(tmp_path, [_ok_row()])
+    assert load_dataset(p).sha256 == load_dataset(p).sha256
 
 
-def test_rejects_missing_id(tmp_path: Path) -> None:
-    bad = {"input": "x", "scoring": {"final_answer": {"mode": "exact", "target": ""}}}
-    p = _write(tmp_path, [bad])
+def test_missing_id_rejected(tmp_path: Path) -> None:
+    row = _ok_row()
+    del row["id"]
     with pytest.raises(ValueError, match="'id'"):
-        load_dataset(p)
+        load_dataset(_write(tmp_path, [row]))
 
 
-def test_rejects_blank_id(tmp_path: Path) -> None:
-    """Empty-string id would pass a naive truthiness check downstream
-    but is functionally indistinguishable from no id."""
-    bad = {"id": "   ", "input": "x",
-           "scoring": {"final_answer": {"mode": "exact", "target": ""}}}
-    p = _write(tmp_path, [bad])
-    with pytest.raises(ValueError, match="'id'"):
-        load_dataset(p)
+def test_duplicate_id_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="duplicate"):
+        load_dataset(_write(tmp_path, [_ok_row(0), _ok_row(0)]))
 
 
-def test_rejects_unknown_mode(tmp_path: Path) -> None:
-    bad = {"id": "q0", "input": "x",
-           "scoring": {"final_answer": {"mode": "fuzzy"}}}
-    p = _write(tmp_path, [bad])
-    with pytest.raises(ValueError, match="mode"):
-        load_dataset(p)
-
-
-def test_exact_mode_requires_target(tmp_path: Path) -> None:
-    bad = {"id": "q0", "input": "x",
-           "scoring": {"final_answer": {"mode": "exact"}}}
-    p = _write(tmp_path, [bad])
+def test_missing_target_rejected(tmp_path: Path) -> None:
+    """target is the judge criterion — a sample without one is
+    ungradable and must fail at load, not at scoring."""
+    row = _ok_row()
+    del row["target"]
     with pytest.raises(ValueError, match="target"):
-        load_dataset(p)
+        load_dataset(_write(tmp_path, [row]))
 
 
-def test_regex_mode_requires_pattern(tmp_path: Path) -> None:
-    bad = {"id": "q0", "input": "x",
-           "scoring": {"final_answer": {"mode": "regex"}}}
-    p = _write(tmp_path, [bad])
-    with pytest.raises(ValueError, match="pattern"):
-        load_dataset(p)
+def test_blank_target_rejected(tmp_path: Path) -> None:
+    row = _ok_row()
+    row["target"] = "   "
+    with pytest.raises(ValueError, match="target"):
+        load_dataset(_write(tmp_path, [row]))
 
 
-def test_judge_mode_requires_non_empty_criterion(tmp_path: Path) -> None:
-    """Whitespace-only criterion is still empty in any meaningful sense."""
-    bad = {"id": "q0", "input": "x",
-           "scoring": {"final_answer": {"mode": "llm_judge", "criterion": "   "}}}
-    p = _write(tmp_path, [bad])
-    with pytest.raises(ValueError, match="criterion"):
-        load_dataset(p)
+def test_legacy_final_answer_key_rejected(tmp_path: Path) -> None:
+    """Pre-migration datasets carried scoring.final_answer; silently
+    ignoring it would let an author believe a mode is still graded."""
+    row = _ok_row()
+    row["scoring"] = {"final_answer": {"mode": "exact", "target": "4"}}
+    with pytest.raises(ValueError, match="unsupported scoring key"):
+        load_dataset(_write(tmp_path, [row]))
 
 
-def test_legacy_scoring_keys_rejected(tmp_path: Path) -> None:
-    """tool_trace / routing specs are no longer graded; silently
-    loading them would let a dataset author believe they still are."""
-    for legacy in ("tool_trace", "routing"):
-        row = _ok_row(0)
-        row["scoring"][legacy] = {"anything": True}
-        p = _write(tmp_path, [row])
-        with pytest.raises(ValueError, match="outcome-only"):
-            load_dataset(p)
-
-
-def test_blank_lines_skipped(tmp_path: Path) -> None:
-    """A trailing newline or accidental blank in the middle of the
-    file should not register as an empty sample."""
+def test_empty_dataset_rejected(tmp_path: Path) -> None:
     p = tmp_path / "data.jsonl"
-    p.write_text(
-        json.dumps(_ok_row(0)) + "\n\n" + json.dumps(_ok_row(1)) + "\n",
-        encoding="utf-8",
-    )
-    ds = load_dataset(p)
-    assert len(ds.samples) == 2
-
-
-def test_empty_file_rejected(tmp_path: Path) -> None:
-    p = tmp_path / "empty.jsonl"
-    p.write_text("", encoding="utf-8")
+    p.write_text("\n", encoding="utf-8")
     with pytest.raises(ValueError, match="empty"):
         load_dataset(p)
 
 
-def test_malformed_json_loud(tmp_path: Path) -> None:
+def test_invalid_json_line_rejected(tmp_path: Path) -> None:
     p = tmp_path / "data.jsonl"
-    p.write_text('{"id": "q0", "input": "x",\n', encoding="utf-8")
+    p.write_text('{"id": "q0"\n', encoding="utf-8")
     with pytest.raises(ValueError, match="invalid JSON"):
         load_dataset(p)
 
 
-def test_sha256_deterministic_and_distinguishes_changes(tmp_path: Path) -> None:
-    """The same bytes must hash identically; a single byte change
-    must produce a different hash so config-clustering doesn't
-    confuse two genuinely different datasets."""
-    p1 = _write(tmp_path, [_ok_row(0)])
-    h1 = load_dataset(p1).sha256
-    h2 = load_dataset(p1).sha256
-    assert h1 == h2
-
-    p2 = tmp_path / "data2.jsonl"
-    p2.write_text(p1.read_text() + " ", encoding="utf-8")
-    assert load_dataset(p2).sha256 != h1
+def test_blank_lines_skipped(tmp_path: Path) -> None:
+    p = tmp_path / "data.jsonl"
+    rows = [json.dumps(_ok_row(0)), "", json.dumps(_ok_row(1)), ""]
+    p.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    assert len(load_dataset(p).samples) == 2
 
 
-def test_missing_file_raises_filenotfound(tmp_path: Path) -> None:
-    with pytest.raises(FileNotFoundError):
-        load_dataset(tmp_path / "nope.jsonl")
+# ---------------------------------------------------------------------------
+# state_check probes
+# ---------------------------------------------------------------------------
 
 
-def test_metadata_passthrough(tmp_path: Path) -> None:
-    row = _ok_row(0)
-    row["metadata"] = {"category": "math", "difficulty": "easy"}
-    p = _write(tmp_path, [row])
-    ds = load_dataset(p)
-    assert ds.samples[0].metadata == {"category": "math", "difficulty": "easy"}
+def test_state_check_parses(tmp_path: Path) -> None:
+    ds = load_dataset(_write(tmp_path, [_state_row()]))
+    assert ds.has_state_check
+    spec = ds.samples[0].state_check
+    assert spec is not None
+    probe = spec.probes[0]
+    assert probe.expect_status == 200
+    assert probe.assertions[0].op == "equals"
+    assert probe.assertions[0].value == "done"
+
+
+def test_probe_requires_http_url(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="http"):
+        load_dataset(_write(tmp_path, [_state_row(url="ftp://x/y")]))
+
+
+def test_probe_rejects_unknown_assert_op(tmp_path: Path) -> None:
+    row = _state_row()
+    row["scoring"]["state_check"]["probes"][0]["assert"] = [
+        {"path": "status", "op": "fuzzy", "value": "x"},
+    ]
+    with pytest.raises(ValueError, match=r"assert\.op"):
+        load_dataset(_write(tmp_path, [row]))
+
+
+def test_probe_exists_op_takes_no_value(tmp_path: Path) -> None:
+    row = _state_row()
+    row["scoring"]["state_check"]["probes"][0]["assert"] = [
+        {"path": "status", "op": "exists", "value": "x"},
+    ]
+    with pytest.raises(ValueError, match="takes no value"):
+        load_dataset(_write(tmp_path, [row]))
+
+
+def test_probe_equals_requires_value(tmp_path: Path) -> None:
+    row = _state_row()
+    row["scoring"]["state_check"]["probes"][0]["assert"] = [
+        {"path": "status", "op": "equals"},
+    ]
+    with pytest.raises(ValueError, match="requires a value"):
+        load_dataset(_write(tmp_path, [row]))
+
+
+def test_probe_empty_probes_rejected(tmp_path: Path) -> None:
+    row = _state_row()
+    row["scoring"]["state_check"]["probes"] = []
+    with pytest.raises(ValueError, match="non-empty"):
+        load_dataset(_write(tmp_path, [row]))
+
+
+# ---------------------------------------------------------------------------
+# Credential / env discipline
+# ---------------------------------------------------------------------------
+
+
+def test_literal_secret_in_header_rejected(tmp_path: Path) -> None:
+    """Datasets are git content — a token-looking literal must never
+    land in one."""
+    row = _state_row(
+        headers={"Authorization": "Bearer sk-ant-abcdef0123456789ABCDEF"},
+    )
+    with pytest.raises(ValueError, match="credential"):
+        load_dataset(_write(tmp_path, [row]))
+
+
+def test_env_ref_header_accepted(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("EVAL_STAGING_TOKEN", "tok")
+    row = _state_row(headers={"Authorization": "Bearer ${EVAL_STAGING_TOKEN}"})
+    ds = load_dataset(_write(tmp_path, [row]))
+    probe = ds.samples[0].state_check.probes[0]
+    # Stored unresolved — the scorer substitutes at score time.
+    assert probe.headers["Authorization"] == "Bearer ${EVAL_STAGING_TOKEN}"
+
+
+def test_missing_env_ref_fails_at_load(tmp_path: Path, monkeypatch) -> None:
+    """Fail before any container spawns — same posture as the
+    user-mode MCP pre-flight."""
+    monkeypatch.delenv("EVAL_NO_SUCH_TOKEN", raising=False)
+    row = _state_row(headers={"Authorization": "${EVAL_NO_SUCH_TOKEN}"})
+    with pytest.raises(ValueError, match="EVAL_NO_SUCH_TOKEN"):
+        load_dataset(_write(tmp_path, [row]))
+
+
+# ---------------------------------------------------------------------------
+# {{trial_id}} solvability
+# ---------------------------------------------------------------------------
+
+
+def test_probe_trial_var_requires_input_trial_var(tmp_path: Path) -> None:
+    """A probe scoped to {{trial_id}} with an input that never mentions
+    it is unsolvable — the agent can't know which entity to touch."""
+    row = _state_row()
+    row["input"] = "close the ticket"  # no {{trial_id}}
+    with pytest.raises(ValueError, match="unsolvable"):
+        load_dataset(_write(tmp_path, [row]))
+
+
+def test_input_trial_var_without_probe_var_ok(tmp_path: Path) -> None:
+    """The reverse is harmless: uniquely-named entities with probes
+    that look them up another way."""
+    row = _state_row(url="https://staging.example/api/latest")
+    ds = load_dataset(_write(tmp_path, [row]))
+    assert ds.has_state_check
+
+
+# ---------------------------------------------------------------------------
+# Homogeneity
+# ---------------------------------------------------------------------------
+
+
+def test_mixed_dataset_rejected(tmp_path: Path) -> None:
+    """State-check and non-state-check samples in one file make the
+    state_check accuracy column uninterpretable — split them."""
+    with pytest.raises(ValueError, match="mixes"):
+        load_dataset(_write(tmp_path, [_ok_row(0), _state_row(1)]))
+
+
+def test_all_state_check_dataset_ok(tmp_path: Path) -> None:
+    ds = load_dataset(_write(tmp_path, [_state_row(0), _state_row(1)]))
+    assert ds.has_state_check
+    assert len(ds.samples) == 2

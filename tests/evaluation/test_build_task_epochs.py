@@ -13,7 +13,7 @@ import pytest
 
 pytest.importorskip("inspect_ai")
 
-from rolemesh.evaluation.dataset import Dataset, FinalAnswerSpec, Sample
+from rolemesh.evaluation.dataset import Dataset, Sample
 from rolemesh.evaluation.inspect_glue import build_eval_task
 
 
@@ -25,7 +25,7 @@ def _dataset() -> Dataset:
             Sample(
                 id="q1",
                 input="hello",
-                final_answer=FinalAnswerSpec(mode="exact", target="hi"),
+                target="the reply greets the user",
             ),
         ],
     )
