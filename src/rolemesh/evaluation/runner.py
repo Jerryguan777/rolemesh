@@ -13,9 +13,11 @@ The eval-specific concerns this module owns:
     ``chat_jid`` keyed on ``(run_id, sample_idx)`` so backend session
     files and KV entries don't cross-pollute.
   * event collection — a custom ``on_output`` callback accumulates
-    ``ToolUseEvent`` names, the final ``ResultEvent`` text, and the
-    last reported ``UsageSnapshot``. The orchestrator's message-storage
-    side effect path is intentionally not invoked.
+    ``ToolUseEvent`` names (plus a diagnostic per-call trail with
+    ts_ms offsets and input previews), the final ``ResultEvent`` text,
+    the last reported ``UsageSnapshot``, and the container identifiers
+    for cross-referencing container-side logs. The orchestrator's
+    message-storage side effect path is intentionally not invoked.
   * shutdown — production agent containers stay alive for follow-up
     turns; eval wants exactly one turn per container, so we publish
     ``agent.{job_id}.shutdown`` as soon as the batch-final marker
@@ -67,6 +69,17 @@ class SampleExecution:
     error: str | None = None
     result_event_count: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Diagnostic-only trail for failure triage in ``inspect view`` —
+    # one entry per tool call: {"tool", "ts_ms", "input_preview"}.
+    # ts_ms is the offset from sample start (container spawn included).
+    # input_preview is the short orchestrator-truncated preview off the
+    # wire. Nothing here is graded; scorers must not grow back onto it.
+    observed_tool_events: list[dict[str, Any]] = field(default_factory=list)
+    # Bridge from the .eval log to the container-side transcript
+    # (``container-<name>.log`` / NATS subjects keyed by job_id). None
+    # when the sample failed before a container process was reported.
+    container_name: str | None = None
+    job_id: str | None = None
 
 
 def _backend_for_coworker(coworker: Coworker) -> AgentBackendConfig:
@@ -186,8 +199,12 @@ class EvalRunner:
         )
 
         observed_tool_calls: list[str] = []
+        observed_tool_events: list[dict[str, Any]] = []
         last_usage: dict[str, Any] | None = None
         last_result_text: str | None = None
+        # Timing origin for tool-event ts_ms offsets (sample start,
+        # container spawn included — same scale as latency_ms).
+        t0 = time.monotonic()
         result_event_count = 0
         safety_block: dict[str, Any] | None = None
         captured_job_id: str | None = None
@@ -262,6 +279,14 @@ class EvalRunner:
                 tool_name = meta.get("tool")
                 if isinstance(tool_name, str) and tool_name:
                     observed_tool_calls.append(tool_name)
+                    preview = meta.get("input", "")
+                    observed_tool_events.append({
+                        "tool": tool_name,
+                        "ts_ms": int((time.monotonic() - t0) * 1000),
+                        "input_preview": (
+                            preview if isinstance(preview, str) else ""
+                        ),
+                    })
                 return
             if out.status == "safety_blocked":
                 meta = out.metadata or {}
@@ -363,6 +388,9 @@ class EvalRunner:
             return SampleExecution(
                 output_text="",
                 observed_tool_calls=observed_tool_calls,
+                observed_tool_events=observed_tool_events,
+                container_name=captured_container_name,
+                job_id=captured_job_id,
                 usage=last_usage,
                 latency_ms=latency_ms,
                 status="error",
@@ -378,6 +406,9 @@ class EvalRunner:
             return SampleExecution(
                 output_text="",
                 observed_tool_calls=observed_tool_calls,
+                observed_tool_events=observed_tool_events,
+                container_name=captured_container_name,
+                job_id=captured_job_id,
                 usage=last_usage,
                 latency_ms=latency_ms,
                 status="error",
@@ -401,6 +432,9 @@ class EvalRunner:
         return SampleExecution(
             output_text=last_result_text or "",
             observed_tool_calls=observed_tool_calls,
+            observed_tool_events=observed_tool_events,
+            container_name=captured_container_name,
+            job_id=captured_job_id,
             usage=last_usage,
             latency_ms=latency_ms,
             status=status,
