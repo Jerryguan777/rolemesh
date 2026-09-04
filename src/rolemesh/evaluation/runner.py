@@ -9,9 +9,10 @@ production container path — including tool wiring, MCP rewriting,
 backend selection — is exercised by eval too.
 
 The eval-specific concerns this module owns:
-  * sample isolation — every sample uses its own ``group_folder`` and
-    ``chat_jid`` keyed on ``(run_id, sample_idx)`` so backend session
-    files and KV entries don't cross-pollute.
+  * sample isolation — every trial uses its own ``group_folder`` and
+    ``chat_jid`` keyed on ``(run_id, sample_idx, epoch)`` so backend
+    session files and KV entries don't cross-pollute — neither between
+    samples nor between epochs of the same sample.
   * event collection — a custom ``on_output`` callback accumulates
     ``ToolUseEvent`` names (plus a diagnostic per-call trail with
     ts_ms offsets and input previews), the final ``ResultEvent`` text,
@@ -158,16 +159,23 @@ class EvalRunner:
         coworker: Coworker,
         sample_idx: int,
         prompt: str,
+        epoch: int = 1,
     ) -> SampleExecution:
         """Run one sample end-to-end. Never raises — failures are
         captured as ``status='error'`` so the eval continues.
         """
-        # Per-sample isolation. group_folder participates in container
-        # names and KV keys; chat_jid prefixes WS routing. Both are
+        # Per-trial isolation. group_folder participates in container
+        # names and KV keys; chat_jid prefixes WS routing; the Pi
+        # session file path takes it via conversation_id. All are
         # eval-prefixed so production grep/triage filters do not pick
-        # them up. session_id is pinned to None so each sample opens a
-        # fresh backend session — no transcript bleed-through.
-        group_folder = f"eval-{self._run_id}-{sample_idx}"
+        # them up. epoch is folded in because Inspect reuses the same
+        # Sample across epochs — without it, the N trials of one sample
+        # would share session files and KV entries, and pass@k's
+        # independent-repeats premise would silently break. Worst-case
+        # length (uuid4 run_id + 3-digit idx + 2-digit epoch) is 48
+        # chars, within core.group_folder's 64-char pattern. session_id
+        # is pinned to None so each trial opens a fresh backend session.
+        group_folder = f"eval-{self._run_id}-{sample_idx}-e{epoch}"
         chat_jid = _safe_chat_jid(group_folder)
 
         # Use the live coworker's permissions so eval mirrors what the

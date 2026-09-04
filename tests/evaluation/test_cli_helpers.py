@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from rolemesh.evaluation.cli import (
     _aggregate_metrics,
     _check_thresholds,
@@ -101,8 +103,11 @@ class _FakeMetric:
 
 
 class _FakeScore:
-    def __init__(self, name: str, accuracy: float) -> None:
+    def __init__(
+        self, name: str, accuracy: float, reducer: str | None = None,
+    ) -> None:
         self.name = name
+        self.reducer = reducer
         self.metrics = {"accuracy": _FakeMetric(accuracy)}
 
 
@@ -146,3 +151,70 @@ def test_aggregate_handles_zero_samples() -> None:
     assert metrics["cost_usd_total"] is None
     assert metrics["cost_usd_coverage"] == 0.0
     assert metrics["latency_ms"]["p50"] is None
+
+
+def test_aggregate_multi_reducer_keys_do_not_collide() -> None:
+    """With epochs > 1 the same scorer appears once per reducer. Keying
+    by bare name would let the second entry silently overwrite the
+    first — the exact bug this reducer-qualified keying prevents."""
+    log = _FakeEvalLog(
+        samples=[],
+        scores=[
+            _FakeScore("final_answer_scorer", accuracy=0.8, reducer="mean"),
+            _FakeScore(
+                "final_answer_scorer", accuracy=0.4, reducer="at_least_5",
+            ),
+        ],
+    )
+    metrics = _aggregate_metrics(
+        inspect_results=log, sample_count=10, epochs=5,
+    )
+    scorers = metrics["scorers"]
+    assert scorers["final_answer_scorer/mean"]["accuracy"] == 0.8
+    assert scorers["final_answer_scorer/at_least_5"]["accuracy"] == 0.4
+    assert metrics["epochs"] == 5
+    assert metrics["trial_count"] == 50
+
+
+def test_aggregate_single_epoch_keeps_bare_scorer_names() -> None:
+    """reducer=None (single-epoch logs) must keep the bare name so
+    existing --threshold specs stay valid."""
+    log = _FakeEvalLog(
+        samples=[],
+        scores=[_FakeScore("final_answer_scorer", accuracy=0.9)],
+    )
+    metrics = _aggregate_metrics(inspect_results=log, sample_count=3)
+    assert "final_answer_scorer" in metrics["scorers"]
+    assert metrics["epochs"] == 1
+    assert metrics["trial_count"] == 3
+
+
+def test_aggregate_epochs_coverage_uses_trial_count() -> None:
+    """With 2 samples x 2 epochs, 4 trials run; if all 4 report cost
+    the coverage is 1.0 — a sample_count denominator would report an
+    impossible 2.0."""
+    samples = [
+        _FakeSample(latency_ms=100, usage={"cost_usd": 0.01})
+        for _ in range(4)
+    ]
+    log = _FakeEvalLog(samples=samples, scores=[])
+    metrics = _aggregate_metrics(
+        inspect_results=log, sample_count=2, epochs=2,
+    )
+    assert abs(metrics["cost_usd_coverage"] - 1.0) < 1e-6
+    assert metrics["cost_usd_total"] == pytest.approx(0.04)
+
+
+def test_threshold_with_reducer_qualified_key() -> None:
+    """The '/' in reducer-qualified keys must survive the dotted-path
+    lookup (split is on '.', not '/')."""
+    metrics = {
+        "scorers": {"final_answer_scorer/at_least_5": {"accuracy": 0.75}},
+    }
+    assert _check_thresholds(
+        metrics, ["scorers.final_answer_scorer/at_least_5.accuracy>=0.7"],
+    ) == []
+    failures = _check_thresholds(
+        metrics, ["scorers.final_answer_scorer/at_least_5.accuracy>=0.8"],
+    )
+    assert len(failures) == 1

@@ -10,9 +10,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from inspect_ai import Task
+from inspect_ai import Epochs, Task
 from inspect_ai.dataset import MemoryDataset
 from inspect_ai.dataset import Sample as InspectSample
+from inspect_ai.scorer import at_least
 from inspect_ai.solver import Generate, Solver, TaskState, solver
 
 from rolemesh.evaluation.scorers import final_answer_scorer
@@ -76,7 +77,15 @@ def container_solver(runner: EvalRunner, coworker: Coworker) -> Solver:
             prompt_raw if isinstance(prompt_raw, str) else str(prompt_raw)
         )
         execution = await runner.execute_sample(
-            coworker=coworker, sample_idx=sample_idx, prompt=prompt,
+            coworker=coworker,
+            sample_idx=sample_idx,
+            prompt=prompt,
+            # Inspect reuses the same Sample across epochs (1-based
+            # state.epoch is the only difference); the runner folds it
+            # into the isolation key. Direct attribute access on
+            # purpose: if the field ever vanishes we want a loud
+            # AttributeError, not epochs silently sharing state again.
+            epoch=state.epoch,
         )
         state.output.completion = execution.output_text
         state.metadata["observed_tool_calls"] = list(execution.observed_tool_calls)
@@ -116,8 +125,18 @@ def build_eval_task(
     coworker: Coworker,
     judge_model: str | None = None,
     task_name: str = "rolemesh-eval",
+    epochs: int = 1,
 ) -> Task:
-    """Construct the Inspect AI Task we hand to ``inspect_ai.eval``."""
+    """Construct the Inspect AI Task we hand to ``inspect_ai.eval``.
+
+    epochs > 1 runs every sample that many times and reduces the per-
+    sample scores two ways: ``mean`` (per-trial pass rate — for binary
+    scores this equals pass@1, so the single-epoch semantics carry
+    over) and ``at_least(epochs)`` (1 only when every trial passed —
+    the empirical all-correct rate, the pass^k-style consistency
+    signal to gate customer-facing coworkers on). epochs == 1 passes
+    no Epochs at all, keeping today's behavior bit-for-bit.
+    """
     inspect_samples = [
         _sample_to_inspect(s, idx) for idx, s in enumerate(dataset.samples)
     ]
@@ -126,4 +145,8 @@ def build_eval_task(
         dataset=MemoryDataset(samples=inspect_samples),
         solver=container_solver(runner, coworker),
         scorer=[final_answer_scorer(judge_model=judge_model)],
+        epochs=(
+            Epochs(epochs, ["mean", at_least(epochs)])
+            if epochs > 1 else None
+        ),
     )

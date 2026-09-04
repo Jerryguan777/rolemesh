@@ -135,15 +135,21 @@ def _aggregate_metrics(
     *,
     inspect_results: Any,
     sample_count: int,
+    epochs: int = 1,
 ) -> dict[str, Any]:
     """Walk per-sample EvalSample objects and produce summary metrics.
 
     Inspect AI's EvalLog has both top-level ``results.scores`` (one per
-    scorer) and per-sample ``samples[i].scores`` + ``metadata``. We
-    pull latency / cost out of metadata since they're not Inspect
-    scorers, and accuracy from the scorer summary.
+    scorer, per reducer when epochs > 1) and per-sample
+    ``samples[i].scores`` + ``metadata``. We pull latency / cost out of
+    metadata since they're not Inspect scorers, and accuracy from the
+    scorer summary. With epochs > 1 the log carries one EvalSample per
+    trial, so latency/cost stats naturally cover every trial;
+    ``sample_count`` stays the number of distinct dataset samples and
+    ``trial_count`` is the expected total executions.
     """
     samples = getattr(inspect_results, "samples", None) or []
+    trial_count = sample_count * max(epochs, 1)
     latencies: list[float] = []
     costs: list[float] = []
     cost_seen = 0
@@ -182,7 +188,11 @@ def _aggregate_metrics(
                         cache_write_tokens += int(v)
 
     # Pull scorer summaries — Inspect EvalLog.results.scores is a list
-    # of EvalScore objects. Each carries ``name`` and ``metrics`` dict.
+    # of EvalScore objects. Each carries ``name`` and ``metrics``; with
+    # epochs > 1 the same scorer appears once per reducer, so the key
+    # must include the reducer or later entries would silently
+    # overwrite earlier ones. Single-epoch logs have reducer=None and
+    # keep the bare name — existing --threshold specs stay valid.
     scorer_summary: dict[str, dict[str, Any]] = {}
     results = getattr(inspect_results, "results", None)
     scores_list = getattr(results, "scores", None) if results else None
@@ -190,17 +200,21 @@ def _aggregate_metrics(
         name = getattr(sc, "name", None)
         if not isinstance(name, str):
             continue
+        reducer = getattr(sc, "reducer", None)
+        key = f"{name}/{reducer}" if isinstance(reducer, str) else name
         metrics_dict: dict[str, Any] = {}
         for m_name, m_val in (getattr(sc, "metrics", {}) or {}).items():
             v = getattr(m_val, "value", m_val)
             if isinstance(v, (int, float)):
                 metrics_dict[m_name] = float(v)
-        scorer_summary[name] = metrics_dict
+        scorer_summary[key] = metrics_dict
 
-    coverage = (cost_seen / sample_count) if sample_count > 0 else 0.0
+    coverage = (cost_seen / trial_count) if trial_count > 0 else 0.0
 
     return {
         "sample_count": sample_count,
+        "epochs": max(epochs, 1),
+        "trial_count": trial_count,
         "scorers": scorer_summary,
         "latency_ms": {
             "p50": _percentile(latencies, 0.5),
@@ -286,11 +300,22 @@ def _check_thresholds(
 async def _cmd_run(args: argparse.Namespace) -> int:
     tenant_id = _resolve_tenant(args)
 
+    epochs = int(args.epochs)
+    if epochs < 1:
+        print("ERROR: --epochs must be >= 1", file=sys.stderr)
+        return 1
+
     dataset = load_dataset(args.dataset)
     print(
         f"Loaded {len(dataset.samples)} samples from {dataset.path} "
         f"(sha256={dataset.sha256[:12]}...)"
     )
+    if epochs > 1:
+        print(
+            f"epochs={epochs}: every sample runs {epochs}x — "
+            f"{len(dataset.samples) * epochs} container runs, ~{epochs}x "
+            f"API cost. Scores add /mean and /at_least_{epochs} reducers."
+        )
 
     await init_database()
 
@@ -398,6 +423,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         "dataset_path": dataset.path,
         "dataset_sha256": dataset.sha256,
         "status": "running",
+        "epochs": epochs,
         "started_at": started_at,
         "finished_at": None,
         "metrics": None,
@@ -423,6 +449,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
             coworker=coworker,
             judge_model=args.judge_model,
             task_name=f"rolemesh-eval-{coworker.folder}",
+            epochs=epochs,
         )
 
         # Late import — Inspect AI is an optional dependency.
@@ -445,7 +472,9 @@ async def _cmd_run(args: argparse.Namespace) -> int:
             raise RuntimeError("inspect_ai.eval returned no results")
 
         metrics = _aggregate_metrics(
-            inspect_results=result, sample_count=len(dataset.samples),
+            inspect_results=result,
+            sample_count=len(dataset.samples),
+            epochs=epochs,
         )
         eval_log_uri = getattr(result, "location", None) or str(log_dir)
 
@@ -550,8 +579,18 @@ def _build_parser() -> argparse.ArgumentParser:
              "user's OIDC bearer on outbound MCP calls.",
     )
     pr.add_argument(
+        "--epochs", type=int, default=1,
+        help="trials per sample (default 1). With N > 1 every sample "
+             "runs N times (N x containers and API cost) and scorer "
+             "metrics appear once per reducer: .../mean (per-trial "
+             "pass rate) and .../at_least_N (all-N-trials-passed rate "
+             "- the consistency gate for customer-facing coworkers).",
+    )
+    pr.add_argument(
         "--threshold", action="append",
-        help="threshold spec like 'scorers.final_answer_scorer.accuracy>=0.9'",
+        help="threshold spec like 'scorers.final_answer_scorer.accuracy>=0.9' "
+             "(with --epochs N, keys gain a reducer suffix, e.g. "
+             "'scorers.final_answer_scorer/at_least_5.accuracy>=0.8')",
     )
     pr.add_argument(
         "--judge-model", default=None,
