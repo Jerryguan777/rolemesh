@@ -90,6 +90,19 @@ def answer_check(judge_model: str | None = None) -> Scorer:
                         f"{len(rubrics)}]: {exc!r}"
                     ),
                 )
+            if verdict is None:
+                # The Scorer protocol allows None ("no score for this
+                # sample"). model_graded_qa's current implementation
+                # never returns it, but relying on that would be
+                # depending on a detail narrower than the declared
+                # contract — treat it like a failed judge call.
+                return Score(
+                    value=NOANSWER,
+                    explanation=(
+                        f"judge produced no score for rubric "
+                        f"[{idx + 1}/{len(rubrics)}]"
+                    ),
+                )
             ok = verdict.value == CORRECT
             satisfied += int(ok)
             lines.append(
