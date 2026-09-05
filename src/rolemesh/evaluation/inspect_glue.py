@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 from inspect_ai import Epochs, Task
 from inspect_ai.dataset import MemoryDataset
 from inspect_ai.dataset import Sample as InspectSample
-from inspect_ai.scorer import at_least
+from inspect_ai.scorer import at_least, mean_score
 from inspect_ai.solver import Generate, Solver, TaskState, solver
 
 from rolemesh.evaluation.scorers import answer_check, state_check
@@ -146,7 +146,10 @@ def build_eval_task(
         solver=container_solver(runner, coworker),
         scorer=scorers,
         epochs=(
-            Epochs(epochs, ["mean", at_least(epochs)])
+            # Epochs wants a homogeneous reducer list; mean_score() is
+            # the registered "mean" reducer as an object, so both
+            # entries are ScoreReducer.
+            Epochs(epochs, [mean_score(), at_least(epochs)])
             if epochs > 1 else None
         ),
     )
