@@ -94,6 +94,17 @@ def test_assertion_ops() -> None:
     assert ok
 
 
+def test_gte_non_numeric_expected_fails_without_raising() -> None:
+    """This scorer's input boundary is .eval metadata (offline
+    re-scoring bypasses the loader): a corrupted gte value must fail
+    the assertion, not TypeError out of the scorer."""
+    ok, desc = _check_assertion(
+        {"count": 3}, {"path": "count", "op": "gte", "value": None}, "t",
+    )
+    assert not ok
+    assert "non-numeric" in desc
+
+
 def test_assertion_trial_id_substituted_in_expected_value() -> None:
     body = {"owner": "eval-r1-0-e1"}
     ok, _ = _check_assertion(

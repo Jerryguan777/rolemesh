@@ -104,6 +104,24 @@ async def test_judge_exception_is_noanswer_for_whole_sample(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
+async def test_judge_none_score_is_noanswer(monkeypatch) -> None:
+    """The Scorer protocol allows returning None; the shell must not
+    assume model_graded_qa's narrower behavior (AttributeError
+    otherwise)."""
+
+    def factory(**_kw: Any):
+        async def graded(state: TaskState, target: Target) -> Score | None:
+            return None
+
+        return graded
+
+    monkeypatch.setattr(ac_mod, "model_graded_qa", factory)
+    score = await ac_mod.answer_check()(_state(), Target(["r1"]))
+    assert score.value == NOANSWER
+    assert "no score" in (score.explanation or "")
+
+
+@pytest.mark.asyncio
 async def test_empty_rubrics_is_noanswer(monkeypatch) -> None:
     """Loader forbids this; reaching it means glue breakage, and a
     divide-by-zero or a free CORRECT would both be worse."""

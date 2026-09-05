@@ -175,6 +175,12 @@ def _check_assertion(body: Any, a: dict[str, Any], trial_id: str) -> tuple[bool,
             ok = False
         return ok, f"{label} (got {actual!r})"
     if op == "gte":
+        # The loader guarantees a numeric value, but this scorer's
+        # input boundary is .eval metadata (offline re-scoring bypasses
+        # the loader) — a corrupted spec fails the assertion, it must
+        # not raise.
+        if not isinstance(expected, (int, float)):
+            return False, f"{label} — non-numeric expected value"
         ok = isinstance(actual, (int, float)) and actual >= float(expected)
         return ok, f"{label} (got {actual!r})"
     if op == "matches":
