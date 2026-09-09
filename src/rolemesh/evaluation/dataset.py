@@ -55,6 +55,13 @@ _ENV_REF_RE = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
 # dataset: after stripping ${VAR} references and the trial template
 # var, any long contiguous token-looking run is suspicious.
 _SECRETISH_RE = re.compile(r"[A-Za-z0-9+/=_\-]{20,}")
+# URL-adapted variant: '/' and '-' are structural in URLs (paths,
+# UUID-ish ids), so including them — as the header pattern does for
+# base64 tokens — would flag virtually every URL with a path. Dropping
+# both still catches the realistic leaks: 'sk-ant-<22 hex chars>'
+# splits at the hyphens into a 20+ alnum run, JWTs split at dots, and
+# typical API keys are long unbroken alnum runs.
+_URL_SECRETISH_RE = re.compile(r"[A-Za-z0-9+=_]{20,}")
 
 
 @dataclass(frozen=True)
@@ -124,6 +131,24 @@ def _check_header_value(value: str, sample_id: str) -> None:
         raise ValueError(msg)
 
 
+def _check_url_value(url: str, sample_id: str) -> None:
+    """Reject URLs that look like they embed a literal credential.
+
+    Closes the query-string leak the header guard alone left open
+    (``?token=sk-ant-...`` passed the loader while the same token in a
+    header was rejected). Same preprocessing as the header check, but
+    a URL-adapted token pattern — see _URL_SECRETISH_RE.
+    """
+    stripped = _ENV_REF_RE.sub("", url).replace(TRIAL_VAR, "")
+    if _URL_SECRETISH_RE.search(stripped):
+        msg = (
+            f"sample {sample_id!r}: probe URL looks like it embeds a "
+            f"literal credential — reference a host env var as ${{VAR}} "
+            f"instead (datasets are git content)"
+        )
+        raise ValueError(msg)
+
+
 def _check_env_refs(value: str, sample_id: str) -> None:
     """Fail at load time if a referenced env var is missing — before
     any container spawns, matching the user-mode MCP pre-flight."""
@@ -183,6 +208,7 @@ def _parse_probe(raw: Any, sample_id: str) -> Probe:
             f"got {url!r}"
         )
         raise ValueError(msg)
+    _check_url_value(url, sample_id)
     _check_env_refs(url, sample_id)
 
     headers_raw = raw.get("headers", {})

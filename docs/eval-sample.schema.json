@@ -49,7 +49,7 @@
                   "url": {
                     "type": "string",
                     "pattern": "^https?://",
-                    "description": "HTTP GET target. May contain {{trial_id}} and ${ENV_VAR} references."
+                    "description": "HTTP GET target. May contain {{trial_id}} and ${ENV_VAR} references. Literal credentials (long token-looking runs, e.g. in a query string) are rejected by the loader, same as in headers — datasets are git content."
                   },
                   "headers": {
                     "type": "object",
