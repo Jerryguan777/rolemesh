@@ -231,6 +231,43 @@ def test_literal_secret_in_header_rejected(tmp_path: Path) -> None:
         load_dataset(_write(tmp_path, [row]))
 
 
+def test_literal_secret_in_url_rejected(tmp_path: Path) -> None:
+    """The header guard alone left the query string open — a token in
+    the URL is the same leak through a different door."""
+    row = _state_row(
+        url="https://staging.example/api?token=sk-ant-abcdef0123456789ABCDEF",
+    )
+    with pytest.raises(ValueError, match="credential"):
+        load_dataset(_write(tmp_path, [row]))
+
+
+def test_deep_path_url_accepted(tmp_path: Path) -> None:
+    """'/' is structural in URLs: an ordinary deep path must not trip
+    the URL secret guard (the header pattern would have)."""
+    row = _state_row(
+        url="https://staging.example/api/organizations/items/{{trial_id}}",
+    )
+    assert load_dataset(_write(tmp_path, [row])).has_state_check
+
+
+def test_uuid_path_url_accepted(tmp_path: Path) -> None:
+    """Hyphens split UUID-ish path ids below the token threshold."""
+    row = _state_row(
+        url="https://staging.example/api/items/3aebabe1-9a0c-4c7b-b73b-d34b9c181837",
+    )
+    assert load_dataset(_write(tmp_path, [row])).has_state_check
+
+
+def test_env_ref_in_url_accepted(tmp_path: Path, monkeypatch) -> None:
+    """A ${VAR} reference in the URL is the sanctioned form and must
+    not be mistaken for a literal token."""
+    monkeypatch.setenv("EVAL_STAGING_QUERY_TOKEN", "tok")
+    row = _state_row(
+        url="https://staging.example/api?token=${EVAL_STAGING_QUERY_TOKEN}",
+    )
+    assert load_dataset(_write(tmp_path, [row])).has_state_check
+
+
 def test_env_ref_header_accepted(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("EVAL_STAGING_TOKEN", "tok")
     row = _state_row(headers={"Authorization": "Bearer ${EVAL_STAGING_TOKEN}"})
