@@ -561,13 +561,14 @@ class TestComputeEgressRouting:
         # Static config drives DNS — never empty.
         assert r.dns_servers == [EGRESS_GATEWAY_DNS_IP]
 
-    def test_nats_url_passes_through_verbatim(self) -> None:
-        """Regression (docs/21 §4.3): the deployment layer injects a
-        service-name NATS_URL (compose: ``nats://nats:4222``) and the
-        routing must hand it to the agent UNCHANGED. Catches anyone
-        re-introducing a launcher-era loopback/host-gateway rewrite —
-        in the single network stack such a rewrite would point agents
-        at a name that resolves to the wrong (or no) host."""
+    def test_agent_nats_url_passes_through_verbatim(self) -> None:
+        """Regression (docs/21 §4.3): the routing hands the CONTAINER-
+        side NATS url (``AGENT_NATS_URL``, defaulting to ``NATS_URL``)
+        to the agent UNCHANGED. Catches anyone re-introducing a
+        launcher-era loopback/host-gateway rewrite — in the single
+        network stack such a rewrite would point agents at a name that
+        resolves to the wrong (or no) host. The host/container split
+        lives in configuration (two variables), never in code."""
         from rolemesh.container import runner
 
         for url in (
@@ -576,12 +577,22 @@ class TestComputeEgressRouting:
             "nats://127.0.0.1:4222",
             "nats://nats.prod.example:4222",
         ):
-            with patch.object(runner, "NATS_URL", url):
+            with patch.object(runner, "AGENT_NATS_URL", url):
                 r = compute_egress_routing("TOK")
             assert r.nats_url == url, (
-                f"NATS_URL must pass through verbatim; {url!r} became "
-                f"{r.nats_url!r}"
+                f"AGENT_NATS_URL must pass through verbatim; {url!r} "
+                f"became {r.nats_url!r}"
             )
+
+    def test_host_nats_url_does_not_leak_into_container(self) -> None:
+        """When the two views differ (eval CLI on a macOS host), the
+        container must get AGENT_NATS_URL — the host-side NATS_URL is
+        meaningless inside the bridge network."""
+        from rolemesh.container import runner
+
+        with patch.object(runner, "AGENT_NATS_URL", "nats://nats:4222"):
+            r = compute_egress_routing(None)
+        assert r.nats_url == "nats://nats:4222"
 
 
 # ---------------------------------------------------------------------------

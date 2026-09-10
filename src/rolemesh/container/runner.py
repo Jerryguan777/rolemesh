@@ -20,6 +20,7 @@ from rolemesh.container.runtime import (
     VolumeMount,
 )
 from rolemesh.core.config import (
+    AGENT_NATS_URL,
     CONTAINER_CPU_LIMIT,
     CONTAINER_ENV_ALLOWLIST,
     CONTAINER_IMAGE,
@@ -33,7 +34,6 @@ from rolemesh.core.config import (
     DATA_DIR,
     EGRESS_GATEWAY_CONTAINER_NAME,
     EGRESS_GATEWAY_FORWARD_PORT,
-    NATS_URL,
     TIMEZONE,
 )
 from rolemesh.core.logger import get_logger
@@ -325,9 +325,12 @@ def compute_egress_routing(egress_token: str | None) -> EgressRouting:
     Pure and side-effect free: a single-path read of deployment-layer
     configuration (docs/21 §4.3).
 
-    Agent sits on the Internal=true bridge. NATS is reached by the
-    service name the deployment layer injects via ``NATS_URL``
-    (compose / Helm declare it; the URL is passed through verbatim);
+    Agent sits on the Internal=true bridge. NATS is reached at
+    ``AGENT_NATS_URL`` — the container-side view of NATS, which
+    defaults to ``NATS_URL`` when the spawning process shares the
+    docker network (orchestrator in compose) and is set separately
+    when it doesn't (eval CLI on a macOS/dev host, where the host
+    uses a published port and the container needs the service name);
     LLM/MCP calls go to the gateway container by service name;
     HTTP(S)_PROXY points every client at the forward proxy; DNS is
     pinned to the gateway's resolver — an address the deployment layer
@@ -353,7 +356,7 @@ def compute_egress_routing(egress_token: str | None) -> EgressRouting:
         f"http://{forward_authority}:{EGRESS_GATEWAY_FORWARD_PORT}"
     )
     return EgressRouting(
-        nats_url=NATS_URL,
+        nats_url=AGENT_NATS_URL,
         proxy_base=f"http://{EGRESS_GATEWAY_CONTAINER_NAME}:{CREDENTIAL_PROXY_PORT}",
         provider_prefix=provider_prefix,
         proxy_env={
