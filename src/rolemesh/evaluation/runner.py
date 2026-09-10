@@ -49,6 +49,7 @@ from rolemesh.evaluation.dataset import TRIAL_VAR
 if TYPE_CHECKING:
     from rolemesh.container.runtime import ContainerRuntime
     from rolemesh.core.types import Coworker
+    from rolemesh.egress.token_identity import TokenAuthority
     from rolemesh.ipc.nats_transport import NatsTransport
 
 logger = get_logger()
@@ -124,11 +125,19 @@ class EvalRunner:
         timeout_s: float = 300.0,
         user_id: str = "",
         get_mcp_configs: Any = None,  # Callable[[str], list[McpServerConfig]]
+        token_authority: TokenAuthority | None = None,
     ) -> None:
         self._runtime = runtime
         self._transport = transport
         self._get_coworker = get_coworker
         self._get_mcp_configs = get_mcp_configs
+        # The egress gateway is token-only: agents spawned without a
+        # minted identity token get 401 UNKNOWN_SOURCE on every
+        # provider call and the whole eval scores zeros for a harness
+        # reason. The CLI wires TokenAuthority.from_env() (fail-loud at
+        # start when EGRESS_TOKEN_SECRET is missing); None is for unit
+        # tests with stubbed executors only.
+        self._token_authority = token_authority
         self._run_id = run_id
         self._timeout_s = timeout_s
         # ``user_id`` flows through ``AgentInput`` to ``init.user_id`` in
@@ -155,6 +164,7 @@ class EvalRunner:
                 transport=self._transport,
                 get_coworker=self._get_coworker,
                 get_mcp_configs=self._get_mcp_configs,
+                token_authority=self._token_authority,
             )
             self._executors[backend.name] = ex
         return ex

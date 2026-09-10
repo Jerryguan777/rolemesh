@@ -317,6 +317,18 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         print("ERROR: --epochs must be >= 1", file=sys.stderr)
         return 1
 
+    # The egress gateway is token-only; a run without a token authority
+    # spawns agents that 401 on every provider call and score zeros for
+    # a harness reason. Fail loud here — before any container spends
+    # money — when EGRESS_TOKEN_SECRET is missing.
+    from rolemesh.egress.token_identity import TokenAuthority
+
+    try:
+        token_authority = TokenAuthority.from_env()
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
     dataset = load_dataset(args.dataset)
     print(
         f"Loaded {len(dataset.samples)} samples from {dataset.path} "
@@ -453,6 +465,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
             run_id=run_id,
             timeout_s=float(args.timeout_s),
             user_id=user_id,
+            token_authority=token_authority,
         )
 
         task = build_eval_task(

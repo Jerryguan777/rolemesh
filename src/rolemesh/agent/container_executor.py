@@ -140,11 +140,14 @@ class ContainerAgentExecutor:
         self._runtime = runtime
         self._transport = transport
         self._get_coworker = get_coworker
-        # Token-identity refactor: mints the per-spawn signed identity
-        # token embedded in the agent's proxy env. The orchestrator
-        # wires a real authority from env at startup; tests and the eval
-        # CLI leave it None, so spawns produce token-free proxy URLs and
-        # the gateway falls back to source-IP identity (dual-run window).
+        # Token-identity: mints the per-spawn signed identity token
+        # embedded in the agent's proxy env. The gateway verifies
+        # tokens with the shared secret and is TOKEN-ONLY — the old
+        # source-IP fallback (dual-run window) is gone, so a None
+        # authority yields token-free proxy URLs that the gateway
+        # rejects with 401 UNKNOWN_SOURCE. Both real call sites
+        # (orchestrator boot, eval CLI) wire TokenAuthority.from_env();
+        # None is legitimate only in unit tests with stubbed runtimes.
         self._token_authority = token_authority
         # Frontdesk v1.2: optional callback rendering the delegatable-
         # specialist catalog for a tenant. Signature:
@@ -274,9 +277,19 @@ class ContainerAgentExecutor:
 
         # Token-identity: mint the signed token this container will carry
         # in its proxy env; the gateway verifies it with the shared
-        # secret. None only when no authority is wired (eval CLI /
-        # tests), which yields token-free URLs.
+        # secret and accepts nothing else (token-only, no source-IP
+        # fallback). A token-free spawn is doomed to 401 on every
+        # provider call — warn loudly here so the cause is visible at
+        # spawn time instead of surfacing as UNKNOWN_SOURCE downstream.
         egress_token: str | None = None
+        if self._token_authority is None:
+            logger.warning(
+                "spawning container WITHOUT a token authority — the "
+                "gateway is token-only and will reject its provider "
+                "calls (401 UNKNOWN_SOURCE); expected only in unit "
+                "tests with stubbed runtimes",
+                container=container_name,
+            )
         if self._token_authority is not None:
             egress_token = self._token_authority.mint(
                 Identity(
