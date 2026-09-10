@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import sys
 from typing import Any
 
 import aiodocker.exceptions
@@ -38,6 +39,21 @@ EGRESS_NET = "rolemesh-egress-net"
 GATEWAY = "egress-gateway"
 
 _FIX_HINT = "docker compose -f deploy/compose/compose.yaml up -d"
+
+
+@pytest.fixture
+def linux_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the healthz probe's platform dispatch to the Linux branch.
+
+    verify_infrastructure skips check (d) on a macOS host — the bridge
+    subnet is not host-routable under Docker Desktop, so the probe can
+    never succeed there regardless of gateway health. The tests using
+    this fixture assert the PROBE's behavior (retry, error surface),
+    not the platform dispatch, so they pin sys.platform to keep
+    exercising the probe on any developer machine. The darwin skip
+    branch has its own tests below.
+    """
+    monkeypatch.setattr(sys, "platform", "linux")
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +237,7 @@ def _patch_topology_config(
 
 
 async def test_all_invariants_hold_passes(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, linux_platform: None,
 ) -> None:
     async with _HealthzServer([200]) as http, _TcpServer() as tcp:
         _patch_topology_config(
@@ -234,7 +250,7 @@ async def test_all_invariants_hold_passes(
 
 
 async def test_transient_gateway_cold_start_is_absorbed_by_retry(
-    monkeypatch: pytest.MonkeyPatch, fast_retry: None
+    monkeypatch: pytest.MonkeyPatch, fast_retry: None, linux_platform: None,
 ) -> None:
     """compose starts the gateway before the orchestrator, but 'started'
     != 'serving': the first healthz probes may fail while Python is
@@ -375,7 +391,7 @@ async def test_gateway_on_wrong_network_fails(
 
 
 async def test_healthz_non_200_fails(
-    monkeypatch: pytest.MonkeyPatch, fast_retry: None
+    monkeypatch: pytest.MonkeyPatch, fast_retry: None, linux_platform: None,
 ) -> None:
     async with _HealthzServer([503]) as http, _TcpServer() as tcp:
         _patch_topology_config(
@@ -391,7 +407,7 @@ async def test_healthz_non_200_fails(
 
 
 async def test_healthz_connection_refused_fails_with_fix_hint(
-    monkeypatch: pytest.MonkeyPatch, fast_retry: None
+    monkeypatch: pytest.MonkeyPatch, fast_retry: None, linux_platform: None,
 ) -> None:
     async with _TcpServer() as tcp:
         _patch_topology_config(
@@ -405,6 +421,42 @@ async def test_healthz_connection_refused_fails_with_fix_hint(
             await _runtime_with(client).verify_infrastructure()
     assert "healthz" in str(exc.value)
     assert _FIX_HINT in str(exc.value)
+
+
+async def test_healthz_skipped_on_darwin(
+    monkeypatch: pytest.MonkeyPatch, fast_retry: None
+) -> None:
+    """On a macOS host the bridge subnet is unroutable, so check (d)
+    is skipped instead of failing a healthy stack. A closed healthz
+    port — connection refused, a RuntimeError on Linux above — must
+    NOT fail verification on darwin."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    async with _TcpServer() as tcp:
+        _patch_topology_config(
+            monkeypatch, healthz_port=_free_port(), nats_port=tcp.port
+        )
+        client = _FakeClient(
+            _healthy_networks(), {GATEWAY: _gateway_info("127.0.0.1")}
+        )
+        await _runtime_with(client).verify_infrastructure()  # must not raise
+
+
+async def test_darwin_skip_is_scoped_to_healthz_only(
+    monkeypatch: pytest.MonkeyPatch, fast_retry: None
+) -> None:
+    """The darwin skip must not swallow the other invariants: NATS
+    down still fails verification on darwin — the skip is (d) alone,
+    not a blanket pre-flight bypass."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    _patch_topology_config(
+        monkeypatch, healthz_port=_free_port(), nats_port=_free_port()
+    )
+    client = _FakeClient(
+        _healthy_networks(), {GATEWAY: _gateway_info("127.0.0.1")}
+    )
+    with pytest.raises(RuntimeError) as exc:
+        await _runtime_with(client).verify_infrastructure()
+    assert "NATS" in str(exc.value)
 
 
 # ---------------------------------------------------------------------------
