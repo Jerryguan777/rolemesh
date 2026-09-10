@@ -42,9 +42,15 @@ RUN git config --system http.proxyAuthMethod basic
 # ``structlog`` is needed by the rolemesh.core.logger shim that the safety
 # loader + hook handler imports at module load — without it, agent_runner
 # crashes at boot with ``No module named 'structlog'``.
+# ``mcp<2``: the 2.x SDK breaks our client's connection pattern
+# (AsyncExitStack-split enter/exit over an anyio TaskGroup transport,
+# src/pi/mcp/client.py) — handshakes fail deterministically and agents
+# spawn with an empty tool table. Unpinned, the break would ship on
+# whatever image rebuild lands after a 2.x release. Lift the pin only
+# together with the lexical-async-with rewrite of the client.
 RUN pip install --no-cache-dir \
     claude-agent-sdk croniter nats-py \
-    anthropic openai google-genai boto3 httpx mcp \
+    anthropic openai google-genai boto3 httpx "mcp<2" \
     partial-json-parser pyyaml filelock Pillow mistune wcwidth \
     structlog
 
