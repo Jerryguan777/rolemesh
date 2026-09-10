@@ -83,6 +83,19 @@ DATABASE_URL: str = os.environ.get("DATABASE_URL", "postgresql://rolemesh:roleme
 # the bootstrap user is also used for admin work).
 ADMIN_DATABASE_URL: str = os.environ.get("ADMIN_DATABASE_URL", "")
 NATS_URL: str = os.environ.get("NATS_URL", "nats://localhost:4222")
+# NATS as seen from INSIDE an agent container. One string cannot serve
+# both sides of the host/container boundary: a host process (eval CLI
+# on macOS/dev) reaches NATS via a published port (localhost:4222),
+# while agents on the docker bridge reach it by service name
+# (nats://nats:4222) — and each side's spelling is unresolvable from
+# the other. Defaults to NATS_URL so in-network deployments
+# (orchestrator in compose, both views identical) configure one
+# variable, as before. Set both only when the spawning process runs on
+# the host: NATS_URL for the CLI itself, AGENT_NATS_URL for the
+# containers it spawns. Deliberately NOT auto-translated in code —
+# rewriting localhost to a guessed service name would corrupt setups
+# where NATS is remote and reachable identically from both sides.
+AGENT_NATS_URL: str = os.environ.get("AGENT_NATS_URL", NATS_URL)
 
 CONTAINER_IMAGE: str = os.environ.get("CONTAINER_IMAGE", "rolemesh-agent:latest")
 CONTAINER_TIMEOUT: int = int(os.environ.get("CONTAINER_TIMEOUT", "1800000"))

@@ -11,6 +11,7 @@ import dataclasses
 import os
 import re
 import shutil
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -681,14 +682,33 @@ class DockerRuntime:
             what="egress gateway agent-net address",
         )
 
-        # (d) gateway healthz answers 200.
+        # (d) gateway healthz answers 200. This probes the gateway's
+        # bridge-subnet address FROM THIS PROCESS, which is a valid
+        # proxy measurement only where the bridge subnet is routable
+        # from here: a Linux host, or inside a compose-attached
+        # container (where sys.platform is always "linux"). On a macOS
+        # host (Docker Desktop keeps docker networks inside a VM with
+        # no host route) the probe can never succeed regardless of
+        # gateway health — and the real consumer of the gateway is the
+        # agent container, which sits inside the network. Skipping the
+        # probe there loses fail-fast, not any invariant: a dead
+        # gateway surfaces on the first agent call instead.
         healthz_url = (
             f"http://{EGRESS_GATEWAY_DNS_IP}:{CREDENTIAL_PROXY_PORT}/healthz"
         )
-        await _retry_within_budget(
-            lambda: _check_http_healthz(healthz_url, hint=_COMPOSE_HINT),
-            what="egress gateway /healthz",
-        )
+        if sys.platform == "darwin":
+            logger.warning(
+                "skipping gateway /healthz pre-flight: bridge subnet "
+                "is not routable from a macOS host (Docker Desktop). "
+                "Gateway health will surface on the first agent call "
+                "instead.",
+                url=healthz_url,
+            )
+        else:
+            await _retry_within_budget(
+                lambda: _check_http_healthz(healthz_url, hint=_COMPOSE_HINT),
+                what="egress gateway /healthz",
+            )
 
         # (e) NATS TCP-reachable at the orchestrator-facing URL.
         await _retry_within_budget(
