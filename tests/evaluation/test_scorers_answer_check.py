@@ -128,3 +128,37 @@ async def test_empty_rubrics_is_noanswer(monkeypatch) -> None:
     monkeypatch.setattr(ac_mod, "model_graded_qa", _stub_judge({}, []))
     score = await ac_mod.answer_check()(_state(), Target([" "]))
     assert score.value == NOANSWER
+
+
+@pytest.mark.parametrize("completion", ["", "   \n\t "])
+@pytest.mark.asyncio
+async def test_empty_completion_scores_zero_without_judge(
+    monkeypatch, completion: str,
+) -> None:
+    """An empty reply must fail every rubric with no judge calls: fed
+    to model_graded_qa, a blank {answer} next to a fact-rich
+    {criterion} can be misread as the submission and score CORRECT
+    (observed in the field: 0.75 for a 0-char reply). It is 0.0, not
+    NOANSWER — the reply is gradeable, the grading infra is fine."""
+    calls: list[str] = []
+    monkeypatch.setattr(ac_mod, "model_graded_qa", _stub_judge(
+        {"r1": "C", "r2": "C"}, calls,
+    ))
+    score = await ac_mod.answer_check()(
+        _state(completion), Target(["r1", "r2"]),
+    )
+    assert score.value == 0.0
+    assert calls == []
+    assert "empty completion" in (score.explanation or "")
+    gradings = (score.metadata or {})["rubrics"]
+    assert [g["rubric"] for g in gradings] == ["r1", "r2"]
+    assert all(g["grade"] == INCORRECT for g in gradings)
+
+
+@pytest.mark.asyncio
+async def test_no_rubrics_guard_precedes_empty_completion(monkeypatch) -> None:
+    """Both guards firing at once is a dataset/glue problem first:
+    NOANSWER (infra signal) must win over the 0.0 agent grade."""
+    monkeypatch.setattr(ac_mod, "model_graded_qa", _stub_judge({}, []))
+    score = await ac_mod.answer_check()(_state(""), Target([" "]))
+    assert score.value == NOANSWER
