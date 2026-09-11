@@ -21,6 +21,14 @@ The shell owns three things:
   failure) makes the whole sample NOANSWER — a partial rubric count
   over a half-graded sample is not evidence, and grading-infra
   failure must never read as agent failure.
+* empty-completion guard: an empty final reply scores 0.0 without
+  any judge calls. It is a gradeable outcome (no rubric can be
+  satisfied), not a grading failure, so it is 0 rather than
+  NOANSWER — NOANSWER counts feed the CLI's grading-infra warning
+  and must not be polluted by agent failures. Without the guard the
+  judge sees a blank ``{answer}`` slot next to a fact-rich
+  ``{criterion}`` and can mistake the criterion text for the
+  submission (observed: 0.75 for a 0-char reply).
 
 Known upstream semantic, deliberately kept: a judge reply with no
 parseable ``GRADE:`` label scores that rubric INCORRECT (reply kept in
@@ -35,6 +43,7 @@ from typing import TYPE_CHECKING, Any
 
 from inspect_ai.scorer import (
     CORRECT,
+    INCORRECT,
     NOANSWER,
     Score,
     Scorer,
@@ -72,6 +81,24 @@ def answer_check(judge_model: str | None = None) -> Scorer:
             return Score(
                 value=NOANSWER,
                 explanation="sample has no judge rubrics",
+            )
+
+        completion = state.output.completion
+        if not completion.strip():
+            return Score(
+                value=0.0,
+                answer=completion,
+                explanation="empty completion — all rubrics fail",
+                metadata={
+                    "rubrics": [
+                        {
+                            "rubric": rubric,
+                            "grade": INCORRECT,
+                            "explanation": "empty completion",
+                        }
+                        for rubric in rubrics
+                    ],
+                },
             )
 
         satisfied = 0
